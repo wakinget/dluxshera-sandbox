@@ -18,6 +18,7 @@ import dLux.layers as dll
 import dLux.utils as dlu
 import dLuxToliman as dlT
 from Classes.optical_systems import JNEXTOpticalSystem
+from Classes.oneoverf import oneoverf_noise_2D
 
 # Plotting/visualisation
 import matplotlib as mpl
