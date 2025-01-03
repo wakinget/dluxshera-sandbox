@@ -18,7 +18,7 @@ import dLux.layers as dll
 import dLux.utils as dlu
 import dLuxToliman as dlT
 from Classes.optical_systems import JNEXTOpticalSystem
-from Classes.oneoverf import oneoverf_noise_2D
+from Classes.oneoverf import *
 
 # Plotting/visualisation
 import matplotlib as mpl
@@ -51,7 +51,7 @@ keys = jr.split(rng_key, 4)
 
 # Construct Optical System
 noll_ind = np.arange(4, 15)
-zCoeffs_true = 0.5 * jr.normal(keys[0], noll_ind.shape)
+# zCoeffs_true = 0 * jr.normal(keys[0], noll_ind.shape)
 optics = dlT.TolimanOpticalSystem(
     wf_npixels=512,
     psf_npixels=128,
@@ -62,15 +62,33 @@ optics = dlT.TolimanOpticalSystem(
 # Normalise the aberration basis to be in units of nm
 optics = optics.multiply('basis', 1e-9)
 # Set the zernike coefficients
-optics = optics.set("coefficients", zCoeffs_true)
-zernike_opd = optics.aperture.eval_basis
+# optics = optics.set("coefficients", zCoeffs_true)
+# zernike_opd = optics.aperture.eval_basis
 
 # Generate some 1/f noise
-oneoverf_opd = oneoverf_noise_2D(optics.wf_npixels, 2.5, key=keys[1]) * 1e-9 # 1nm rms
+oneoverf_opd = oneoverf_noise_2D(optics.wf_npixels, 2.5, oversample=8, key=keys[1], rmTipTilt=False)
 # Generate a new layer
-wfe_layer = dll.AberratedLayer(opd=oneoverf_opd)
+wfe_layer = dll.AberratedLayer(np.zeros((optics.wf_npixels, optics.wf_npixels)))
 # Add the wfe to the optics
 optics = optics.insert_layer(('wfe', wfe_layer), 2)
+
+
+oneoverf_opd_PTTremoved = remove_PTT(oneoverf_opd, optics.aperture.transmission.astype(bool))
+
+pupil_plot_mask = np.where(optics.aperture.transmission, 1, np.nan)
+v_res = np.nanmax(np.abs(oneoverf_opd *pupil_plot_mask))
+
+
+fig = plt.figure(figsize=(10, 5))
+ax = plt.subplot(1,2,1)
+plt.title("1/f OPD")
+im = ax.imshow(oneoverf_opd *pupil_plot_mask, inferno, vmin=-v_res, vmax=v_res)
+fig.colorbar(im, cax=merge_cbar(ax))
+ax = plt.subplot(1,2,2)
+plt.title("1/f OPD PTT Removed")
+im = ax.imshow(oneoverf_opd_PTTremoved *pupil_plot_mask, inferno, vmin=-v_res, vmax=v_res)
+fig.colorbar(im, cax=merge_cbar(ax))
+plt.show(block=True)
 
 
 # Create Detector
@@ -115,9 +133,59 @@ model = dl.Telescope(
 )
 
 
+
+pupil_extent_mm = optics.diameter*1e3/2*np.array([-1, 1, -1, 1])
+psf_extent_as = optics.psf_npixels*optics.psf_pixel_scale/2*np.array([-1, 1, -1, 1])
+
+
+# Generate Ideal PSF
+ideal_psf = model.model()
+
+# Assign opd to optics
+model = model.set('wfe', dll.AberratedLayer(oneoverf_opd))
+
+# Generate PSF w/ OPD
+aberrated_psf = model.model()
+
+wfe_opd = np.where(model.aperture.transmission, oneoverf_opd, np.nan)
+
+
+# Plot the Ideal and Aberrated PSF
+fig = plt.figure(figsize=(10, 10))
+ax = plt.subplot(2, 2, 1)
+plt.title("Ideal PSF")
+im = ax.imshow(ideal_psf, inferno, extent=psf_extent_as)
+fig.colorbar(im, cax=merge_cbar(ax))
+plt.xlabel('X (as)')
+plt.ylabel('Y (as)')
+ax = plt.subplot(2, 2, 2)
+plt.title("WFE: 1nm rms")
+im = ax.imshow(wfe_opd, inferno, extent=pupil_extent_mm)
+fig.colorbar(im, cax=merge_cbar(ax))
+plt.xlabel('X (mm)')
+plt.ylabel('Y (mm)')
+ax = plt.subplot(2, 2, 3)
+plt.title("Aberrated PSF")
+im = ax.imshow(aberrated_psf, inferno, extent=psf_extent_as)
+fig.colorbar(im, cax=merge_cbar(ax))
+plt.xlabel('X (as)')
+plt.ylabel('Y (as)')
+ax = plt.subplot(2, 2, 4)
+plt.title("PSF Difference")
+im = ax.imshow(aberrated_psf - ideal_psf, inferno, extent=psf_extent_as)
+fig.colorbar(im, cax=merge_cbar(ax))
+plt.xlabel('X (as)')
+plt.ylabel('Y (as)')
+plt.tight_layout()
+plt.show(block=True)
+
 # Examine the Model
-pupil_opd = np.where(model.aperture.transmission, model.pupil.opd, np.nan)
-wfe_opd = np.where(model.aperture.transmission, model.wfe.opd, np.nan)
+pupil_transmission = model.aperture.transmission
+zernike_opd = model.aperture.eval_basis()
+dp_opd = np.where(model.aperture.transmission, model.pupil.opd, np.nan)
+wfe_opd = oneoverf_opd
+
+
 model_psf = model.model()
 pupil_extent_mm = optics.diameter*1e3/2*np.array([-1, 1, -1, 1])
 psf_extent_as = optics.psf_npixels*optics.psf_pixel_scale/2*np.array([-1, 1, -1, 1])

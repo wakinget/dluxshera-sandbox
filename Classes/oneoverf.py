@@ -5,10 +5,10 @@ from jax.numpy.fft import fft2, ifft2, fftshift
 
 import time
 
-__all__ = ["oneoverf_noise_2D"]
+__all__ = ["oneoverf_noise_2D", "remove_PTT"]
 
 
-def oneoverf_noise_2D(n_samps: int, alpha: float, oversample: int = 1, key=None, rmTipTilt: bool = True) -> Array:
+def oneoverf_noise_2D(n_samps: int, alpha: float, oversample: int = 1, key=None) -> Array:
     """
     Generate 1/f^alpha noise in 2 Dimensions using Fourier-space convolution.
     Author: Dylan McKeithen 2024-12-19
@@ -31,9 +31,6 @@ def oneoverf_noise_2D(n_samps: int, alpha: float, oversample: int = 1, key=None,
         The multiplicative oversampling factor, >= 1
     key: Optional jax.random.key
         jax.random.key for reproducible noise maps, random key is generated if not provided
-    rmTipTilt: bool = True
-        flag to remove tip/tilt from the generated noise map. True by default
-
     """
 
     # Ensure oversample is >= 1
@@ -62,21 +59,27 @@ def oneoverf_noise_2D(n_samps: int, alpha: float, oversample: int = 1, key=None,
     # Normalize to variance = 1.0
     filtered_noise = filtered_noise / np.std(filtered_noise)
 
-    # Remove Tip/Tilt if requested
-    if rmTipTilt:
-        # Fit filtered_noise to a plane and remove it
-        X, Y = np.meshgrid((np.arange(N) - N / 2) / N, (np.arange(N) - N / 2) / N)
-        XX = X.flatten()
-        YY = Y.flatten()
-
-        A = np.c_[XX, YY, np.ones(XX.shape)]  # Z = a*X + b*Y + c
-        C = np.dot(np.linalg.pinv(A), filtered_noise.flatten())  # Least-squares solution
-        fitted_plane = np.dot(A, C).reshape(filtered_noise.shape)
-        filtered_noise -= fitted_plane
-
     # Extract the central portion of the image
     start = N // 2 - n_samps // 2
     end = start + n_samps
     central_noise = filtered_noise[start:end, start:end]
 
     return central_noise
+
+def remove_PTT(opd_in, mask = None):
+    # Fits opd_in to a plane and removes it
+    # mask is an optional logical array specifying where to compute the PTT
+
+    # Create an X, Y grid
+    X, Y = np.meshgrid(np.arange(opd_in.shape[1]), np.arange(opd_in.shape[0]))
+
+    if mask is None:
+        mask = np.ones(opd_in.shape, dtype=bool) # Fit over entire array
+
+    A = np.c_[X[mask].flatten(), Y[mask].flatten(), np.ones(X[mask].flatten().shape)]  # Z = a*X + b*Y + c
+    C = np.dot(np.linalg.pinv(A), opd_in[mask].flatten())  # Least-squares solution
+    AA = np.c_[X.flatten(), Y.flatten(), np.ones(X.flatten().shape)] # Define eval points
+    fitted_plane = np.dot(AA, C).reshape(opd_in.shape) # Evaluate the plane
+    opd_out = opd_in - fitted_plane # And remove it
+
+    return opd_out
