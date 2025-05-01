@@ -321,8 +321,18 @@ def propagate_fresnel_AS(
     fx, fy = np.meshgrid(fx, fy)  # Create 2D grid
     f2 = fx ** 2 + fy ** 2
 
+    # Debug Messages
+    sqrt_argument = 1 - (1 / 4) * (wavelength / radius) ** 2 * f2
+    print("radius:", radius)
+    print("wavelength:", wavelength)
+    print("min(f2):", np.min(f2))
+    print("max(f2):", np.max(f2))
+    print("sqrt argument min:", np.min(sqrt_argument))
+    print("sqrt argument N elem below zero:", np.sum(sqrt_argument < 0))
+
     # Compute the transfer function H (Goodman Eq. 4-20)
     H = np.exp(1j * k * prop_dist * (np.sqrt(1 - (1 / 4) * (wavelength / radius) ** 2 * f2) - 0))
+    print("transfer function N nans:", np.sum(np.isnan(H)))
 
     # Perform the Fresnel propagation
     E_propped = np.fft.ifft2(np.fft.fft2(Ein) * H)
@@ -333,6 +343,35 @@ def propagate_fresnel_AS(
     return E_propped
 
 
+def jax_interp2d(array, x_input, y_input, x_output, y_output, order=1):
+    """
+    Performs 2D interpolation (similar to MATLAB's interp2) using JAX.
+
+    Parameters
+    ----------
+    array : 2D JAX array
+        Input array to be interpolated.
+    x_input, y_input : 1D JAX arrays
+        Original grid values.
+    x_output, y_output : 1D JAX arrays
+        Desired grid values.
+    order : int
+        Interpolation order (1 = bilinear, 3 = cubic).
+
+    Returns
+    -------
+    2D JAX array with interpolated values.
+    """
+    # Convert output coordinates to match input array indices
+    x_indices = np.interp(x_output, x_input, np.arange(len(x_input)))
+    y_indices = np.interp(y_output, y_input, np.arange(len(y_input)))
+
+    # Create a meshgrid of output coordinates
+    X_indices, Y_indices = np.meshgrid(x_indices, y_indices, indexing="ij")
+
+    # Perform 2D interpolation
+    return jax.scipy.ndimage.map_coordinates(array, [Y_indices, X_indices], order=order)
+
 
 #####################
 ## Main Parameters ##
@@ -342,19 +381,19 @@ def propagate_fresnel_AS(
 # Telescope Parameters: PD1: Flat Filter
 wavelength = 5.5e-7 # m
 # band = 0.1 # microns
-f_1 = 0.277696 # m, M1 focal length
-f_2 = -0.071518 # m, M2 focal length
-D = 0.21997 # m, Distance between M1 and M2
+f_1 = 0.35796 # m, M1 focal length
+f_2 = -0.041935 # m, M2 focal length
+D = 0.320 # m, Distance between M1 and M2
 M1_diam = 0.09 # m, M1 Diameter
 M2_diam = 0.025 # m, M2 Diameter (for obscuration purposes)
-dx_detector = 2.74e-6 # m/pixel, Detector sampling
+dx_detector = 6.5e-6 # m/pixel, Detector sampling
 
 # Reduce the 2-optic system
 phi_1 = 1/f_1 # diopters, M1 power
 phi_2 = 1/f_2 # diopters, M2 power
 
 phi_telescope = phi_1 + phi_2 - D*phi_1*phi_2 # Overall Telescope power
-f_telescope = 1/phi_telescope # Overall Telescope focal distance
+f_telescope = 1/phi_telescope # Overall Telescope focal length
 
 # Calculate the shift of the principal planes
 d = phi_2 / phi_telescope * D # m, Shift of the front principal plane from the plane of M1
@@ -374,12 +413,14 @@ print("Primary Magnification: %.3f" % M_1)
 
 
 # Set up a basic circular aperture
-N_pupil = 1800
+N_pupil = 1024
 pupil_oversamp = 2
 
 coords = dlu.pixel_coords(N_pupil*pupil_oversamp, M1_diam)
 primary = dlu.circle(coords, M1_diam/2)
 aperture = dlu.downsample(primary, pupil_oversamp)
+
+M2_aperture = aperture
 
 # # Generate secondary mirror occultation
 # secondary = dlu.circle(coords, M2_diam/2, invert=True)
@@ -408,9 +449,10 @@ optics = dl.AngularOpticalSystem(
 )
 
 # Compute the PSF
-psf = optics.propagate(wavelength) # Uses an MFT
+# psf = optics.propagate(wavelength) # Uses an MFT
 
 M1_extent = M1_diam/2 * np.array([-1, 1, -1, 1])
+M2_extent = M2_diam/2 * np.array([-1, 1, -1, 1])
 psf_extent = N_psf * psf_pixel_scale/2 * np.array([-1, 1, -1, 1])
 
 # # Plot the Aperture
@@ -443,6 +485,7 @@ psf_extent = N_psf * psf_pixel_scale/2 * np.array([-1, 1, -1, 1])
 prop_dist = D * M_1 # Magnified prop distance to the Secondary
 pupil_dx = M1_diam / N_pupil
 radius = M1_diam/2
+pad = 2
 
 
 # Initialise a wavefront
@@ -457,7 +500,9 @@ wavefront *= aperture
 # Get the E Field
 E_M1 = wavefront.phasor
 I_M1 = E_M1 * np.conj(E_M1)
-
+# Pad the input array
+Npad = (I_M1.shape[0] * (pad - 1)) // 2
+I_M1_padded = np.pad(I_M1, Npad)
 
 
 MFT_wf = wavefront.propagate(N_psf, dlu.arcsec2rad(psf_pixel_scale))
@@ -494,9 +539,27 @@ print("Radius: %.3f mm" % (radius*1e3))
 print("Prop_Dist: %.3f m" % prop_dist)
 
 # Propagate to the Secondary
-E_M2 = propagate_fresnel_AS( E_M1, wavelength, radius, prop_dist)
+E_M2 = propagate_fresnel_AS(E_M1, wavelength, radius, prop_dist, pad=pad)
 # E_M2 = E_M2 * M_1 # Scale the field by the magnification
 I_M2 = E_M2 * np.conj(E_M2)
+
+# Resample I_M2 so that we can apply the aperture of M2
+# radius_in = M1_diam/2
+# radius_out = M2_diam/2*M_1
+# x_in = np.linspace(-radius_in, radius_in, N_pupil)
+# y_in = x_in
+# Xin, Yin = np.meshgrid(x_in, y_in, indexing="ij")
+# x_out = np.linspace(-radius_out, radius_out, N_pupil)
+# y_out = x_out
+# resampled_I_M2 = jax_interp2d(I_M2, x_in, y_in, x_out, y_out)
+# # Plot results
+# fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+# ax[0].imshow(I_M2.real, cmap='viridis', extent=M1_extent)
+# ax[0].set_title("Original Array")
+# ax[1].imshow(resampled_I_M2.real, cmap='viridis', extent=M2_extent)
+# ax[1].set_title("Resampled Array")
+# plt.show()
+
 
 # Propagate to the Focal Plane using the Wavefront object
 
@@ -506,12 +569,100 @@ M2_wv = M2_wv.set('amplitude', np.abs(E_M2))
 M2_wv = M2_wv.set('phase', np.angle(E_M2))
 # M2_wv = M2_wv.set('plane', 'Intermediate')
 # wavefront = wavefront.set('pixel_scale', M1_diam / N_pupil / M_1)
+# print(M2_wv.diameter)
+# print(M2_wv.pixel_scale)
+# print(M2_wv.npixels)
+# print(M2_wv.units)
+
+# plt.figure(figsize=(12, 4))
+# plt.subplot(1, 2, 1)
+# plt.title("Original Propagated Intensity")
+# plt.imshow(np.log10(M2_wv.psf), extent=2*M1_extent)
+# plt.colorbar()
+# plt.xlabel("X (m)")
+# plt.ylabel("Y (m)")
+
+# Resample the wavefront
+new_pixel_scale = M2_diam*M_1 /N_pupil
+M2_wv = M2_wv.scale_to(N_pupil, new_pixel_scale)
+M2_wv *= M2_diam/M1_diam*M_1
+# print(M2_wv.diameter)
+# print(M2_wv.pixel_scale)
+# print(M2_wv.npixels)
+# print(M2_wv.units)
+
+E_resampled = M2_wv.phasor
+I_resampled = E_resampled * np.conj(E_resampled)
+
+# plt.subplot(1, 2, 2)
+# plt.title("Resampled Propagated Intensity")
+# plt.imshow(np.log10(M2_wv.psf), extent=M2_extent*M_1)
+# plt.colorbar()
+# plt.xlabel("X (m)")
+# plt.ylabel("Y (m)")
+
 
 # Propagate to Focus
 M2_wv = M2_wv.propagate(N_psf, dlu.arcsec2rad(psf_pixel_scale))
+# print(M2_wv.pixel_scale)
+# print(M2_wv.npixels)
+# print(M2_wv.units)
 
 E_focus = M2_wv.phasor
 I_focus = E_focus * np.conj(E_focus)
+
+
+
+# Plot the Pupil
+plt.figure(figsize=(12, 6))
+plt.subplot(2, 3, 1)
+plt.title("Original Pupil")
+plt.imshow(I_M1.real, extent=M1_extent)
+plt.colorbar()
+plt.xlabel("X (m)")
+plt.ylabel("Y (m)")
+# plt.show()
+plt.subplot(2, 3, 2)
+plt.title("Padded Pupil")
+plt.imshow(I_M1_padded.real, extent=2*M1_extent)
+plt.colorbar()
+plt.xlabel("X (m)")
+plt.ylabel("Y (m)")
+# M2_extent = M1_diam/M_1 * np.array([-1, 1, -1, 1])
+plt.subplot(2, 3, 3)
+plt.title("Propagated Intensity")
+plt.imshow(I_M2.real, extent=2*M1_extent)
+plt.colorbar()
+plt.xlabel("X (m)")
+plt.ylabel("Y (m)")
+# plt.show()
+plt.subplot(2, 3, 4)
+plt.title("Resampled Intensity (M1)")
+plt.imshow(I_resampled.real, extent=M_1*M2_extent)
+plt.colorbar()
+plt.xlabel("X (m)")
+plt.ylabel("Y (m)")
+plt.subplot(2, 3, 5)
+plt.title("Resampled Intensity (M2)")
+plt.imshow(I_resampled.real, extent=M2_extent)
+plt.colorbar()
+plt.xlabel("X (m)")
+plt.ylabel("Y (m)")
+plt.subplot(2, 3, 6)
+plt.title("Focal Plane Intensity")
+plt.imshow(I_focus.real, extent=psf_extent)
+plt.colorbar()
+plt.xlabel("X (m)")
+plt.ylabel("Y (m)")
+plt.show()
+
+# plt.subplot(1, 3, 4)
+# plt.title("SQRT( I ) @ Focus")
+# plt.imshow(I_focus.real**0.5, extent=psf_extent)
+# plt.colorbar()
+# plt.xlabel("X (as)")
+# plt.ylabel("Y (as)")
+
 
 # # Plot the Aperture
 # plt.figure(figsize=(5, 4))
@@ -522,68 +673,90 @@ I_focus = E_focus * np.conj(E_focus)
 # plt.ylabel("Y (m)")
 # plt.show()
 
-# Plot the Intensity at M2
-plt.figure(figsize=(12, 4))
-plt.subplot(1, 3, 1)
-plt.title("I @ M1")
-plt.imshow(I_M1.real, extent=M1_extent)
-plt.colorbar()
-plt.xlabel("X (m)")
-plt.ylabel("Y (m)")
+# # Plot the Intensity at M2
+# plt.figure(figsize=(12, 4))
+# plt.subplot(1, 3, 1)
+# plt.title("I @ M1")
+# plt.imshow(I_M1.real, extent=M1_extent)
+# plt.colorbar()
+# plt.xlabel("X (m)")
+# plt.ylabel("Y (m)")
+# # plt.show()
+#
+# M2_extent = M1_diam/M_1 * np.array([-1, 1, -1, 1])
+# plt.subplot(1, 3, 2)
+# plt.title("I @ M2")
+# plt.imshow(I_M2.real, extent=M2_extent)
+# plt.colorbar()
+# plt.xlabel("X (m)")
+# plt.ylabel("Y (m)")
+# # plt.show()
+#
+# plt.subplot(1, 3, 3)
+# plt.title("SQRT( I ) @ Focus")
+# plt.imshow(I_focus.real**0.5, extent=psf_extent)
+# plt.colorbar()
+# plt.xlabel("X (as)")
+# plt.ylabel("Y (as)")
 # plt.show()
 
-M2_extent = M1_diam/M_1 * np.array([-1, 1, -1, 1])
-plt.subplot(1, 3, 2)
-plt.title("I @ M2")
-plt.imshow(I_M2.real, extent=M2_extent)
-plt.colorbar()
-plt.xlabel("X (m)")
-plt.ylabel("Y (m)")
-# plt.show()
-
-plt.subplot(1, 3, 3)
-plt.title("SQRT( I ) @ Focus")
-plt.imshow(I_focus.real**0.5, extent=psf_extent)
-plt.colorbar()
-plt.xlabel("X (as)")
-plt.ylabel("Y (as)")
-plt.show()
-
-
-
 plt.figure(figsize=(12, 4))
 plt.subplot(1, 3, 1)
-plt.title("SQRT PSF 1")
-plt.imshow(np.log10(I_MFT.real**0.5), extent=psf_extent)
+plt.title("MFT PSF")
+plt.imshow(np.log10(I_MFT.real), extent=psf_extent)
 plt.colorbar()
+plt.clim(np.array([-20, -8]))
 plt.xlabel("X (as)")
 plt.ylabel("Y (as)")
 plt.subplot(1, 3, 2)
-plt.title("SQRT PSF 2")
-plt.imshow(np.log10(I_focus.real**0.5), extent=psf_extent)
+plt.title("Fresnel PSF")
+plt.imshow(np.log10(I_focus.real), extent=psf_extent)
 plt.colorbar()
+plt.clim(np.array([-20, -8]))
 plt.xlabel("X (as)")
 plt.ylabel("Y (as)")
 plt.subplot(1, 3, 3)
 plt.title("PSF Difference")
-plt.imshow(np.log10(np.abs(I_MFT.real**0.5 - I_focus.real**0.5)), extent=psf_extent)
+plt.imshow(I_focus.real/I_MFT.real, extent=psf_extent)
 plt.colorbar()
+plt.clim(np.array([0, 5]))
 plt.xlabel("X (as)")
 plt.ylabel("Y (as)")
 plt.show()
+
+# plt.figure(figsize=(12, 4))
+# plt.subplot(1, 3, 1)
+# plt.title("MFT PSF")
+# plt.imshow(np.log10(I_MFT.real**0.5), extent=psf_extent)
+# plt.colorbar()
+# plt.xlabel("X (as)")
+# plt.ylabel("Y (as)")
+# plt.subplot(1, 3, 2)
+# plt.title("Fresnel PSF")
+# plt.imshow(np.log10(I_focus.real**0.5), extent=psf_extent)
+# plt.colorbar()
+# plt.xlabel("X (as)")
+# plt.ylabel("Y (as)")
+# plt.subplot(1, 3, 3)
+# plt.title("PSF Difference")
+# plt.imshow(np.log10(np.abs(I_MFT.real**0.5 - I_focus.real**0.5)), extent=psf_extent)
+# plt.colorbar()
+# plt.xlabel("X (as)")
+# plt.ylabel("Y (as)")
+# plt.show()
 
 
 
 
 plt.figure(figsize=(10, 4))
 plt.subplot(1, 2, 1)
-plt.title("PSF 1 Phase")
+plt.title("MFT PSF Phase")
 plt.imshow(np.angle(E_MFT), extent=psf_extent)
 plt.colorbar()
 plt.xlabel("X (as)")
 plt.ylabel("Y (as)")
 plt.subplot(1, 2, 2)
-plt.title("PSF 2 Phase")
+plt.title("Fresnel PSF Phase")
 plt.imshow(np.angle(E_focus), extent=psf_extent)
 plt.colorbar()
 plt.xlabel("X (as)")

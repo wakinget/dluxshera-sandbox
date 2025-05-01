@@ -287,7 +287,7 @@ timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Plotting/Saving Settings
 save_plots = True # True / False
-N_saved_plots = 3 # Limit the number of plots that are saved, the first N plots will be saved
+N_saved_plots = 15 # Limit the number of plots that are saved, the first N plots will be saved
 present_plots = False # True / False
 save_results = True
 print2console = True
@@ -297,7 +297,7 @@ starting_seed = 0
 # seeds = np.arange(20)
 
 # Pointing Error Settings
-n_pointings = 200
+n_pointings = 10
 pointing_error_rms_amplitude = 0 # as, in X and Y
 separation_change_ppm_rms = 0 # Separation change to introduce, 1-sigma
 
@@ -311,11 +311,14 @@ bandwidth = 110 # nm
 n_wavelengths = 5
 
 # Zernike OPD Settings
-model_noll_ind = np.arange(4,22) # List of Zernikes present in the model
+model_noll_ind = np.arange(5,22) # List of Zernikes present in the model
 data_noll_ind = np.arange(4,22) # List of Zernikes present in the data
 zCoeff_amp_rms = 0 # Zernike coefficient rms amplitude for the data
+# z4_amp = 2 # nm, Sets Z4 to this value
+# z4_amp = np.ones(n_pointings)
+z4_amp = np.array([-1, -0.5, 0, 0.2, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5])
 # 11, 16, 22, 29, 37, 46, 56, 67, 79, 92, 106
-
+n_pointings = z4_amp.shape[0]
 
 # 1/f Noise Settings
 n_maps = 1
@@ -323,16 +326,16 @@ oneoverf_alpha = 2.5
 oneoverf_amp_rms = 0e-9
 
 # Image Noise Settings
-add_shot_noise = True
+add_shot_noise = False
 sigma_read = 0 # e-/frame rms read noise
 
 # Exposure Settings
-exposure_per_frame = 40*1800  # seconds
+exposure_per_frame = 1*1800  # seconds
 N_frames = 1  # frames
 
 
 # Optimization Settings
-n_iter = 25
+n_iter = 30
 
 # Define the parameters to solve for
 lr = 0.5
@@ -494,6 +497,7 @@ for map_i in np.arange(n_maps):
         # Set random zernike coefficients
         pointing_key, subkey = jr.split(pointing_key)
         zCoeffs_true = zCoeff_amp_rms * jr.normal(subkey, data_model.coefficients.shape)
+        zCoeffs_true = zCoeffs_true.at[0].set(z4_amp[pointing_i]) # Set Z4
         data_model = data_model.set("coefficients", zCoeffs_true)
 
         # Model the Data PSF
@@ -541,7 +545,8 @@ for map_i in np.arange(n_maps):
         if add_shot_noise:
             var = np.maximum(data + (sigma_read * np.sqrt(N_frames))**2, (sigma_read * np.sqrt(N_frames))**2)
         else:
-            var = np.maximum((sigma_read * np.sqrt(N_frames))**2, 1e-20) * np.ones_like(data) # No shot noise, ensures a minimum value to prevent nans
+            # var = np.maximum((sigma_read * np.sqrt(N_frames))**2, 1e-10) * np.ones_like(data) # No shot noise, ensures a minimum value to prevent nans
+            var = np.maximum(data + (sigma_read * np.sqrt(N_frames)) ** 2, (sigma_read * np.sqrt(N_frames)) ** 2) # Same as for shot noise
 
 
 
