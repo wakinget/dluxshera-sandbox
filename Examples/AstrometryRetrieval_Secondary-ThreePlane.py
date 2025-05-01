@@ -20,6 +20,7 @@ import dLux.utils as dlu
 import dLuxToliman as dlT
 from Classes.optical_systems import SheraThreePlaneSystem
 from Classes.oneoverf import *
+from Classes.utils import merge_cbar, nanrms, scale_array
 
 # Plotting/visualisation
 import matplotlib as mpl
@@ -45,9 +46,6 @@ plt.rcParams['figure.dpi'] = 120
 
 
 jax.config.update("jax_enable_x64", True)
-
-def merge_cbar(ax):
-    return make_axes_locatable(ax).append_axes("right", size="5%", pad=0.0)
 
 def hessian(f, x):
     # Jit the sub-function here since it is called many times
@@ -273,15 +271,6 @@ def step_fn(model_params, data, var, model, lr_model, optim, state):
     # Re-inject into the model and return
     model = model_params.inject(model)
     return loss, model, model_params, state
-
-def nanrms(arr, axis=None): # Returns the rms value of the input array, ignoring nans
-    return np.nanmean(arr**2, axis=axis)**0.5
-
-# Add scale_array here so I can use it locally
-def scale_array(array: jax.Array, size_out: int, order: int) -> jax.Array:
-    xs = np.linspace(0, array.shape[0], size_out)
-    xs, ys = np.meshgrid(xs, xs)
-    return jax.scipy.ndimage.map_coordinates(array, np.array([ys, xs]), order=order)
 
 def sine_wave_2D(size, amplitude, frequency, angle=0, phase=None):
     """

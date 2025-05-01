@@ -4,11 +4,13 @@ __version__ = "0.1.0"
 # Import as modules
 from . import optical_systems
 from . import oneoverf
+from . import utils
 
 # Add to __all__
 modules = [
     optical_systems,
-    oneoverf
+    oneoverf,
+    utils
 ]
 
 # __all__ = [module.__all__ for module in modules] # Threw an error to do with nested lists
