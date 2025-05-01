@@ -11,4 +11,5 @@ modules = [
     oneoverf
 ]
 
-__all__ = [module.__all__ for module in modules]
+# __all__ = [module.__all__ for module in modules] # Threw an error to do with nested lists
+__all__ = sum((module.__all__ for module in modules), []) # This should work?

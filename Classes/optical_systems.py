@@ -10,11 +10,19 @@ import os
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
-__all__ = ["JNEXTOpticalSystem"]
+__all__ = ["TolimanOpticalSystem", "SheraThreePlaneSystem", "SheraMultiPlaneSystem"]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
+ThreePlaneOpticalSystem = lambda: dLux.optical_systems.ThreePlaneOpticalSystem
+MultiPlaneOpticalSystem = lambda: dLux.optical_systems.MultiPlaneOpticalSystem
 
+
+# Define Scaling function here for local use
+def scale_array(array: Array, size_out: int, order: int) -> Array:
+    xs = np.linspace(0, array.shape[0], size_out)
+    xs, ys = np.meshgrid(xs, xs)
+    return map_coordinates(array, np.array([ys, xs]), order=order)
 
 class TolimanOpticalSystem(AngularOpticalSystem()):
     def __init__(
@@ -124,12 +132,6 @@ class TolimanOpticalSystem(AngularOpticalSystem()):
         #     strut_rotation=strut_rotation,
         # )
 
-        # Put this here for now, will be in dLux eventually
-        def scale_array(array: Array, size_out: int, order: int) -> Array:
-            xs = np.linspace(0, array.shape[0], size_out)
-            xs, ys = np.meshgrid(xs, xs)
-            return map_coordinates(array, np.array([ys, xs]), order=order)
-
         # Generate Mask
         if mask is None:
             path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
@@ -174,7 +176,6 @@ class TolimanOpticalSystem(AngularOpticalSystem()):
         wf = wf.normalise()
         wf += self.mask
         return wf
-
 
 class JNEXTOpticalSystem(AngularOpticalSystem()):
     def __init__(
@@ -284,12 +285,6 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         #     strut_rotation=strut_rotation,
         # )
 
-        # Put this here for now, will be in dLux eventually
-        def scale_array(array: Array, size_out: int, order: int) -> Array:
-            xs = np.linspace(0, array.shape[0], size_out)
-            xs, ys = np.meshgrid(xs, xs)
-            return map_coordinates(array, np.array([ys, xs]), order=order)
-
         # Generate Mask
         if mask is None:
             path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
@@ -334,7 +329,6 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         wf = wf.normalise()
         wf += self.mask
         return wf
-
 
 class TolimanSpikes(TolimanOpticalSystem):
     """
@@ -547,3 +541,277 @@ class TolimanSpikes(TolimanOpticalSystem):
 
         # Return
         return central_psfs.sum(0), spikes.sum(0)
+
+class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
+    def __init__(
+        self,
+        wf_npixels: int = 256,
+        psf_npixels: int = 128,
+        oversample: int = 2,
+        detector_pixel_pitch: float = 4.6,
+        mask: Array = None,
+        radial_orders: Array = None,
+        noll_indices: Array = None,
+        coefficients: Array = None,
+        m1_diameter: float = 0.220,
+        m2_diameter: float = 0.025,
+        m1_focal_length: float = 0.604353,
+        m2_focal_length: float = -0.0545,
+        m1_m2_separation: float = 0.554130,
+        n_struts: int = 3,
+        strut_width: float = 0.002,
+        strut_rotation: float = -np.pi / 2,
+    ):
+        phi_m1 = 1 / m1_focal_length
+        phi_m2 = 1 / m2_focal_length
+        phi_telescope = phi_m1 + phi_m2 - m1_m2_separation * phi_m1 * phi_m2
+        f_telescope = 1 / phi_telescope
+        m1_magnification = 1 / (1 - m1_m2_separation * phi_m1)
+        psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch * 1e-6 / f_telescope)
+
+        pupil_oversample = 2
+        coords = dlu.pixel_coords(pupil_oversample * wf_npixels, m1_diameter)
+        outer = dlu.circle(coords, m1_diameter / 2)
+        inner = dlu.circle(coords, m2_diameter / 2, invert=True)
+        strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + np.rad2deg(strut_rotation)
+        spiders = dlu.spider(coords, strut_width, strut_angles)
+        m1_transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
+        m2_transmission = dlu.downsample(outer, pupil_oversample)
+
+        if radial_orders is not None:
+            radial_orders = np.array(radial_orders)
+            if (radial_orders < 0).any():
+                raise ValueError("Radial orders must be >= 0")
+            noll_indices = np.concatenate([
+                np.arange(dlu.triangular_number(o), dlu.triangular_number(o + 1)) + 1
+                for o in radial_orders
+            ]).astype(int)
+
+        if noll_indices is None:
+            m1_aperture = dll.TransmissiveLayer(m1_transmission, normalise=True)
+            m2_aperture = dll.TransmissiveLayer(m2_transmission, normalise=True)
+        else:
+            coords = dlu.pixel_coords(wf_npixels, m1_diameter)
+            basis = np.array([dlu.zernike(i, coords, m1_diameter) for i in noll_indices])
+            coefficients = np.zeros(len(noll_indices)) if coefficients is None else coefficients
+            m1_aperture = dll.BasisOptic(basis, m1_transmission, coefficients, normalise=True)
+            m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
+
+        # Generate Mask
+        if mask is None:
+            path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
+            # arr_in = np.load(path)
+            # ratio = wf_npixels / arr_in.shape[-1]
+            mask = scale_array(np.load(path), wf_npixels, order=1)
+
+            # Enforce full binary
+            mask = mask.at[np.where(mask <= 0.5)].set(0.0)
+            mask = mask.at[np.where(mask > 0.5)].set(1.0)
+
+            # Enforce full binary
+            mask = dlu.phase2opd(mask * np.pi, 550e-9)
+
+            # Turn into optic
+            mask = dll.AberratedLayer(mask)
+
+        # layers = [("aperture", aperture), ("pupil", mask)]
+
+        p1_layers = [("m1_aperture", m1_aperture), ("dp", mask)]
+        p2_layers = [("m2_aperture", m2_aperture)]
+        super().__init__(
+            wf_npixels=wf_npixels,
+            p1_diameter=m1_diameter,
+            p2_diameter=m2_diameter,
+            p1_layers=p1_layers,
+            p2_layers=p2_layers,
+            plane_separation=m1_m2_separation,
+            magnification=m1_magnification,
+            psf_npixels=psf_npixels,
+            psf_pixel_scale=psf_pixel_scale,
+            oversample=oversample,
+        )
+
+class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
+    def __init__(
+        self,
+        wf_npixels: int = 256,
+        psf_npixels: int = 128,
+        oversample: int = 4,
+        detector_pixel_pitch: float = 4.6,  # um
+        mask: Array = None,
+        radial_orders: Array = None,
+        noll_indices: Array = None,
+        coefficients: Array = None,
+        m1_diameter: float = 0.220,
+        m2_diameter: float = 0.060,
+        m1_focal_length: float = 0.604353,
+        m2_focal_length: float = -0.0545,
+        m1_m2_separation: float = 0.554130,
+        n_struts: int = 3,
+        strut_width: float = 0.002,
+        strut_rotation: float = -np.pi / 2,
+    ):
+        """
+        A pre-built dLux optics layer of the Shera optical system, including a secondary mirror.
+
+        Parameters
+        ----------
+        wf_npixels : int
+            The pixel width the wavefront layer.
+        psf_npixels : int
+            The pixel width of the PSF.
+        oversample : int
+            The Nyquist oversampling factor of the PSF.
+        psf_pixel_scale : float
+            The pixel scale of the PSF in arcseconds per pixel.
+        mask : Array
+            The diffractive mask array to apply to the wavefront layer.
+        radial_orders : Array = None
+            The radial orders of the zernike polynomials to be used for the
+            aberrations. Input of [0, 1] would give [Piston, Tilt X, Tilt Y],
+            [1, 2] would be [Tilt X, Tilt Y, Defocus, Astig X, Astig Y], etc.
+            The order must be increasing but does not have to be consecutive.
+            If you want to specify specific zernikes across radial orders the
+            noll_indices argument should be used instead.
+        noll_indices : Array
+            The zernike noll indices to be used for the aberrations. [1, 2, 3]
+            would give [Piston, Tilt X, Tilt Y], [2, 3, 4] would be [Tilt X,
+            Tilt Y, Defocus.
+        coefficients : Array
+            The coefficients of the Zernike polynomials.
+        m1_diameter : float
+            The diameter of the primary mirror in metres.
+        m2_diameter : float
+            The diameter of the secondary mirror in metres.
+        m1_focal_length : float
+            The focal length of the primary mirror in metres.
+        m2_focal_length : float
+            The focal length of the secondary mirror in metres.
+        m1_m2_separation : float
+            The separation between the primary and secondary in metres.
+        n_struts : int
+            The number of uniformly spaced struts holding the secondary mirror.
+        strut_width : float
+            The width of the struts in metres.
+        strut_rotation : float
+            The angular rotation of the struts in radians.
+        """
+
+        # Diameter
+        diameter = [m1_diameter, m2_diameter]
+
+
+        # Reduce the telescope system
+        phi_m1 = 1 / m1_focal_length  # diopters, M1 power
+        phi_m2 = 1 / m2_focal_length  # diopters, M2 power
+        phi_telescope = phi_m1 + phi_m2 - m1_m2_separation * phi_m1 * phi_m2  # Overall Telescope power
+        f_telescope = 1 / phi_telescope  # Overall Telescope focal length
+        # Calculate M1 Magnification
+        m1_magnification = 1 / (1 - m1_m2_separation * phi_m1)
+        psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch*1e-6 / f_telescope)
+
+        # Generate Pupil Aperture
+        pupil_oversample = 5
+        coords = dlu.pixel_coords(pupil_oversample * wf_npixels, diameter[0])
+        outer = dlu.circle(coords, m1_diameter / 2)
+        inner = dlu.circle(coords, m2_diameter / 2, invert=True)
+        strut_angles = np.linspace(0,360, n_struts+1)
+        strut_angles = strut_angles[:-1] + np.rad2deg(strut_rotation)
+        spiders = dlu.spider(coords, strut_width, strut_angles)
+        m1_transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
+        m2_transmission = dlu.downsample(outer, pupil_oversample)
+
+        # Generate a zernike basis
+        if radial_orders is not None:
+            radial_orders = np.array(radial_orders)
+
+            if (radial_orders < 0).any():
+                raise ValueError("Radial orders must be >= 0")
+
+            noll_indices = []
+            for order in radial_orders:
+                start = dlu.triangular_number(order)
+                stop = dlu.triangular_number(order + 1)
+                noll_indices.append(np.arange(start, stop) + 1)
+            noll_indices = np.concatenate(noll_indices).astype(int)
+
+        if noll_indices is None:
+            m1_aperture = dll.TransmissiveLayer(m1_transmission, normalise=True)
+            m2_aperture = dll.TransmissiveLayer(m2_transmission, normalise=True)
+        else:
+            # Generate Basis
+            coords = dlu.pixel_coords(wf_npixels, diameter[0])
+            basis = np.array(
+                [dlu.zernike(i, coords, m1_diameter) for i in noll_indices]
+            )
+
+            if coefficients is None:
+                coefficients = np.zeros(len(noll_indices))
+
+            # Combine into BasisOptic class
+            m1_aperture = dll.BasisOptic(basis, m1_transmission, coefficients, normalise=True)
+            m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
+
+        # # Generate Aperture
+        # aperture = dLux.apertures.ApertureFactory(
+        #     npixels=wf_npixels,
+        #     radial_orders=radial_orders,
+        #     noll_indices=noll_indices,
+        #     coefficients=coefficients,
+        #     secondary_ratio=m2_diameter / m1_diameter,
+        #     nstruts=n_struts,
+        #     strut_ratio=strut_width / m1_diameter,
+        #     strut_rotation=strut_rotation,
+        # )
+
+        # Generate DP Mask
+        if mask is None:
+            path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
+            # print("DP Path: %s" % path)
+            # arr_in = np.load(path)
+            # ratio = wf_npixels / arr_in.shape[-1]
+            mask = scale_array(np.load(path), wf_npixels, order=1)
+
+            # Enforce full binary
+            mask = mask.at[np.where(mask <= 0.5)].set(0.0)
+            mask = mask.at[np.where(mask > 0.5)].set(1.0)
+
+            # Enforce full binary
+            mask = dlu.phase2opd(mask * np.pi, 550e-9)
+
+            # Turn into optic
+            mask = dll.AberratedLayer(mask)
+
+
+        # Define Layers for the Primary and for the Secondary
+        m1_layers = [("m1_aperture", m1_aperture), ("dp_mask", mask)]
+        m2_layers = [("m2_aperture", m2_aperture)]
+
+        # Propagator Properties
+        psf_npixels = int(psf_npixels)
+        oversample = float(oversample)
+        psf_pixel_scale = float(psf_pixel_scale)
+
+        super().__init__(
+            wf_npixels=wf_npixels,
+            diameter=diameter,
+            plane_layers=[m1_layers, m2_layers],
+            plane_separations=m1_m2_separation,
+            plane_magnifications=m1_magnification,
+            # aperture=aperture,
+            # mask=mask,
+            psf_npixels=psf_npixels,
+            oversample=int(oversample),
+            psf_pixel_scale=psf_pixel_scale,
+        )
+
+    def _apply_aperture(self, wavelength, offset):
+        """
+        Overwrite so mask can be stored as array
+        """
+        wf = self._construct_wavefront(wavelength, offset)
+        wf *= self.m1_aperture
+        wf = wf.normalise()
+        wf += self.mask
+        return wf
+
