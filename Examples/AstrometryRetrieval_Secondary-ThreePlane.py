@@ -8,7 +8,7 @@ import jax.random as jr
 from jax import jit, grad, linearize, lax, config, tree
 
 # Optimisation
-import equinox as eqx
+
 import zodiax as zdx
 from zodiax import filter_vmap
 import optax
@@ -47,125 +47,6 @@ plt.rcParams['figure.dpi'] = 120
 
 
 jax.config.update("jax_enable_x64", True)
-
-
-def set_array(pytree, parameters):
-    dtype = np.float64 if config.x64_enabled else np.float32
-    floats, other = eqx.partition(pytree, eqx.is_inexact_array_like)
-    floats = tree.map(lambda x: np.array(x, dtype=dtype), floats)
-    return eqx.combine(floats, other)
-
-
-def sine_wave_2D(size, amplitude, frequency, angle=0, phase=None):
-    """
-    Generate a rotated 2D sine wave pattern.
-
-    Parameters:
-    -----------
-    size : int
-        The size of the output 2D array (size x size).
-    amplitude : float
-        The amplitude of the sine wave.
-    frequency : float
-        The frequency of the sine wave (cycles per unit length).
-    angle : float (Optional)
-        The angle (in degrees) to rotate the sine wave pattern counter-clockwise.
-    phase : float array (Optional)
-        The phase of the sine wave specified as a full (size x size) array.
-
-
-    Returns:
-    --------
-    sine_wave : np.array
-        A 2D array containing the sine wave pattern.
-    """
-
-    if phase is None:
-        phase = np.zeros((size, size))
-
-    # Normalized coordinate grid
-    x = np.linspace(-0.5, 0.5, size)
-    y = np.linspace(-0.5, 0.5, size)
-    X, Y = np.meshgrid(x, y)
-
-    # Convert angle to radians
-    theta = np.deg2rad(angle)
-
-    # Rotate coordinate system
-    X_rot = X * np.cos(theta) + Y * np.sin(theta)
-    Y_rot = -X * np.sin(theta) + Y * np.cos(theta)
-
-    # Compute the sine wave along rotated axes
-    sine_wave = amplitude * (np.sin(2 * np.pi * frequency * X_rot - phase) +
-                             np.sin(2 * np.pi * frequency * Y_rot - phase))
-
-    return sine_wave
-
-
-
-## Debugging ##
-
-def check_parameter_sensitivity(
-    model,   # your full model pytree
-    parameters,   # list of parameter names, e.g., ['separation', 'm1_aperture.coefficients']
-    loglike_fn,   # your loss_fn or loglikelihood function
-    data,         # observed PSF
-    var,          # variance array
-    epsilon=1e-6, # perturbation size (default 1e-6)
-):
-    """
-    Check sensitivity of the loglikelihood function to each parameter.
-
-    Parameters
-    ----------
-    model : pytree
-        The optical system + source + detector model.
-    parameters : list of str
-        List of parameter names to perturb.
-    loglike_fn : function
-        The loss function or negative log-likelihood.
-    data : Array
-        The observed data (image).
-    var : Array
-        The variance associated with the data.
-    epsilon : float
-        Size of finite-difference perturbation.
-
-    Returns
-    -------
-    results : list of dict
-        List of dictionaries containing parameter name, baseline, perturbed, delta log-likelihood, relative change.
-    """
-
-    results = []
-    baseline_loglike = loglike_fn(model, data, var)
-
-    for param in parameters:
-        value = model.get(param)
-
-        # Handle scalars vs arrays
-        perturb = epsilon * np.ones_like(value)
-        perturbed_value = value + perturb
-
-        # Update model with perturbed value
-        perturbed_model = model.set(param, perturbed_value)
-
-        # Compute perturbed log-likelihood
-        perturbed_loglike = loglike_fn(perturbed_model, data, var)
-
-        # Compute differences
-        delta_loglike = perturbed_loglike - baseline_loglike
-        relative_change = np.abs(delta_loglike) / (np.abs(baseline_loglike) + 1e-12)
-
-        results.append({
-            "param": param,
-            "initial_value": value,
-            "perturbed_value": perturbed_value,
-            "delta_loglike": delta_loglike,
-            "relative_change": relative_change
-        })
-
-    return results
 
 
 
