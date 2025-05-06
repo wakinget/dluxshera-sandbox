@@ -2,7 +2,7 @@
 import jax.numpy as np
 import jax
 # from jax import grad, linearize, jit, lax
-from jax import config, tree
+from jax import config, tree, Array
 import equinox as eqx
 
 __all__ = ["merge_cbar", "nanrms","set_array", "scale_array", "sinusoidal_grating_2D"]
@@ -26,7 +26,7 @@ def set_array(pytree, parameters):
     return eqx.combine(floats, other)
 
 
-def scale_array(array: jax.Array, size_out: int, order: int) -> jax.Array:
+def scale_array(array: Array, size_out: int, order: int) -> Array:
     xs = np.linspace(0, array.shape[0], size_out)
     xs, ys = np.meshgrid(xs, xs)
     return jax.scipy.ndimage.map_coordinates(array, np.array([ys, xs]), order=order)

@@ -7,6 +7,8 @@ import dLux.layers as dll
 import dLux
 import dLuxToliman
 import os
+from .utils import scale_array
+
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
@@ -17,12 +19,6 @@ AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
 ThreePlaneOpticalSystem = lambda: dLux.optical_systems.ThreePlaneOpticalSystem
 MultiPlaneOpticalSystem = lambda: dLux.optical_systems.MultiPlaneOpticalSystem
 
-
-# Define Scaling function here for local use
-def scale_array(array: Array, size_out: int, order: int) -> Array:
-    xs = np.linspace(0, array.shape[0], size_out)
-    xs, ys = np.meshgrid(xs, xs)
-    return map_coordinates(array, np.array([ys, xs]), order=order)
 
 class TolimanOpticalSystem(AngularOpticalSystem()):
     def __init__(
