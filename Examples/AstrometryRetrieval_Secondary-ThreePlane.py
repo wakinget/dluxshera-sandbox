@@ -21,6 +21,7 @@ import dLuxToliman as dlT
 from Classes.optical_systems import SheraThreePlaneSystem
 from Classes.oneoverf import *
 from Classes.utils import merge_cbar, nanrms, scale_array
+from Classes.optimization import get_optimiser, step_fn
 
 # Plotting/visualisation
 import matplotlib as mpl
@@ -47,59 +48,6 @@ plt.rcParams['figure.dpi'] = 120
 
 jax.config.update("jax_enable_x64", True)
 
-def hessian(f, x):
-    # Jit the sub-function here since it is called many times
-    _, hvp = linearize(grad(f), x)
-    hvp = jit(hvp)
-
-    # Build and stack
-    basis = np.eye(x.size).reshape(-1, *x.shape)
-    return np.stack([hvp(e) for e in basis]).reshape(x.shape + x.shape)
-
-
-def FIM(
-    pytree,
-    parameters,
-    loglike_fn,
-    *loglike_args,
-    **loglike_kwargs,
-):
-    # Build X vec
-    pytree = zdx.tree.set_array(pytree, parameters)
-
-    if len(parameters) == 1:
-        parameters = [parameters]
-
-    leaves = [pytree.get(p) for p in parameters]
-    shapes = [leaf.shape for leaf in leaves]
-    lengths = [leaf.size for leaf in leaves]
-    N = np.array(lengths).sum()
-    X = np.zeros(N)
-
-    # Build function to calculate FIM and calculate
-    def loglike_fn_vec(X):
-        parametric_pytree = _perturb(X, pytree, parameters, shapes, lengths)
-        return loglike_fn(parametric_pytree, *loglike_args, **loglike_kwargs)
-
-    # return hessian(loglike_fn_vec, X)
-    return jax.hessian(loglike_fn_vec)(X)
-
-
-def _perturb(X, pytree, parameters, shapes, lengths):
-    n, xs = 0, []
-    if isinstance(parameters, str):
-        parameters = [parameters]
-    indexes = range(len(parameters))
-
-    for i, param, shape, length in zip(indexes, parameters, shapes, lengths):
-        if length == 1:
-            xs.append(X[i + n])
-        else:
-            xs.append(lax.dynamic_slice(X, (i + n,), (length,)).reshape(shape))
-            n += length - 1
-
-    return pytree.add(parameters, xs)
-
 
 def set_array(pytree, parameters):
     dtype = np.float64 if config.x64_enabled else np.float32
@@ -107,170 +55,6 @@ def set_array(pytree, parameters):
     floats = tree.map(lambda x: np.array(x, dtype=dtype), floats)
     return eqx.combine(floats, other)
 
-
-def scheduler(lr, start, *args):
-    shed_dict = {start: 1e100}
-    for start, mul in args:
-        shed_dict[start] = mul
-    return optax.piecewise_constant_schedule(lr / 1e100, shed_dict)
-
-
-base_sgd = lambda vals: optax.sgd(vals, nesterov=True, momentum=0.6)
-sgd = lambda lr, start, *schedule: base_sgd(scheduler(lr, start, *schedule))
-
-
-def get_optimiser(pytree, optimisers, parameters=None):
-
-    # Get the parameters and opt_dict
-    if parameters is not None:
-        optimisers = dict([(p, optimisers[p]) for p in parameters])
-    else:
-        parameters = list(optimisers.keys())
-
-    model_params = ModelParams(dict([(p, pytree.get(p)) for p in parameters]))
-    param_spec = ModelParams(dict([(param, param) for param in parameters]))
-    optim = optax.multi_transform(optimisers, param_spec)
-
-    # Build the optimised object - the 'model_params' object
-    state = optim.init(model_params)
-    return model_params, optim, state
-
-
-def get_lr_model(
-    pytree,
-    parameters,
-    loglike_fn,
-    *loglike_args,
-    **loglike_kwargs,
-):
-
-    fmat = FIM(model, parameters, loglike_fn, *loglike_args, **loglike_kwargs)
-    lr_vec = 1 / np.diag(fmat)
-
-    # lr_model = eqx.filter(model, zdx.boolean_filter(model, parameters))
-
-    idx = 0
-    lr_model = {}
-    for param in parameters:
-        leaf = np.array(model.get(param))
-        size, shape = leaf.size, leaf.shape
-        lr_model[param] = lr_vec[idx : idx + size].reshape(shape)
-        # lr_model = lr_model.set(param, lr_vec[idx : idx + size].reshape(shape))
-        idx += size
-
-    return ModelParams(lr_model)
-
-
-class BaseModeller(zdx.Base):
-    params: dict
-
-    def __init__(self, params):
-        self.params = params
-
-    def __getattr__(self, key):
-        if key in self.params:
-            return self.params[key]
-        for k, val in self.params.items():
-            if hasattr(val, key):
-                return getattr(val, key)
-        raise AttributeError(
-            f"Attribute {key} not found in params of {self.__class__.__name__} object"
-        )
-
-    def __getitem__(self, key):
-
-        values = {}
-        for param, item in self.params.items():
-            if isinstance(item, dict) and key in item.keys():
-                values[param] = item[key]
-
-        return values
-
-    def get(self, key):
-        if key in self.params:
-            return self.params[key]
-        raise ValueError(f"key: {key} not found in object: {type(self).__name__}")
-
-    # def get(self, key: str):
-    #     parts = key.split(".")
-    #     val = self
-    #     for part in parts:
-    #         if isinstance(val, dict):
-    #             val = val[part]
-    #         elif hasattr(val, part):
-    #             val = getattr(val, part)
-    #         else:
-    #             raise KeyError(f"Invalid path segment: {part}")
-    #     return val
-
-
-class ModelParams(BaseModeller):
-
-    @property
-    def keys(self):
-        return list(self.params.keys())
-
-    @property
-    def values(self):
-        return list(self.params.values())
-
-    def replace(self, values):
-        # Takes in a super-set class and updates this class with input values
-        return self.set(
-            "params", dict([(param, values.get(param)) for param in self.keys])
-        )
-
-    def from_model(self, values):
-        return self.set(
-            "params", dict([(param, values.get(param)) for param in self.keys])
-        )
-
-    def __add__(self, values):
-        matched = self.replace(values)
-        return jax.tree_map(lambda x, y: x + y, self, matched)
-
-    def __iadd__(self, values):
-        return self.__add__(values)
-
-    def __mul__(self, values):
-        matched = self.replace(values)
-        return jax.tree_map(lambda x, y: x * y, self, matched)
-
-    def __imul__(self, values):
-        return self.__mul__(values)
-
-    def inject(self, other):
-        # Injects the values of this class into another class
-        return other.set(self.keys, self.values)
-
-
-# Define Loss and Update Functions
-# Define the log likelihood
-def loglikelihood(model, data, var):
-    return jax.scipy.stats.norm.logpdf(model.model(), loc=data, scale=np.sqrt(var))
-
-# Define the loss function
-def loss_fn(model, data, var):
-    return -np.nansum(loglikelihood(model, data, var))
-
-# Define the step function
-@eqx.filter_jit
-def step_fn(model_params, data, var, model, lr_model, optim, state):
-    print("Compiling update function")
-
-    # Get the loss and the gradients
-    loss, grads = val_grad_fn(model, data, var)
-
-    # Normalise the gradients
-    grads = tree.map(lambda x, y: x * y, lr_model.replace(grads), lr_model)
-
-    # Update the model parameters
-    updates, state = optim.update(grads, state, model_params)
-    model_params = zdx.apply_updates(model_params, updates)
-
-    # Re-inject into the model and return
-    model = model_params.inject(model)
-    return loss, model, model_params, state
 
 def sine_wave_2D(size, amplitude, frequency, angle=0, phase=None):
     """
@@ -417,7 +201,7 @@ initial_angle = 90
 initial_center = (0, 0)
 central_wavelength = 550 # nm
 bandwidth = 110 # nm
-n_wavelengths = 5
+n_wavelengths = 1
 
 # Telescope Parameters
 pupil_npix = 256
@@ -438,7 +222,7 @@ detector_pixel_pitch = 6.5 # um, detector pixel size
 # detector_pixel_pitch = 4.6 # um, detector pixel size
 
 # Observation Settings
-N_observations = 3 # Number of repeated observations
+N_observations = 1 # Number of repeated observations
 total_exposure_time = 1800 # sec, total exposure time of the observation
 frame_rate = 20 # Hz, observation frame rate
 exposure_per_frame = 1/frame_rate  # seconds
@@ -496,10 +280,10 @@ optimisers = {
     "separation": opt,
     "position_angle": opt,
     "log_flux": opt,
-    "contrast": opt,
+    # "contrast": opt,
     "psf_pixel_scale": opt,
     "m1_aperture.coefficients": opt,
-    "m2_aperture.coefficients": opt,
+    # "m2_aperture.coefficients": opt,
 }
 params = list(optimisers.keys())
 
