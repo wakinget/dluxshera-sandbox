@@ -2,11 +2,11 @@
 
 import jax
 import jax.numpy as np
-from jax import grad, linearize, jit, lax, config as jax_config
+from jax import grad, linearize, jit, lax, tree, config as jax_config
 import optax
 import equinox as eqx
 import zodiax as zdx
-from zodiax import tree
+# from zodiax import tree
 
 
 ############################
