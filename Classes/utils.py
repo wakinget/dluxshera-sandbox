@@ -4,6 +4,7 @@ import jax
 # from jax import grad, linearize, jit, lax
 from jax import config, tree, Array
 import equinox as eqx
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 __all__ = ["merge_cbar", "nanrms","set_array", "scale_array", "sinusoidal_grating_2D"]
 
@@ -11,7 +12,6 @@ __all__ = ["merge_cbar", "nanrms","set_array", "scale_array", "sinusoidal_gratin
 
 
 def merge_cbar(ax):
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
     return make_axes_locatable(ax).append_axes("right", size="5%", pad=0.0)
 
 
