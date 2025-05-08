@@ -544,7 +544,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         wf_npixels: int = 256,
         psf_npixels: int = 128,
         oversample: int = 2,
-        detector_pixel_pitch: float = 4.6,
+        detector_pixel_pitch: float = 4.6e-6, # pixel pitch in meters/pixel
         mask: Array = None,
         radial_orders: Array = None,
         noll_indices: Array = None,
@@ -563,7 +563,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         phi_telescope = phi_m1 + phi_m2 - m1_m2_separation * phi_m1 * phi_m2
         f_telescope = 1 / phi_telescope
         m1_magnification = 1 / (1 - m1_m2_separation * phi_m1)
-        psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch * 1e-6 / f_telescope)
+        psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch / f_telescope)
 
         pupil_oversample = 2
         coords = dlu.pixel_coords(pupil_oversample * wf_npixels, m1_diameter)

@@ -97,14 +97,14 @@ m2_diam = 0.025
 m1_focal_length = 0.35796
 m2_focal_length = -0.041935
 m1_m2_separation = 0.320
-detector_pixel_pitch = 6.5 # um, detector pixel size
+detector_pixel_pitch = 6.5e-6 # m, detector pixel size
 # # SHERA Flight Prescription
 # m1_diam = 0.22
 # m2_diam = 0.025
 # m1_focal_length = 0.604353
 # m2_focal_length = -0.0545
 # m1_m2_separation = 0.554130
-# detector_pixel_pitch = 4.6 # um, detector pixel size
+# detector_pixel_pitch = 4.6e-6 # m, detector pixel size
 
 # Observation Settings
 N_observations = 100 # Number of repeated observations
