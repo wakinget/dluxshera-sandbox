@@ -554,9 +554,9 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         m1_focal_length: float = 0.604353,
         m2_focal_length: float = -0.0545,
         m1_m2_separation: float = 0.554130,
-        n_struts: int = 3,
+        n_struts: int = 4,
         strut_width: float = 0.002,
-        strut_rotation: float = -np.pi / 2,
+        strut_rotation: float = -np.pi / 4,
     ):
         phi_m1 = 1 / m1_focal_length
         phi_m2 = 1 / m2_focal_length
