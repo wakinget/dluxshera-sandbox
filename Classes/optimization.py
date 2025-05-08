@@ -16,7 +16,7 @@ import zodiax as zdx
 __all__ = [
     "hessian", "FIM", "_perturb",
     "scheduler", "sgd", "get_optimiser", "get_lr_model",
-    "BaseModeller", "ModelParams",
+    "BaseModeller", "ModelParams", "SheraThreePlaneParams",
     "loglikelihood", "loss_fn", "step_fn"
 ]
 
