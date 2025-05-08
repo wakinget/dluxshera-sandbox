@@ -6,6 +6,7 @@ from . import optical_systems
 from . import oneoverf
 from . import utils
 from . import optimization
+from . import modeling
 
 
 # Add to __all__
@@ -13,7 +14,8 @@ modules = [
     optical_systems,
     oneoverf,
     utils,
-    optimization
+    optimization,
+    modeling
 ]
 
 # __all__ = [module.__all__ for module in modules] # Threw an error to do with nested lists
