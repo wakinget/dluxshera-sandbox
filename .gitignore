@@ -1,13 +1,6 @@
 
 # My own example files to ignore
-Examples/AstrometryRetrieval_DPTesting.py
-Examples/AstrometryRetrieval_Secondary-PropTesting.py
-Examples/AstrometryRetrieval_Secondary-Testing.py
-Examples/AstrometryRetrieval_Secondary.py
-Examples/DetectorFlux_Testing_20250317.py
-Examples/TwoPlaneOpticalSystem_Testing.py
-Examples/prop_testing_20250416.py
-
+Examples/*
 
 
 

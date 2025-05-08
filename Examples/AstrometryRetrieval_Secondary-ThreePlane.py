@@ -20,14 +20,13 @@ import dLux.utils as dlu
 import dLuxToliman as dlT
 from Classes.optical_systems import SheraThreePlaneSystem
 from Classes.oneoverf import *
-from Classes.utils import merge_cbar, nanrms, scale_array
-from Classes.optimization import get_optimiser, step_fn
+from Classes.utils import merge_cbar, nanrms, set_array
+from Classes.optimization import get_optimiser, step_fn, loss_fn, get_lr_model
 
 # Plotting/visualisation
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tqdm import tqdm
 import time, datetime, os
 import pandas as pd
@@ -82,11 +81,16 @@ initial_angle = 90
 initial_center = (0, 0)
 central_wavelength = 550 # nm
 bandwidth = 110 # nm
-n_wavelengths = 1
+n_wavelengths = 5
 
 # Telescope Parameters
 pupil_npix = 256
 psf_npix = 256
+# Struts
+n_struts = 4
+strut_width = 0.002
+strut_rotation = np.pi/4
+# strut_rotation = -np.pi/2
 # SHERA Testbed Prescription
 m1_diam = 0.09
 m2_diam = 0.025
@@ -103,7 +107,7 @@ detector_pixel_pitch = 6.5 # um, detector pixel size
 # detector_pixel_pitch = 4.6 # um, detector pixel size
 
 # Observation Settings
-N_observations = 1 # Number of repeated observations
+N_observations = 100 # Number of repeated observations
 total_exposure_time = 1800 # sec, total exposure time of the observation
 frame_rate = 20 # Hz, observation frame rate
 exposure_per_frame = 1/frame_rate  # seconds
@@ -114,13 +118,13 @@ N_frames = frame_rate*total_exposure_time  # frames
 # Zernike WFE
 m1_noll_ind = np.arange(4, 11)
 m1_key, m2_key = jr.split(jr.PRNGKey(1))
-m1_zCoeff_initial = 2*jax.random.normal(m1_key, shape=m1_noll_ind.shape)
+m1_zCoeff_initial = 0*jax.random.normal(m1_key, shape=m1_noll_ind.shape)
 # m1_zCoeff_initial = np.zeros_like(m1_noll_ind)
 m1_zCoeff_amp_rms = nanrms(m1_zCoeff_initial)
 m1_zCoeff_delta_amp_rms = 0 # nm rms, describes changes to zernike coefficients from observation to observation
 # 11, 16, 22, 29, 37, 46, 56, 67, 79, 92, 106
 # Calibrated 1/f WFE
-m1_calibrated_wfe_amp = 5e-9
+m1_calibrated_wfe_amp = 0e-9
 m1_calibrated_wfe_alpha = 2.5
 # Uncalibrated 1/f WFE
 m1_uncalibrated_wfe_amp = 0e-9
@@ -129,16 +133,16 @@ m1_uncalibrated_wfe_alpha = 2.5
 ## Secondary Mirror OPD Settings
 # Zernike OPD
 # m2_noll_ind = np.arange(4, 11) # Noll indices for Secondary
-m2_zCoeff_initial = 2*jax.random.normal(m2_key, shape=m1_noll_ind.shape)
+m2_zCoeff_initial = 0*jax.random.normal(m2_key, shape=m1_noll_ind.shape)
 # m2_zCoeff_initial = np.zeros_like(m1_noll_ind)
 m2_zCoeff_amp_rms = nanrms(m2_zCoeff_initial)
 m2_zCoeff_delta_amp_rms = 0 # nm rms, describes changes to zernike coefficients
 # 11, 16, 22, 29, 37, 46, 56, 67, 79, 92, 106
 # Calibrated 1/f WFE
-m2_calibrated_wfe_amp = 5e-9
+m2_calibrated_wfe_amp = 0e-9
 m2_calibrated_wfe_alpha = 2.5
 # Uncalibrated 1/f WFE
-m2_uncalibrated_wfe_amp = 0.1e-9
+m2_uncalibrated_wfe_amp = 0e-9
 m2_uncalibrated_wfe_alpha = 2.5
 
 
@@ -161,10 +165,10 @@ optimisers = {
     "separation": opt,
     "position_angle": opt,
     "log_flux": opt,
-    # "contrast": opt,
+    "contrast": opt,
     "psf_pixel_scale": opt,
     "m1_aperture.coefficients": opt,
-    # "m2_aperture.coefficients": opt,
+    "m2_aperture.coefficients": opt,
 }
 params = list(optimisers.keys())
 
@@ -186,6 +190,9 @@ model_optics = SheraThreePlaneSystem(
     m1_focal_length = m1_focal_length,
     m2_focal_length = m2_focal_length,
     m1_m2_separation = m1_m2_separation,
+    n_struts=n_struts,
+    strut_width=strut_width,
+    strut_rotation=strut_rotation
 )
 
 data_optics = SheraThreePlaneSystem(
@@ -199,6 +206,9 @@ data_optics = SheraThreePlaneSystem(
     m1_focal_length = m1_focal_length,
     m2_focal_length = m2_focal_length,
     m1_m2_separation = m1_m2_separation,
+    n_struts=n_struts,
+    strut_width=strut_width,
+    strut_rotation=strut_rotation
 )
 
 
@@ -1047,6 +1057,9 @@ for obs_i in np.arange(N_observations):
             "Input Source Contrast (A:B)": contrast_true,
             "Input Source A Raw Flux": rawFlux_true[0],
             "Input Source B Raw Flux": rawFlux_true[1],
+            "Central Wavelength (nm)": central_wavelength,
+            "Bandwidth (nm)": bandwidth,
+            "N Wavelengths": n_wavelengths,
             "Input Platescale (as/pixel)": platescale_true,
             "Input M1 Zernikes (Noll Index)": ", ".join(map(str, m1_noll_ind)),
             "Input M1 Zernike Coefficient RMS Amplitude (nm)": m1_zCoeff_amp_rms,
@@ -1083,7 +1096,7 @@ for obs_i in np.arange(N_observations):
             "Found Platescale (as/pixel)": platescale_found[-1],
             "Found Zernikes (Noll Index)": ", ".join(map(str, m1_noll_ind)),
             "Found M1 Zernike Coefficient Amplitudes (nm)": ", ".join(map(str, m1_zCoeffs_found[-1,:])),
-            # "Found M2 Zernike Coefficient Amplitudes (nm)": ", ".join(map(str, m2_zCoeffs_found[-1, :])),
+            "Found M2 Zernike Coefficient Amplitudes (nm)": ", ".join(map(str, m2_zCoeffs_found[-1, :])),
 
             "Residual Source Position X (uas)": posX_resid[-1] * 1e6,
             "Residual Source Position Y (uas)": posY_resid[-1] * 1e6,
