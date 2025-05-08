@@ -180,6 +180,156 @@ class ModelParams(BaseModeller):
         return other.set(self.keys, self.values)
 
 
+class SheraThreePlaneParams(ModelParams):
+    """Parameter container for the Shera Three-Plane Optical System."""
+
+    def __init__(self, params=None, point_design=None):
+        """
+        Initialize the parameter set for the Shera Three-Plane Optical System.
+
+        Parameters
+        ----------
+        params : dict, optional
+            A dictionary of parameter overrides. These values will replace the
+            default parameters, including those set by the point design.
+
+        point_design : str, optional
+            Specifies which telescope point design to use. Valid options are:
+                - "shera_testbed" (default)
+                - "shera_flight"
+
+            If not specified, the default "shera_testbed" parameters will be used.
+
+        Notes
+        -----
+        The following point designs are available:
+
+        1. shera_testbed (default)
+            - m1_diameter: 0.09 m
+            - m2_diameter: 0.025 m
+            - m1_focal: 0.35796 m
+            - m2_focal: -0.041935 m
+            - plane_separation: 0.320 m
+            - pixel_size: 6.5e-6 m
+
+        2. shera_flight
+            - m1_diameter: 0.22 m
+            - m2_diameter: 0.025 m
+            - m1_focal: 0.604353 m
+            - m2_focal: -0.0545 m
+            - plane_separation: 0.55413 m
+            - pixel_size: 4.6e-6 m
+
+        The remaining parameters are common to both point designs and include
+        wavefront sampling, source properties, and Zernike aberrations.
+        """
+        # Define the two point designs
+        point_designs = {
+            "shera_testbed": {
+                "m1_diameter": 0.09,
+                "m2_diameter": 0.025,
+                "m1_focal": 0.35796,
+                "m2_focal": -0.041935,
+                "plane_separation": 0.320,
+                "pixel_size": 6.5e-6
+            },
+            "shera_flight": {
+                "m1_diameter": 0.22,
+                "m2_diameter": 0.025,
+                "m1_focal": 0.604353,
+                "m2_focal": -0.0545,
+                "plane_separation": 0.55413,
+                "pixel_size": 4.6e-6
+            }
+        }
+
+        # Set the default parameters (shera_testbed)
+        defaults = point_designs.get(point_design, point_designs["shera_testbed"])
+
+        # Add other default parameters
+        defaults.update({
+            # Sampling and resolution settings
+            "pupil_npix": 256,
+            "psf_npix": 256,
+
+            # Source parameters
+            "x_position": 0,
+            "y_position": 0,
+            "separation": 10,
+            "angle": 90,
+            "contrast": 0.3,
+            "wavelength": 550,
+            "bandwidth": 110,
+            "n_wavelengths": 5,
+            "exposure_time": 0.05,
+            "frame_rate": 20,
+
+            # M1 Aberrations
+            "m1_zernike_noll": np.arange(4, 11),
+            "m1_zernike_amp": np.zeros(7),
+            "m1_calibrated_power_law": 2.5,
+            "m1_calibrated_amplitude": 0,
+            "m1_uncalibrated_power_law": 2.5,
+            "m1_uncalibrated_amplitude": 0,
+
+            # M2 Aberrations
+            "m2_zernike_noll": np.arange(4, 11),
+            "m2_zernike_amp": np.zeros(7),
+            "m2_calibrated_power_law": 2.5,
+            "m2_calibrated_amplitude": 0,
+            "m2_uncalibrated_power_law": 2.5,
+            "m2_uncalibrated_amplitude": 0
+        })
+
+        # Initialize with defaults
+        super().__init__(defaults)
+
+        # Update with user-provided values
+        if params is not None:
+            self.replace(params)
+
+        # Initialize frozen set
+        self._fixed = set()
+
+    def validate(self):
+        """Validate the internal consistency of the parameter sets."""
+        # Check that Zernike indexes and amplitudes match in length
+        for prefix in ["m1_", "m2_"]:
+            noll = self.params[f"{prefix}zernike_noll"]
+            amp = self.params[f"{prefix}zernike_amp"]
+            if len(noll) != len(amp):
+                raise ValueError(
+                    f"{prefix}zernike_noll and {prefix}zernike_amp must have the same length."
+                )
+        print("Validation successful.")
+
+    def freeze(self, *patterns):
+        """Freeze parameters that match the given patterns."""
+        for pattern in patterns:
+            for key in self.params.keys():
+                if pattern in key:
+                    self._fixed.add(key)
+
+    def unfreeze(self, *patterns):
+        """Unfreeze parameters that match the given patterns."""
+        for pattern in patterns:
+            for key in list(self._fixed):
+                if pattern in key:
+                    self._fixed.discard(key)
+
+    def is_frozen(self, key):
+        """Check if a parameter is currently frozen."""
+        return key in self._fixed
+
+    def get_frozen_params(self):
+        """Return a list of all currently frozen parameters."""
+        return list(self._fixed)
+
+    def to_dict(self):
+        """Flatten the parameter hierarchy for easy export."""
+        return self.params
+
+
 ############################
 # Loss and Update Functions
 ############################
