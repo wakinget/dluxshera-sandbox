@@ -5,6 +5,7 @@ import jax
 from jax import config, tree, Array
 import equinox as eqx
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import warnings
 
 __all__ = ["merge_cbar", "nanrms","set_array", "scale_array",
            "sinusoidal_grating_2D", "calculate_log_flux"]
@@ -99,6 +100,14 @@ def calculate_log_flux(diameter, bandwidth, exposure_time, default_flux=1.7227e1
     float
         The calculated log_flux.
     """
+
+    # Check if the bandwidth is specified in nanometers or microns
+    if bandwidth > 1:
+        warnings.warn(
+            f"Bandwidth appears to be specified in nanometers ({bandwidth} nm). "
+            "Expected units are microns. Please verify you have the correct units for bandwidth."
+        )
+
     # Calculate the aperture area (m^2)
     aperture_area = np.pi * (diameter / 2) ** 2
 
