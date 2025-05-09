@@ -207,7 +207,9 @@ class SheraThreePlaneParams(ModelParams):
                 "m1_focal": 0.35796,
                 "m2_focal": -0.041935,
                 "plane_separation": 0.320,
-                "pixel_size": 6.5e-6
+                "pixel_size": 6.5e-6,
+                "bandwidth": 110,  # nm
+                "log_flux": 6.78,
             },
             "shera_flight": {
                 "m1_diameter": 0.22,
@@ -215,7 +217,9 @@ class SheraThreePlaneParams(ModelParams):
                 "m1_focal": 0.604353,
                 "m2_focal": -0.0545,
                 "plane_separation": 0.55413,
-                "pixel_size": 4.6e-6
+                "pixel_size": 4.6e-6,
+                "bandwidth": 41,  # nm
+                "log_flux": 7.13,
             }
         }
 
@@ -234,9 +238,7 @@ class SheraThreePlaneParams(ModelParams):
             "separation": 10,
             "position_angle": 90,
             "contrast": 0.3,
-            "log_flux": 6.832,
             "wavelength": 550,  # nm
-            "bandwidth": 110,    # nm
             "n_wavelengths": 5,
 
             # M1 Aberrations
