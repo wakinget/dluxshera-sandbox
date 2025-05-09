@@ -45,7 +45,7 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
         m2_diameter = params.get("m2_diameter"),
         m1_focal_length = params.get("m1_focal"),
         m2_focal_length = params.get("m2_focal"),
-        m1_m2_separation = params.get("plane_separation")
+        plane_separation = params.get("plane_separation")
     )
 
     # Normalise the zernike basis to be in units of nm
@@ -121,7 +121,7 @@ def SheraThreePlane_Model(params):
         m2_diameter = params.get("m2_diameter"),
         m1_focal_length = params.get("m1_focal"),
         m2_focal_length = params.get("m2_focal"),
-        m1_m2_separation = params.get("plane_separation")
+        plane_separation = params.get("plane_separation")
     )
 
     # Normalise the zernike basis to be in units of nm
@@ -133,8 +133,8 @@ def SheraThreePlane_Model(params):
     model_optics = model_optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
 
     # Initialize the source
-    wavelength = params.get("wavelength")
-    bandwidth = params.get("bandwidth")
+    wavelength = params.get("wavelength") # Central wavelength (nm)
+    bandwidth = params.get("bandwidth") # Bandwidth (
     bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
     source = dlT.AlphaCen(
         n_wavels = params.get("n_wavelengths"),
