@@ -236,8 +236,8 @@ class SheraThreePlaneParams(ModelParams):
             "position_angle": 90,
             "contrast": 0.3,
             "log_flux": 6.832,
-            "wavelength": 550,
-            "bandwidth": 110,
+            "wavelength": 550, # nm
+            "bandwidth": 110, # nm
             "n_wavelengths": 5,
 
 
