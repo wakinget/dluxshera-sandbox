@@ -228,7 +228,7 @@ class SheraThreePlaneParams(ModelParams):
                 "m2_focal": -0.041935,
                 "plane_separation": 0.320,
                 "pixel_size": 6.5e-6,
-                "bandwidth": 110,  # nm
+                "bandwidth": 110.,  # nm
                 "log_flux": 6.78,
             },
             "shera_flight": {
@@ -238,7 +238,7 @@ class SheraThreePlaneParams(ModelParams):
                 "m2_focal": -0.0545,
                 "plane_separation": 0.55413,
                 "pixel_size": 4.6e-6,
-                "bandwidth": 41,  # nm
+                "bandwidth": 41.,  # nm
                 "log_flux": 7.13,
             }
         }
@@ -253,12 +253,12 @@ class SheraThreePlaneParams(ModelParams):
             "psf_npix": 256,
 
             # Source parameters
-            "x_position": 0,
-            "y_position": 0,
-            "separation": 10,
-            "position_angle": 90,
+            "x_position": 0.,
+            "y_position": 0.,
+            "separation": 10.,
+            "position_angle": 90.,
             "contrast": 0.3,
-            "wavelength": 550,  # nm
+            "wavelength": 550.,  # nm
             "n_wavelengths": 5,
 
             # M1 Aberrations
@@ -278,12 +278,12 @@ class SheraThreePlaneParams(ModelParams):
             "m2_uncalibrated_amplitude": 0
         })
 
-        # Initialize with defaults
+        # Initialize ModelParams with defaults
         super().__init__(defaults)
 
         # Update with user-provided values
         if params is not None:
-            self.replace(params)
+            self = self.replace(params)
 
     def validate(self):
         """Validate the internal consistency of the parameter sets."""
