@@ -1,8 +1,8 @@
 import jax.numpy as np
 import numpyro as npy
 import numpyro.distributions as dist
-from Classes.modeling import SheraThreePlane_Model
 
+__all__ = ["SheraThreePlane_NumpyroModel"]
 
 def SheraThreePlane_NumpyroModel(data, model):
     """

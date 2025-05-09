@@ -7,6 +7,7 @@ from . import oneoverf
 from . import utils
 from . import optimization
 from . import modeling
+from . import inference
 
 
 # Add to __all__
@@ -15,7 +16,8 @@ modules = [
     oneoverf,
     utils,
     optimization,
-    modeling
+    modeling,
+    inference
 ]
 
 # __all__ = [module.__all__ for module in modules] # Threw an error to do with nested lists
