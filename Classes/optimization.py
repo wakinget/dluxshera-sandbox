@@ -156,6 +156,26 @@ class ModelParams(BaseModeller):
         return list(self.params.values())
 
     def replace(self, values):
+        """
+        Replace all parameters with the provided values.
+
+        Parameters
+        ----------
+        values : dict
+            A dictionary containing updated parameter values. Any parameters
+            not included in this dictionary will be replaced with None.
+
+        Returns
+        ----------
+        ModelParams
+            A new ModelParams object with the updated parameter values.
+
+        Notes
+        ----------
+        - This method expects a fully defined parameter dictionary.
+        - Missing keys will be replaced with None, potentially leading
+          to unexpected behavior.
+        """
         return self.set("params", dict([(param, values.get(param)) for param in self.keys]))
 
     def from_model(self, values):
@@ -280,6 +300,28 @@ class SheraThreePlaneParams(ModelParams):
     def to_dict(self):
         """Flatten the parameter hierarchy for easy export."""
         return self.params
+
+    def replace(self, values):
+        """
+        Replace parameters with the provided values.
+
+        Parameters
+        ----------
+        values : dict
+            A dictionary containing updated parameter values. Only the
+            specified keys are updated, all other parameters are preserved.
+
+        Returns
+        -------
+        SheraThreePlaneParams
+            A new SheraThreePlaneParams object with the updated parameter values.
+
+        Notes
+        -----
+        - This method preserves existing parameters that are not explicitly updated.
+        - Does not support nested dictionary updates.
+        """
+        return self.set("params", {**self.params, **values})
 
 
 ############################
