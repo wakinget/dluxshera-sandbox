@@ -65,7 +65,7 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
         x_position = params.get("x_position"),
         y_position = params.get("y_position"),
         separation = params.get("separation"),
-        position_angle = params.get("angle"),
+        position_angle = params.get("position_angle"),
         log_flux = params.get("log_flux"),
         contrast = params.get("contrast"),
         bandpass = bandpass
@@ -141,7 +141,7 @@ def SheraThreePlane_Model(params):
         x_position = params.get("x_position"),
         y_position = params.get("y_position"),
         separation = params.get("separation"),
-        position_angle = params.get("angle"),
+        position_angle = params.get("position_angle"),
         log_flux = params.get("log_flux"),
         contrast = params.get("contrast"),
         bandpass = bandpass
