@@ -4,7 +4,8 @@ import jax.numpy as np
 from Classes.optical_systems import SheraThreePlaneSystem
 
 __all__ = [
-    "SheraThreePlane_ForwardModel"
+    "SheraThreePlane_ForwardModel",
+    "SheraThreePlane_Model"
 ]
 
 
@@ -30,49 +31,21 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
     model : dl.Telescope, optional
         The full Telescope model object, returned if return_model=True.
     """
+    # A note: M2 zernike nolls are currently assumed to be the same as M1 zernike nolls.
+    # I will need to modify the SheraThreePlaneOpticalSystem to fix this.
 
-    # Extract key parameters
-    m1_diameter = params.get("m1_diameter")
-    m2_diameter = params.get("m2_diameter")
-    m1_focal_length = params.get("m1_focal")
-    m2_focal_length = params.get("m2_focal")
-    plane_separation = params.get("plane_separation")
-    pixel_size = params.get("pixel_size")
-
-    pupil_npix = params.get("pupil_npix")
-    psf_npix = params.get("psf_npix")
-
-    # Source parameters
-    x_position = params.get("x_position")
-    y_position = params.get("y_position")
-    separation = params.get("separation")
-    angle = params.get("angle")
-    contrast = params.get("contrast")
-    log_flux = params.get("log_flux")
-    wavelength = params.get("wavelength")
-    bandwidth = params.get("bandwidth")
-    n_wavelengths = params.get("n_wavelengths")
-
-    # M1 aberrations
-    m1_zernike_noll = params.get("m1_zernike_noll")
-    m1_zernike_amp = params.get("m1_zernike_amp")
-
-    # M2 aberrations
-    # m2_zernike_noll = params.get("m2_zernike_noll")
-    m2_zernike_amp = params.get("m2_zernike_amp")
-
-    # Initialize the optical system
+    # Initialize the optical system given input params
     model_optics = SheraThreePlaneSystem(
-        wf_npixels = pupil_npix,
-        psf_npixels = psf_npix,
+        wf_npixels = params.get("pupil_npix"),
+        psf_npixels = params.get("psf_npix"),
         oversample = 3,
-        detector_pixel_pitch = pixel_size,
-        noll_indices = m1_zernike_noll,
-        m1_diameter = m1_diameter,
-        m2_diameter = m2_diameter,
-        m1_focal_length = m1_focal_length,
-        m2_focal_length = m2_focal_length,
-        m1_m2_separation = plane_separation
+        detector_pixel_pitch = params.get("pixel_size"),
+        noll_indices = params.get("m1_zernike_noll"),
+        m1_diameter = params.get("m1_diameter"),
+        m2_diameter = params.get("m2_diameter"),
+        m1_focal_length = params.get("m1_focal"),
+        m2_focal_length = params.get("m2_focal"),
+        m1_m2_separation = params.get("plane_separation")
     )
 
     # Normalise the zernike basis to be in units of nm
@@ -80,29 +53,21 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
     model_optics = model_optics.multiply('m2_aperture.basis', 1e-9)
 
     # Set Zernike coefficients (units of nm)
-    model_optics = model_optics.set('m1_aperture.coefficients', m1_zernike_amp)
-    model_optics = model_optics.set('m2_aperture.coefficients', m2_zernike_amp)
-
-    # # Scale the source flux from exposure time
-    # # Default fluxes taken from Toliman Master spreadsheet
-    # starA_default_flux = 1.267e11  # photons / second of exposure / square meter of aperture / micron of band
-    # starB_default_flux = 4.557e10  # photons / second of exposure / square meter of aperture / micron of band
-    # default_total_flux = starA_default_flux + starB_default_flux
-    # aperture_area = np.pi * (
-    #             model_optics.p1_diameter / 2) ** 2  # square meters of aperture (doesn't include M2 obscuration)
-    # total_flux = default_total_flux * exposure_time * aperture_area * (bandwidth / 1000)  # photons
-    # total_log_flux = np.log10(total_flux)
+    model_optics = model_optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
+    model_optics = model_optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
 
     # Initialize the source
+    wavelength = params.get("wavelength")
+    bandwidth = params.get("bandwidth")
     bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
     source = dlT.AlphaCen(
-        n_wavels = n_wavelengths,
-        x_position = x_position,
-        y_position = y_position,
-        separation = separation,
-        position_angle = angle,
-        log_flux = log_flux,
-        contrast = contrast,
+        n_wavels = params.get("n_wavelengths"),
+        x_position = params.get("x_position"),
+        y_position = params.get("y_position"),
+        separation = params.get("separation"),
+        position_angle = params.get("angle"),
+        log_flux = params.get("log_flux"),
+        contrast = params.get("contrast"),
         bandpass = bandpass
     )
 
@@ -126,3 +91,73 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
         return psf, model
     else:
         return psf
+
+
+def SheraThreePlane_Model(params):
+    """
+    Builds a SheraThreePlane Optical Model using the given params,
+    Outputs the telescope model
+
+    Parameters
+    ----------
+    params : SheraThreePlaneParams
+        The optical system parameters, including telescope design, sampling,
+        source properties, and aberrations.
+
+    Returns
+    -------
+    model : dl.Telescope
+        The full Telescope model object, with source, optics, and detector
+    """
+
+    # Initialize the optical system given input params
+    model_optics = SheraThreePlaneSystem(
+        wf_npixels = params.get("pupil_npix"),
+        psf_npixels = params.get("psf_npix"),
+        oversample = 3,
+        detector_pixel_pitch = params.get("pixel_size"),
+        noll_indices = params.get("m1_zernike_noll"),
+        m1_diameter = params.get("m1_diameter"),
+        m2_diameter = params.get("m2_diameter"),
+        m1_focal_length = params.get("m1_focal"),
+        m2_focal_length = params.get("m2_focal"),
+        m1_m2_separation = params.get("plane_separation")
+    )
+
+    # Normalise the zernike basis to be in units of nm
+    model_optics = model_optics.multiply('m1_aperture.basis', 1e-9)
+    model_optics = model_optics.multiply('m2_aperture.basis', 1e-9)
+
+    # Set Zernike coefficients (units of nm)
+    model_optics = model_optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
+    model_optics = model_optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
+
+    # Initialize the source
+    wavelength = params.get("wavelength")
+    bandwidth = params.get("bandwidth")
+    bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
+    source = dlT.AlphaCen(
+        n_wavels = params.get("n_wavelengths"),
+        x_position = params.get("x_position"),
+        y_position = params.get("y_position"),
+        separation = params.get("separation"),
+        position_angle = params.get("angle"),
+        log_flux = params.get("log_flux"),
+        contrast = params.get("contrast"),
+        bandpass = bandpass
+    )
+
+    # Initialize the detector (no jitter for now)
+    detector = dl.LayeredDetector(
+        layers=[("downsample", dl.Downsample(model_optics.oversample))]
+    )
+
+    # Combine into a full telescope model
+    model = dl.Telescope(
+        source=source,
+        optics=model_optics,
+        detector=detector,
+    )
+
+    # Return the full model object
+    return model
