@@ -199,29 +199,6 @@ class SheraThreePlaneParams(ModelParams):
                 - "shera_flight"
 
             If not specified, the default "shera_testbed" parameters will be used.
-
-        Notes
-        -----
-        The following point designs are available:
-
-        1. shera_testbed (default)
-            - m1_diameter: 0.09 m
-            - m2_diameter: 0.025 m
-            - m1_focal: 0.35796 m
-            - m2_focal: -0.041935 m
-            - plane_separation: 0.320 m
-            - pixel_size: 6.5e-6 m
-
-        2. shera_flight
-            - m1_diameter: 0.22 m
-            - m2_diameter: 0.025 m
-            - m1_focal: 0.604353 m
-            - m2_focal: -0.0545 m
-            - plane_separation: 0.55413 m
-            - pixel_size: 4.6e-6 m
-
-        The remaining parameters are common to both point designs and include
-        wavefront sampling, source properties, and Zernike aberrations.
         """
         # Define the two point designs
         point_designs = {
@@ -256,13 +233,13 @@ class SheraThreePlaneParams(ModelParams):
             "x_position": 0,
             "y_position": 0,
             "separation": 10,
-            "angle": 90,
+            "position_angle": 90,
             "contrast": 0.3,
+            "log_flux": 6.832,
             "wavelength": 550,
             "bandwidth": 110,
             "n_wavelengths": 5,
-            "exposure_time": 0.05,
-            "frame_rate": 20,
+
 
             # M1 Aberrations
             "m1_zernike_noll": np.arange(4, 11),

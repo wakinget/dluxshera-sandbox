@@ -6,9 +6,8 @@ from jax import config, tree, Array
 import equinox as eqx
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-__all__ = ["merge_cbar", "nanrms","set_array", "scale_array", "sinusoidal_grating_2D"]
-
-
+__all__ = ["merge_cbar", "nanrms","set_array", "scale_array",
+           "sinusoidal_grating_2D", "calculate_log_flux"]
 
 
 def merge_cbar(ax):
@@ -78,3 +77,33 @@ def sinusoidal_grating_2D(N, amplitude, frequency, angle=0, phase=None):
                              np.sin(2 * np.pi * frequency * Y_rot - phase))
 
     return sine_wave
+
+def calculate_log_flux(diameter, bandwidth, exposure_time, default_flux=1.7227e11):
+    """
+    Calculate the log_flux given the primary mirror diameter, bandwidth, and exposure time.
+
+    Parameters
+    ----------
+    diameter : float
+        Diameter of the primary mirror (meters).
+    bandwidth : float
+        Bandwidth of the observation (microns).
+    exposure_time : float
+        Exposure time (seconds).
+    default_flux : float, optional
+        Default total star flux in photons per second per meter^2 per micron of band
+        Default of 1.7227e11 is taken from the Toliman Master Spreadsheet for aCenA+B
+
+    Returns
+    -------
+    float
+        The calculated log_flux.
+    """
+    # Calculate the aperture area (m^2)
+    aperture_area = np.pi * (diameter / 2) ** 2
+
+    # Calculate the total flux
+    total_flux = default_flux * exposure_time * aperture_area * bandwidth
+
+    # Return the log_flux
+    return np.log10(total_flux)

@@ -48,11 +48,10 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
     separation = params.get("separation")
     angle = params.get("angle")
     contrast = params.get("contrast")
+    log_flux = params.get("log_flux")
     wavelength = params.get("wavelength")
     bandwidth = params.get("bandwidth")
     n_wavelengths = params.get("n_wavelengths")
-    exposure_time = params.get("exposure_time")
-    # frame_rate = params.get("frame_rate")
 
     # M1 aberrations
     m1_zernike_noll = params.get("m1_zernike_noll")
@@ -84,25 +83,25 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
     model_optics = model_optics.set('m1_aperture.coefficients', m1_zernike_amp)
     model_optics = model_optics.set('m2_aperture.coefficients', m2_zernike_amp)
 
-    # Scale the source flux from exposure time
-    # Default fluxes taken from Toliman Master spreadsheet
-    starA_default_flux = 1.267e11  # photons / second of exposure / square meter of aperture / micron of band
-    starB_default_flux = 4.557e10  # photons / second of exposure / square meter of aperture / micron of band
-    default_total_flux = starA_default_flux + starB_default_flux
-    aperture_area = np.pi * (
-                model_optics.p1_diameter / 2) ** 2  # square meters of aperture (doesn't include M2 obscuration)
-    bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
-    total_flux = default_total_flux * exposure_time * aperture_area * (bandwidth / 1000)  # photons
-    total_log_flux = np.log10(total_flux)
+    # # Scale the source flux from exposure time
+    # # Default fluxes taken from Toliman Master spreadsheet
+    # starA_default_flux = 1.267e11  # photons / second of exposure / square meter of aperture / micron of band
+    # starB_default_flux = 4.557e10  # photons / second of exposure / square meter of aperture / micron of band
+    # default_total_flux = starA_default_flux + starB_default_flux
+    # aperture_area = np.pi * (
+    #             model_optics.p1_diameter / 2) ** 2  # square meters of aperture (doesn't include M2 obscuration)
+    # total_flux = default_total_flux * exposure_time * aperture_area * (bandwidth / 1000)  # photons
+    # total_log_flux = np.log10(total_flux)
 
     # Initialize the source
+    bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
     source = dlT.AlphaCen(
         n_wavels = n_wavelengths,
         x_position = x_position,
         y_position = y_position,
         separation = separation,
         position_angle = angle,
-        log_flux = total_log_flux,
+        log_flux = log_flux,
         contrast = contrast,
         bandpass = bandpass
     )
