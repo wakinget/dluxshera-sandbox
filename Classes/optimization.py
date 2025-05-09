@@ -6,7 +6,6 @@ from jax import grad, linearize, jit, lax, tree, config as jax_config
 import optax
 import equinox as eqx
 import zodiax as zdx
-# from zodiax import tree
 
 
 ############################
@@ -236,10 +235,9 @@ class SheraThreePlaneParams(ModelParams):
             "position_angle": 90,
             "contrast": 0.3,
             "log_flux": 6.832,
-            "wavelength": 550, # nm
-            "bandwidth": 110, # nm
+            "wavelength": 550,  # nm
+            "bandwidth": 110,    # nm
             "n_wavelengths": 5,
-
 
             # M1 Aberrations
             "m1_zernike_noll": np.arange(4, 11),
@@ -265,9 +263,6 @@ class SheraThreePlaneParams(ModelParams):
         if params is not None:
             self.replace(params)
 
-        # Initialize frozen set
-        self._fixed = set()
-
     def validate(self):
         """Validate the internal consistency of the parameter sets."""
         # Check that Zernike indexes and amplitudes match in length
@@ -279,28 +274,6 @@ class SheraThreePlaneParams(ModelParams):
                     f"{prefix}zernike_noll and {prefix}zernike_amp must have the same length."
                 )
         print("Validation successful.")
-
-    def freeze(self, *patterns):
-        """Freeze parameters that match the given patterns."""
-        for pattern in patterns:
-            for key in self.params.keys():
-                if pattern in key:
-                    self._fixed.add(key)
-
-    def unfreeze(self, *patterns):
-        """Unfreeze parameters that match the given patterns."""
-        for pattern in patterns:
-            for key in list(self._fixed):
-                if pattern in key:
-                    self._fixed.discard(key)
-
-    def is_frozen(self, key):
-        """Check if a parameter is currently frozen."""
-        return key in self._fixed
-
-    def get_frozen_params(self):
-        """Return a list of all currently frozen parameters."""
-        return list(self._fixed)
 
     def to_dict(self):
         """Flatten the parameter hierarchy for easy export."""
