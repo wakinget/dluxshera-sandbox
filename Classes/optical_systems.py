@@ -553,16 +553,16 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         m2_diameter: float = 0.025,
         m1_focal_length: float = 0.604353,
         m2_focal_length: float = -0.0545,
-        m1_m2_separation: float = 0.554130,
+        plane_separation: float = 0.554130,
         n_struts: int = 4,
         strut_width: float = 0.002,
         strut_rotation: float = -np.pi / 4,
     ):
         phi_m1 = 1 / m1_focal_length
         phi_m2 = 1 / m2_focal_length
-        phi_telescope = phi_m1 + phi_m2 - m1_m2_separation * phi_m1 * phi_m2
+        phi_telescope = phi_m1 + phi_m2 - plane_separation * phi_m1 * phi_m2
         f_telescope = 1 / phi_telescope
-        m1_magnification = 1 / (1 - m1_m2_separation * phi_m1)
+        m1_magnification = 1 / (1 - plane_separation * phi_m1)
         psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch / f_telescope)
 
         pupil_oversample = 2
@@ -620,7 +620,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             p2_diameter=m2_diameter,
             p1_layers=p1_layers,
             p2_layers=p2_layers,
-            plane_separation=m1_m2_separation,
+            plane_separation=plane_separation,
             magnification=m1_magnification,
             psf_npixels=psf_npixels,
             psf_pixel_scale=psf_pixel_scale,
@@ -642,7 +642,7 @@ class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
         m2_diameter: float = 0.060,
         m1_focal_length: float = 0.604353,
         m2_focal_length: float = -0.0545,
-        m1_m2_separation: float = 0.554130,
+        plane_separation: float = 0.554130,
         n_struts: int = 3,
         strut_width: float = 0.002,
         strut_rotation: float = -np.pi / 2,
@@ -683,7 +683,7 @@ class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
             The focal length of the primary mirror in metres.
         m2_focal_length : float
             The focal length of the secondary mirror in metres.
-        m1_m2_separation : float
+        plane_separation : float
             The separation between the primary and secondary in metres.
         n_struts : int
             The number of uniformly spaced struts holding the secondary mirror.
@@ -700,10 +700,10 @@ class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
         # Reduce the telescope system
         phi_m1 = 1 / m1_focal_length  # diopters, M1 power
         phi_m2 = 1 / m2_focal_length  # diopters, M2 power
-        phi_telescope = phi_m1 + phi_m2 - m1_m2_separation * phi_m1 * phi_m2  # Overall Telescope power
+        phi_telescope = phi_m1 + phi_m2 - plane_separation * phi_m1 * phi_m2  # Overall Telescope power
         f_telescope = 1 / phi_telescope  # Overall Telescope focal length
         # Calculate M1 Magnification
-        m1_magnification = 1 / (1 - m1_m2_separation * phi_m1)
+        m1_magnification = 1 / (1 - plane_separation * phi_m1)
         psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch*1e-6 / f_telescope)
 
         # Generate Pupil Aperture
@@ -792,7 +792,7 @@ class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
             wf_npixels=wf_npixels,
             diameter=diameter,
             plane_layers=[m1_layers, m2_layers],
-            plane_separations=m1_m2_separation,
+            plane_separations=plane_separation,
             plane_magnifications=m1_magnification,
             # aperture=aperture,
             # mask=mask,
