@@ -278,12 +278,12 @@ class SheraThreePlaneParams(ModelParams):
             "m2_uncalibrated_amplitude": 0
         })
 
+        # Update user-provided values
+        if params is not None:
+            defaults = {**defaults, **params}
+
         # Initialize ModelParams with defaults
         super().__init__(defaults)
-
-        # Update with user-provided values
-        if params is not None:
-            self = self.replace(params)
 
     def validate(self):
         """Validate the internal consistency of the parameter sets."""
