@@ -251,6 +251,7 @@ class SheraThreePlaneParams(ModelParams):
         # Add other default parameters
         defaults.update({
             # Sampling and resolution settings
+            "rng_seed": 0,
             "pupil_npix": 256,
             "psf_npix": 256,
 
@@ -261,7 +262,7 @@ class SheraThreePlaneParams(ModelParams):
             "position_angle": 90.,
             "contrast": 0.3,
             "wavelength": 550.,  # nm
-            "n_wavelengths": 5,
+            "n_wavelengths": 3,
 
             # M1 Aberrations
             "m1_zernike_noll": np.arange(4, 11),
@@ -278,6 +279,134 @@ class SheraThreePlaneParams(ModelParams):
             "m2_calibrated_amplitude": 0,
             "m2_uncalibrated_power_law": 2.5,
             "m2_uncalibrated_amplitude": 0
+        })
+
+        # Update user-provided values
+        if params is not None:
+            defaults = {**defaults, **params}
+
+        # Initialize ModelParams with defaults
+        super().__init__(defaults)
+
+    def validate(self):
+        """Validate the internal consistency of the parameter sets."""
+        # Check that Zernike indexes and amplitudes match in length
+        for prefix in ["m1_", "m2_"]:
+            noll = self.params[f"{prefix}zernike_noll"]
+            amp = self.params[f"{prefix}zernike_amp"]
+            if len(noll) != len(amp):
+                raise ValueError(
+                    f"{prefix}zernike_noll and {prefix}zernike_amp must have the same length."
+                )
+        print("Validation successful.")
+
+    def to_dict(self):
+        """Flatten the parameter hierarchy for easy export."""
+        return self.params
+
+    def replace(self, values):
+        """
+        Replace parameters with the provided values.
+
+        Parameters
+        ----------
+        values : dict
+            A dictionary containing updated parameter values. Only the
+            specified keys are updated, all other parameters are preserved.
+
+        Returns
+        -------
+        SheraThreePlaneParams
+            A new SheraThreePlaneParams object with the updated parameter values.
+
+        Notes
+        -----
+        - This method preserves existing parameters that are not explicitly updated.
+        - Does not support nested dictionary updates.
+        """
+        return self.set("params", {**self.params, **values})
+
+    @staticmethod
+    def get_param_path_map():
+        '''Returns the parameter path that maps params from this class to the parameters of the model'''
+        return {
+            "x_position": "x_position",
+            "y_position": "y_position",
+            "separation": "separation",
+            "position_angle": "position_angle",
+            "contrast": "contrast",
+            "log_flux": "log_flux",
+            "m1_zernike_amp": "m1_aperture.coefficients",
+            "m2_zernike_amp": "m2_aperture.coefficients"
+        }
+
+
+class SheraTwoPlaneParams(ModelParams):
+    """Parameter container for the Shera Two-Plane Optical System."""
+
+    def __init__(self, params=None, point_design=None):
+        """
+        Initialize the parameter set for the Shera Two-Plane Optical System.
+
+        Parameters
+        ----------
+        params : dict, optional
+            A dictionary of parameter overrides. These values will replace the
+            default parameters, including those set by the point design.
+
+        point_design : str, optional
+            Specifies which telescope point design to use. Valid options are:
+                - "shera_testbed" (default)
+                - "shera_flight"
+
+            If not specified, the default "shera_testbed" parameters will be used.
+        """
+        # Define the two point designs
+        point_designs = {
+            "shera_testbed": {
+                "p1_diameter": 0.09,
+                "p2_diameter": 0.025,
+                "psf_pixel_scale": 0.355,
+                "bandwidth": 110.,  # nm
+                "log_flux": 6.78,
+            },
+            "shera_flight": {
+                "p1_diameter": 0.22,
+                "p2_diameter": 0.025,
+                "psf_pixel_scale": 0.123,
+                "bandwidth": 41.,  # nm
+                "log_flux": 7.13,
+            }
+        }
+
+
+        if point_design is None:
+            point_design = "shera_testbed" # Default point design
+        defaults = point_designs.get(point_design)
+
+        # Add other default parameters
+        defaults.update({
+            # Sampling and resolution settings
+            "rng_seed": 0,
+            "pupil_npix": 256,
+            "psf_npix": 256,
+
+            # Source parameters
+            "x_position": 0.,
+            "y_position": 0.,
+            "separation": 10.,
+            "position_angle": 90.,
+            "contrast": 0.3,
+            "wavelength": 550.,  # nm
+            "n_wavelengths": 3,
+
+            # Aberrations
+            "zernike_noll": np.arange(4, 11),
+            "zernike_amp": np.zeros(7),
+            "calibrated_power_law": 2.5,
+            "calibrated_amplitude": 0,
+            "uncalibrated_power_law": 2.5,
+            "uncalibrated_amplitude": 0,
         })
 
         # Update user-provided values
