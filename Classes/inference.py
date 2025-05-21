@@ -44,14 +44,14 @@ def SheraThreePlane_NumpyroModel(data, model):
         elif path == "separation":
             sample_value = npy.sample(path, dist.Normal(current_value, 0.001))
         elif path == "position_angle":
-            sample_value = npy.sample(path, dist.Uniform(current_value - 5, current_value + 5))
+            sample_value = npy.sample(path, dist.Uniform(current_value - 1, current_value + 1))
         elif path == "contrast":
-            sample_value = npy.sample(path, dist.LogNormal(np.log(current_value), 0.1))
+            sample_value = npy.sample(path, dist.LogNormal(np.log(current_value), 0.05))
         elif path == "log_flux":
-            sample_value = npy.sample(path, dist.Normal(current_value, 0.5))
+            sample_value = npy.sample(path, dist.LogNormal(np.log(current_value), 0.05))
         elif path in ["m1_aperture.coefficients", "m2_aperture.coefficients"]:
             n_coeffs = len(current_value)
-            sample_value = npy.sample(path, dist.Normal(current_value, 1).expand([n_coeffs]).to_event(1))
+            sample_value = npy.sample(path, dist.Normal(current_value, 0.1).expand([n_coeffs]).to_event(1))
 
         # Append the sampled value
         values.append(sample_value)
