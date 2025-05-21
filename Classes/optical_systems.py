@@ -178,20 +178,21 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         self,
         wf_npixels: int = 256,
         psf_npixels: int = 128,
-        oversample: int = 4,
-        psf_pixel_scale: float = 0.3547,  # arcsec
+        oversample: int = 2,
+        psf_pixel_scale: float = 0.3547,  # as/pix
         mask: Array = None,
         radial_orders: Array = None,
         noll_indices: Array = None,
         coefficients: Array = None,
         m1_diameter: float = 0.09,
         m2_diameter: float = 0.025,
-        n_struts: int = 3,
+        n_struts: int = 4,
         strut_width: float = 0.002,
-        strut_rotation: float = -np.pi / 2,
+        strut_rotation: float = -np.pi / 4,
+        dp_design_wavel: float = 550e-9,
     ):
         """
-        A pre-built dLux optics layer of the Toliman optical system. Note TolimanOptics uses units of arcseconds.
+        A pre-built dLux optics layer of the JNEXT optical system. Note TolimanOptics uses units of arcseconds.
 
         Parameters
         ----------
@@ -234,11 +235,14 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         diameter = m1_diameter
 
         # Generate Aperture
-        coords = dlu.pixel_coords(5 * wf_npixels, diameter)
+        pupil_oversample = 2
+        coords = dlu.pixel_coords(pupil_oversample * wf_npixels, m1_diameter)
         outer = dlu.circle(coords, m1_diameter / 2)
         inner = dlu.circle(coords, m2_diameter / 2, invert=True)
-        spiders = dlu.spider(coords, strut_width, [0, 120, 240])
-        transmission = dlu.combine([outer, inner, spiders], 5)
+        strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + np.rad2deg(strut_rotation)
+        spiders = dlu.spider(coords, strut_width, strut_angles)
+        transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
+
 
         # Hack this in for now, will be in dLux eventually
         if radial_orders is not None:
@@ -269,23 +273,10 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
             # Combine into BasisOptic class
             aperture = dll.BasisOptic(basis, transmission, coefficients, normalise=True)
 
-        # # Generate Aperture
-        # aperture = dLux.apertures.ApertureFactory(
-        #     npixels=wf_npixels,
-        #     radial_orders=radial_orders,
-        #     noll_indices=noll_indices,
-        #     coefficients=coefficients,
-        #     secondary_ratio=m2_diameter / m1_diameter,
-        #     nstruts=n_struts,
-        #     strut_ratio=strut_width / m1_diameter,
-        #     strut_rotation=strut_rotation,
-        # )
 
         # Generate Mask
         if mask is None:
             path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
-            # arr_in = np.load(path)
-            # ratio = wf_npixels / arr_in.shape[-1]
             mask = scale_array(np.load(path), wf_npixels, order=1)
 
             # Enforce full binary
@@ -293,7 +284,7 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
             mask = mask.at[np.where(mask > 0.5)].set(1.0)
 
             # Enforce full binary
-            mask = dlu.phase2opd(mask * np.pi, 550e-9)
+            mask = dlu.phase2opd(mask * np.pi, dp_design_wavel)
 
             # Turn into optic
             mask = dll.AberratedLayer(mask)
