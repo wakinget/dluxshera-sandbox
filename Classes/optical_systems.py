@@ -549,8 +549,8 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         radial_orders: Array = None,
         noll_indices: Array = None,
         coefficients: Array = None,
-        m1_diameter: float = 0.220,
-        m2_diameter: float = 0.025,
+        p1_diameter: float = 0.220,
+        p2_diameter: float = 0.025,
         m1_focal_length: float = 0.604353,
         m2_focal_length: float = -0.0545,
         plane_separation: float = 0.554130,
@@ -566,9 +566,9 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch / f_telescope)
 
         pupil_oversample = 2
-        coords = dlu.pixel_coords(pupil_oversample * wf_npixels, m1_diameter)
-        outer = dlu.circle(coords, m1_diameter / 2)
-        inner = dlu.circle(coords, m2_diameter / 2, invert=True)
+        coords = dlu.pixel_coords(pupil_oversample * wf_npixels, p1_diameter)
+        outer = dlu.circle(coords, p1_diameter / 2)
+        inner = dlu.circle(coords, p2_diameter / 2, invert=True)
         strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + np.rad2deg(strut_rotation)
         spiders = dlu.spider(coords, strut_width, strut_angles)
         m1_transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
@@ -587,8 +587,8 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             m1_aperture = dll.TransmissiveLayer(m1_transmission, normalise=True)
             m2_aperture = dll.TransmissiveLayer(m2_transmission, normalise=True)
         else:
-            coords = dlu.pixel_coords(wf_npixels, m1_diameter)
-            basis = np.array([dlu.zernike(i, coords, m1_diameter) for i in noll_indices])
+            coords = dlu.pixel_coords(wf_npixels, p1_diameter)
+            basis = np.array([dlu.zernike(i, coords, p1_diameter) for i in noll_indices])
             coefficients = np.zeros(len(noll_indices)) if coefficients is None else coefficients
             m1_aperture = dll.BasisOptic(basis, m1_transmission, coefficients, normalise=True)
             m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
@@ -616,8 +616,8 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         p2_layers = [("m2_aperture", m2_aperture)]
         super().__init__(
             wf_npixels=wf_npixels,
-            p1_diameter=m1_diameter,
-            p2_diameter=m2_diameter,
+            p1_diameter=p1_diameter,
+            p2_diameter=p2_diameter,
             p1_layers=p1_layers,
             p2_layers=p2_layers,
             plane_separation=plane_separation,
