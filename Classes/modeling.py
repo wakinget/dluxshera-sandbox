@@ -1,8 +1,12 @@
 import dLux as dl
 import dLuxToliman as dlT
+import dLux.layers as dll
 import jax.numpy as np
-from Classes.optical_systems import SheraThreePlaneSystem
+import jax.random as jr
+from Classes.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
 from Classes.optimization import SheraThreePlaneParams
+from Classes.oneoverf import *
+from Classes.utils import merge_cbar, nanrms, set_array, calculate_log_flux
 
 __all__ = [
     "SheraThreePlane_ForwardModel",
@@ -130,10 +134,10 @@ class SheraThreePlane_Model(dl.Telescope):
         """
         Initialize the optical system.
         """
-        model_optics = SheraThreePlaneSystem(
+        optics = SheraThreePlaneSystem(
             wf_npixels = params.get("pupil_npix"),
             psf_npixels = params.get("psf_npix"),
-            oversample = 3,
+            oversample = 1,
             detector_pixel_pitch = params.get("pixel_size"),
             noll_indices = params.get("m1_zernike_noll"),
             p1_diameter = params.get("p1_diameter"),
@@ -144,14 +148,52 @@ class SheraThreePlane_Model(dl.Telescope):
         )
 
         # Normalize the Zernike basis to be in units of nm
-        model_optics = model_optics.multiply('m1_aperture.basis', 1e-9)
-        model_optics = model_optics.multiply('m2_aperture.basis', 1e-9)
+        optics = optics.multiply('m1_aperture.basis', 1e-9)
+        optics = optics.multiply('m2_aperture.basis', 1e-9)
 
         # Set Zernike coefficients (units of nm)
-        model_optics = model_optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
-        model_optics = model_optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
+        optics = optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
+        optics = optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
 
-        return model_optics
+        # Initialize the Calibrated 1/f WFE
+        # First for the Primary
+        rng_key, subkey = jr.split(jr.PRNGKey(params.get("rng_seed")))
+        m1_cal_wfe = oneoverf_noise_2D(optics.wf_npixels, params.get("m1_calibrated_power_law"), key=subkey)
+        m1_cal_wfe = remove_PTT(m1_cal_wfe, optics.m1_aperture.transmission.astype(bool))  # Remove PTT from aperture
+        m1_cal_wfe = m1_cal_wfe * (params.get("m1_calibrated_amplitude") / nanrms(
+            m1_cal_wfe[optics.m1_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
+        m1_cal_layer = dll.AberratedLayer(m1_cal_wfe)
+        optics = optics.insert_layer(('calibration', m1_cal_layer), 3, 0)
+
+        # Now for the Secondary
+        rng_key, subkey = jr.split(rng_key)
+        m2_cal_wfe = oneoverf_noise_2D(optics.wf_npixels, params.get("m2_calibrated_power_law"), key=subkey)
+        m2_cal_wfe = remove_PTT(m2_cal_wfe, optics.m2_aperture.transmission.astype(bool))  # Remove PTT from aperture
+        m2_cal_wfe = m2_cal_wfe * (params.get("m2_calibrated_amplitude") / nanrms(
+            m2_cal_wfe[optics.m2_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
+        m2_cal_layer = dll.AberratedLayer(m2_cal_wfe)
+        optics = optics.insert_layer(('calibration', m2_cal_layer), 3, 1)
+
+        # Initialize the Uncalibrated 1/f WFE
+        # First for the Primary
+        rng_key, subkey = jr.split(rng_key)
+        m1_uncal_wfe = oneoverf_noise_2D(optics.wf_npixels, params.get("m1_uncalibrated_power_law"), key=subkey)
+        m1_uncal_wfe = remove_PTT(m1_uncal_wfe, optics.m1_aperture.transmission.astype(bool))  # Remove PTT from aperture
+        m1_uncal_wfe = m1_uncal_wfe * (params.get("m1_uncalibrated_amplitude") / nanrms(
+            m1_uncal_wfe[optics.m1_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
+        m1_uncal_layer = dll.AberratedLayer(m1_uncal_wfe)
+        optics = optics.insert_layer(('wfe', m1_uncal_layer), 4, 0)
+
+        # Now for the Secondary
+        rng_key, subkey = jr.split(rng_key)
+        m2_uncal_wfe = oneoverf_noise_2D(optics.wf_npixels, params.get("m2_uncalibrated_power_law"), key=subkey)
+        m2_uncal_wfe = remove_PTT(m2_uncal_wfe, optics.m2_aperture.transmission.astype(bool))  # Remove PTT from aperture
+        m2_uncal_wfe = m2_uncal_wfe * (params.get("m2_uncalibrated_amplitude") / nanrms(
+            m2_uncal_wfe[optics.m2_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
+        m2_uncal_layer = dll.AberratedLayer(m2_uncal_wfe)
+        optics = optics.insert_layer(('wfe', m2_uncal_layer), 4, 1)
+
+        return optics
 
     def _initialize_source(self, params):
         """
@@ -184,7 +226,9 @@ class SheraThreePlane_Model(dl.Telescope):
             "contrast": "contrast",
             "log_flux": "log_flux",
             "m1_zernike_amp": "m1_aperture.coefficients",
-            "m2_zernike_amp": "m2_aperture.coefficients"
+            "m2_zernike_amp": "m2_aperture.coefficients",
+            "pupil_npix": "wf_npix",
+            "psf_npix": "psf_npixels"
         }
 
     @staticmethod
@@ -263,43 +307,62 @@ class SheraTwoPlane_Model(dl.Telescope):
 
     def __init__(self, params):
         # Initialize the optical system given input params
-        model_optics = self._initialize_optics(params)
+        optics = self._initialize_optics(params)
 
         # Initialize the source
         source = self._initialize_source(params)
 
         # Initialize the detector (no jitter for now)
         detector = dl.LayeredDetector(
-            layers=[("downsample", dl.Downsample(model_optics.oversample))]
+            layers=[("downsample", dl.Downsample(optics.oversample))]
         )
 
         # Initialize the parent Telescope class
-        super().__init__(source=source, optics=model_optics, detector=detector)
+        super().__init__(source=source, optics=optics, detector=detector)
 
     def _initialize_optics(self, params):
         """
         Initialize the optical system.
         """
 
-        model_optics = dlT.TolimanOpticalSystem(
+        optics = JNEXTOpticalSystem(
             wf_npixels = params.get("pupil_npix"),
             psf_npixels = params.get("psf_npix"),
-            oversample = 2,
+            oversample = 1,
             psf_pixel_scale = params.get("psf_pixel_scale"),
-            noll_indices = params.get("m1_zernike_noll"),
-            m1_diameter = params.get("p1_diameter"),
-            m2_diameter = params.get("p2_diameter"),
+            noll_indices = params.get("zernike_noll"),
+            m1_diameter = params.get("m1_diameter"),
+            m2_diameter = params.get("m2_diameter"),
             n_struts = 4,
             strut_width = 0.002,
-            strut_rotation = -np.pi / 4
+            strut_rotation = -np.pi / 4,
+            dp_design_wavel = params.get("wavelength")
         )
 
         # Normalize the Zernike basis to be in units of nm
-        model_optics = model_optics.multiply('aperture.basis', 1e-9)
+        optics = optics.multiply('aperture.basis', 1e-9)
 
         # Set Zernike coefficients (units of nm)
-        model_optics = model_optics.set('aperture.coefficients', params.get("zernike_amp"))
-        return model_optics
+        optics = optics.set('aperture.coefficients', params.get("zernike_amp"))
+
+        # Initialize the Calibrated 1/f WFE
+        rng_key, subkey = jr.split(jr.PRNGKey(params.get("rng_seed")))
+        cal_wfe = oneoverf_noise_2D(optics.wf_npixels, params.get("calibrated_power_law"), key=subkey)
+        cal_wfe = remove_PTT(cal_wfe, optics.aperture.transmission.astype(bool))  # Remove PTT from aperture
+        cal_wfe = cal_wfe * (params.get("calibrated_amplitude") / nanrms(
+            cal_wfe[optics.aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
+        cal_layer = dll.AberratedLayer(cal_wfe)
+        optics = optics.insert_layer(('calibration', cal_layer), 3)
+
+        # Initialize the Uncalibrated 1/f WFE
+        rng_key, subkey = jr.split(rng_key)
+        uncal_wfe = oneoverf_noise_2D(optics.wf_npixels, params.get("uncalibrated_power_law"), key=subkey)
+        uncal_wfe = remove_PTT(uncal_wfe, optics.aperture.transmission.astype(bool))  # Remove PTT from aperture
+        uncal_wfe = uncal_wfe * (params.get("uncalibrated_amplitude") / nanrms(
+            uncal_wfe[optics.aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
+        uncal_layer = dll.AberratedLayer(uncal_wfe)
+        optics = optics.insert_layer(('wfe', uncal_layer), 4)
+        return optics
 
     def _initialize_source(self, params):
         """
@@ -332,6 +395,8 @@ class SheraTwoPlane_Model(dl.Telescope):
             "contrast": "contrast",
             "log_flux": "log_flux",
             "zernike_amp": "aperture.coefficients",
+            "pupil_npix": "wf_npix",
+            "psf_npix": "psf_npixels"
         }
 
     @staticmethod
