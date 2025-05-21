@@ -464,8 +464,7 @@ class SheraTwoPlaneParams(ModelParams):
             "position_angle": "position_angle",
             "contrast": "contrast",
             "log_flux": "log_flux",
-            "m1_zernike_amp": "m1_aperture.coefficients",
-            "m2_zernike_amp": "m2_aperture.coefficients"
+            "zernike_amp": "aperture.coefficients",
         }
 
 ############################
