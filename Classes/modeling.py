@@ -2,6 +2,7 @@ import dLux as dl
 import dLuxToliman as dlT
 import jax.numpy as np
 from Classes.optical_systems import SheraThreePlaneSystem
+from Classes.optimization import SheraThreePlaneParams
 
 __all__ = [
     "SheraThreePlane_ForwardModel",
@@ -41,8 +42,8 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
         oversample = 3,
         detector_pixel_pitch = params.get("pixel_size"),
         noll_indices = params.get("m1_zernike_noll"),
-        m1_diameter = params.get("m1_diameter"),
-        m2_diameter = params.get("m2_diameter"),
+        p1_diameter = params.get("m1_diameter"),
+        p2_diameter = params.get("m2_diameter"),
         m1_focal_length = params.get("m1_focal"),
         m2_focal_length = params.get("m2_focal"),
         plane_separation = params.get("plane_separation")
@@ -93,10 +94,10 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
         return psf
 
 
-def SheraThreePlane_Model(params):
+class SheraThreePlane_Model(dl.Telescope):
     """
-    Builds a SheraThreePlane Optical Model using the given params,
-    Outputs the telescope model
+    Builds a SheraThreePlane Optical Model using the given params.
+    Outputs the telescope model.
 
     Parameters
     ----------
@@ -107,57 +108,136 @@ def SheraThreePlane_Model(params):
     Returns
     -------
     model : dl.Telescope
-        The full Telescope model object, with source, optics, and detector
+        The full Telescope model object, with source, optics, and detector.
     """
 
-    # Initialize the optical system given input params
-    model_optics = SheraThreePlaneSystem(
-        wf_npixels = params.get("pupil_npix"),
-        psf_npixels = params.get("psf_npix"),
-        oversample = 3,
-        detector_pixel_pitch = params.get("pixel_size"),
-        noll_indices = params.get("m1_zernike_noll"),
-        m1_diameter = params.get("m1_diameter"),
-        m2_diameter = params.get("m2_diameter"),
-        m1_focal_length = params.get("m1_focal"),
-        m2_focal_length = params.get("m2_focal"),
-        plane_separation = params.get("plane_separation")
-    )
+    def __init__(self, params):
+        # Initialize the optical system given input params
+        model_optics = self._initialize_optics(params)
 
-    # Normalise the zernike basis to be in units of nm
-    model_optics = model_optics.multiply('m1_aperture.basis', 1e-9)
-    model_optics = model_optics.multiply('m2_aperture.basis', 1e-9)
+        # Initialize the source
+        source = self._initialize_source(params)
 
-    # Set Zernike coefficients (units of nm)
-    model_optics = model_optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
-    model_optics = model_optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
+        # Initialize the detector (no jitter for now)
+        detector = dl.LayeredDetector(
+            layers=[("downsample", dl.Downsample(model_optics.oversample))]
+        )
 
-    # Initialize the source
-    wavelength = params.get("wavelength") # Central wavelength (nm)
-    bandwidth = params.get("bandwidth") # Bandwidth (
-    bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
-    source = dlT.AlphaCen(
-        n_wavels = params.get("n_wavelengths"),
-        x_position = params.get("x_position"),
-        y_position = params.get("y_position"),
-        separation = params.get("separation"),
-        position_angle = params.get("position_angle"),
-        log_flux = params.get("log_flux"),
-        contrast = params.get("contrast"),
-        bandpass = bandpass
-    )
+        # Initialize the parent Telescope class
+        super().__init__(source=source, optics=model_optics, detector=detector)
 
-    # Initialize the detector (no jitter for now)
-    detector = dl.LayeredDetector(
-        layers=[("downsample", dl.Downsample(model_optics.oversample))]
-    )
+    def _initialize_optics(self, params):
+        """
+        Initialize the optical system.
+        """
+        model_optics = SheraThreePlaneSystem(
+            wf_npixels = params.get("pupil_npix"),
+            psf_npixels = params.get("psf_npix"),
+            oversample = 3,
+            detector_pixel_pitch = params.get("pixel_size"),
+            noll_indices = params.get("m1_zernike_noll"),
+            p1_diameter = params.get("p1_diameter"),
+            p2_diameter = params.get("p2_diameter"),
+            m1_focal_length = params.get("m1_focal_length"),
+            m2_focal_length = params.get("m2_focal_length"),
+            plane_separation = params.get("plane_separation")
+        )
 
-    # Combine into a full telescope model
-    model = dl.Telescope(
-        source=source,
-        optics=model_optics,
-        detector=detector,
-    )
+        # Normalize the Zernike basis to be in units of nm
+        model_optics = model_optics.multiply('m1_aperture.basis', 1e-9)
+        model_optics = model_optics.multiply('m2_aperture.basis', 1e-9)
 
-    # Return the full model object
-    return model
+        # Set Zernike coefficients (units of nm)
+        model_optics = model_optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
+        model_optics = model_optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
+
+        return model_optics
+
+    def _initialize_source(self, params):
+        """
+        Initialize the source.
+        """
+        wavelength = params.get("wavelength")  # Central wavelength (nm)
+        bandwidth = params.get("bandwidth")  # Bandwidth (nm)
+        bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
+        return dlT.AlphaCen(
+            n_wavels = params.get("n_wavelengths"),
+            x_position = params.get("x_position"),
+            y_position = params.get("y_position"),
+            separation = params.get("separation"),
+            position_angle = params.get("position_angle"),
+            log_flux = params.get("log_flux"),
+            contrast = params.get("contrast"),
+            bandpass = bandpass
+        )
+
+    @staticmethod
+    def get_param_path_map():
+        """
+        Returns the parameter path that maps params from this class to the parameters of the model.
+        """
+        return {
+            "x_position": "x_position",
+            "y_position": "y_position",
+            "separation": "separation",
+            "position_angle": "position_angle",
+            "contrast": "contrast",
+            "log_flux": "log_flux",
+            "m1_zernike_amp": "m1_aperture.coefficients",
+            "m2_zernike_amp": "m2_aperture.coefficients"
+        }
+
+    @staticmethod
+    def get_param_transform_map():
+        """
+        Returns a mapping of parameter names to custom transformation functions.
+        These functions are used to convert model attributes into parameter values
+        when extracting parameters from the model.
+        """
+        return {
+            "bandwidth": lambda model: np.diff(np.array(model.bandpass)),
+            "wavelength": lambda model: np.mean(model.wavelengths),
+            "n_wavelengths": lambda model: model.wavelengths.size,
+        }
+
+    def extract_params(self):
+        """
+        Extract the current parameters from this SheraThreePlane_Model instance.
+
+        Returns
+        -------
+        SheraThreePlaneParams
+            A new SheraThreePlaneParams object populated with the current model parameters.
+        """
+
+        # Determine the point design from the model diameter
+        if self.diameter == 0.09:
+            pd = "shera_testbed"
+        elif self.diameter == 0.22:
+            pd = "shera_flight"
+
+        # Initialize a new SheraThreePlaneParams object
+        extracted_params = SheraThreePlaneParams(point_design=pd)
+
+        # Retrieve the parameter path map and transformation map
+        param_path_map = self.get_param_path_map()
+        param_transform_map = self.get_param_transform_map()
+
+        # Extract all parameters from the model
+        for param_key in extracted_params.keys:
+            try:
+                # Use a custom transformation function if available
+                if param_key in param_transform_map:
+                    value = param_transform_map[param_key](self)
+                else:
+                    # Use the model path if available, otherwise fall back to the param_key
+                    model_path = param_path_map.get(param_key, param_key)
+                    value = self.get(model_path)
+
+                # Set the extracted value
+                extracted_params = extracted_params.set(param_key, value)
+            except (AttributeError, KeyError, ValueError):
+                # Skip parameters that are not present in the model
+                continue
+
+        return extracted_params
