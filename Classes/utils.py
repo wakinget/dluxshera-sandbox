@@ -6,9 +6,13 @@ from jax import config, tree, Array
 import equinox as eqx
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import warnings
+import matplotlib.pyplot as plt
+import time, datetime, os
+
 
 __all__ = ["merge_cbar", "nanrms","set_array", "scale_array",
-           "sinusoidal_grating_2D", "calculate_log_flux"]
+           "sinusoidal_grating_2D", "calculate_log_flux",
+           "plot_parameter_history"]
 
 
 def merge_cbar(ax):
@@ -116,3 +120,59 @@ def calculate_log_flux(diameter, bandwidth, exposure_time, default_flux=1.7227e1
 
     # Return the log_flux
     return np.log10(total_flux)
+
+
+def plot_parameter_history(names, histories, figsize=(8, 5), display=True, save=False,
+                           save_dir="../Results", save_name=None):
+    plt.figure(figsize=figsize)
+    if isinstance(names, str):
+        names = [names]
+        histories = [histories]
+    for name, history in zip(names, histories):
+        plt.plot(history, label=name)
+    plt.title(f"Optimization History")
+    plt.xlabel("Iteration")
+    plt.ylabel("Value")
+    plt.legend()
+
+    # Save the plot if requested
+    if save:
+        if save_name is None: # Generate a new save_name
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_name = f"parameter_history_{timestamp}.png"
+        save_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), save_dir))
+        os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(os.path.join(save_dir, save_name), dpi=300)
+
+    # Show the plot if requested
+    if display:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_opd_surface(opd, title, figsize=(8, 6), mask=None, extent=None, cmap="inferno", vmin=None, vmax=None,
+                     save=False, display=True, save_dir="../Results", save_name=None):
+    plt.figure(figsize=figsize)
+    if mask is not None:
+        opd = opd * mask
+    plt.imshow(1e9 * opd, cmap=cmap, vmin=vmin, vmax=vmax, extent=extent)
+    plt.colorbar(label="OPD (nm)")
+    plt.title(title)
+    plt.xlabel("X (mm)")
+    plt.ylabel("Y (mm)")
+    plt.tight_layout()
+    # Save the plot if requested
+    if save:
+        if save_name is None: # Generate a new save_name
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_name = f"surface_opd_{timestamp}.png"
+        save_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), save_dir))
+        os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(os.path.join(save_dir, save_name), dpi=300)
+
+    # Show the plot if requested
+    if display:
+        plt.show()
+    else:
+        plt.close()
