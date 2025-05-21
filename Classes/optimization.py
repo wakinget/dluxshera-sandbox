@@ -222,20 +222,20 @@ class SheraThreePlaneParams(ModelParams):
         # Define the two point designs
         point_designs = {
             "shera_testbed": {
-                "m1_diameter": 0.09,
-                "m2_diameter": 0.025,
-                "m1_focal": 0.35796,
-                "m2_focal": -0.041935,
+                "p1_diameter": 0.09,
+                "p2_diameter": 0.025,
+                "m1_focal_length": 0.35796,
+                "m2_focal_length": -0.041935,
                 "plane_separation": 0.320,
                 "pixel_size": 6.5e-6,
                 "bandwidth": 110.,  # nm
                 "log_flux": 6.78,
             },
             "shera_flight": {
-                "m1_diameter": 0.22,
-                "m2_diameter": 0.025,
-                "m1_focal": 0.604353,
-                "m2_focal": -0.0545,
+                "p1_diameter": 0.22,
+                "p2_diameter": 0.025,
+                "m1_focal_length": 0.604353,
+                "m2_focal_length": -0.0545,
                 "plane_separation": 0.55413,
                 "pixel_size": 4.6e-6,
                 "bandwidth": 41.,  # nm
@@ -243,8 +243,10 @@ class SheraThreePlaneParams(ModelParams):
             }
         }
 
-        # Set the default parameters (shera_testbed)
-        defaults = point_designs.get(point_design, point_designs["shera_testbed"])
+
+        if point_design is None:
+            point_design = "shera_testbed" # Default point design
+        defaults = point_designs.get(point_design)
 
         # Add other default parameters
         defaults.update({
@@ -323,6 +325,19 @@ class SheraThreePlaneParams(ModelParams):
         """
         return self.set("params", {**self.params, **values})
 
+    @staticmethod
+    def get_param_path_map():
+        '''Returns the parameter path that maps params from this class to the parameters of the model'''
+        return {
+            "x_position": "x_position",
+            "y_position": "y_position",
+            "separation": "separation",
+            "position_angle": "position_angle",
+            "contrast": "contrast",
+            "log_flux": "log_flux",
+            "m1_zernike_amp": "m1_aperture.coefficients",
+            "m2_zernike_amp": "m2_aperture.coefficients"
+        }
 
 ############################
 # Loss and Update Functions
