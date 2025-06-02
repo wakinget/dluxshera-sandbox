@@ -172,7 +172,11 @@ def plot_parameter_history(
         save_name=None,
         log_scale=False,
         ax=None,
-        plot_residuals=False
+        plot_residuals=False,
+        title=None,
+        custom_labels=None,
+        scale_factors=None,
+        unit_labels=None
 ):
     """
     Plots the optimization history or residuals of one or more parameters.
@@ -225,22 +229,30 @@ def plot_parameter_history(
         fig = ax.figure
 
     for i, (name, history) in enumerate(zip(names, histories)):
-        y_data = history
+        y_data = np.array(history)
 
-        # Apply residual logic if requested
+        # Subtract true value if residuals requested
         if plot_residuals and true_vals is not None:
             truth = true_vals[i]
-            y_data = np.array(history) - truth
-            label = f"{name} (residual)"
+            y_data = y_data - truth
+
+        # Apply scaling if specified
+        key = custom_labels[i] if custom_labels else name
+        if scale_factors and key in scale_factors:
+            y_data = y_data * scale_factors[key]
+
+        # Label logic
+        if custom_labels is not None:
+            label = custom_labels[i]
         else:
-            label = f"{name} (estimated)"
+            label = f"Residual {name}" if plot_residuals else f"Recovered {name}"
 
         ax.plot(y_data, label=label)
 
         if not plot_residuals and true_vals is not None:
             truth = true_vals[i]
             if np.ndim(truth) == 0:
-                ax.axhline(truth, linestyle="--", color="k", alpha=0.6, label=f"{name} (true)")
+                ax.axhline(truth, linestyle="--", color="k", alpha=0.6, label=f"True {name}")
             else:
                 ax.plot([0, len(history)], [truth, truth], linestyle="--", color="k", alpha=0.6)
 
@@ -250,13 +262,31 @@ def plot_parameter_history(
     if log_scale:
         ax.set_yscale("log")
 
-    ax.set_title("Parameter Residuals" if plot_residuals else "Optimization History")
+    if title is not None:
+        ax.set_title(title)
+    else:
+        ax.set_title("Parameter Residuals" if plot_residuals else "Parameter History")
+
     ax.set_xlabel("Iteration")
-    ax.set_ylabel("Residual" if plot_residuals else "Value")
+    # Determine y-axis unit label
+    unit = None
+    if unit_labels:
+        # Use first matching unit based on parameter names
+        units = [unit_labels.get(name) for name in names if name in unit_labels]
+        unique_units = list(set(u for u in units if u is not None))
+        if len(unique_units) == 1:
+            unit = unique_units[0]
+
+    ylabel = "Residual" if plot_residuals else "Value"
+    if unit:
+        ylabel += f" ({unit})"
+
+    ax.set_ylabel(ylabel)
+
     ax.legend()
 
     # Save the plot if requested
-    if save and ax is None:
+    if save:
         if save_name is None:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             save_name = f"parameter_history_{timestamp}.png"
@@ -264,9 +294,9 @@ def plot_parameter_history(
         os.makedirs(save_dir, exist_ok=True)
         fig.savefig(os.path.join(save_dir, save_name), dpi=300)
 
-    if display and ax is None:
+    if display:
         plt.show()
-    elif ax is None:
+    else:
         plt.close()
 
     return fig
