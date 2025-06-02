@@ -170,7 +170,7 @@ class TolimanOpticalSystem(AngularOpticalSystem()):
         wf = self._construct_wavefront(wavelength, offset)
         wf *= self.aperture
         wf = wf.normalise()
-        wf += self.mask
+        wf += self.pupil
         return wf
 
 class JNEXTOpticalSystem(AngularOpticalSystem()):
@@ -300,8 +300,6 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
             wf_npixels=wf_npixels,
             diameter=diameter,
             layers=layers,
-            # aperture=aperture,
-            # mask=mask,
             psf_npixels=psf_npixels,
             oversample=int(oversample),
             psf_pixel_scale=psf_pixel_scale,
@@ -314,7 +312,7 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         wf = self._construct_wavefront(wavelength, offset)
         wf *= self.aperture
         wf = wf.normalise()
-        wf += self.mask
+        wf += self.pupil
         return wf
 
 class TolimanSpikes(TolimanOpticalSystem):
