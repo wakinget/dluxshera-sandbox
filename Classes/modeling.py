@@ -142,7 +142,8 @@ class SheraThreePlane_Model(dl.Telescope):
             psf_npixels = params.get("psf_npix"),
             oversample = 1,
             detector_pixel_pitch = params.get("pixel_size"),
-            noll_indices = params.get("m1_zernike_noll"),
+            m1_noll_ind = params.get("m1_zernike_noll"),
+            m2_noll_ind = params.get("m2_zernike_noll"),
             p1_diameter = params.get("p1_diameter"),
             p2_diameter = params.get("p2_diameter"),
             m1_focal_length = params.get("m1_focal_length"),
@@ -150,11 +151,11 @@ class SheraThreePlane_Model(dl.Telescope):
             plane_separation = params.get("plane_separation")
         )
 
-        # Normalize the Zernike basis to be in units of nm
+        # Normalize the Zernike basis so that the coefficients are scaled to units of nm
         optics = optics.multiply('m1_aperture.basis', 1e-9)
         optics = optics.multiply('m2_aperture.basis', 1e-9)
 
-        # Set Zernike coefficients (units of nm)
+        # Set Zernike coefficients (in nm)
         optics = optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
         optics = optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
 
