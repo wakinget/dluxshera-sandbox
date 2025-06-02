@@ -330,12 +330,6 @@ class SheraThreePlaneParams(ModelParams):
     def get_param_path_map():
         '''Returns the parameter path that maps params from this class to the parameters of the model'''
         return {
-            "x_position": "x_position",
-            "y_position": "y_position",
-            "separation": "separation",
-            "position_angle": "position_angle",
-            "contrast": "contrast",
-            "log_flux": "log_flux",
             "m1_zernike_amp": "m1_aperture.coefficients",
             "m2_zernike_amp": "m2_aperture.coefficients"
         }
@@ -458,12 +452,6 @@ class SheraTwoPlaneParams(ModelParams):
     def get_param_path_map():
         '''Returns the parameter path that maps params from this class to the parameters of the model'''
         return {
-            "x_position": "x_position",
-            "y_position": "y_position",
-            "separation": "separation",
-            "position_angle": "position_angle",
-            "contrast": "contrast",
-            "log_flux": "log_flux",
             "zernike_amp": "coefficients",
         }
 
