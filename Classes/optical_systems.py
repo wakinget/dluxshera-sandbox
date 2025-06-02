@@ -535,9 +535,10 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         oversample: int = 2,
         detector_pixel_pitch: float = 4.6e-6, # pixel pitch in meters/pixel
         mask: Array = None,
-        radial_orders: Array = None,
-        noll_indices: Array = None,
-        coefficients: Array = None,
+        m1_noll_ind: Array = None,
+        m1_coefficients: Array = None,
+        m2_noll_ind: Array = None,
+        m2_coefficients: Array = None,
         p1_diameter: float = 0.220,
         p2_diameter: float = 0.025,
         m1_focal_length: float = 0.604353,
@@ -546,7 +547,14 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         n_struts: int = 4,
         strut_width: float = 0.002,
         strut_rotation: float = -np.pi / 4,
+        dp_design_wavel: float = 550e-9,
     ):
+
+        # Set attributes
+        self.m1_noll_ind = m1_noll_ind
+        self.m2_noll_ind - m2_noll_ind
+
+        # Calculate optical system parameters
         phi_m1 = 1 / m1_focal_length
         phi_m2 = 1 / m2_focal_length
         phi_telescope = phi_m1 + phi_m2 - plane_separation * phi_m1 * phi_m2
@@ -554,6 +562,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         m1_magnification = 1 / (1 - plane_separation * phi_m1)
         psf_pixel_scale = dlu.rad2arcsec(detector_pixel_pitch / f_telescope)
 
+        # Create the aperture masks (including spider geometry)
         pupil_oversample = 2
         coords = dlu.pixel_coords(pupil_oversample * wf_npixels, p1_diameter)
         outer = dlu.circle(coords, p1_diameter / 2)
@@ -563,26 +572,25 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         m1_transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
         m2_transmission = dlu.downsample(outer, pupil_oversample)
 
-        if radial_orders is not None:
-            radial_orders = np.array(radial_orders)
-            if (radial_orders < 0).any():
-                raise ValueError("Radial orders must be >= 0")
-            noll_indices = np.concatenate([
-                np.arange(dlu.triangular_number(o), dlu.triangular_number(o + 1)) + 1
-                for o in radial_orders
-            ]).astype(int)
-
-        if noll_indices is None:
+        # Generate Zernike basis for M1
+        if self.m1_noll_ind is None:
             m1_aperture = dll.TransmissiveLayer(m1_transmission, normalise=True)
-            m2_aperture = dll.TransmissiveLayer(m2_transmission, normalise=True)
         else:
             coords = dlu.pixel_coords(wf_npixels, p1_diameter)
-            basis = np.array([dlu.zernike(i, coords, p1_diameter) for i in noll_indices])
-            coefficients = np.zeros(len(noll_indices)) if coefficients is None else coefficients
+            basis = np.array([dlu.zernike(i, coords, p1_diameter) for i in self.m1_noll_ind])
+            coefficients = np.zeros(len(self.m1_noll_ind)) if m1_coefficients is None else m1_coefficients
             m1_aperture = dll.BasisOptic(basis, m1_transmission, coefficients, normalise=True)
+
+        # Generate Zernike basis for M2
+        if self.m2_noll_ind is None:
+            m2_aperture = dll.TransmissiveLayer(m2_transmission, normalise=True)
+        else:
+            coords = dlu.pixel_coords(wf_npixels, p2_diameter)
+            basis = np.array([dlu.zernike(i, coords, p2_diameter) for i in self.m2_noll_ind])
+            coefficients = np.zeros(len(self.m2_noll_ind)) if m2_coefficients is None else m2_coefficients
             m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
 
-        # Generate Mask
+        # Generate Diffractive Pupil Mask
         if mask is None:
             path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
             # arr_in = np.load(path)
@@ -594,12 +602,16 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             mask = mask.at[np.where(mask > 0.5)].set(1.0)
 
             # Enforce full binary
-            mask = dlu.phase2opd(mask * np.pi, 550e-9)
+            mask = dlu.phase2opd(mask * np.pi, dp_design_wavel)
 
             # Turn into optic
             mask = dll.AberratedLayer(mask)
+        else:
+            # Throw an error for now
+            raise NotImplementedError("Custom DP masks are not yet configured in SheraThreePlaneSystem")
+            # mask, if specified might be an array that is already loaded in, but it might be a string that specifies a filename
+            # I should create a folder to store the pupil files, and point
 
-        # layers = [("aperture", aperture), ("pupil", mask)]
 
         p1_layers = [("m1_aperture", m1_aperture), ("dp", mask)]
         p2_layers = [("m2_aperture", m2_aperture)]
