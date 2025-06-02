@@ -6,7 +6,7 @@ from jax import grad, linearize, jit, lax, tree, config as jax_config
 import optax
 import equinox as eqx
 import zodiax as zdx
-
+import numpyro.distributions as dist
 
 ############################
 # Exports
@@ -464,8 +464,53 @@ class SheraTwoPlaneParams(ModelParams):
             "position_angle": "position_angle",
             "contrast": "contrast",
             "log_flux": "log_flux",
-            "zernike_amp": "aperture.coefficients",
+            "zernike_amp": "coefficients",
         }
+
+
+
+def construct_priors_from_dict(param_info):
+    """
+    Constructs NumPyro-compatible priors from a simplified parameter info dictionary.
+
+    Parameters
+    ----------
+    param_info : dict
+        Dictionary of parameter metadata in the form:
+        {
+            "param_name": {
+                "mean": float or array,
+                "sigma": float,
+                "dist": "Normal" | "Uniform" | "LogNormal"
+            },
+            ...
+        }
+
+    Returns
+    -------
+    dict
+        Dictionary of {param: numpyro distribution}.
+    """
+    param_priors = {}
+
+    for param, info in param_info.items():
+        mu = info["mean"]
+        sigma = info["sigma"]
+        dist_type = info["dist"]
+
+        if dist_type == "Normal":
+            param_priors[param] = dist.Normal(loc=mu, scale=sigma)
+        elif dist_type == "Uniform":
+            param_priors[param] = dist.Uniform(low=mu - sigma, high=mu + sigma)
+        elif dist_type == "LogNormal":
+            param_priors[param] = dist.LogNormal(loc=np.log(mu), scale=sigma)
+        else:
+            raise ValueError(f"Unsupported distribution type '{dist_type}' for parameter '{param}'")
+
+    return param_priors
+
+
+
 
 ############################
 # Loss and Update Functions
