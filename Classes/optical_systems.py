@@ -528,6 +528,9 @@ class TolimanSpikes(TolimanOpticalSystem):
         return central_psfs.sum(0), spikes.sum(0)
 
 class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
+    m1_noll_ind: Array = None
+    m2_noll_ind: Array = None
+
     def __init__(
         self,
         wf_npixels: int = 256,
@@ -552,7 +555,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
 
         # Set attributes
         self.m1_noll_ind = m1_noll_ind
-        self.m2_noll_ind - m2_noll_ind
+        self.m2_noll_ind = m2_noll_ind
 
         # Calculate optical system parameters
         phi_m1 = 1 / m1_focal_length
