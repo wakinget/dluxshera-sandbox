@@ -4,7 +4,7 @@ import dLux.layers as dll
 import jax.numpy as np
 import jax.random as jr
 from Classes.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
-from Classes.optimization import SheraThreePlaneParams
+from Classes.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
 from Classes.oneoverf import *
 from Classes.utils import merge_cbar, nanrms, set_array, calculate_log_flux
 
@@ -105,9 +105,9 @@ class SheraThreePlane_Model(dl.Telescope):
 
     Parameters
     ----------
-    params : SheraThreePlaneParams
+    params : SheraThreePlaneParams (optional)
         The optical system parameters, including telescope design, sampling,
-        source properties, and aberrations.
+        source properties, and aberrations. Default values are used if unspecified
 
     Returns
     -------
@@ -115,7 +115,10 @@ class SheraThreePlane_Model(dl.Telescope):
         The full Telescope model object, with source, optics, and detector.
     """
 
-    def __init__(self, params):
+    def __init__(self, params=None):
+        if params is None:
+            params = SheraThreePlaneParams()
+
         # Initialize the optical system given input params
         model_optics = self._initialize_optics(params)
 
@@ -295,9 +298,9 @@ class SheraTwoPlane_Model(dl.Telescope):
 
     Parameters
     ----------
-    params : SheraTwoPlaneParams
+    params : SheraTwoPlaneParams (optional)
         The optical system parameters, including telescope design, sampling,
-        source properties, and aberrations.
+        source properties, and aberrations. Default values are used if unspecified.
 
     Returns
     -------
@@ -305,7 +308,10 @@ class SheraTwoPlane_Model(dl.Telescope):
         The full Telescope model object, with source, optics, and detector.
     """
 
-    def __init__(self, params):
+    def __init__(self, params=None):
+        if params is None:
+            params = SheraTwoPlaneParams()
+
         # Initialize the optical system given input params
         optics = self._initialize_optics(params)
 
@@ -336,7 +342,7 @@ class SheraTwoPlane_Model(dl.Telescope):
             n_struts = 4,
             strut_width = 0.002,
             strut_rotation = -np.pi / 4,
-            dp_design_wavel = params.get("wavelength")
+            dp_design_wavel = params.get("wavelength")*1e-9
         )
 
         # Normalize the Zernike basis to be in units of nm
