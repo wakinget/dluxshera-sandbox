@@ -473,3 +473,14 @@ def plot_opd_surface(opd, title, figsize=(8, 6), mask=None, extent=None, cmap="i
         plt.show()
     else:
         plt.close()
+
+def choose_subplot_grid(n):
+    """Choose a good (rows, cols) layout for n subplots."""
+    if n <= 3:
+        return (n, 1)
+    elif n <= 6:
+        return (np.ceil(n / 2), 2)
+    else:
+        cols = np.ceil(np.sqrt(n))
+        rows = np.ceil(n / cols)
+        return (int(rows), int(cols))
