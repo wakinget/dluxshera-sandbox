@@ -631,6 +631,18 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             oversample=oversample,
         )
 
+    def _apply_aperture(self, wavelength, offset):
+        """
+        Overwrite so mask can be stored as array
+        """
+        wf = self._construct_wavefront(wavelength, offset)
+        wf *= self.m1_aperture
+        wf = wf.normalise()
+        wf += self.dp
+        return wf
+
+
+
 class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
     def __init__(
         self,
