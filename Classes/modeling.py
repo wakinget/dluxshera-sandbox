@@ -152,12 +152,12 @@ class SheraThreePlane_Model(dl.Telescope):
         )
 
         # Normalize the Zernike basis so that the coefficients are scaled to units of nm
-        optics = optics.multiply('m1_aperture.basis', 1e-9)
-        optics = optics.multiply('m2_aperture.basis', 1e-9)
-
-        # Set Zernike coefficients (in nm)
-        optics = optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
-        optics = optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
+        if params.get("m1_zernike_noll") is not None:
+            optics = optics.multiply('m1_aperture.basis', 1e-9)
+            optics = optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
+        if params.get("m2_zernike_noll") is not None:
+            optics = optics.multiply('m2_aperture.basis', 1e-9)
+            optics = optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
 
         # Initialize the Calibrated 1/f WFE
         # First for the Primary
@@ -167,7 +167,7 @@ class SheraThreePlane_Model(dl.Telescope):
         m1_cal_wfe = m1_cal_wfe * (params.get("m1_calibrated_amplitude") / nanrms(
             m1_cal_wfe[optics.m1_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
         m1_cal_layer = dll.AberratedLayer(m1_cal_wfe)
-        optics = optics.insert_layer(('calibration', m1_cal_layer), 3, 0)
+        optics = optics.insert_layer(('m1_calibration', m1_cal_layer), 3, 0)
 
         # Now for the Secondary
         rng_key, subkey = jr.split(rng_key)
@@ -176,7 +176,7 @@ class SheraThreePlane_Model(dl.Telescope):
         m2_cal_wfe = m2_cal_wfe * (params.get("m2_calibrated_amplitude") / nanrms(
             m2_cal_wfe[optics.m2_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
         m2_cal_layer = dll.AberratedLayer(m2_cal_wfe)
-        optics = optics.insert_layer(('calibration', m2_cal_layer), 3, 1)
+        optics = optics.insert_layer(('m2_calibration', m2_cal_layer), 3, 1)
 
         # Initialize the Uncalibrated 1/f WFE
         # First for the Primary
@@ -186,7 +186,7 @@ class SheraThreePlane_Model(dl.Telescope):
         m1_uncal_wfe = m1_uncal_wfe * (params.get("m1_uncalibrated_amplitude") / nanrms(
             m1_uncal_wfe[optics.m1_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
         m1_uncal_layer = dll.AberratedLayer(m1_uncal_wfe)
-        optics = optics.insert_layer(('wfe', m1_uncal_layer), 4, 0)
+        optics = optics.insert_layer(('m1_wfe', m1_uncal_layer), 4, 0)
 
         # Now for the Secondary
         rng_key, subkey = jr.split(rng_key)
@@ -195,7 +195,7 @@ class SheraThreePlane_Model(dl.Telescope):
         m2_uncal_wfe = m2_uncal_wfe * (params.get("m2_uncalibrated_amplitude") / nanrms(
             m2_uncal_wfe[optics.m2_aperture.transmission.astype(bool)]))  # Scale the 1/f noise map over the aperture
         m2_uncal_layer = dll.AberratedLayer(m2_uncal_wfe)
-        optics = optics.insert_layer(('wfe', m2_uncal_layer), 4, 1)
+        optics = optics.insert_layer(('m2_wfe', m2_uncal_layer), 4, 1)
 
         return optics
 
