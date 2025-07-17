@@ -3,10 +3,13 @@
 import jax
 import jax.numpy as np
 from jax import grad, linearize, jit, lax, tree, config as jax_config
+import dLux.utils as dlu
 import optax
 import equinox as eqx
 import zodiax as zdx
 import numpyro.distributions as dist
+import json
+from Classes.utils import get_sweep_values
 
 ############################
 # Exports
@@ -198,6 +201,32 @@ class ModelParams(BaseModeller):
     def inject(self, other):
         return other.set(self.keys, self.values)
 
+    def to_json(self, filepath: str):
+        serializable = {k: np.array(v).tolist() for k, v in self.params.items()}
+        with open(filepath, "w") as f:
+            json.dump(serializable, f)
+
+    @classmethod
+    def from_json(cls, filepath: str) -> "ModelParams":
+        with open(filepath, "r") as f:
+            raw = json.load(f)
+
+        params = {}
+        for k, v in raw.items():
+            arr = np.array(v)
+
+            # Shape fixes
+            if isinstance(v, (int, float)):
+                arr = v  # Use as is
+            elif arr.shape == (1,):
+                arr = float(arr[0]) if isinstance(arr[0], float) else int(arr[0])
+            elif arr.ndim == 2 and arr.shape[1] == 1:
+                arr = arr.reshape(-1)
+
+            params[k] = arr
+
+        return cls(params)
+
 
 class SheraThreePlaneParams(ModelParams):
     """Parameter container for the Shera Three-Plane Optical System."""
@@ -334,6 +363,61 @@ class SheraThreePlaneParams(ModelParams):
             "m2_zernike_amp": "m2_aperture.coefficients"
         }
 
+    def get(self, key):
+        # This custom get method allows us to calculate what
+        # psf_pixel_scale would be given the other parameters.
+        # Falls back to the default get() behavior for other parameters
+        if key == "psf_pixel_scale":
+            return self.compute_psf_pixel_scale()
+        return super().get(key)
+
+    def update_from_model(self, model: "SheraThreePlane_Model") -> "SheraThreePlaneParams":
+        """
+        Return a new SheraThreePlaneParams object with updated values pulled from a model.
+
+        For each parameter in this object, we attempt to update it using the model:
+        - If a model-facing path is defined (via get_param_path_map), we use that.
+        - Otherwise, we try to extract the parameter directly using its own name.
+
+        Parameters
+        ----------
+        model : SheraThreePlane_Model
+            The model object containing the most recent optimized parameter values.
+
+        Returns
+        -------
+        SheraThreePlaneParams
+            A new parameter object with updated values from the model.
+        """
+        updated = {}
+        param_map = self.get_param_path_map()  # Maps self keys -> model keys
+
+        for key in self.params:
+            model_key = param_map.get(key, key)
+            try:
+                updated_value = model.get(model_key)
+            except Exception as e:
+                raise ValueError(f"Could not retrieve '{model_key}' from model: {e}")
+            updated[key] = updated_value
+
+        return self.replace(updated)
+
+    def compute_psf_pixel_scale(self):
+        """
+        Computes the PSF pixel scale in arcseconds/pixel based on mirror geometry and pixel size.
+
+        Returns
+        -------
+        float
+            The computed psf_pixel_scale in arcseconds/pixel.
+        """
+        # Get focal lengths and pixel size
+        f1 = self.get("m1_focal_length")
+        f2 = self.get("m2_focal_length")
+        sep = self.get("plane_separation")
+        pixel_size = self.get("pixel_size")  # e.g., 6.5e-6 meters
+        EFL = (f1**-1 + f2**-1 - sep * f1**-1 * f2**-1)**-1
+        return dlu.rad2arcsec(pixel_size / EFL)
 
 class SheraTwoPlaneParams(ModelParams):
     """Parameter container for the Shera Two-Plane Optical System."""
@@ -522,3 +606,72 @@ def step_fn(model_params, data, var, model, lr_model, optim, state):
     model_params = zdx.apply_updates(model_params, updates)
     model = model_params.inject(model)
     return loss, model, model_params, state
+
+
+def sweep_param(model, param, sweep_info, loss_fn, *loss_args, **loss_kwargs):
+    """
+    Perform a 1D parameter sweep for any scalar or vector parameter in the model.
+
+    Parameters
+    ----------
+    model : object
+        The optical model that supports `.get(param)` and `.set(param, value)` methods.
+    param : str
+        Name of the parameter to sweep.
+    sweep_info : dict
+        Dictionary of the form {param: (span, steps)} specifying the sweep range and resolution.
+    loss_fn : callable
+        Function to evaluate model loss, must accept (model, *args, **kwargs).
+    *loss_args : tuple
+        Positional arguments passed to the loss function.
+    **loss_kwargs : dict
+        Keyword arguments passed to the loss function.
+
+    Returns
+    -------
+    results : list of dict
+        Each result entry contains:
+        - 'parameter' : str, name of the parameter
+        - 'index' : int or None, for vector parameters
+        - 'value' : float, value of the parameter at that sweep point
+        - 'loss' : float, scalar loss value
+    """
+    results = []
+    span, steps = sweep_info[param]
+    value = model.get(param)
+
+    # Check if vector-valued parameter (ndim > 0)
+    if np.ndim(value) > 0:
+        for i in range(len(value)):
+            center = float(value[i])
+            sweep_values = get_sweep_values(center, span, steps)
+
+            for val in sweep_values:
+                new_value = value.at[i].set(val)
+                model_ = model.set(param, new_value)
+                loss = float(loss_fn(model_, *loss_args, **loss_kwargs))
+
+                results.append({
+                    "parameter": param,
+                    "index": i,
+                    "value": float(val),
+                    "loss": loss,
+                })
+
+    # Scalar parameter
+    else:
+        center = float(value)
+        sweep_values = get_sweep_values(center, span, steps)
+
+        for val in sweep_values:
+            model_ = model.set(param, val)
+            loss = float(loss_fn(model_, *loss_args, **loss_kwargs))
+
+            results.append({
+                "parameter": param,
+                "index": None,
+                "value": float(val),
+                "loss": loss,
+            })
+
+    return results

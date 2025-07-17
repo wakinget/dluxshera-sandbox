@@ -1,5 +1,6 @@
 # utils.py
 import jax.numpy as np
+import numpy as onp
 import jax
 # from jax import grad, linearize, jit, lax
 from jax import config, tree, Array
@@ -484,3 +485,564 @@ def choose_subplot_grid(n):
         cols = np.ceil(np.sqrt(n))
         rows = np.ceil(n / cols)
         return (int(rows), int(cols))
+
+
+def get_sweep_values(center, span, steps):
+    """
+    Generate a symmetric array of sweep values around a center value.
+
+    Parameters
+    ----------
+    center : float
+        The central value of the sweep (e.g., the current parameter value).
+    span : float
+        The total range of the sweep (from min to max).
+    steps : int
+        The number of points in the sweep. If odd, the center is included.
+        If even, the sweep avoids the center.
+
+    Returns
+    -------
+    np.ndarray
+        1D array of sweep values.
+    """
+    half = span / 2
+    if steps % 2 == 0:
+        step = span / steps
+        return np.linspace(center - half + step/2, center + half - step/2, steps)
+    else:
+        return np.linspace(center - half, center + half, steps)
+
+
+def print_param_summary(data_params, model_params, rtol=1e-10, atol=0):
+    """
+    Compare and summarize the starting parameters for data and model.
+
+    Parameters
+    ----------
+    data_params : ModelParams
+        Initial parameters used to generate synthetic data.
+    model_params : ModelParams
+        Initial parameters used to initialize the model.
+    rtol : float
+        Relative tolerance used in comparison.
+    atol : float
+        Absolute tolerance used in comparison.
+
+    Notes
+    -----
+    Assumes both objects have `.keys` and `.get(key)` methods.
+    """
+    print("\n📌 Parameter Summary Before Sweep")
+    print("-" * 100)
+
+    all_keys = sorted(set(data_params.keys) | set(model_params.keys))
+
+    for key in all_keys:
+        val_data = data_params.get(key)
+        val_model = model_params.get(key)
+
+        try:
+            match = np.allclose(val_data, val_model, rtol=rtol, atol=atol)
+        except Exception:
+            match = False
+
+        val_data_arr = np.array(val_data)
+        val_model_arr = np.array(val_model)
+
+        val_data_str = onp.array2string(val_data_arr, precision=3, separator=", ")
+        val_model_str = onp.array2string(val_model_arr, precision=3, separator=", ")
+
+        if match:
+            status = "✅ Match"
+            diff_str = ""
+        else:
+            abs_diff = onp.abs(val_data_arr - val_model_arr)
+            # Handle relative difference safely
+            with onp.errstate(divide='ignore', invalid='ignore'):
+                rel_diff = onp.abs(abs_diff / val_data_arr)
+                rel_diff = onp.where(onp.isfinite(rel_diff), rel_diff,
+                                     onp.nan)  # Replace inf/nan with NaN for later formatting
+            # Format strings
+            abs_diff_str = onp.array2string(abs_diff, precision=6, separator=", ")
+            # Convert array to string manually, replacing NaN with "N/A"
+            rel_diff_cleaned = ["N/A" if onp.isnan(x) else f"{x:.6e}" for x in onp.ravel(rel_diff)]
+            rel_diff_str = "[" + ", ".join(rel_diff_cleaned) + "]"
+            diff_str = f" | ΔABS: {abs_diff_str:18} | ΔREL: {rel_diff_str:18}"
+            status = "❌ Mismatch"
+
+        print(f"{key:20} | Data: {val_data_str:30} | Model: {val_model_str:30} | {status}{diff_str}")
+
+    print("-" * 100 + "\n")
+
+
+
+
+def plot_parameter_sweeps(
+    df,
+    highlight_min=True,
+    sharey=False,
+    display=True,
+    save=False,
+    save_dir="../Results",
+    save_name="parameter_sweeps.png",
+    dpi=300,
+    font_size=12,
+    reference_params=None,
+    true_loss=None,
+):
+    """
+    Plot loss vs. Δvalue for each parameter sweep in a grid layout.
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    all_params = df["parameter"].unique()
+    n = len(all_params)
+    rows, cols = choose_subplot_grid(n)
+
+    fig, axes = plt.subplots(int(rows), int(cols), figsize=(5.5 * cols, 4 * rows), sharey=sharey)
+    axes = onp.atleast_1d(axes).flatten()
+    df = df.copy()  # Prevent modifying original
+
+    # Compute delta values
+    if reference_params is not None:
+        df_params = df["parameter"].unique()
+
+        # Try to get the param path map if it exists
+        try:
+            path_map = reference_params.get_param_path_map()
+            inv_path_map = {v: k for k, v in path_map.items()}
+        except AttributeError:
+            path_map = {}
+            inv_path_map = {}
+
+        for param in df_params:
+            ref_key = param
+            if ref_key not in reference_params.params:
+                ref_key = path_map.get(param, inv_path_map.get(param, param))
+
+            try:
+                ref_val = reference_params.get(ref_key)
+            except (KeyError, ValueError):
+
+                # Try getting the ref_val from the model
+
+                print(f"⚠️  Warning: Could not resolve reference for parameter '{param}'. Skipping delta.")
+                continue
+
+            if np.ndim(ref_val) > 0:
+                for i in range(len(ref_val)):
+                    mask = (df["parameter"] == param) & (df["index"] == i)
+                    df.loc[mask, "delta"] = df.loc[mask, "value"] - float(ref_val[i])
+            else:
+                mask = (df["parameter"] == param)
+                df.loc[mask, "delta"] = df.loc[mask, "value"] - float(ref_val)
+    else:
+        df["delta"] = df["value"]
+
+    # Extract model-facing path -> Noll index map
+    model_path_to_noll = {}
+    if reference_params is not None:
+        try:
+            path_map = reference_params.get_param_path_map()
+            for param_key, model_path in path_map.items():
+                if param_key.endswith("zernike_amp"):
+                    noll_key = param_key.replace("zernike_amp", "zernike_noll")
+                    try:
+                        model_path_to_noll[model_path] = reference_params.get(noll_key)
+                    except KeyError:
+                        continue
+        except AttributeError:
+            pass
+
+    # Plot each parameter
+    for i, param in enumerate(all_params):
+        scale, unit = get_param_scale_and_unit(param)
+        ax = axes[i]
+        sub = df[df["parameter"] == param]
+
+        if sub["index"].isna().all():
+            # Scalar parameter
+            ax.plot(sub["delta"] * scale, sub["loss"], label=param, color="black")
+            if highlight_min:
+                min_idx = sub["loss"].idxmin()
+                ax.axvline(sub.loc[min_idx, "delta"] * scale, color="red", linestyle="--", label="Min loss")
+        else:
+            # Vector parameter
+            for idx, group in sub.groupby("index"):
+                if param in model_path_to_noll:
+                    try:
+                        noll = int(model_path_to_noll[param][int(idx)])
+                        label = f"Noll {noll}"
+                    except (IndexError, ValueError, TypeError):
+                        label = f"{param}[{int(idx)}]"
+                else:
+                    label = f"{param}[{int(idx)}]"
+
+                ax.plot(group["delta"] * scale, group["loss"], label=label)
+                if highlight_min:
+                    min_idx = group["loss"].idxmin()
+                    ax.axvline(group.loc[min_idx, "delta"] * scale, color="red", linestyle=":", alpha=0.5)
+
+        # Add true loss horizontal line (once per subplot)
+        if true_loss is not None:
+            ax.axhline(true_loss, color="gray", linestyle="--", alpha=0.6, label="True loss")
+
+        # Final formatting
+        ax.set_title(param, fontsize=font_size)
+        if reference_params is not None:
+            ax.set_xlabel(f"Δ{param} [{unit}]", fontsize=font_size)
+        else:
+            ax.set_xlabel(f"{param} [{unit}]", fontsize=font_size)
+        ax.set_ylabel("Loss", fontsize=font_size)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+        ax.tick_params(labelsize=font_size - 2)
+
+        # De-duplicate legend labels
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(), fontsize=font_size - 2)
+
+    # Hide unused axes
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
+    fig.tight_layout()
+
+    # Save if requested
+    if save:
+        os.makedirs(save_dir, exist_ok=True)
+        full_path = os.path.join(save_dir, save_name)
+        fig.savefig(full_path, dpi=dpi)
+
+    if display:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+
+
+# This copy worked, this is just before attempting to generalize the function to handle a 3-Plane model as well
+# def plot_parameter_sweeps(
+#     df,
+#     highlight_min=True,
+#     sharey=False,
+#     display=True,
+#     save=False,
+#     save_dir="../Results",
+#     save_name="parameter_sweeps.png",
+#     dpi=300,
+#     font_size=12,
+#     reference_params=None,
+#     true_loss=None,
+# ):
+#     """
+#     Plot loss vs. Δvalue for each parameter sweep in a grid layout.
+#     """
+#     from matplotlib.ticker import MaxNLocator
+#
+#     all_params = df["parameter"].unique()
+#     n = len(all_params)
+#     rows, cols = choose_subplot_grid(n)
+#
+#     fig, axes = plt.subplots(int(rows), int(cols), figsize=(5.5 * cols, 4 * rows), sharey=sharey)
+#     axes = onp.atleast_1d(axes).flatten()
+#     df = df.copy()  # Prevent modifying original
+#
+#     # Compute delta values
+#     if reference_params is not None:
+#         df_params = df["parameter"].unique()
+#
+#         # Try to get the param path map if it exists
+#         try:
+#             path_map = reference_params.get_param_path_map()
+#             inv_path_map = {v: k for k, v in path_map.items()}
+#         except AttributeError:
+#             path_map = {}
+#             inv_path_map = {}
+#
+#         for param in df_params:
+#             ref_key = param
+#             if ref_key not in reference_params.params:
+#                 ref_key = path_map.get(param, inv_path_map.get(param, param))
+#
+#             try:
+#                 ref_val = reference_params.get(ref_key)
+#             except KeyError:
+#                 print(f"⚠️  Warning: Could not resolve reference for parameter '{param}'. Skipping delta.")
+#                 continue
+#
+#             if np.ndim(ref_val) > 0:
+#                 for i in range(len(ref_val)):
+#                     mask = (df["parameter"] == param) & (df["index"] == i)
+#                     df.loc[mask, "delta"] = df.loc[mask, "value"] - float(ref_val[i])
+#             else:
+#                 mask = (df["parameter"] == param)
+#                 df.loc[mask, "delta"] = df.loc[mask, "value"] - float(ref_val)
+#     else:
+#         df["delta"] = df["value"]
+#
+#     # Try to extract Noll indices for Zernike labeling
+#     zernike_nolls = None
+#     if reference_params is not None:
+#         try:
+#             zernike_nolls = reference_params.get("zernike_noll")
+#         except KeyError:
+#             zernike_nolls = None
+#
+#     # Plot each parameter
+#     for i, param in enumerate(all_params):
+#         scale, unit = get_param_scale_and_unit(param)
+#         ax = axes[i]
+#         sub = df[df["parameter"] == param]
+#
+#         if sub["index"].isna().all():
+#             # Scalar parameter
+#             ax.plot(sub["delta"] * scale, sub["loss"], label=param, color="black")
+#             if highlight_min:
+#                 min_idx = sub["loss"].idxmin()
+#                 ax.axvline(sub.loc[min_idx, "delta"] * scale, color="red", linestyle="--", label="Min loss")
+#         else:
+#             # Vector parameter
+#             for idx, group in sub.groupby("index"):
+#                 if param in ["coefficients", "zernike_amp"] and zernike_nolls is not None:
+#                     try:
+#                         noll = int(zernike_nolls[int(idx)])
+#                         label = f"Noll {noll}"
+#                     except (IndexError, ValueError):
+#                         label = f"{param}[{int(idx)}]"
+#                 else:
+#                     label = f"{param}[{int(idx)}]"
+#
+#                 ax.plot(group["delta"] * scale, group["loss"], label=label)
+#                 if highlight_min:
+#                     min_idx = group["loss"].idxmin()
+#                     ax.axvline(group.loc[min_idx, "delta"] * scale, color="red", linestyle=":", alpha=0.5)
+#
+#         # Add true loss horizontal line (once per subplot)
+#         if true_loss is not None:
+#             ax.axhline(true_loss, color="gray", linestyle="--", alpha=0.6, label="True loss")
+#
+#         # Final formatting
+#         ax.set_title(param, fontsize=font_size)
+#         if reference_params is not None:
+#             ax.set_xlabel(f"Δ{param} [{unit}]", fontsize=font_size)
+#         else:
+#             ax.set_xlabel(f"{param} [{unit}]", fontsize=font_size)
+#         ax.set_ylabel("Loss", fontsize=font_size)
+#         ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+#         ax.tick_params(labelsize=font_size - 2)
+#
+#         # De-duplicate legend labels
+#         handles, labels = ax.get_legend_handles_labels()
+#         by_label = dict(zip(labels, handles))
+#         ax.legend(by_label.values(), by_label.keys(), fontsize=font_size - 2)
+#
+#     # Hide unused axes
+#     for j in range(i + 1, len(axes)):
+#         axes[j].axis("off")
+#
+#     fig.tight_layout()
+#
+#     # Save if requested
+#     if save:
+#         os.makedirs(save_dir, exist_ok=True)
+#         full_path = os.path.join(save_dir, save_name)
+#         fig.savefig(full_path, dpi=dpi)
+#
+#     if display:
+#         plt.show()
+#     else:
+#         plt.close(fig)
+#
+#     return fig
+
+
+# This copy worked, this was right before I attempted to label the coefficients with their Noll index
+# def plot_parameter_sweeps(
+#     df,
+#     highlight_min=True,
+#     sharey=False,
+#     display=True,
+#     save=False,
+#     save_dir="../Results",
+#     save_name="parameter_sweeps.png",
+#     dpi=300,
+#     font_size=12,
+#     reference_params=None,
+#     true_loss=None,
+# ):
+#     """
+#     Plot loss vs. Δvalue for each parameter sweep in a grid layout.
+#
+#     Parameters
+#     ----------
+#     df : pd.DataFrame
+#         Sweep results with columns: 'parameter', 'value', 'loss', and optional 'index'.
+#     highlight_min : bool
+#         Whether to draw a vertical line at the minimum loss point.
+#     sharey : bool
+#         If True, share y-axis among all subplots.
+#     display : bool
+#         Whether to display the figure with plt.show().
+#     save : bool
+#         Whether to save the figure to disk.
+#     save_dir : str
+#         Directory where the figure is saved if save=True.
+#     save_name : str
+#         Filename for the saved figure.
+#     dpi : int
+#         Dots per inch when saving.
+#     font_size : int
+#         Font size for labels and titles.
+#     reference_params : dict or ModelParams, optional
+#         If provided, values are plotted as deltas from these reference values.
+#     true_loss : float, optional
+#         Horizontal line value to display across all subplots.
+#
+#     Returns
+#     -------
+#     fig : matplotlib.figure.Figure
+#         The resulting figure.
+#     """
+#     from matplotlib.ticker import MaxNLocator
+#
+#     all_params = df["parameter"].unique()
+#     n = len(all_params)
+#     rows, cols = choose_subplot_grid(n)
+#
+#     fig, axes = plt.subplots(int(rows), int(cols), figsize=(5.5 * cols, 4 * rows), sharey=sharey)
+#     axes = onp.atleast_1d(axes).flatten()
+#     df = df.copy()  # Prevent modifying original
+#
+#     # Compute delta values
+#     if reference_params is not None:
+#         df_params = df["parameter"].unique()
+#
+#         # Try to get the param path map if it exists
+#         try:
+#             path_map = reference_params.get_param_path_map()
+#             inv_path_map = {v: k for k, v in path_map.items()}
+#         except AttributeError:
+#             path_map = {}
+#             inv_path_map = {}
+#
+#         for param in df_params:
+#             # Default to direct match
+#             ref_key = param
+#
+#             if ref_key not in reference_params.params:
+#                 # Try remapping if available
+#                 ref_key = path_map.get(param, inv_path_map.get(param, param))
+#
+#             try:
+#                 ref_val = reference_params.get(ref_key)
+#             except KeyError:
+#                 print(f"⚠️  Warning: Could not resolve reference for parameter '{param}'. Skipping delta.")
+#                 continue
+#
+#             if np.ndim(ref_val) > 0:
+#                 for i in range(len(ref_val)):
+#                     mask = (df["parameter"] == param) & (df["index"] == i)
+#                     df.loc[mask, "delta"] = df.loc[mask, "value"] - float(ref_val[i])
+#             else:
+#                 mask = (df["parameter"] == param)
+#                 df.loc[mask, "delta"] = df.loc[mask, "value"] - float(ref_val)
+#     else:
+#         df["delta"] = df["value"]
+#
+#     # Plot each parameter
+#     for i, param in enumerate(all_params):
+#         scale, unit = get_param_scale_and_unit(param)
+#         ax = axes[i]
+#         sub = df[df["parameter"] == param]
+#
+#         if sub["index"].isna().all():
+#             # Scalar parameter
+#             ax.plot(sub["delta"] * scale, sub["loss"], label=param, color="black")
+#             if highlight_min:
+#                 min_idx = sub["loss"].idxmin()
+#                 ax.axvline(sub.loc[min_idx, "delta"] * scale, color="red", linestyle="--", label="Min loss")
+#         else:
+#             # Vector parameter
+#             for idx, group in sub.groupby("index"):
+#                 ax.plot(group["delta"] * scale, group["loss"], label=f"{param}[{int(idx)}]")
+#                 if highlight_min:
+#                     min_idx = group["loss"].idxmin()
+#                     ax.axvline(group.loc[min_idx, "delta"] * scale, color="red", linestyle=":", alpha=0.5)
+#
+#         # Add true loss horizontal line (once per subplot)
+#         if true_loss is not None:
+#             ax.axhline(true_loss, color="gray", linestyle="--", alpha=0.6, label="True loss")
+#
+#         # Final formatting
+#         ax.set_title(param, fontsize=font_size)
+#         if reference_params is not None:
+#             ax.set_xlabel(f"Δ{param} [{unit}]", fontsize=font_size)
+#         else:
+#             ax.set_xlabel(f"{param} [{unit}]", fontsize=font_size)
+#         ax.set_ylabel("Loss", fontsize=font_size)
+#         ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+#         ax.tick_params(labelsize=font_size - 2)
+#
+#         # De-duplicate legend labels
+#         handles, labels = ax.get_legend_handles_labels()
+#         by_label = dict(zip(labels, handles))
+#         ax.legend(by_label.values(), by_label.keys(), fontsize=font_size - 2)
+#
+#     # Hide unused axes
+#     for j in range(i + 1, len(axes)):
+#         axes[j].axis("off")
+#
+#     fig.tight_layout()
+#
+#     # Save if requested
+#     if save:
+#         os.makedirs(save_dir, exist_ok=True)
+#         full_path = os.path.join(save_dir, save_name)
+#         fig.savefig(full_path, dpi=dpi)
+#
+#     if display:
+#         plt.show()
+#     else:
+#         plt.close(fig)
+#
+#     return fig
+
+
+
+def get_param_scale_and_unit(param):
+    """
+    Returns a scaling factor and unit string for plotting a given parameter.
+
+    Parameters
+    ----------
+    param : str
+        Name of the parameter (e.g., 'x_position', 'coefficients').
+
+    Returns
+    -------
+    scale : float
+        Value by which to multiply the parameter for display (e.g., 1e6 for μas).
+    unit : str
+        Unit string for labeling axes (e.g., 'μas', 'nm').
+    """
+    mapping = {
+        "x_position": (1e6, "μas"),
+        "y_position": (1e6, "μas"),
+        "separation": (1e6, "μas"),
+        "coefficients": (1.0, "nm"),
+        "m1_aperture.coefficients": (1.0, "nm"),
+        "m2_aperture.coefficients": (1.0, "nm"),
+        "zernike_amp": (1.0, "nm"),
+        "contrast": (1.0, "Contrast B:A"),
+        "position_angle": (1.0, "deg"),
+        "log_flux": (1.0, "log photons"),
+        "psf_pixel_scale": (1.0, "arcsec/px"),
+        "wavelength": (1.0, "nm"),
+    }
+
+    return mapping.get(param, (1.0, "units"))
