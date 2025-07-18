@@ -6,7 +6,8 @@ import jax.random as jr
 from Classes.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
 from Classes.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
 from Classes.oneoverf import *
-from Classes.utils import merge_cbar, nanrms, set_array, calculate_log_flux
+from Classes.utils import nanrms, set_array, calculate_log_flux
+from Classes.plotting import merge_cbar
 
 __all__ = [
     "SheraThreePlane_ForwardModel",
