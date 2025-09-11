@@ -17,11 +17,27 @@ from Classes.utils import get_sweep_values, set_array
 ############################
 
 __all__ = [
+    # fisher / curvature
     "hessian", "FIM", "_perturb",
+
+    # optax helpers
     "scheduler", "sgd", "get_optimiser", "get_lr_model",
-    "BaseModeller", "ModelParams", "SheraThreePlaneParams",
-    "loglikelihood", "loss_fn", "step_fn"
+    "assign_lr_vector", "get_lr_from_curvature",
+
+    # containers
+    "BaseModeller", "ModelParams",
+    "SheraTwoPlaneParams", "SheraThreePlaneParams", "EigenParams",
+
+    # likelihood / step
+    "loglikelihood", "loss_fn", "step_fn",
+
+    # reparameterisation utils
+    "generate_fim_labels", "pack_params", "unpack_params", "build_basis",
+
+    # priors
+    "construct_priors_from_dict",
 ]
+
 
 
 
@@ -87,75 +103,54 @@ base_sgd = lambda vals: optax.sgd(vals, nesterov=True, momentum=0.6)
 sgd = lambda lr, start, *schedule: base_sgd(scheduler(lr, start, *schedule))
 
 
-# def get_optimiser(pytree, optimisers):
-#     """
-#     Build an optimizer and return (params, optim, state).
-#
-#     Preserves the type of the input pytree (ModelParams vs EigenParams).
-#     """
-#     parameters = list(optimisers.keys())
-#     if isinstance(pytree, EigenParams):
-#         # preserve eigen-specific attributes
-#         model_params = EigenParams(
-#             eigen_coefficients=pytree.get("eigen_coefficients"),
-#             p_ref=pytree.p_ref,
-#             B=pytree.B,
-#             params=pytree.params,
-#             template=pytree.template,
-#         )
-#     else:
-#         # default: regular ModelParams
-#         model_params = ModelParams({p: pytree.get(p) for p in parameters})
-#
-#     # Build the optimizer (Optax)
-#     optim = optax.multi_transform(
-#         {p: optimisers[p] for p in parameters}, param_labels=model_params
-#     )
-#     state = optim.init(model_params)
-#     return model_params, optim, state
 
-def get_optimiser(pytree, optimisers):
+def get_optimiser(pytree, optimisers, parameters=None):
     """
-    Build an optimizer and return (params, optim, state).
+    Build an optimizer and return (model_params, optim, state).
 
-    - For ModelParams: builds a multi_transform optimizer with per-parameter
-      transforms (so you can assign different learning rates/optimizers).
-    - For EigenParams: builds a single optimiser on the eigen_coefficients leaf.
-      Gradient preconditioning (e.g., 1/λ_i scaling) should be handled outside
-      of Optax before updates.
+    Parameters
+    ----------
+    pytree : ModelParams or EigenParams (or subclass like SheraThreePlaneParams)
+        The parameter container to optimise.
+    optimisers : dict
+        Mapping from external parameter names (e.g. 'm1_aperture.coefficients')
+        to optax.GradientTransformation.
+    parameters : list[str], optional
+        Subset of parameter names (external) to include. If None, uses all keys.
 
     Returns
     -------
-    model_params : ModelParams or EigenParams
-        Copy of the input pytree, filtered to the parameters to optimise.
+    model_params : ModelParams/EigenParams
+        Same type as input `pytree`, restricted to selected parameters.
     optim : optax.GradientTransformation
-        Optax optimizer or multi_transform wrapper.
+        Optax multi_transform optimizer.
     state : optax.OptState
-        Optimizer state.
+        Initial optimizer state.
     """
-    if isinstance(pytree, EigenParams):
-        # --- Eigenmode case ---
-        model_params = EigenParams(
-            eigen_coefficients=pytree.get("eigen_coefficients"),
-            p_ref=onp.array(pytree.p_ref),
-            B=onp.array(pytree.B),
-            params=pytree.params,
-            template=pytree.template,
-        )
-        # Only one differentiable leaf → use a single optimiser
-        opt = list(optimisers.values())[0]  # should just be one
-        optim = opt
-        state = optim.init(model_params)
-
+    if parameters is not None:
+        optimisers = {p: optimisers[p] for p in parameters}
     else:
-        # --- Pure parameter case ---
         parameters = list(optimisers.keys())
-        model_params = ModelParams({p: pytree.get(p) for p in parameters})
 
-        # Build multi_transform with per-parameter optimisers
-        param_labels = ModelParams({p: p for p in parameters})
-        optim = optax.multi_transform(optimisers, param_labels)
-        state = optim.init(model_params)
+    # external->internal mapping
+    ext2int = {}
+    if hasattr(pytree, "get_param_path_map"):
+        path_map = pytree.get_param_path_map()  # internal -> external
+        ext2int = {v: k for k, v in path_map.items()}
+
+    # Build filtered param dict using internal keys for lookup
+    filtered = {}
+    for p_ext in parameters:
+        p_int = ext2int.get(p_ext, p_ext)
+        filtered[p_ext] = pytree.get(p_int)
+
+    # Replace params in same type as input
+    model_params = pytree.set("params", filtered)
+
+    # Multi-transform expects labels keyed by external names
+    param_labels = model_params.set("params", {p: p for p in parameters})
+    optim = optax.multi_transform(optimisers, param_labels)
+    state = optim.init(model_params)
 
     return model_params, optim, state
 
@@ -176,94 +171,96 @@ def get_lr_model(pytree, parameters, loglike_fn, *loglike_args, **loglike_kwargs
 
     return ModelParams(lr_model)
 
-def assign_lr_vector(lr_vec, pytree, params, model_template=None):
+def assign_lr_vector(lr_vec, target, order=None):
     """
-    Assign a precomputed learning-rate vector to a ModelParams structure.
+    Pack a flat learning-rate vector into a ModelParams container.
 
     Parameters
     ----------
     lr_vec : array-like
-        Learning rate vector of length equal to flattened parameters.
-    pytree : ModelParams
-        Parameter container with the actual storage keys (e.g. initial_model_params).
-    params : list[str]
-        Optimizer parameter keys (may include external names like 'm1_aperture.coefficients').
-    model_template : ModelParams, optional
-        Template used to provide path mappings and shapes. Defaults to `pytree`.
+        Flat vector of learning rates. Its length must equal the total number
+        of scalar elements across all selected leaves.
+    target : ModelParams or EigenParams (or subclass, e.g. SheraThreePlaneParams)
+        The optimization container whose .params defines the leaf keys/shapes.
+    order : list[str], optional
+        External parameter keys to consume from lr_vec. If None, uses
+        list(target.params.keys()).
 
     Returns
     -------
     lr_model : ModelParams
-        Learning rates structured to match params.
+        A ModelParams with external keys and shapes matching the target.
     """
-    if model_template is None:
-        model_template = pytree
+    lr_vec = np.asarray(lr_vec)
 
-    # Forward + inverse mappings
-    path_map = model_template.get_param_path_map()
-    inv_path_map = {v: k for k, v in path_map.items()}
+    # internal -> external, then invert to external -> internal
+    ext2int = {}
+    if hasattr(target, "get_param_path_map"):
+        path_map = target.get_param_path_map()      # internal -> external
+        ext2int = {v: k for k, v in path_map.items()}  # external -> internal
 
-    idx = 0
-    lr_dict = {}
+    keys_ext = order if order is not None else list(target.params.keys())
 
-    for param in params:
-        actual_key = inv_path_map.get(param, param)
-        leaf = np.array(pytree.get(actual_key))
-        size, shape = leaf.size, leaf.shape
-        lr_dict[param] = lr_vec[idx: idx + size].reshape(shape)
-        idx += size
+    sizes, shapes = [], []
+    for k_ext in keys_ext:
+        # Prefer the stored external leaf (avoids computed getters)
+        if k_ext in getattr(target, "params", {}):
+            leaf = np.asarray(target.params[k_ext])
+        else:
+            k_int = ext2int.get(k_ext, k_ext)       # fallback to internal
+            leaf = np.asarray(target.get(k_int))
+        sizes.append(int(leaf.size))
+        shapes.append(leaf.shape)
 
-    return ModelParams(lr_dict)
+    total = sum(sizes)
+    if lr_vec.size != total:
+        raise ValueError(
+            f"assign_lr_vector: size mismatch. lr_vec has {lr_vec.size} elems "
+            f"but selected leaves sum to {total}."
+        )
+
+    out, i = {}, 0
+    for k_ext, n, shape in zip(keys_ext, sizes, shapes):
+        out[k_ext] = lr_vec[i:i+n].reshape(shape)
+        i += n
+
+    # Keep the same node type as `target` (needed for tree alignment in step_fn)
+    return target.set("params", out)
 
 
-def get_lr_from_curvature(curv_vec, pytree=None, params=None, model_template=None,
-                          key=None, eps=1e-12):
+def get_lr_from_curvature(curv_vec, target, order=None, eps=1e-12):
     """
-    Compute learning rates as 1/curvature and assign into ModelParams.
+    Convenience wrapper: compute lr_vec = 1/(curvature+eps) then assign.
 
     Parameters
     ----------
     curv_vec : array-like
-        Curvature vector (e.g. diag(FIM) or eigenvalues).
-    pytree : ModelParams, optional
-        Parameter container with actual storage keys. Required if `key` is None.
-    params : list[str], optional
-        Optimizer parameter keys (external names). Required if `key` is None.
-    model_template : ModelParams, optional
-        Used for path mapping and shapes.
-    key : str, optional
-        If provided, assign the entire lr_vec under this single key
-        (e.g. "eigen.coefficients").
+        Curvature per degree of freedom (e.g., diag(FIM), or eigenvalues if
+        `target` is EigenParams with a single 'eigen_coefficients' leaf).
+    target : ModelParams or EigenParams
+        The optimization container whose structure we want to mirror.
+    order : list[str], optional
+        Deterministic order of keys to consume from lr_vec (see assign_lr_vector).
     eps : float
-        Regularization to avoid divide-by-zero.
+        Regularizer to avoid division by zero.
 
     Returns
     -------
     lr_model : ModelParams
-        Learning rates structured to match params or stored under a single key.
+        Structured learning-rate carrier aligned with `target`.
     """
     lr_vec = 1.0 / (np.asarray(curv_vec) + eps)
+    return assign_lr_vector(lr_vec, target, order=order)
 
-    if key is not None:
-        # Eigenmode case: all learning rates live under one key
-        return ModelParams({key: lr_vec})
-
-    # Pure parameter case: delegate to assign_lr_vector
-    if pytree is None or params is None:
-        raise ValueError("Must provide `pytree` and `params` unless using `key`.")
-    return assign_lr_vector(lr_vec, pytree, params, model_template)
 
 
 #############################
 # Parameter Container Classes
 #############################
 
-class BaseModeller(zdx.Base):
+class BaseModeller(zdx.Base):  # zdx.Base inherits eqx.Module
     """Base class to manage model parameters stored in a dictionary."""
-    params: dict
-
-    def __init__(self, params):
-        self.params = params
+    params: dict = eqx.field()  # differentiable leaves live here
 
     def __getattr__(self, key):
         if key in self.params:
@@ -509,7 +506,9 @@ class SheraThreePlaneParams(ModelParams):
         # psf_pixel_scale would be given the other parameters.
         # Falls back to the default get() behavior for other parameters
         if key == "psf_pixel_scale":
-            return self.compute_psf_pixel_scale()
+            if "psf_pixel_scale" in self.params:
+                return self.params["psf_pixel_scale"] # Return a stored value if present
+            return self.compute_psf_pixel_scale() # Otherwise compute
         return super().get(key)
 
     def update_from_model(self, model: "SheraThreePlane_Model") -> "SheraThreePlaneParams":
@@ -682,37 +681,30 @@ class SheraTwoPlaneParams(ModelParams):
 
 class EigenParams(ModelParams):
     """
-    Wrapper around eigenmode coefficients. Behaves similar to ModelParams,
-    but inject() maps back into pure parameter space before updating the model.
+    Wrapper around eigenmode coefficients, with same structure as ModelParams:
+    - All differentiable leaves live in `params`, here {"eigen_coefficients": jax.Array}.
+    - Metadata is static (p_ref, B, pure_keys, template).
     """
-    eigen_coefficients: jax.Array  # coefficients in eigenbasis
-    p_ref: np.ndarray = eqx.field(static=True)  # reference vector of pure params
-    B: np.ndarray = eqx.field(static=True)  # eigenbasis matrix
-    params: list      = eqx.field(static=True)  # list of param names
-    template: object  = eqx.field(static=True)  # model template (e.g. initial_model_params)
+    # Differentiable leaves:
+    # params: dict = eqx.field()  # inherited from ModelParams
 
-    def keys(self):
-        return ["eigen_coefficients"]
-
-    def get(self, key):
-        if key == "eigen_coefficients":
-            return self.eigen_coefficients
-        raise ValueError(f"key: {key} not found in object: {type(self).__name__}")
-
-    def set(self, key, value):
-        if key == "eigen_coefficients":
-            return eqx.tree_at(lambda e: e.eigen_coefficients, self, value)
-        raise ValueError(f"key: {key} not found in object: {type(self).__name__}")
-
-    def inject(self, model):
-        # project to pure parameters and inject into the model
-        p = self.to_pure()
-        pure_params = unpack_params(p, self.params, self.template, pytree_cls=ModelParams)
-        return pure_params.inject(model)
+    # Static metadata
+    p_ref: onp.ndarray = eqx.field(static=True)   # store as NumPy to avoid static JAX warnings
+    B: onp.ndarray     = eqx.field(static=True)
+    pure_keys: list    = eqx.field(static=True)   # names of the underlying pure params (external)
+    template: object   = eqx.field(static=True)   # e.g. initial_model_params
 
     def to_pure(self):
         """Project eigen coefficients back into pure parameter vector."""
-        return self.p_ref + self.B @ self.eigen_coefficients
+        c = self.get("eigen_coefficients")  # a jax.Array
+        # p_ref, B are NumPy; that's OK because they are static. Convert as needed:
+        return np.asarray(self.p_ref) + np.asarray(self.B) @ c
+
+    def inject(self, model):
+        """Project to pure parameters and inject into the model."""
+        p = self.to_pure()
+        pure_params = unpack_params(p, self.pure_keys, self.template, pytree_cls=ModelParams)
+        return pure_params.inject(model)
 
 
 
@@ -786,82 +778,42 @@ def loss_fn(model, data, var):
 @eqx.filter_jit
 def step_fn(model_params, data, var, model, lr_model, optim, state):
     """
-    Perform one optimization step and update model parameters.
+    One optimization step, regardless of parameterization.
 
-    This function supports two parameterizations:
-    1. Pure parameter space (ModelParams): updates directly on physical parameters.
-    2. Eigenmode space (EigenParams): updates on eigen_coefficients, then projects
-       back into pure space before injecting into the model.
+    Works for:
+      - ModelParams (pure parameter space)
+      - EigenParams (eigenmode space; projection happens inside .inject())
 
-    Parameters
-    ----------
-    model_params : ModelParams or EigenParams
-        Current parameter container for optimization.
-    data : ndarray
-        Observed image data.
-    var : ndarray
-        Noise variance associated with the data.
-    model : SheraThreePlane_Model
-        Current optical model to be updated.
-    lr_model : ModelParams
-        Learning-rate structure matching parameters (or eigen_coefficients).
-    optim : optax.GradientTransformation
-        Optimizer object (e.g., SGD, Adam).
-    state : optax.OptState
-        Current optimizer state.
+    Requirements:
+      - model_params.inject(model) must return a model with those params applied.
+      - lr_model must share the *same pytree structure* as model_params
+        (e.g., EigenParams for eigen mode, ModelParams for pure mode).
 
     Returns
     -------
-    loss : float
-        Current loss value for this iteration.
-    model : SheraThreePlane_Model
-        Updated optical model with new parameters injected.
-    model_params : ModelParams or EigenParams
-        Updated parameter container (depending on optimization mode).
-    state : optax.OptState
-        Updated optimizer state.
+    loss, model, model_params, state
     """
-    if isinstance(model_params, EigenParams):
-        # --- Eigenmode branch ---
-        # Project eigen coefficients → pure parameter vector
-        p = model_params.to_pure()
-        pure_params = unpack_params(p, model_params.params, model_params.template)
 
-        # Inject into model so gradients are taken wrt physical parameters
-        model = set_array(model, dict(zip(pure_params.keys, pure_params.values)))
+    # Define loss as a function of "params" (pure or eigen) by delegating to .inject()
+    def _loss_with_params(params, model, data, var):
+        model_in = params.inject(model)         # projection+injection if EigenParams
+        return loss_fn(model_in, data, var)
 
-        # Compute gradients wrt pure parameters
-        loss, grads_pure = zdx.filter_value_and_grad(pure_params.keys)(loss_fn)(model, data, var)
+    # Compute loss and grads wrt "model_params" leaves
+    # loss, grads = zdx.filter_value_and_grad(model_params.keys)(_loss_with_params)(model_params, model, data, var)
+    loss, grads = eqx.filter_value_and_grad(_loss_with_params)(model_params, model, data, var)
 
-        # Pack pure grads into vector, map into eigenmode space via Bᵀ
-        grads_vec, _ = pack_params(grads_pure, pure_params.keys, model_params.template)
-        grads = {"eigen_coefficients": model_params.B.T @ grads_vec}
+    # Sanity: lr_model must align with grads/params structurally
+    # (If you ever see a tree/type mismatch in optax.update/apply_updates,
+    #  it usually means lr_model wasn't constructed with the same structure.)
+    grads = jax.tree_util.tree_map(lambda g, s: g * s, grads, lr_model)
 
-        # Apply learning-rate scaling
-        grads = tree.map(lambda x, y: x * y, lr_model.replace(grads), lr_model)
+    # Optax step
+    updates, state = optim.update(grads, state, model_params)
+    model_params = zdx.apply_updates(model_params, updates)
 
-        # Update optimizer state and apply updates
-        updates, state = optim.update(grads, state, model_params)
-        model_params = zdx.apply_updates(model_params, updates)
-
-        # Re-inject updated pure parameters into the model
-        p_updated = model_params.to_pure()
-        pure_params_updated = unpack_params(p_updated, model_params.params, model_params.template)
-        model = set_array(model, dict(zip(pure_params_updated.keys, pure_params_updated.values)))
-
-    else:
-        # --- Pure parameter branch ---
-        loss, grads = zdx.filter_value_and_grad(model_params.keys)(loss_fn)(model, data, var)
-
-        # Apply learning-rate scaling
-        grads = tree.map(lambda x, y: x * y, lr_model.replace(grads), lr_model)
-
-        # Update optimizer state and apply updates
-        updates, state = optim.update(grads, state, model_params)
-        model_params = zdx.apply_updates(model_params, updates)
-
-        # Re-inject updated parameters into the model
-        model = model_params.inject(model)
+    # Inject the *updated* params into the model for the next iteration
+    model = model_params.inject(model)
 
     return loss, model, model_params, state
 
