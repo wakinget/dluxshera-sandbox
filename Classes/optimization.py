@@ -484,16 +484,16 @@ class SheraThreePlaneParams(ModelParams):
             "n_wavelengths": 3,
 
             # M1 Aberrations
-            "m1_zernike_noll": np.arange(4, 11),
-            "m1_zernike_amp": np.zeros(7),
+            "m1_zernike_noll": np.arange(4, 12),
+            "m1_zernike_amp": np.zeros(8),
             "m1_calibrated_power_law": 2.5,
             "m1_calibrated_amplitude": 0,
             "m1_uncalibrated_power_law": 2.5,
             "m1_uncalibrated_amplitude": 0,
 
             # M2 Aberrations
-            "m2_zernike_noll": np.arange(4, 11),
-            "m2_zernike_amp": np.zeros(7),
+            "m2_zernike_noll": np.arange(4, 12),
+            "m2_zernike_amp": np.zeros(8),
             "m2_calibrated_power_law": 2.5,
             "m2_calibrated_amplitude": 0,
             "m2_uncalibrated_power_law": 2.5,
