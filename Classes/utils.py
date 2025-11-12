@@ -30,6 +30,23 @@ plt.rcParams['figure.dpi'] = 120
 
 
 
+def debug_param_type(model, key):
+    val = model.get(key)
+    print(f"{key:20s} | value={val} | type={type(val)}", end="")
+
+    # Check if JAX array
+    if isinstance(val, Array):
+        print("  <-- JAX Array ✅")
+    elif isinstance(val, onp.ndarray):
+        print("  <-- NumPy array (not JAX) ⚠️")
+    elif isinstance(val, float) or isinstance(val, int):
+        print("  <-- Python scalar ⚠️ (not differentiable)")
+    elif val is None:
+        print("  <-- None ⚠️ (not in graph)")
+    else:
+        print("  <-- other type")
+
+
 def nanrms(arr, axis=None):
     return np.nanmean(arr**2, axis=axis)**0.5
 
@@ -540,6 +557,9 @@ def build_results_row(
         "Initial M1 Zernike Coefficient Amplitudes (nm)": ", ".join(
             map(str, onp.asarray(initial_vals.get("m1_aperture.coefficients", onp.array([]))).tolist())
         ),
+        "Initial M2 Zernike Coefficient Amplitudes (nm)": ", ".join(
+            map(str, onp.asarray(initial_vals.get("m2_aperture.coefficients", onp.array([]))).tolist())
+        ) if "m2_aperture.coefficients" in initial_vals else "",
 
         # --- Found (last values from history) ---
         "Found Source Position X (as)":     excel_friendly(last("x_position")),
@@ -553,8 +573,9 @@ def build_results_row(
         "Found Platescale (as/pixel)":      excel_friendly(last("psf_pixel_scale")),
         "Found M1 Zernikes (Noll Index)":   ", ".join(map(str, onp.asarray(getattr(model_initial_params, "m1_zernike_noll", onp.array([]))).tolist())),
         "Found M1 Zernike Coefficient Amplitudes (nm)": ", ".join(
-            map(str, onp.asarray(last("m1_aperture.coefficients")).tolist()) if last("m1_aperture.coefficients") is not None else []
-        ),
+            map(str, onp.asarray(last("m1_aperture.coefficients")).tolist()) if last("m1_aperture.coefficients") is not None else []),
+        "Found M2 Zernike Coefficient Amplitudes (nm)": ", ".join(
+            map(str, onp.asarray(last("m2_aperture.coefficients")).tolist()) if last("m2_aperture.coefficients") is not None else []),
 
         # --- Residuals (final) ---
         "Residual Source Position X (uas)": excel_friendly(residuals.get("x_position", [None])[-1] * 1e6 if "x_position" in residuals else None),
@@ -568,7 +589,34 @@ def build_results_row(
         "Residual M1 Zernike Coefficient Errors (nm)": ", ".join(
             map(str, onp.asarray(residuals.get("m1_aperture.coefficients", [onp.array([])])[-1]).tolist())
         ) if "m1_aperture.coefficients" in residuals else "",
+        "Residual M2 Zernike Coefficient Errors (nm)": ", ".join(
+            map(str, onp.asarray(residuals.get("m2_aperture.coefficients", [onp.array([])])[-1]).tolist())
+        ) if "m2_aperture.coefficients" in residuals else "",
     }
+
+    # --- Eigenmode fields (conditional) ---
+    if "use_eigen" in misc:
+        row["Use Eigenmodes"] = excel_friendly(misc.get("use_eigen"))
+    if "truncate_k" in misc:
+        row["Eigenmode Truncation"] = excel_friendly(misc.get("truncate_k"))
+    if "whiten_basis" in misc:
+        row["Whiten Eigenbasis"] = excel_friendly(misc.get("whiten_basis"))
+    if "eigen_coefficients" in true_vals:
+        row["True Eigenmode Coefficients"] = ", ".join(
+            map(str, onp.asarray(true_vals["eigen_coefficients"]).tolist())
+        )
+    if "eigen_coefficients" in initial_vals:
+        row["Initial Eigenmode Coefficients"] = ", ".join(
+            map(str, onp.asarray(initial_vals["eigen_coefficients"]).tolist())
+        )
+    if "eigen_coefficients" in history:
+        row["Found Eigenmode Coefficients"] = ", ".join(
+            map(str, onp.asarray(history["eigen_coefficients"][-1]).tolist())
+        )
+    if "eigen_coefficients" in residuals:
+        row["Residual Eigenmode Coefficients"] = ", ".join(
+            map(str, onp.asarray(residuals["eigen_coefficients"][-1]).tolist())
+        )
 
     return row
 
@@ -669,3 +717,139 @@ def save_results(
         ) from e
 
     return last_row
+
+
+# Utilities to allow logging during optimization steps
+def _to_serializable(x):
+    """Make JAX/NumPy scalars/arrays JSON-friendly."""
+    if x is None:
+        return None
+    x = jax.device_get(x)
+    if onp.isscalar(x):
+        # floats/ints/bools
+        return x.item() if hasattr(x, "item") else float(x)
+    return onp.asarray(x).tolist()
+
+def _pack_any(pytree, params_pure, initial_model_params, pack_params_fn):
+    """
+    Pack grads/updates for PURE runs; returns (vec, labels).
+    Expects leaves keyed by pure param names in `params_pure`.
+    """
+    vec, labels = pack_params_fn(pytree, params_pure, initial_model_params)
+    return onp.asarray(vec).ravel(), list(labels)
+
+def _pack_eigen_leaf(pytree_or_updates):
+    """
+    Extract eigen vector from a ModelParams-like pytree where the only leaf is
+    'eigen_coefficients'. Returns a flat numpy vector.
+    """
+    # Handle either ModelParams-like (with .params) or raw dict
+    if hasattr(pytree_or_updates, "params"):
+        arr = pytree_or_updates.params.get("eigen_coefficients", None)
+    elif isinstance(pytree_or_updates, dict):
+        arr = pytree_or_updates.get("eigen_coefficients", None)
+    else:
+        # Some optax transforms may already hand you a bare array
+        arr = pytree_or_updates
+    if arr is None:
+        return None
+    return onp.asarray(jax.device_get(arr)).ravel()
+
+def log_step_jsonl(
+    filepath: str,
+    step_idx: int,
+    *,
+    loss,
+    raw_grads,
+    scaled_grads,
+    updates,
+    lr_model=None,                 # ModelParams-like or dict or scalar
+    # Pure-space packing (always supply these)
+    params_pure,
+    initial_model_params,
+    pack_params_fn,
+    # Optional eigen back-projection (only used if we're in eigen mode)
+    eig_B=None,                    # jax/np array (P x K)
+    pure_labels=None,              # list[str], order used by `pack_params` for pure
+    extras: dict = None            # anything else to stash
+):
+    """
+    Append a single JSON line with loss, grads, updates, learning rates.
+    Handles both PURE and EIGEN runs automatically.
+
+    If in EIGEN mode and eig_B is provided, also logs 'grad_pure' (back-projected).
+    """
+    # Detect eigen vs pure by the presence of the eigen leaf
+    is_eigen = hasattr(raw_grads, "params") and ("eigen_coefficients" in raw_grads.params)
+
+    if is_eigen:
+        # --- EIGEN SPACE ---
+        g_raw   = _pack_eigen_leaf(raw_grads)        # (K,)
+        g_scale = _pack_eigen_leaf(scaled_grads)     # (K,)
+        upd     = _pack_eigen_leaf(updates)          # (K,) from optax
+        # labels for eigen coeffs
+        labels  = [f"c[{i}]" for i in range(g_raw.size)] if g_raw is not None else []
+
+        # learning rates (optional)
+        if lr_model is not None:
+            lr_vec = _pack_eigen_leaf(lr_model)
+        else:
+            lr_vec = None
+
+        # Optional: back-project eigen gradients to pure space for comparability
+        grad_pure = None
+        pure_lbls = None
+        if eig_B is not None and g_raw is not None:
+            grad_pure = onp.asarray(eig_B) @ onp.asarray(g_raw)  # (P,)
+            pure_lbls = list(pure_labels) if pure_labels is not None else None
+
+        record = {
+            "t": step_idx,
+            "time": time.time(),
+            "mode": "eigen",
+            "loss": _to_serializable(loss),
+            "labels": labels,
+            "grad_raw": _to_serializable(g_raw),
+            "grad_scaled": _to_serializable(g_scale),
+            "update": _to_serializable(upd),
+            "learning_rate": _to_serializable(lr_vec),
+        }
+        if grad_pure is not None:
+            record["grad_pure"] = _to_serializable(grad_pure)
+            if pure_lbls is not None:
+                record["pure_labels"] = pure_lbls
+
+    else:
+        # --- PURE SPACE ---
+        g_raw, labels   = _pack_any(raw_grads,   params_pure, initial_model_params, pack_params_fn)
+        g_scale, _      = _pack_any(scaled_grads, params_pure, initial_model_params, pack_params_fn)
+        upd, _          = _pack_any(updates,      params_pure, initial_model_params, pack_params_fn)
+        # learning rates (optional)
+        if lr_model is not None:
+            try:
+                lr_vec, _  = _pack_any(lr_model, params_pure, initial_model_params, pack_params_fn)
+            except Exception:
+                lr_vec = None
+        else:
+            lr_vec = None
+
+        record = {
+            "t": step_idx,
+            "time": time.time(),
+            "mode": "pure",
+            "loss": _to_serializable(loss),
+            "labels": labels,
+            "grad_raw": _to_serializable(g_raw),
+            "grad_scaled": _to_serializable(g_scale),
+            "update": _to_serializable(upd),
+            "learning_rate": _to_serializable(lr_vec),
+        }
+
+    # optional extras (serializable)
+    if extras:
+        record["extras"] = {k: _to_serializable(v) for k, v in extras.items()}
+
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "a") as f:
+        f.write(json.dumps(record) + "\n")
+# -------- /Logging utilities --------
