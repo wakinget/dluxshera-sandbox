@@ -3,12 +3,13 @@
 import jax
 import jax.numpy as np
 import numpy as onp
-from jax import grad, linearize, jit, lax, tree, config as jax_config
+from jax import config, grad, linearize, jit, lax, tree, config as jax_config
 import dLux.utils as dlu
 import optax
 import equinox as eqx
 import zodiax as zdx
 import numpyro.distributions as dist
+import math
 import json
 from Classes.utils import get_sweep_values, set_array
 
@@ -148,10 +149,12 @@ def get_optimiser(pytree, optimisers, parameters=None):
     model_params = pytree.set("params", filtered)
 
     # Multi-transform expects labels keyed by external names
-    param_labels = model_params.set("params", {p: p for p in parameters})
-    optim = optax.multi_transform(optimisers, param_labels)
-    state = optim.init(model_params)
+    # --- Build a label tree that has ONLY strings/None ---
+    label_tree = jax.tree_util.tree_map(lambda _: None, model_params)          # None for every leaf (incl. p_ref, B, …)
+    label_tree = label_tree.set("params", {p: p for p in parameters}) # strings for the optimised leaves
 
+    optim = optax.multi_transform(optimisers, label_tree)
+    state = optim.init(model_params)
     return model_params, optim, state
 
 
@@ -262,6 +265,55 @@ class BaseModeller(zdx.Base):  # zdx.Base inherits eqx.Module
     """Base class to manage model parameters stored in a dictionary."""
     params: dict = eqx.field()  # differentiable leaves live here
 
+    # ---------- NEW: normalization helpers ----------
+    @staticmethod
+    def _promote_float_like(x):
+        """Promote Python/NumPy float-like values to jax arrays.
+        Leave ints/bools/None unchanged. Preserve existing jax/np arrays."""
+        if x is None:
+            return None
+        # Keep ints and bools structural/static (not differentiable)
+        if isinstance(x, (bool, onp.bool_)):
+            return x
+        if isinstance(x, (int, onp.integer)):
+            return x
+
+        # jax/numPy arrays: preserve but ensure float arrays are jax floats
+        dtype = np.float64 if config.x64_enabled else np.float32
+        if isinstance(x, (np.ndarray, jax.Array)):
+            # If it's already jax, keep as-is
+            return x
+        if isinstance(x, onp.ndarray):
+            # Convert float arrays to jax float; others (e.g. int arrays) to jax arrays too if you prefer.
+            if onp.issubdtype(x.dtype, onp.floating):
+                return np.asarray(x, dtype=dtype)
+            else:
+                return np.asarray(x)
+
+        # Python floats (or numpy floating scalars): promote to jax float arrays
+        if isinstance(x, (float, onp.floating)):
+            return np.array(x, dtype=dtype)
+
+        # Lists/tuples: try to convert to a float jax array if all numeric floats
+        if isinstance(x, (list, tuple)):
+            try:
+                arr = onp.asarray(x)
+                if onp.issubdtype(arr.dtype, onp.floating):
+                    return np.asarray(arr, dtype=dtype)
+                # If list is ints or mixed: leave as-is (they’re usually structural, not differentiable)
+                return x
+            except Exception:
+                return x
+
+        # Anything else (dicts, objects, callables): leave alone
+        return x
+
+    @classmethod
+    def _normalize_params_dict(cls, d: dict) -> dict:
+        # Shallow normalization is enough (your params are flat)
+        return {k: cls._promote_float_like(v) for k, v in d.items()}
+    # ---------- /NEW ----------
+
     def __getattr__(self, key):
         if key in self.params:
             return self.params[key]
@@ -284,6 +336,13 @@ class BaseModeller(zdx.Base):  # zdx.Base inherits eqx.Module
 
 class ModelParams(BaseModeller):
     """Encapsulates a subset of model parameters with math operations for optimization."""
+
+    # # ---------- NEW: frozen Module-safe __init__ ----------
+    # def __init__(self, params: dict):
+    #     normalized = self._normalize_params_dict(params)
+    #     # eqx.Modules are frozen; set via object.__setattr__
+    #     object.__setattr__(self, "params", normalized)
+    # # ---------- /NEW ----------
 
     @property
     def keys(self):
@@ -314,10 +373,12 @@ class ModelParams(BaseModeller):
         - Missing keys will be replaced with None, potentially leading
           to unexpected behavior.
         """
-        return self.set("params", dict([(param, values.get(param)) for param in self.keys]))
+        normalized = self._normalize_params_dict({param: values.get(param) for param in self.keys})
+        return self.set("params", normalized)
 
     def from_model(self, values):
-        return self.set("params", dict([(param, values.get(param)) for param in self.keys]))
+        normalized = self._normalize_params_dict({param: values.get(param) for param in self.keys})
+        return self.set("params", normalized)
 
     def __add__(self, values):
         matched = self.replace(values)
@@ -334,7 +395,8 @@ class ModelParams(BaseModeller):
         return self.__mul__(values)
 
     def inject(self, other):
-        return other.set(self.keys, self.values)
+        normalized = [self._promote_float_like(v) for v in self.values]
+        return other.set(self.keys, normalized)
 
     def to_json(self, filepath: str):
         serializable = {
@@ -349,21 +411,11 @@ class ModelParams(BaseModeller):
         with open(filepath, "r") as f:
             raw = json.load(f)
 
+        # Don’t collapse to Python scalars; normalize to jax where needed.
         params = {}
         for k, v in raw.items():
-            if v is None:
-                params[k] = None
-            else:
-                arr = np.array(v)
-                if isinstance(v, (int, float)):
-                    arr = v
-                elif arr.shape == (1,):
-                    arr = float(arr[0]) if isinstance(arr[0], float) else int(arr[0])
-                elif arr.ndim == 2 and arr.shape[1] == 1:
-                    arr = arr.reshape(-1)
-                params[k] = arr
-
-        return cls(params)
+            params[k] = v  # leave raw shape; normalize below
+        return cls(cls._normalize_params_dict(params))
 
 
 class SheraThreePlaneParams(ModelParams):
@@ -396,7 +448,7 @@ class SheraThreePlaneParams(ModelParams):
                 "plane_separation": 0.320,
                 "pixel_size": 6.5e-6,
                 "bandwidth": 110.,  # nm
-                "log_flux": 6.78,
+                "log_flux": np.asarray(6.78),
             },
             "shera_flight": {
                 "p1_diameter": 0.22,
@@ -406,14 +458,14 @@ class SheraThreePlaneParams(ModelParams):
                 "plane_separation": 0.55413,
                 "pixel_size": 4.6e-6,
                 "bandwidth": 41.,  # nm
-                "log_flux": 7.13,
+                "log_flux": np.asarray(7.13),
             }
         }
 
 
         if point_design is None:
             point_design = "shera_testbed" # Default point design
-        defaults = point_designs.get(point_design)
+        defaults = dict(point_designs[point_design])  # copy
 
         # Add other default parameters
         defaults.update({
@@ -423,11 +475,11 @@ class SheraThreePlaneParams(ModelParams):
             "psf_npix": 256,
 
             # Source parameters
-            "x_position": 0.,
-            "y_position": 0.,
-            "separation": 10.,
-            "position_angle": 90.,
-            "contrast": 0.3,
+            "x_position": np.asarray(0.),
+            "y_position": np.asarray(0.),
+            "separation": np.asarray(10.),
+            "position_angle": np.asarray(90.),
+            "contrast": np.asarray(0.3),
             "wavelength": 550.,  # nm
             "n_wavelengths": 3,
 
@@ -451,6 +503,9 @@ class SheraThreePlaneParams(ModelParams):
         # Update user-provided values
         if params is not None:
             defaults = {**defaults, **params}
+
+        # Normalize everything to JAX arrays
+        defaults = self._normalize_params_dict(defaults)
 
         # Initialize ModelParams with defaults
         super().__init__(defaults)
@@ -557,7 +612,7 @@ class SheraThreePlaneParams(ModelParams):
         sep = self.get("plane_separation")
         pixel_size = self.get("pixel_size")  # e.g., 6.5e-6 meters
         EFL = (f1**-1 + f2**-1 - sep * f1**-1 * f2**-1)**-1
-        return dlu.rad2arcsec(pixel_size / EFL)
+        return np.asarray(dlu.rad2arcsec(pixel_size / EFL))
 
 class SheraTwoPlaneParams(ModelParams):
     """Parameter container for the Shera Two-Plane Optical System."""
@@ -688,11 +743,12 @@ class EigenParams(ModelParams):
     # Differentiable leaves:
     # params: dict = eqx.field()  # inherited from ModelParams
 
-    # Static metadata
-    p_ref: onp.ndarray = eqx.field(static=True)   # store as NumPy to avoid static JAX warnings
-    B: onp.ndarray     = eqx.field(static=True)
-    pure_keys: list    = eqx.field(static=True)   # names of the underlying pure params (external)
-    template: object   = eqx.field(static=True)   # e.g. initial_model_params
+    # <-- make arrays NON-static
+    p_ref: onp.ndarray = eqx.field(static=False)
+    B:     onp.ndarray = eqx.field(static=False)
+    # <-- keep small metadata static (hashable/comparable)
+    pure_keys: list = eqx.field(static=True)       # list[str]
+    shape_map: dict = eqx.field(static=True)       # {name: tuple(shape)}
 
     def to_pure(self):
         """Project eigen coefficients back into pure parameter vector."""
@@ -703,8 +759,13 @@ class EigenParams(ModelParams):
     def inject(self, model):
         """Project to pure parameters and inject into the model."""
         p = self.to_pure()
-        pure_params = unpack_params(p, self.pure_keys, self.template, pytree_cls=ModelParams)
-        return pure_params.inject(model)
+        d, i = {}, 0
+        for name in self.pure_keys:
+            shape = self.shape_map[name]
+            size = 1 if not shape else int(math.prod(shape))
+            d[name] = p[i:i+size].reshape(shape)
+            i += size
+        return ModelParams(d).inject(model)
 
 
 
@@ -764,58 +825,79 @@ def loss_fn(model, data, var):
     """Negative log-likelihood (loss function)."""
     return -np.nansum(loglikelihood(model, data, var))
 
-# # Original Function - Updated 20250902
-# @eqx.filter_jit
-# def step_fn(model_params, data, var, model, lr_model, optim, state):
-#     """Performs one optimization step and updates model parameters."""
-#     loss, grads = zdx.filter_value_and_grad(model_params.keys)(loss_fn)(model, data, var)
-#     grads = tree.map(lambda x, y: x * y, lr_model.replace(grads), lr_model)
-#     updates, state = optim.update(grads, state, model_params)
-#     model_params = zdx.apply_updates(model_params, updates)
-#     model = model_params.inject(model)
-#     return loss, model, model_params, state
+# --- shared helper ---
+def _loss_with_params(params, model, data, var, loss_fn):
+    return loss_fn(params.inject(model), data, var)
 
+def loss_with_injected(model_params, model, data, var, loss_fn):
+    return loss_fn(model_params.inject(model), data, var)
+
+# ============ GENERAL - Should work for Pure Modes + Eigenmodes ============
 @eqx.filter_jit
-def step_fn(model_params, data, var, model, lr_model, optim, state):
-    """
-    One optimization step, regardless of parameterization.
+def step_fn_general(model_params, data, var, model, lr_model, optim, state, loss_fn):
+    # grads w.r.t. the leaves listed by model_params.keys
+    loss, raw_grads = zdx.filter_value_and_grad(model_params.keys)(
+        lambda p, m, d, v: loss_with_injected(p, m, d, v, loss_fn)
+    )(model_params, model, data, var)
 
-    Works for:
-      - ModelParams (pure parameter space)
-      - EigenParams (eigenmode space; projection happens inside .inject())
+    # elementwise LR scaling (same tree structure as model_params)
+    scaled_grads = jax.tree_util.tree_map(lambda g, s: g * s, raw_grads, lr_model)
 
-    Requirements:
-      - model_params.inject(model) must return a model with those params applied.
-      - lr_model must share the *same pytree structure* as model_params
-        (e.g., EigenParams for eigen mode, ModelParams for pure mode).
+    # optax update on exactly those leaves
+    updates, state = optim.update(scaled_grads, state, model_params)
 
-    Returns
-    -------
-    loss, model, model_params, state
-    """
-
-    # Define loss as a function of "params" (pure or eigen) by delegating to .inject()
-    def _loss_with_params(params, model, data, var):
-        model_in = params.inject(model)         # projection+injection if EigenParams
-        return loss_fn(model_in, data, var)
-
-    # Compute loss and grads wrt "model_params" leaves
-    # loss, grads = zdx.filter_value_and_grad(model_params.keys)(_loss_with_params)(model_params, model, data, var)
-    loss, grads = eqx.filter_value_and_grad(_loss_with_params)(model_params, model, data, var)
-
-    # Sanity: lr_model must align with grads/params structurally
-    # (If you ever see a tree/type mismatch in optax.update/apply_updates,
-    #  it usually means lr_model wasn't constructed with the same structure.)
-    grads = jax.tree_util.tree_map(lambda g, s: g * s, grads, lr_model)
-
-    # Optax step
-    updates, state = optim.update(grads, state, model_params)
+    # apply updates to the params container
     model_params = zdx.apply_updates(model_params, updates)
 
-    # Inject the *updated* params into the model for the next iteration
+    # build next-step model by injecting the (updated) params
     model = model_params.inject(model)
 
-    return loss, model, model_params, state
+    # return enough stuff for logging
+    return loss, raw_grads, scaled_grads, updates, model, model_params, state
+
+
+
+# ============ PURE SPACE ============
+@eqx.filter_jit
+def step_fn(model_params, data, var, model, lr_model, optim, state, loss_fn):
+    # grads wrt external keys in ModelParams
+    loss, raw_grads = zdx.filter_value_and_grad(model_params.keys)(
+        lambda p, m, d, v: _loss_with_params(p, m, d, v, loss_fn)
+    )(model_params, model, data, var)
+
+    # scale grads elementwise by lr_model (same ModelParams structure)
+    scaled_grads = jax.tree_util.tree_map(lambda g, s: g * s, raw_grads, lr_model)
+
+    updates, state = optim.update(scaled_grads, state, model_params)
+    model_params = zdx.apply_updates(model_params, updates)
+    model = model_params.inject(model)
+    return loss, raw_grads, scaled_grads, updates, model, model_params, state
+
+
+# ============ EIGEN SPACE ============
+@eqx.filter_jit
+def step_fn_eigen(eparams, data, var, model, lr_model, optim, state, loss_fn):
+    # Pull current coefficients (1D array)
+    c = eparams.params["eigen_coefficients"]
+
+    # Define loss as a function of *only* the coefficients
+    def loss_from_c(c_flat, model, data, var):
+        e_tmp = eqx.tree_at(lambda t: t.params["eigen_coefficients"], eparams, c_flat)
+        return loss_fn(e_tmp.inject(model), data, var)
+
+    loss, g_c = jax.value_and_grad(loss_from_c)(c, model, data, var)
+    g_c = g_c * lr_model.params["eigen_coefficients"]  # elementwise scaling
+    # g_c = g_c * 0  # zero out gradients
+
+    # Update c only (so optax state is tiny)
+    updates, state = optim.update(g_c, state, c)
+    c_new = optax.apply_updates(c, updates)
+    eparams = eqx.tree_at(lambda t: t.params["eigen_coefficients"], eparams, c_new)
+
+    # Build next-step model
+    model = eparams.inject(model)
+    return loss, g_c, model, eparams, state
+
 
 
 def sweep_param(model, param, sweep_info, loss_fn, *loss_args, **loss_kwargs):
