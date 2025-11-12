@@ -1,6 +1,7 @@
 import dLux as dl
 import dLuxToliman as dlT
 import dLux.layers as dll
+import dLux.utils as dlu
 import jax.numpy as np
 import jax.random as jr
 from Classes.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
@@ -204,18 +205,18 @@ class SheraThreePlane_Model(dl.Telescope):
         """
         Initialize the source.
         """
-        wavelength = params.get("wavelength")  # Central wavelength (nm)
-        bandwidth = params.get("bandwidth")  # Bandwidth (nm)
+        wavelength = np.asarray(params.get("wavelength")).reshape(())  # Central wavelength (nm)
+        bandwidth = np.asarray(params.get("bandwidth")).reshape(())  # Bandwidth (nm)
         bandpass = (wavelength - bandwidth / 2, wavelength + bandwidth / 2)
         return dlT.AlphaCen(
-            n_wavels = params.get("n_wavelengths"),
+            n_wavels = int(params.get("n_wavelengths")),
             x_position = params.get("x_position"),
             y_position = params.get("y_position"),
             separation = params.get("separation"),
             position_angle = params.get("position_angle"),
             log_flux = params.get("log_flux"),
             contrast = params.get("contrast"),
-            bandpass = bandpass
+            bandpass = bandpass,
         )
 
     @staticmethod
@@ -247,9 +248,10 @@ class SheraThreePlane_Model(dl.Telescope):
             "bandwidth": lambda model: np.diff(np.array(model.bandpass)),
             "wavelength": lambda model: np.mean(model.wavelengths),
             "n_wavelengths": lambda model: model.wavelengths.size,
+            "psf_pixel_scale": lambda model: model._read_or_compute_psf_pixel_scale(),
         }
 
-    def extract_params(self):
+    def extract_params(self, names=None):
         """
         Extract the current parameters from this SheraThreePlane_Model instance.
 
@@ -264,6 +266,8 @@ class SheraThreePlane_Model(dl.Telescope):
             pd = "shera_testbed"
         elif self.diameter == 0.22:
             pd = "shera_flight"
+        else:
+            pd = None
 
         # Initialize a new SheraThreePlaneParams object
         extracted_params = SheraThreePlaneParams(point_design=pd)
@@ -272,25 +276,69 @@ class SheraThreePlane_Model(dl.Telescope):
         param_path_map = self.get_param_path_map()
         param_transform_map = self.get_param_transform_map()
 
-        # Extract all parameters from the model
-        for param_key in extracted_params.keys:
+        # Extract parameters from the model
+        # ---- decide which keys to extract ----
+        if names is None:
+            keys_to_extract = list(extracted_params.keys)
+            # ensure psf_pixel_scale is attempted even if not in defaults
+            if "psf_pixel_scale" not in keys_to_extract:
+                keys_to_extract.append("psf_pixel_scale")
+        else:
+            keys_to_extract = list(names)
+
+        for param_key in keys_to_extract:
             try:
-                # Use a custom transformation function if available
                 if param_key in param_transform_map:
                     value = param_transform_map[param_key](self)
                 else:
-                    # Use the model path if available, otherwise fall back to the param_key
                     model_path = param_path_map.get(param_key, param_key)
                     value = self.get(model_path)
 
-                # Set the extracted value
-                extracted_params = extracted_params.set(param_key, value)
+                # Try normal set; if the params container doesn't have the key,
+                # fall back to a replace() merge to insert it.
+                try:
+                    extracted_params = extracted_params.set(param_key, value)
+                except Exception:
+                    extracted_params = extracted_params.replace({param_key: value})
+
             except (AttributeError, KeyError, ValueError):
-                # Skip parameters that are not present in the model
                 continue
 
         return extracted_params
 
+    def _compute_psf_pixel_scale(self):
+        """
+        Return psf_pixel_scale in arcsec/pixel, derived from the model's optics.
+        Uses the same EFL relation as SheraThreePlaneParams.compute_psf_pixel_scale().
+        """
+        optics = self.optics
+        f1 = float(optics.m1_focal_length)
+        f2 = float(optics.m2_focal_length)
+        sep = float(optics.plane_separation)
+        pix = float(optics.detector_pixel_pitch)  # meters
+
+        # Effective focal length for the two-mirror relay:
+        # EFL = (1/f1 + 1/f2 - sep/(f1*f2))^-1
+        EFL = 1.0 / (1.0 / f1 + 1.0 / f2 - sep / (f1 * f2))
+
+        # arcsec/pixel
+        return float(dlu.rad2arcsec(pix / EFL))
+
+    def _read_psf_pixel_scale_from_model(self):
+        """Try all reasonable paths to read the optimized psf_pixel_scale from the model."""
+        for path in ("psf_pixel_scale", "optics.psf_pixel_scale"):
+            try:
+                return float(self.get(path))
+            except Exception:
+                pass
+        raise AttributeError("psf_pixel_scale not found on model.")
+
+    def _read_or_compute_psf_pixel_scale(self):
+        """Prefer stored model attribute; otherwise compute from primitives."""
+        try:
+            return self._read_psf_pixel_scale_from_model()
+        except AttributeError:
+            return self._compute_psf_pixel_scale()
 
 
 class SheraTwoPlane_Model(dl.Telescope):
