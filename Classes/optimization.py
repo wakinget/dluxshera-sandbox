@@ -597,6 +597,20 @@ class SheraThreePlaneParams(ModelParams):
 
         return self.replace(updated)
 
+    def compute_EFL(self):
+        """
+        Return Effective Focal Length (EFL) in m, derived from the model's optics.
+        """
+        # Get focal lengths and pixel size
+        f1 = self.get("m1_focal_length")
+        f2 = self.get("m2_focal_length")
+        sep = self.get("plane_separation")
+
+        # Effective focal length for the two-mirror relay:
+        # EFL = (1/f1 + 1/f2 - sep/(f1*f2))^-1
+        EFL = 1.0 / (1.0 / f1 + 1.0 / f2 - sep / (f1 * f2)) # meters
+        return EFL
+
     def compute_psf_pixel_scale(self):
         """
         Computes the PSF pixel scale in arcseconds/pixel based on mirror geometry and pixel size.
@@ -606,13 +620,10 @@ class SheraThreePlaneParams(ModelParams):
         float
             The computed psf_pixel_scale in arcseconds/pixel.
         """
-        # Get focal lengths and pixel size
-        f1 = self.get("m1_focal_length")
-        f2 = self.get("m2_focal_length")
-        sep = self.get("plane_separation")
-        pixel_size = self.get("pixel_size")  # e.g., 6.5e-6 meters
-        EFL = (f1**-1 + f2**-1 - sep * f1**-1 * f2**-1)**-1
-        return np.asarray(dlu.rad2arcsec(pixel_size / EFL))
+        # Get the EFL + Pixel size
+        EFL = self.compute_EFL()
+        pixel_size = self.get("pixel_size")
+        return np.asarray(dlu.rad2arcsec(pixel_size / EFL)) # as/pixel
 
 class SheraTwoPlaneParams(ModelParams):
     """Parameter container for the Shera Two-Plane Optical System."""
