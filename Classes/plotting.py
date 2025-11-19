@@ -173,6 +173,141 @@ def plot_parameter_history_grid(param_histories, true_vals=None, log_scale=False
     return fig
 
 
+def plot_psf_single(
+        psf,
+        extent=None,
+        title="PSF",
+        display=True,
+        save=False,
+        save_dir="../Results",
+        save_name=None,
+        cmap="inferno",
+        dpi=300,
+        font_size=12,
+        normalise=True,
+        stretch="sqrt",  # "linear", "sqrt", or "log"
+        vmin=None,
+        vmax=None,
+        cbar_label=None,
+):
+    """
+    Plot a single PSF image.
+
+    Parameters
+    ----------
+    psf : ndarray or object with .model()
+        PSF image or a dLux optical model object.
+    extent : list or None
+        Axis extent for imshow (e.g., [-1, 1, -1, 1] in arcseconds).
+        If None, pixel coordinates are used.
+    title : str
+        Title for the PSF subplot.
+    display : bool, optional
+        Whether to display the plot.
+    save : bool, optional
+        Whether to save the figure to disk.
+    save_dir : str, optional
+        Directory to save the figure. Ignored unless `save=True`.
+    save_name : str, optional
+        Name of the saved file. Defaults to "psf_single.png".
+    cmap : str
+        Colormap for the PSF plot.
+    dpi : int
+        Dots per inch when saving the figure.
+    font_size : int
+        Font size for axis labels and titles.
+    normalise : bool
+        If True, normalise the PSF by its maximum value.
+    stretch : {"linear", "sqrt", "log"}
+        Intensity stretch applied before plotting.
+        "sqrt" is often nice for PSF visualisation.
+    vmin, vmax : float or None
+        Optional explicit limits for imshow. If None, determined from the
+        stretched image.
+    cbar_label : str or None
+        Label for the colorbar. If None, a sensible default is chosen.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The resulting matplotlib figure object.
+    ax : matplotlib.axes.Axes
+        The axis containing the PSF plot.
+    """
+
+    # Evaluate PSF if a model object is passed
+    psf_img = psf.model() if hasattr(psf, "model") else psf
+    psf_img = onp.array(psf_img)
+
+    # Normalise if requested
+    if normalise:
+        max_val = onp.nanmax(psf_img)
+        if max_val > 0:
+            psf_img = psf_img / max_val
+
+    # Apply intensity stretch
+    if stretch.lower() == "linear":
+        img_to_plot = psf_img
+        default_cbar = "Normalised Photons" if normalise else "Photons"
+
+    elif stretch.lower() == "sqrt":
+        img_to_plot = onp.sqrt(onp.maximum(psf_img, 0))
+        default_cbar = r"$\sqrt{\mathrm{Photons}}$ (normalised)" if normalise else r"$\sqrt{\mathrm{Photons}}$"
+
+    elif stretch.lower() == "log":
+        # Avoid log of zero/negative
+        eps = 1e-12 * onp.nanmax(psf_img) if onp.nanmax(psf_img) > 0 else 1e-12
+        img_to_plot = onp.log10(onp.clip(psf_img, eps, None))
+        default_cbar = r"$\log_{10}$ Photons (normalised)" if normalise else r"$\log_{10}$ Photons"
+    else:
+        raise ValueError(f"Unknown stretch '{stretch}'. Use 'linear', 'sqrt', or 'log'.")
+
+    # Determine vmin/vmax if not set
+    if vmin is None:
+        vmin = onp.nanmin(img_to_plot)
+    if vmax is None:
+        vmax = onp.nanmax(img_to_plot)
+
+    # Fall back colorbar label
+    if cbar_label is None:
+        cbar_label = default_cbar
+
+    # Create figure and axis
+    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+
+    if extent is None:
+        im = ax.imshow(img_to_plot, cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_xlabel("X (px)", fontsize=font_size)
+        ax.set_ylabel("Y (px)", fontsize=font_size)
+    else:
+        im = ax.imshow(img_to_plot, cmap=cmap, extent=extent, vmin=vmin, vmax=vmax)
+        ax.set_xlabel("X (arcsec)", fontsize=font_size)
+        ax.set_ylabel("Y (arcsec)", fontsize=font_size)
+
+    ax.set_title(title, fontsize=font_size)
+
+    # Colorbar using your merge_cbar helper
+    cax = merge_cbar(ax)
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label(cbar_label, fontsize=font_size)
+
+    fig.tight_layout()
+
+    # Save the figure if requested
+    if save:
+        os.makedirs(save_dir, exist_ok=True)
+        full_name = os.path.join(save_dir, save_name or "psf_single.png")
+        fig.savefig(full_name, dpi=dpi)
+
+    # Show or close
+    if display:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig, ax
+
+
 def plot_psf_comparison(
         data,
         model,
