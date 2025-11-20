@@ -1,6 +1,9 @@
 
 # My own example files to ignore
 Examples/*
+# BUT do not ignore the notebooks folder
+!Examples/notebooks/
+!Examples/notebooks/**
 
 
 

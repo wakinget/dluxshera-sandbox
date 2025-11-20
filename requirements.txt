@@ -1,2 +1,30 @@
-dLux==0.14.*
-zodiax
+# Core dependency: dLux from Dylan's fork (main has Fresnel utilities)
+dLux @ git+https://github.com/wakinget/dLux.git@main
+
+# dLux ecosystem
+dLuxToliman==0.3.0
+
+# JAX + numerical stack
+jax==0.4.30
+jaxlib==0.4.30
+numpy>=1.24
+scipy>=1.9
+
+# Astronomy / units
+astropy>=5.0
+
+# Plotting / progress
+matplotlib>=3.9
+tqdm>=4.67
+
+# Inference / JAX helpers
+numpyro==0.18.0
+optax>=0.2.4
+equinox>=0.11.10
+chex>=0.1.88
+jaxtyping>=0.2.36
+zodiax>=0.4.1
+
+# Notebook support (optional but nice for examples)
+ipykernel>=6.31
+jupyterlab>=4.4
