@@ -410,6 +410,8 @@ git push -u origin refactor/params-graph
 | 2025-11-13 | Add **four-plane** support via new builder/binder + transforms.              | Scale architecture to new systems while reusing graph and API.                                                                             | PLANNED  | DMK   |  |
 | 2025-11-21 | Created `refactor/params-graph` branch for parameter refactor work. | Keep refactor changes isolated from stable main; enables incremental PRs. | IN PROGRESS | DMK |  |
 | 2025-11-21 | Reorganized project directory into new src/dluxshera/ hierarchy per refactor plan.         | Establish a clean package structure before implementing ParamSpec/ParameterStore; improves clarity and maintainability. | Completed   | DMK    | Moved oneoverf.py to utils/ instead of core/. |
+| 2025-11-21 | Introduce ParamField/ParamSpec schema, root tests/ layout, and pyproject/pytest setup for src-based package. | Establishes a declarative parameter schema and testing harness before wiring into SheraThreePlane; makes refactor safer/tested. | COMPLETED | DMK   |       |
+| 2025-11-21 | ParameterStore.replace() uses a mapping for updates (not kwargs) for hierarchical keys with dots.      | Param keys are canonical string IDs like "binary.separation_mas"; Python kwargs cannot represent these safely. Mapping-based updates avoid subtle key mismatches. | COMPLETED | DMK   | kwargs allowed only for simple identifier-like keys. |
 
 ---
 
