@@ -30,15 +30,15 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-After installation, your environment includes:
+After installation, your environment should include:
 
 - JAX + jaxlib  
-- Your Fresnel-enabled dLux fork (via PEP 508 URL)  
+- The Fresnel-enabled dLux (via Dylan's own [fork of dLux](https://github.com/wakinget/dLux))  
 - numpy, scipy, matplotlib, astropy  
 - numpyro, optax, equinox, chex, jaxtyping, zodiax  
 - JupyterLab  
 
-> **Note:** Once the Fresnel PR merges into upstream dLux, this step will be updated to rely on a released version.
+> **Note:** Once the Fresnel utilities officially merge into upstream dLux, this step will be updated to rely on the released version.
 
 ---
 
