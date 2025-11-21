@@ -93,16 +93,78 @@ The notebook simulates synthetic data, initializes the SHERA model, computes its
   ```
 - A `pyproject.toml` will be added later to support `pip install -e .`.
 
-
 ## Key concepts
-- **Eigen re-parameterization:** `use_eigen`, `whiten_basis`, `truncate_k`, `truncate_by_eigval`
-- **Plate scale:** `psf_pixel_scale` can be optimized directly or derived from primitives.
-- **Numerics:** Fresnel propagation via custom three-plane routine (dLux-based, JAX grad-safe).
 
+- **JAX and immutability**
+
+  dLux optical models are built on JAX and follow a functional, immutable design.
+  This means that **model objects cannot be modified in place** — attempting something like:  
+  `model.parameter = new_value`  
+  will raise an error because the underlying data
+  structures (JAX pytrees) are immutable.
+
+  Instead, every update must create a *new* model with the change applied:
+
+    ```python
+      model = model.set("parameter_name", new_value)
+    ```
+
+    Or for multiple parameters:
+    
+    ```python
+      model = model.set(["param1", "param2"], [val1, val2])
+    ```
+
+    This functional update pattern preserves JAX compatibility (JIT, vmap, grad) and
+    ensures the entire optical system remains differentiable.
+
+- **`.model()` forward pass**
+
+  This is the standard way to evaluate a dLux optical model. For SHERA this computes a (typically polychromatic) PSF image from the current set of parameters, handling any internal wavelength sampling and normalisation.
+
+- **Eigenmode re-parameterization**
+
+  For inference we diagonalise the Fisher Information Matrix (FIM) and express parameters in the eigenbasis of that matrix. This separates well-constrained from poorly constrained parameter combinations and can improve optimisation:
+  - `use_eigen` – toggle between native parameters and eigenmode coefficients.  
+  - `whiten_basis` – optionally scale modes by `1/√λ` so all directions have unit variance.  
+  - `truncate_k` – keep only the top `k` best-constrained modes.  
+  - `truncate_by_eigval` – alternatively, keep all modes with eigenvalue above a chosen threshold.
+
+- **Fresnel propagation and the 3-Plane SHERA model**  
+  SHERA uses a custom three-plane optical system to capture beam walk effects, and mirror-specific aberrations that cannot be modeled with a single Fraunhofer propagation.  
+  The backend workflow is:
+
+  1. **Primary mirror plane**  
+     The pupil field is constructed by combining the primary mirror aperture, wavefront error (WFE), and the diffractive-pupil phase OPD.
+
+  2. **Forward Fresnel propagation to the secondary**  
+     The pupil field is propagated to the secondary mirror using a Fresnel Angular Spectrum operator. This produces the near-field amplitude and phase distribution on the secondary.
+
+  3. **Secondary mirror WFE application**  
+     Additional WFE (representing alignment errors or surface figure on M2) is applied directly to the propagated field at the secondary plane.
+
+  4. **Backward Fresnel propagation to the primary**  
+     The field is then Fresnel-back-propagated to the primary plane, capturing
+     how secondary-mirror errors couple back into the entrance pupil.
+
+  5. **Matrix Fourier Transform (MFT) to the focal plane**  
+     Finally, we use an MFT to compute the focal-plane field at the desired detector sampling and field of view.
+     This produces the monochromatic PSF, which is then internally vectorized and summed over wavelength to yield the polychromatic image.
+
+  This sequence allows the SHERA model to capture the key physical effects
+  (M1/M2 misalignments, beam walk, and diffractive pupil structure) needed for
+  micro-arcsecond astrometry.
+
+
+- **Differentiable inference loop**  
+  Because everything is built on JAX, we can obtain exact gradients of the loss with respect to all parameters, build the FIM, and run gradient-based optimisers or HMC samplers directly on the optical model.
+
+<!--
 ## Troubleshooting
 - **Zero gradients from “perfect” init:** initialize with *non-zero* tiny perturbations.
 - **Slow JIT on first call:** expected; subsequent runs are fast.
 - **Diffs not showing?** `git diff -- path/to/file.py` or `git diff --staged`.
+-->
 
 ## Documentation
 (MkDocs configuration pending; this command will serve once docs are added.)
