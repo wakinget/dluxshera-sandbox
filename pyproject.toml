@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dluxshera"
+version = "0.1.0"
+description = "Shera / dLux-based astrometric modeling tools"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Dylan McKeithen" }
+]
+
+# You can fill this in later; leaving it empty is okay for now
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
