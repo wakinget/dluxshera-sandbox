@@ -2,7 +2,7 @@
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from Classes.utils import get_param_scale_and_unit
+from src.dluxshera.utils.utils import get_param_scale_and_unit
 import datetime
 import os
 import jax.numpy as np

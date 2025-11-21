@@ -4,11 +4,10 @@ import dLux.layers as dll
 import dLux.utils as dlu
 import jax.numpy as np
 import jax.random as jr
-from Classes.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
-from Classes.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
-from Classes.oneoverf import *
-from Classes.utils import nanrms, set_array, calculate_log_flux
-from Classes.plotting import merge_cbar
+from src.dluxshera.optics.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
+from src.dluxshera.inference.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
+from src.dluxshera.utils.oneoverf import *
+from src.dluxshera.utils.utils import nanrms
 
 __all__ = [
     "SheraThreePlane_ForwardModel",

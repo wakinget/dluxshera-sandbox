@@ -408,6 +408,8 @@ git push -u origin refactor/params-graph
 | 2025-11-13 | Defaults: spec if safe; otherwise **profiles**; else `NO_DEFAULT`.           | Clear precedence; early, actionable errors; instrument/site separation.                                                                   | AGREED   | DMK   |  |
 | 2025-11-13 | Preserve legacy ergonomics via **ParamsProxy/ModelParams** shim.             | Smooth migration; deprecations later without blocking users.                                                                               | AGREED   | DMK   |  |
 | 2025-11-13 | Add **four-plane** support via new builder/binder + transforms.              | Scale architecture to new systems while reusing graph and API.                                                                             | PLANNED  | DMK   |  |
+| 2025-11-21 | Created `refactor/params-graph` branch for parameter refactor work. | Keep refactor changes isolated from stable main; enables incremental PRs. | IN PROGRESS | DMK |  |
+| 2025-11-21 | Reorganized project directory into new src/dluxshera/ hierarchy per refactor plan.         | Establish a clean package structure before implementing ParamSpec/ParameterStore; improves clarity and maintainability. | Completed   | DMK    | Moved oneoverf.py to utils/ instead of core/. |
 
 ---
 

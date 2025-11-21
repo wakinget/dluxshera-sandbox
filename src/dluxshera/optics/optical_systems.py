@@ -1,13 +1,12 @@
 from __future__ import annotations
 import jax.numpy as np
 from jax import Array, vmap
-from jax.scipy.ndimage import map_coordinates
 import dLux.utils as dlu
 import dLux.layers as dll
 import dLux
 import dLuxToliman
 import os
-from .utils import scale_array
+from src.dluxshera.utils.utils import scale_array
 
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen

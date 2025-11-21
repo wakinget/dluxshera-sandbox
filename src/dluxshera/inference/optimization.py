@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as np
 import numpy as onp
-from jax import config, grad, linearize, jit, lax, tree, config as jax_config
+from jax import config, grad, linearize, jit, lax
 import dLux.utils as dlu
 import optax
 import equinox as eqx
@@ -11,7 +11,7 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
-from Classes.utils import get_sweep_values, set_array
+from src.dluxshera.utils.utils import get_sweep_values
 
 ############################
 # Exports
@@ -1017,7 +1017,7 @@ def pack_params(values_pytree, params, model_template, from_model=False):
     Flatten values into a vector + labels.
     Can handle either ModelParams/SheraThreePlaneParams or a SheraThreePlane_Model.
     """
-    from Classes.modeling import SheraThreePlane_Model # Importing locally avoids a circular import error
+    from src.dluxshera.core.modeling import SheraThreePlane_Model # Importing locally avoids a circular import error
     labels = []
     flat_values = []
 
