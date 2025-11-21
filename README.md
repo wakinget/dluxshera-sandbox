@@ -44,20 +44,16 @@ After installation, your environment includes:
 
 ## Quickstart (Jupyter Notebook)
 
-An example notebook is provided at:
+Example notebooks are provided under: `Examples/notebooks/`
 
-```
-Examples/notebooks/Shera_Eigen_Inference_Example.ipynb
-```
-
-Launch JupyterLab **from inside the virtual environment**:
+To run any of the examples, launch JupyterLab **from inside the virtual environment**:
 
 ```bash
-source .venv/bin/activate
-jupyter lab
+source .venv/bin/activate # Activate your virtual environment
+jupyter lab # Start up a Jupyter lab session (opens in browser)
 ```
 
-Then open the example notebook in the sidebar.
+Then open the example notebook from the sidebar.
 
 ### Notebook setup
 
@@ -70,22 +66,19 @@ repo_root = notebook_setup.setup_paths()
 
 ### Minimal example — build a model and generate a PSF
 
-```python
-# Notebook path setup
-import notebook_setup
-repo_root = notebook_setup.setup_paths()
+`minimal_example.ipynb`
 
-# Model + utilities
-from Classes.modeling import SheraThreePlane_Model
+A lightweight introduction to the SHERA three-plane optical model.
 
-# Build model with default parameters
-model = SheraThreePlane_Model()
+This notebook walks through constructing the default model, evaluating the forward simulation, and visualizing the resulting polychromatic PSF. It is intended as the quickest way to confirm that the installation works and to understand the basic model workflow.
 
-# Forward simulation (PSF image)
-psf = model.model()
-```
+### Eigenmode Inference — recovers parameters as eigenmodes
 
-This produces a simulated PSF image using the default three-plane SHERA optical model.
+`Shera_Eigen_Inference_Example.ipynb`
+
+A full demonstration of parameter retrieval using the eigenmode-based optimization pipeline.
+
+The notebook simulates synthetic data, initializes the SHERA model, computes its Fisher-information eigenbasis, and re-parameterizes the model in terms of these eigenmodes. An iterative optimization loop then solves for the eigenmode coefficients, recovering the underlying physical parameters. Diagnostic plots and convergence summaries are generated throughout.
 
 ---
 
