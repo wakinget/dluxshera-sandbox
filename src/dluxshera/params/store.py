@@ -17,9 +17,9 @@ Key design points
 - Parameter keys are *string identifiers* (ParamKey = str), and in practice
   we use dotted, hierarchical names such as:
 
-      "binary.separation_mas"
-      "imaging.psf_pixel_scale"
-      "noise.jitter_rms_mas"
+      "binary.separation_as"
+      "imaging.plate_scale_as_per_pix"
+      "noise.jitter_rms_as"
 
   These keys are part of the public "parameter API" of the model: they are
   used consistently in specs, priors, configs, logging, etc.
@@ -28,14 +28,14 @@ Key design points
   Python identifiers, we cannot safely rely on keyword arguments for
   updating them. For example:
 
-      store.replace(binary_separation_mas=120.0)
+      store.replace(binary_separation_as=12.0)
 
-  would create/modify a key called "binary_separation_mas", which is *not*
-  the same as the canonical key "binary.separation_mas". This kind of
+  would create/modify a key called "binary_separation_as", which is *not*
+  the same as the canonical key "binary.separation_as". This kind of
   mismatch is very easy to introduce and hard to debug.
 
 - To avoid this, ParameterStore.replace() accepts a mapping of literal
-  keys to values (e.g. replace({"binary.separation_mas": 120.0})), and only
+  keys to values (e.g. replace({"binary.separation_as": 12.0})), and only
   supports **kwargs as a convenience for simple, identifier-like keys.
 
 The overall goal is to treat parameter keys as opaque strings with stable
@@ -51,7 +51,7 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optio
 import jax
 import jax.numpy as jnp
 
-from .spec import ParamKey
+from .spec import ParamSpec, ParamKey
 
 
 # Sentinel for "no default provided"
@@ -64,12 +64,12 @@ class ParameterStore:
     Immutable-ish container mapping parameter keys to values.
 
     Values are typically Python floats/ints or jax.numpy arrays. Keys are
-    ParamKey strings and may contain dots (e.g. "binary.separation_mas").
+    ParamKey strings and may contain dots (e.g. "binary.separation_as").
 
     Because keys are arbitrary strings, updates should generally be passed
     as an explicit mapping to `replace()`, e.g.:
 
-        store = store.replace({"binary.separation_mas": 120.0})
+        store = store.replace({"binary.separation_as": 12.0})
 
     rather than using keyword arguments, which only work reliably for simple
     identifier-like keys that don't contain dots.
@@ -142,7 +142,7 @@ class ParameterStore:
             recommended way to update parameters, especially for hierarchical
             keys that contain dots, e.g.:
 
-                store = store.replace({"binary.separation_mas": 120.0})
+                store = store.replace({"binary.separation_as": 12.0})
 
         **extra_updates:
             Additional updates passed as keyword arguments. This is only
@@ -155,7 +155,7 @@ class ParameterStore:
 
         Notes
         -----
-        For hierarchical parameter keys such as "binary.separation_mas",
+        For hierarchical parameter keys such as "binary.separation_as",
         always use the mapping form (the `updates` argument). Relying on
         keyword arguments for these keys would silently replace dots with
         underscores at the call site, creating a *different* key (e.g.
@@ -173,19 +173,62 @@ class ParameterStore:
 
         return ParameterStore(new_values)
 
+    # --- validation against a ParamSpec ------------------------------------------
 
-    # --- (future) validation hook -------------------------------------------------
-
-    def validate(self, spec: "ParamSpec") -> "ParameterStore":
+    def validate_against(
+            self,
+            spec: ParamSpec,
+            *,
+            allow_missing: bool = False,
+            allow_extra: bool = False,
+    ) -> "ParameterStore":
         """
-        Placeholder for validation against a ParamSpec.
+        Validate that this store is consistent with a given ParamSpec.
 
-        For now, this is a no-op that simply returns self. Later we can:
-        - check all keys exist in spec
-        - check dtype / shape / bounds, etc.
+        By default this checks only that the set of keys in the store and the
+        spec match exactly. Type/shape/bounds validation can be layered on
+        later once we have concrete use cases.
+
+        Parameters
+        ----------
+        spec:
+            The ParamSpec to validate against.
+        allow_missing:
+            If False (default), require that every key in the spec appears
+            in the store. If True, missing keys are allowed.
+        allow_extra:
+            If False (default), require that every key in the store appears
+            in the spec. If True, extra keys are allowed.
+
+        Raises
+        ------
+        ValueError
+            If the store contains unknown keys (when allow_extra is False)
+            or is missing required keys (when allow_missing is False).
+
+        Returns
+        -------
+        ParameterStore
+            Returns self to allow simple chaining.
         """
-        # from .spec import ParamSpec  # delayed import to avoid cycles
-        # TODO: implement real validation.
+        spec_keys = set(spec.keys())
+        store_keys = set(self.keys())
+
+        extra_keys = store_keys - spec_keys
+        missing_keys = spec_keys - store_keys
+
+        if not allow_extra and extra_keys:
+            raise ValueError(
+                f"ParameterStore contains keys not present in spec: "
+                f"{sorted(extra_keys)}"
+            )
+
+        if not allow_missing and missing_keys:
+            raise ValueError(
+                f"ParameterStore is missing keys required by spec: "
+                f"{sorted(missing_keys)}"
+            )
+
         return self
 
 
