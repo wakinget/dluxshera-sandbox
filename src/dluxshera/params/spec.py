@@ -142,3 +142,183 @@ class ParamSpec:
                 raise ValueError(f"ParamSpec merge conflict on key {key!r}")
             new_fields[key] = field
         return ParamSpec(new_fields.values())
+
+    # --- subset / view helpers ---------------------------------------------------
+
+    def subset(self, keys: Iterable[ParamKey]) -> "ParamSpec":
+        """
+        Return a new ParamSpec containing only the fields whose keys are in `keys`.
+
+        This is useful for defining different inference configurations (e.g.
+        astrometry-only vs joint astrometry+flux) from a larger base spec.
+        """
+        selected_fields = []
+        for key in keys:
+            try:
+                selected_fields.append(self._fields[key])
+            except KeyError as exc:
+                raise KeyError(f"ParamSpec.subset: unknown key {key!r}") from exc
+        return ParamSpec(selected_fields)
+
+
+# ---------------------------------------------------------------------------
+# Shera inference spec builders
+# ---------------------------------------------------------------------------
+
+def build_inference_spec_basic() -> ParamSpec:
+    """
+    Construct the baseline inference parameter specification for Shera runs.
+
+    This specification contains the core effective parameters that the current
+    Shera optimization and inference pipelines typically solve for:
+      • binary separation and position angle
+      • binary centroid offsets (X/Y)
+      • binary flux ratio (A:B)
+      • total effective log-flux detected from the binary
+      • detector plate scale
+      • primary and secondary mirror Zernike WFE coefficients
+
+    All parameters here are treated as *primitive* in the inference model,
+    even if they may have been derived from more physical quantities when
+    generating synthetic data. This allows the inference to operate directly
+    in the effective parameter space used by the forward model.
+    """
+    fields = [
+
+        # ----------------------
+        # Binary astrometry
+        # ----------------------
+        ParamField(
+            key="binary.separation_as",
+            group="binary",
+            kind="primitive",
+            units="as",
+            dtype=float,
+            shape=None,
+            default=10.0,
+            bounds=(0.0, None), # must be positive
+            doc="Angular separation of the binary on the sky, in arcseconds.",
+        ),
+        ParamField(
+            key="binary.position_angle_deg",
+            group="binary",
+            kind="primitive",
+            units="deg",
+            dtype=float,
+            shape=None,
+            default=90.0,
+            bounds=(0.0, 360.0),
+            doc=(
+                "Position angle of the binary on the sky, in degrees East of North"
+            ),
+        ),
+        ParamField(
+            key="binary.x_position",
+            group="binary",
+            kind="primitive",
+            units="as",
+            dtype=float,
+            shape=None,
+            default=0.0,
+            bounds=(None, None),
+            doc="Binary centroid offset in the detector X direction (arcseconds).",
+        ),
+        ParamField(
+            key="binary.y_position",
+            group="binary",
+            kind="primitive",
+            units="as",
+            dtype=float,
+            shape=None,
+            default=0.0,
+            bounds=(None, None),
+            doc="Binary centroid offset in the detector Y direction (arcseconds).",
+        ),
+        ParamField(
+            key="binary.contrast",
+            group="binary",
+            kind="primitive",
+            units=None,
+            dtype=float,
+            shape=None,
+            default=3, # Ratio of A:B
+            bounds=(0.0, None),
+            doc=(
+                "Flux ratio of the binary system, defined as Primary:Secondary "
+                "(A:B). A ratio > 1 indicates the primary is brighter."
+            ),
+        ),
+
+        # ----------------------
+        # Source photometry
+        # ----------------------
+        ParamField(
+            key="source.log_flux_total",
+            group="source",
+            kind="primitive",
+            units="log10(photons)",
+            dtype=float,
+            shape=None,
+            default=8.0,  # rough ballpark; tune later
+            bounds=(None, None),
+            doc=(
+                "Effective total log10 photon count from both stars reaching "
+                "the detector over the exposure. Treated as a primitive "
+                "brightness/throughput parameter in inference."
+            ),
+        ),
+
+        # ----------------------
+        # Detector geometry
+        # ----------------------
+        ParamField(
+            key="imaging.plate_scale_as_per_pix",
+            group="imaging",
+            kind="primitive",
+            units="as / pixel",
+            dtype=float,
+            shape=None,
+            default=0.355,
+            bounds=(0.0, None),
+            doc=(
+                "Detector plate scale, in arcseconds per pixel. Although a "
+                "three-plane optical system may determine plate scale from "
+                "geometry, in inference we treat it as an effective primitive "
+                "parameter."
+            ),
+        ),
+
+        # ----------------------
+        # Optical wavefront errors
+        # ----------------------
+        ParamField(
+            key="primary.zernike_coeffs",
+            group="primary",
+            kind="primitive",
+            units="nm",
+            dtype=float,
+            shape=None, # ← arbitrary length allowed
+            default=None,
+            bounds=(None, None),
+            doc=(
+                "Primary mirror Zernike wavefront error coefficients (nm). "
+                "Length is variable and validated by the model builder."
+            ),
+        ),
+        ParamField(
+            key="secondary.zernike_coeffs",
+            group="secondary",
+            kind="primitive",
+            units="nm",
+            dtype=float,
+            shape=None, # ← arbitrary length allowed
+            default=None,
+            bounds=(None, None),
+            doc=(
+                "Secondary mirror Zernike wavefront error coefficients (nm). "
+                "Length is variable and validated by the model builder."
+            ),
+        ),
+    ]
+
+    return ParamSpec(fields)
