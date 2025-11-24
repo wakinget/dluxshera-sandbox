@@ -327,6 +327,10 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
 - [ ] DLuxSystemNode; wire SheraThreePlane_Model
 - [ ] Unit tests: spec/store/transforms/node
 
+Additional things/ideas to keep in mind:
+
+A `refresh()` method (or similar) to automatically update any derived parameters within a store.
+
 **P1 — Docs & examples**
 - [ ] README quickstart
 - [ ] MkDocs concepts (spec/store/graph/transforms)
