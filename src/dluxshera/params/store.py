@@ -127,6 +127,26 @@ class ParameterStore:
         """
         return cls(dict(data))
 
+    @classmethod
+    def from_spec_defaults(cls, spec: ParamSpec) -> "ParameterStore":
+        """
+        Construct a ParameterStore from the default values in a ParamSpec.
+
+        Each ParamField's `default` attribute is used as the initial value
+        for that key. Fields whose default is None are included with value
+        None; it is the responsibility of the caller or model builder to
+        replace these with concrete values before using the store in a
+        forward model.
+
+        This does not perform any validation beyond copying defaults. Use
+        `store.validate_against(spec)` if you want to check key consistency.
+        """
+        values: Dict[ParamKey, Any] = {}
+        for key, field in spec.items():
+            values[key] = field.default
+        return cls(values)
+
+
     def replace(
         self,
         updates: Optional[Mapping[ParamKey, Any]] = None,
