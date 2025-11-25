@@ -11,7 +11,6 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
-from src.dluxshera.utils.utils import get_sweep_values
 
 ############################
 # Exports
@@ -939,6 +938,8 @@ def sweep_param(model, param, sweep_info, loss_fn, *loss_args, **loss_kwargs):
         - 'value' : float, value of the parameter at that sweep point
         - 'loss' : float, scalar loss value
     """
+    from ..utils.utils import get_sweep_values
+
     results = []
     span, steps = sweep_info[param]
     value = model.get(param)
