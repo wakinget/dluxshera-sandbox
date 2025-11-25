@@ -546,7 +546,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         plane_separation: float = 0.554130,
         n_struts: int = 4,
         strut_width: float = 0.002,
-        strut_rotation: float = -np.pi / 4,
+        strut_rotation_deg: float = 45.0,
         dp_design_wavel: float | None = 550e-9,
     ):
 
@@ -567,7 +567,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         coords = dlu.pixel_coords(pupil_oversample * wf_npixels, p1_diameter)
         outer = dlu.circle(coords, p1_diameter / 2)
         inner = dlu.circle(coords, p2_diameter / 2, invert=True)
-        strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + np.rad2deg(strut_rotation)
+        strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + strut_rotation_deg
         spiders = dlu.spider(coords, strut_width, strut_angles)
         m1_transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
         m2_transmission = dlu.downsample(outer, pupil_oversample)
