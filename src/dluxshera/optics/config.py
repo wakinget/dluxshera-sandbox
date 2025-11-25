@@ -202,70 +202,70 @@ SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     design_name="shera_testbed",
 
     # --- core telescope geometry ---
-    m1_diameter_m = 0.09,
-    m2_diameter_m = 0.025,
-    m1_focal_length_m = 0.35796,
-    m2_focal_length_m = -0.041935,
-    m1_m2_separation_m = 0.320,
+    m1_diameter_m=0.09,
+    m2_diameter_m=0.025,
+    m1_focal_length_m=0.35796,
+    m2_focal_length_m=-0.041935,
+    m1_m2_separation_m=0.320,
 
     # --- detector sampling ---
-    detector_pixel_pitch_m = 6.5e-6,
+    detector_pixel_pitch_m=6.5e-6,
 
     # --- grids & sampling ---
-    pupil_npix = 256,
-    psf_npix = 256,
-    oversample = 3,
-    wavelength_m = 550e-9,
-    bandwidth_m = 110e-9,
-    n_lambda = 3,
+    pupil_npix=256,
+    psf_npix=256,
+    oversample=3,
+    wavelength_m=550e-9,
+    bandwidth_m=110e-9,
+    n_lambda=3,
 
     # --- spiders / obscurations ---
-    n_struts = 4,
-    strut_width_m = 0.002,
-    strut_rotation_deg = 45.0,
+    n_struts=4,
+    strut_width_m=0.002,
+    strut_rotation_deg=45.0,
 
     # --- Zernike basis structure ---
     # define Noll indices as an immutable Python tuple.
-    primary_noll_indices = tuple(range(4, 12)),
-    secondary_noll_indices = tuple(range(4, 12)),
+    primary_noll_indices=tuple(range(4, 12)),
+    secondary_noll_indices=tuple(range(4, 12)),
 
     # --- diffractive pupil ---
     diffractive_pupil_path="data/diffractive_pupil.npy",
-    dp_design_wavelength_m = 550e-9,
+    dp_design_wavelength_m=550e-9,
 )
 
 
 SHERA_FLIGHT_CONFIG = SheraThreePlaneConfig(
-    design_name = "shera_flight",
+    design_name="shera_flight",
 
     # --- core telescope geometry ---
-    m1_diameter_m = 0.22,
-    m2_diameter_m = 0.025,
-    m1_focal_length_m = 0.604353,
-    m2_focal_length_m = -0.0545,
-    m1_m2_separation_m = 0.55413,
+    m1_diameter_m=0.22,
+    m2_diameter_m=0.025,
+    m1_focal_length_m=0.604353,
+    m2_focal_length_m=-0.0545,
+    m1_m2_separation_m=0.55413,
 
     # --- detector sampling ---
-    detector_pixel_pitch_m = 4.6e-6,
+    detector_pixel_pitch_m=4.6e-6,
 
     # --- grids & sampling ---
-    pupil_npix = 256,
-    psf_npix = 256,
-    oversample = 3,
-    wavelength_m = 550e-9,
-    bandwidth_m = 41e-9,
-    n_lambda = 3,
+    pupil_npix=256,
+    psf_npix=256,
+    oversample=3,
+    wavelength_m=550e-9,
+    bandwidth_m=41e-9,
+    n_lambda=3,
 
     # --- spiders / obscurations ---
-    n_struts = 3,
-    strut_width_m = 0.002,
-    strut_rotation_deg = -90.0,
+    n_struts=3,
+    strut_width_m=0.002,
+    strut_rotation_deg=-90.0,
 
     # --- Zernike basis structure ---
     # define Noll indices as an immutable Python tuple.
-    primary_noll_indices = tuple(range(4, 12)),
-    secondary_noll_indices = tuple(range(4, 12)),
+    primary_noll_indices=tuple(range(4, 12)),
+    secondary_noll_indices=tuple(range(4, 12)),
 
     diffractive_pupil_path="data/diffractive_pupil.npy",
-    dp_design_wavelength_m = 550e-9,
+    dp_design_wavelength_m=550e-9,
 )
