@@ -6,8 +6,7 @@ import dLux.layers as dll
 import dLux
 import dLuxToliman
 import os
-from src.dluxshera.utils.utils import scale_array
-
+from ..utils.utils import scale_array
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
@@ -535,7 +534,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         psf_npixels: int = 128,
         oversample: int = 2,
         detector_pixel_pitch: float = 4.6e-6, # pixel pitch in meters/pixel
-        mask: Array = None,
+        mask=None,
         m1_noll_ind: Array = None,
         m1_coefficients: Array = None,
         m2_noll_ind: Array = None,
@@ -548,7 +547,7 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
         n_struts: int = 4,
         strut_width: float = 0.002,
         strut_rotation: float = -np.pi / 4,
-        dp_design_wavel: float = 550e-9,
+        dp_design_wavel: float | None = 550e-9,
     ):
 
         # Set attributes
@@ -591,30 +590,60 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             coefficients = np.zeros(len(self.m2_noll_ind)) if m2_coefficients is None else m2_coefficients
             m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
 
-        # Generate Diffractive Pupil Mask
+        # ------------------------------------------------------------------
+        # Generate Diffractive Pupil Mask layer
+        # ------------------------------------------------------------------
+        # We always create a "dp" layer for p1_layers, but its effect depends
+        # on whether a mask and design wavelength are provided:
+        #
+        # - mask is None:
+        #       create a neutral aberration layer with zero OPD everywhere
+        #       (no diffractive pupil applied).
+        #
+        # - mask is provided and dp_design_wavel is not None:
+        #       interpret the data as a normalized phase pattern P(x, y) in
+        #       [0, 1] spanning [0, π] radians at dp_design_wavel, and map to
+        #       an OPD map via:
+        #
+        #           phase_rad = P * π
+        #           opd_m = dlu.phase2opd(phase_rad, dp_design_wavel)
+        #
+        # - mask is provided and dp_design_wavel is None:
+        #       interpret the data directly as an OPD map in meters.
+        #
+        # The mask input may be either:
+        #   - a filesystem path (str) pointing to a .npy file, or
+        #   - a 2D array already loaded in memory.
+        #
         if mask is None:
-            path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
-            # arr_in = np.load(path)
-            # ratio = wf_npixels / arr_in.shape[-1]
-            mask = scale_array(np.load(path), wf_npixels, order=1)
-
-            # Enforce full binary
-            mask = mask.at[np.where(mask <= 0.5)].set(0.0)
-            mask = mask.at[np.where(mask > 0.5)].set(1.0)
-
-            # Enforce full binary
-            mask = dlu.phase2opd(mask * np.pi, dp_design_wavel)
-
-            # Turn into optic
-            mask = dll.AberratedLayer(mask)
+            # Neutral DP: zero OPD across the pupil grid.
+            dp_opd = np.zeros((wf_npixels, wf_npixels))
         else:
-            # Throw an error for now
-            raise NotImplementedError("Custom DP masks are not yet configured in SheraThreePlaneSystem")
-            # mask, if specified might be an array that is already loaded in, but it might be a string that specifies a filename
-            # I should create a folder to store the pupil files, and point
+            # Load the raw map: either from disk (if mask is a path) or as-is
+            # (if mask is already an array).
+            if isinstance(mask, str):
+                dp_array = np.load(mask)
+            else:
+                dp_array = mask
 
+            # Ensure the map is sampled on the wf_npixels grid. If the helper
+            # already returns a jax.numpy array, jnp.array() is a no-op.
+            if dp_array.shape[-2:] != (wf_npixels, wf_npixels):
+                dp_array = scale_array(dp_array, wf_npixels, order=1)
 
-        p1_layers = [("m1_aperture", m1_aperture), ("dp", mask)]
+            dp_array = np.array(dp_array)
+
+            if dp_design_wavel is None:
+                # Map is already OPD in meters.
+                dp_opd = dp_array
+            else:
+                # Normalized phase P ∈ [0, 1] → phase ∈ [0, π] radians.
+                phase_rad = dp_array * np.pi
+                dp_opd = dlu.phase2opd(phase_rad, dp_design_wavel)
+
+        dp_layer = dll.AberratedLayer(dp_opd)
+
+        p1_layers = [("m1_aperture", m1_aperture), ("dp", dp_layer)]
         p2_layers = [("m2_aperture", m2_aperture)]
         super().__init__(
             wf_npixels=wf_npixels,

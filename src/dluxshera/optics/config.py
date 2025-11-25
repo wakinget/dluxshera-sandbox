@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
-
+from pathlib import Path
 
 @dataclass(frozen=True)
 class SheraThreePlaneConfig:
@@ -198,6 +198,13 @@ class SheraThreePlaneConfig:
 # Named point designs
 # ---------------------------------------------------------------------
 
+# Define the path to the default diffractive pupil file
+_THIS_DIR = Path(__file__).resolve().parent          # .../dluxshera/optics
+_PACKAGE_ROOT = _THIS_DIR.parent                     # .../dluxshera
+_DATA_DIR = _PACKAGE_ROOT / "data"                   # .../dluxshera/data
+
+DEFAULT_DP_PATH = _DATA_DIR / "diffractive_pupil.npy"
+
 SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     design_name="shera_testbed",
 
@@ -230,7 +237,7 @@ SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     secondary_noll_indices=tuple(range(4, 12)),
 
     # --- diffractive pupil ---
-    diffractive_pupil_path="data/diffractive_pupil.npy",
+    diffractive_pupil_path=str(DEFAULT_DP_PATH),
     dp_design_wavelength_m=550e-9,
 )
 
@@ -266,6 +273,6 @@ SHERA_FLIGHT_CONFIG = SheraThreePlaneConfig(
     primary_noll_indices=tuple(range(4, 12)),
     secondary_noll_indices=tuple(range(4, 12)),
 
-    diffractive_pupil_path="data/diffractive_pupil.npy",
+    diffractive_pupil_path=str(DEFAULT_DP_PATH),
     dp_design_wavelength_m=550e-9,
 )
