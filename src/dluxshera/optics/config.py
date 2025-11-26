@@ -64,7 +64,7 @@ class SheraThreePlaneConfig:
     """Number of discrete wavelengths to sample across the bandpass."""
 
     # ------------------------------------------------------------------
-    # Telescope geometry (three-plane layout)
+    # System geometry (three-plane layout)
     # ------------------------------------------------------------------
     m1_diameter_m: float = 0.09
     """Primary mirror clear diameter [meters]."""
@@ -81,10 +81,7 @@ class SheraThreePlaneConfig:
     m1_m2_separation_m: float = 0.320
     """Axial separation between primary and secondary [meters]."""
 
-    # ------------------------------------------------------------------
-    # Detector sampling
-    # ------------------------------------------------------------------
-    detector_pixel_pitch_m: float = 6.5e-6
+    pixel_pitch_m: float = 6.5e-6
     """
     Physical pixel pitch of the detector [meters].
 
@@ -208,15 +205,13 @@ DEFAULT_DP_PATH = _DATA_DIR / "diffractive_pupil.npy"
 SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     design_name="shera_testbed",
 
-    # --- core telescope geometry ---
+    # --- system geometry ---
     m1_diameter_m=0.09,
     m2_diameter_m=0.025,
     m1_focal_length_m=0.35796,
     m2_focal_length_m=-0.041935,
     m1_m2_separation_m=0.320,
-
-    # --- detector sampling ---
-    detector_pixel_pitch_m=6.5e-6,
+    pixel_pitch_m=6.5e-6,
 
     # --- grids & sampling ---
     pupil_npix=256,
@@ -245,15 +240,13 @@ SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
 SHERA_FLIGHT_CONFIG = SheraThreePlaneConfig(
     design_name="shera_flight",
 
-    # --- core telescope geometry ---
+    # --- system geometry ---
     m1_diameter_m=0.22,
     m2_diameter_m=0.025,
     m1_focal_length_m=0.604353,
     m2_focal_length_m=-0.0545,
     m1_m2_separation_m=0.55413,
-
-    # --- detector sampling ---
-    detector_pixel_pitch_m=4.6e-6,
+    pixel_pitch_m=4.6e-6,
 
     # --- grids & sampling ---
     pupil_npix=256,

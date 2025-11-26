@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
-
+from ..optics.config import SheraThreePlaneConfig
 
 ParamKey = str  # simple alias for clarity
 
@@ -235,6 +235,21 @@ def build_inference_spec_basic() -> ParamSpec:
             doc="Binary centroid offset in the detector Y direction (arcseconds).",
         ),
         ParamField(
+            key="binary.log_flux_total",
+            group="binary",
+            kind="primitive",
+            units="log10(photons)",
+            dtype=float,
+            shape=None,
+            default=8.0,  # rough ballpark; tune later
+            bounds=(None, None),
+            doc=(
+                "Effective total log10 photon count from both stars reaching "
+                "the detector over the exposure. Treated as a primitive "
+                "brightness/throughput parameter in inference."
+            ),
+        ),
+        ParamField(
             key="binary.contrast",
             group="binary",
             kind="primitive",
@@ -250,30 +265,11 @@ def build_inference_spec_basic() -> ParamSpec:
         ),
 
         # ----------------------
-        # Source photometry
+        # System geometry
         # ----------------------
         ParamField(
-            key="source.log_flux_total",
-            group="source",
-            kind="primitive",
-            units="log10(photons)",
-            dtype=float,
-            shape=None,
-            default=8.0,  # rough ballpark; tune later
-            bounds=(None, None),
-            doc=(
-                "Effective total log10 photon count from both stars reaching "
-                "the detector over the exposure. Treated as a primitive "
-                "brightness/throughput parameter in inference."
-            ),
-        ),
-
-        # ----------------------
-        # Detector geometry
-        # ----------------------
-        ParamField(
-            key="imaging.plate_scale_as_per_pix",
-            group="imaging",
+            key="system.plate_scale_as_per_pix",
+            group="system",
             kind="primitive",
             units="as / pixel",
             dtype=float,
@@ -281,10 +277,11 @@ def build_inference_spec_basic() -> ParamSpec:
             default=0.355,
             bounds=(0.0, None),
             doc=(
-                "Detector plate scale, in arcseconds per pixel. Although a "
+                "System plate scale, in arcseconds per pixel. Although a "
                 "three-plane optical system may determine plate scale from "
                 "geometry, in inference we treat it as an effective primitive "
-                "parameter."
+                "parameter. In the forward model, the corresponding knob is "
+                "`system.plate_scale_as_per_pix`."
             ),
         ),
 
@@ -317,6 +314,275 @@ def build_inference_spec_basic() -> ParamSpec:
             doc=(
                 "Secondary mirror Zernike wavefront error coefficients (nm). "
                 "Length is variable and validated by the model builder."
+            ),
+        ),
+    ]
+
+    return ParamSpec(fields)
+
+
+# ---------------------------------------------------------------------------
+# Forward modelling spec builders
+# ---------------------------------------------------------------------------
+
+def build_forward_model_spec_from_config(
+    cfg: SheraThreePlaneConfig,
+) -> ParamSpec:
+    """
+    Construct a ParamSpec describing the *truth-level* forward model
+    configuration for a single Shera three-plane scenario.
+
+    This spec is separate from the inference spec:
+
+    - ForwardModelSpec:
+        Holds the physical / configuration quantities used to compute
+        truth-level derived parameters like:
+          * the geometric PSF plate scale, and
+          * the effective total log-flux at the detector.
+        Many of these fields are mirrored from SheraThreePlaneConfig.
+
+    - Inference spec:
+        Holds the effective knobs actually exposed to the optimiser
+        (binary separation, effective plate scale, log-flux, Zernike coeffs).
+
+    Typical usage
+    -------------
+    For truth / synthetic-data generation you might:
+
+      1) Build this spec from a SheraThreePlaneConfig.
+      2) Construct a ParameterStore from the spec defaults.
+      3) Override a few imaging/binary primitives
+         (exposure time, throughput, flux density).
+      4) Run transforms to compute:
+           - `system.plate_scale_as_per_pix`
+           - `binary.log_flux_total`
+      5) Copy those derived values into your inference store.
+
+    Notes
+    -----
+    All fields here live under semantic groups:
+
+      - 'system.*' : geometry and detector sampling mirrored from config
+      - 'band.*'   : bandpass properties
+      - 'imaging.*': observation / exposure configuration
+      - 'binary.*' : binary-level flux normalisation and derived flux
+
+    Only `system.plate_scale_as_per_pix` and `binary.log_flux_total` are
+    declared as kind='derived'; all others are primitives.
+    """
+    fields = [
+        # --- System geometry: mirrored from SheraThreePlaneConfig ----------
+        ParamField(
+            key="system.m1_diameter_m",
+            group="system",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.m1_diameter_m,
+            bounds=(0.0, None),
+            doc=(
+                "Primary mirror clear diameter [meters]. Mirrored directly "
+                "from SheraThreePlaneConfig; used e.g. for collecting area "
+                "in flux calculations."
+            ),
+        ),
+        ParamField(
+            key="system.m2_diameter_m",
+            group="system",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.m2_diameter_m,
+            bounds=(0.0, None),
+            doc=(
+                "Secondary mirror diameter [meters]. Mirrored from config. "
+                "Not used in P0 flux calculations by default, but available "
+                "for future collecting-area refinements (e.g. central "
+                "obscuration)."
+            ),
+        ),
+        ParamField(
+            key="system.m1_focal_length_m",
+            group="system",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.m1_focal_length_m,
+            bounds=(0.0, None),
+            doc=(
+                "Primary mirror effective focal length [meters]. Mirrored "
+                "from SheraThreePlaneConfig; used to compute the effective "
+                "telescope focal length in the three-plane layout."
+            ),
+        ),
+        ParamField(
+            key="system.m2_focal_length_m",
+            group="system",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.m2_focal_length_m,
+            bounds=(None, 0.0),
+            doc=(
+                "Secondary mirror effective focal length [meters]. Mirrored "
+                "from SheraThreePlaneConfig; usually negative for a "
+                "Cassegrain-like layout."
+            ),
+        ),
+        ParamField(
+            key="system.m1_m2_separation_m",
+            group="system",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.m1_m2_separation_m,
+            bounds=(0.0, None),
+            doc=(
+                "Axial separation between M1 and M2 [meters]. Mirrored from "
+                "SheraThreePlaneConfig; together with the focal lengths, this "
+                "defines the effective telescope focal length."
+            ),
+        ),
+        ParamField(
+            key="system.pixel_pitch_m",
+            group="system",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.pixel_pitch_m,
+            bounds=(0.0, None),
+            doc=(
+                "Physical detector pixel pitch [meters]. Mirrored from "
+                "SheraThreePlaneConfig; used with the effective focal length "
+                "to derive the geometric PSF plate scale."
+            ),
+        ),
+
+        # --- Bandpass ----------------------------------------------------
+        ParamField(
+            key="band.wavelength_m",
+            group="band",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.wavelength_m,
+            bounds=(0.0, None),
+            doc="Central wavelength of the bandpass [meters].",
+        ),
+        ParamField(
+            key="band.bandwidth_m",
+            group="band",
+            kind="primitive",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=cfg.bandwidth_m,
+            bounds=(0.0, None),
+            doc=(
+                "Approximate bandpass width [meters]. Used for a simple "
+                "flux ~ flux_density * bandwidth estimate in P0. "
+                "More detailed bandpass modelling can be added later."
+            ),
+        ),
+
+        # --- Imaging configuration ----------------------------------
+        ParamField(
+            key="imaging.exposure_time_s",
+            group="imaging",
+            kind="primitive",
+            units="s",
+            dtype=float,
+            shape=None,
+            default=1800.0,  # 30 min nominal; override as needed
+            bounds=(0.0, None),
+            doc=(
+                "Single-exposure integration time [seconds]. Used in the "
+                "flux transform to map a flux (photons/s) to a total "
+                "photon count at the detector."
+            ),
+        ),
+        ParamField(
+            key="imaging.throughput",
+            group="imaging",
+            kind="primitive",
+            units=None,
+            dtype=float,
+            shape=None,
+            default=1.0,
+            bounds=(0.0, 1.0),
+            doc=(
+                "Effective end-to-end throughput efficiency (0–1), capturing "
+                "optical transmission, detector QE, and any other losses "
+                "not explicitly modelled. P0 default is 1.0 (no loss)."
+            ),
+        ),
+
+        # --- Source flux normalisation ----------------------------------
+        ParamField(
+            key="binary.spectral_flux_density",
+            group="binary",
+            kind="primitive",
+            units="ph / s / m^2 / m",
+            dtype=float,
+            shape=None,
+            default=1.7227e17,
+            bounds=(0.0, None),
+            doc=(
+                "Mean photon flux density from the binary at the telescope "
+                "entrance pupil, in units of photons/s/m^2 per *meter* of "
+                "bandwidth, averaged over the band of interest.\n\n"
+                "In practice you may have tabulated values in "
+                "ph/s/m^2 per micron; in that case you should convert before "
+                "setting this field, e.g. flux_per_m = flux_per_um / 1e-6.\n\n"
+                "The default value (1.7227e17) is taken from the Toliman "
+                "master spreadsheet for Alpha Cen A+B and is suitable as a "
+                "reference point, but for general targets you should override "
+                "this field based on the appropriate flux calibration."
+            ),
+        ),
+
+        # --- Derived forward-model quantities ---------------------------
+        ParamField(
+            key="system.plate_scale_as_per_pix",
+            group="system",
+            kind="derived",
+            units="as / pixel",
+            dtype=float,
+            shape=None,
+            default=None,
+            bounds=(0.0, None),
+            doc=(
+                "Geometric PSF plate scale at the detector, in arcseconds "
+                "per pixel, derived from the three-plane telescope layout "
+                "and detector pixel pitch. This is a truth-level quantity "
+                "for the forward model; in inference, the corresponding "
+                "knob is `system.plate_scale_as_per_pix`."
+            ),
+        ),
+        ParamField(
+            key="binary.log_flux_total",
+            group="binary",
+            kind="derived",
+            units="log10(photons)",
+            dtype=float,
+            shape=None,
+            default=None,
+            bounds=(None, None),
+            doc=(
+                "Truth-level total log10 photon count from the source over "
+                "the exposure at the detector plane.\n\n"
+                "Derived from the mean flux density at the pupil, the "
+                "telescope collecting area, the bandpass width, the "
+                "exposure time, and the throughput efficiency. This value "
+                "is typically copied into the inference ParameterStore under "
+                "the same key, where it is then treated as a primitive knob."
             ),
         ),
     ]
