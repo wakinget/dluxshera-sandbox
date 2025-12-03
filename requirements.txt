@@ -1,5 +1,7 @@
-# Core dependency: dLux from Dylan's fork (main has Fresnel utilities)
-dLux @ git+https://github.com/wakinget/dLux.git@main
+# Core dependency: dLux from Dylan's fork
+# Pinned to commit d0ab6df843503535c05225b15197233144be3cf1
+# (last commit before ConvergingBeamOpticalSystem refactor)
+dLux @ git+https://github.com/wakinget/dLux.git@d0ab6df843503535c05225b15197233144be3cf1
 
 # dLux ecosystem
 dLuxToliman==0.3.0
