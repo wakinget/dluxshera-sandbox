@@ -143,6 +143,9 @@ class ParameterStore:
         """
         values: Dict[ParamKey, Any] = {}
         for key, field in spec.items():
+            # Skip derived parameters
+            if field.kind == "derived":
+                continue
             values[key] = field.default
         return cls(values)
 

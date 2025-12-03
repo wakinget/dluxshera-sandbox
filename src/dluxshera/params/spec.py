@@ -550,6 +550,31 @@ def build_forward_model_spec_from_config(
 
         # --- Derived forward-model quantities ---------------------------
         ParamField(
+            key="system.focal_length_m",
+            group="system",
+            kind="derived",
+            units="m",
+            dtype=float,
+            shape=None,
+            default=None,
+            bounds=(0.0, None),
+            transform="system_focal_length_m",
+            depends_on=(
+                "system.m1_focal_length_m",
+                "system.m2_focal_length_m",
+                "system.m1_m2_separation_m",
+            ),
+            doc=(
+                "Effective telescope focal length [meters] for the Shera three-plane "
+                "two-mirror relay.\n\n"
+                "Computed from the primary and secondary focal lengths and their "
+                "axial separation via\n\n"
+                "    1 / f_eff = 1 / f1 + 1 / f2 - sep / (f1 * f2)\n\n"
+                "This matches the relation used in SheraThreePlaneSystem and is used "
+                "to derive the geometric plate scale at the detector."
+            ),
+        ),
+        ParamField(
             key="system.plate_scale_as_per_pix",
             group="system",
             kind="derived",
@@ -558,6 +583,11 @@ def build_forward_model_spec_from_config(
             shape=None,
             default=None,
             bounds=(0.0, None),
+            transform="system_plate_scale_as_per_pix",
+            depends_on=(
+                "system.focal_length_m",
+                "system.pixel_pitch_m",
+            ),
             doc=(
                 "Geometric PSF plate scale at the detector, in arcseconds "
                 "per pixel, derived from the three-plane telescope layout "
@@ -575,14 +605,23 @@ def build_forward_model_spec_from_config(
             shape=None,
             default=None,
             bounds=(None, None),
+            transform="binary_log_flux_total",
+            depends_on=(
+                "system.m1_diameter_m",
+                "band.bandwidth_m",
+                "imaging.exposure_time_s",
+                "imaging.throughput",
+                "binary.spectral_flux_density",
+            ),
             doc=(
-                "Truth-level total log10 photon count from the source over "
-                "the exposure at the detector plane.\n\n"
-                "Derived from the mean flux density at the pupil, the "
-                "telescope collecting area, the bandpass width, the "
-                "exposure time, and the throughput efficiency. This value "
-                "is typically copied into the inference ParameterStore under "
-                "the same key, where it is then treated as a primitive knob."
+                "Truth-level total log10 photon count from the binary over the "
+                "exposure at the detector plane.\n\n"
+                "Derived from the mean photon flux density at the pupil, the "
+                "telescope collecting area (currently assuming a clear circular "
+                "aperture), the bandpass width, the exposure time, and the "
+                "throughput efficiency. This value is typically copied into the "
+                "inference ParameterStore under the same key, where it is then "
+                "treated as a primitive knob."
             ),
         ),
     ]

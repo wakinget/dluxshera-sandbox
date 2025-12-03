@@ -242,3 +242,50 @@ class TransformRegistry:
             return result
 
         return _resolve(key, requested_by=None)
+
+
+# ---------------------------------------------------------------------------
+# Global registry + decorator helper
+# ---------------------------------------------------------------------------
+
+# Global registry instance that other modules can import and register with.
+TRANSFORMS = TransformRegistry()
+
+
+def register_transform(
+    key: ParamKey,
+    *,
+    depends_on: Iterable[ParamKey] = (),
+    doc: Optional[str] = None,
+):
+    """
+    Convenience decorator for registering a transform function.
+
+    Usage
+    -----
+        @register_transform(
+            "system.plate_scale_as_per_pix",
+            depends_on=("system.focal_length_m", "system.pixel_pitch_m"),
+        )
+        def plate_scale(ctx: Mapping[str, Any]) -> float:
+            f_eff = ctx["system.focal_length_m"]
+            pix   = ctx["system.pixel_pitch_m"]
+            ...
+
+    The decorated function must accept a single argument, `ctx`, which is a
+    mapping from dependency keys to their resolved values, and must return
+    the computed value for `key`.
+    """
+    deps = tuple(depends_on)
+
+    def decorator(fn: TransformFn) -> TransformFn:
+        transform = Transform(
+            key=key,
+            depends_on=deps,
+            fn=fn,
+            doc=doc or fn.__doc__,
+        )
+        TRANSFORMS.register(transform)
+        return fn
+
+    return decorator

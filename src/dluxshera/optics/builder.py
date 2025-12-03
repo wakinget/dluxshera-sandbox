@@ -56,7 +56,7 @@ def build_shera_threeplane_optics(
 
     Notes
     -----
-    - `detector_pixel_pitch_m` is stored and passed in meters, matching the
+    - `pixel_pitch_m` is stored and passed in meters, matching the
       SheraThreePlaneSystem convention.
     - SheraThreePlaneSystem has been updated to accept strut_rotation in
       degrees, so we may pass it directly from the config.
@@ -122,7 +122,7 @@ def build_shera_threeplane_optics(
         wf_npixels=cfg.pupil_npix,
         psf_npixels=cfg.psf_npix,
         oversample=cfg.oversample,
-        detector_pixel_pitch=cfg.detector_pixel_pitch_m,
+        detector_pixel_pitch=cfg.pixel_pitch_m,
         mask=cfg.diffractive_pupil_path,
         m1_noll_ind=m1_noll_ind,
         m1_coefficients=m1_coefficients,
