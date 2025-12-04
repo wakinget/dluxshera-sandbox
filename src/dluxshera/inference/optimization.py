@@ -13,7 +13,15 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
-from typing import Optional, Literal
+from typing import Optional, Literal, Callable, Sequence, Tuple
+
+from ..optics.config import SheraThreePlaneConfig
+from ..params.spec import ParamSpec, ParamKey
+from ..params.store import ParameterStore
+from ..params.packing import (
+    pack_params as store_pack_params,
+    unpack_params as store_unpack_params,
+)
 
 ############################
 # Exports
@@ -33,6 +41,9 @@ __all__ = [
 
     # likelihood / step
     "loglikelihood", "loss_fn", "step_fn",
+    "gaussian_loglikelihood_image", "poisson_loglikelihood_image",
+    "gaussian_loss", "poisson_loss", "make_loss_fn",
+    "make_image_nll_fn",
 
     # reparameterisation utils
     "generate_fim_labels", "pack_params", "unpack_params", "build_basis",
@@ -40,6 +51,7 @@ __all__ = [
     # priors
     "construct_priors_from_dict",
 ]
+
 
 
 
@@ -221,6 +233,104 @@ def make_loss_fn(
     else:
         raise ValueError(f"Unknown noise_model {noise_model!r} (expected 'gaussian' or 'poisson').")
 
+
+# -------------------------------------------------------------------------
+# Bridge from (cfg, spec, store, infer_keys, data, var) → loss(theta)
+# -------------------------------------------------------------------------
+
+def make_image_nll_fn(
+    cfg: SheraThreePlaneConfig,
+    inference_spec: ParamSpec,
+    base_store: ParameterStore,
+    infer_keys: Sequence[ParamKey],
+    data: np.ndarray,
+    var: np.ndarray,
+    *,
+    noise_model: NoiseModel = "gaussian",
+    reduce: Literal["sum", "mean"] = "sum",
+    build_model_fn: Optional[
+        Callable[[SheraThreePlaneConfig, ParamSpec, ParameterStore], Any]
+    ] = None,
+) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray]:
+    """
+    Build a loss(theta) function for image-based Shera inference.
+
+    Parameters
+    ----------
+    cfg
+        Structural SheraThreePlaneConfig (testbed vs flight, etc.).
+    inference_spec
+        ParamSpec describing the inference-space keys
+        (typically `build_inference_spec_basic()`).
+    base_store
+        ParameterStore providing a baseline set of parameter values.
+        This is the state we *overlay* when unpacking theta.
+    infer_keys
+        Sequence of ParamKeys to include in theta, e.g.
+        ["binary.separation_as", "binary.x_position", ...].
+    data
+        Observed image (PSF cutout etc.), as a JAX array.
+    var
+        Per-pixel variance map, same shape as `data`. For Poisson
+        noise it is ignored but kept for API compatibility.
+    noise_model
+        "gaussian" or "poisson": selects which NLL kernel to use.
+    reduce
+        "sum" or "mean" reduction over pixels inside the NLL kernels.
+    build_model_fn
+        Callable (cfg, inference_spec, store) -> model. If None, a
+        default Shera three-plane builder is imported lazily.
+
+    Returns
+    -------
+    loss_fn
+        Callable taking a flat theta vector and returning scalar NLL.
+        Signature: loss_fn(theta) -> scalar.
+    theta0
+        Initial packed parameter vector constructed from
+        (inference_spec, base_store, infer_keys).
+    """
+    # Subset spec to just the keys we want to infer
+    sub_spec = inference_spec.subset(infer_keys)
+
+    # Pack base_store → theta0 (this defines ordering of infer_keys)
+    theta0 = store_pack_params(sub_spec, base_store)
+
+    # Choose a per-model loss kernel (model, data, var) -> loss
+    if noise_model == "gaussian":
+        def _model_loss(m, d, v):
+            return gaussian_loss(m, d, v, reduce=reduce)
+    elif noise_model == "poisson":
+        def _model_loss(m, d, v):
+            # `var` is ignored inside poisson_loss, but we keep it in
+            # the signature so existing step functions still work.
+            return poisson_loss(m, d, v, reduce=reduce)
+    else:
+        raise ValueError(
+            f"Unknown noise_model {noise_model!r} "
+            f"(expected 'gaussian' or 'poisson')."
+        )
+
+    # Lazily resolve the model-building function to avoid circular imports
+    if build_model_fn is None:
+        from ..core.builder import build_shera_threeplane_model
+        build_model_fn = build_shera_threeplane_model
+
+    data = np.asarray(data)
+    var = np.asarray(var)
+
+    def loss_fn(theta: np.ndarray) -> np.ndarray:
+        # Unpack theta back into a ParameterStore, overlaying on base_store
+        # NOTE: unpack_params(spec_subset, theta, base_store)
+        store_theta = store_unpack_params(sub_spec, theta, base_store)
+
+        # Build model from cfg + (inference_spec, store_theta)
+        model = build_model_fn(cfg, inference_spec, store_theta)
+
+        # Evaluate loss
+        return _model_loss(model, data, var)
+
+    return loss_fn, theta0
 
 
 

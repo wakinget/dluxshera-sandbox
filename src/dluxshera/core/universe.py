@@ -59,7 +59,7 @@ def build_alpha_cen_source(
     # Required parameters – let KeyError surface if they’re missing.
     separation_as = store.get("binary.separation_as")
     position_angle_deg = store.get("binary.position_angle_deg")
-    log_flux_total = store.get("source.log_flux_total")
+    log_flux_total = store.get("binary.log_flux_total")
     contrast = store.get("binary.contrast")
 
     # Optional centre; default to (0, 0) if not present
