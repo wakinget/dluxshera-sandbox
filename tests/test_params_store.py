@@ -61,7 +61,7 @@ def test_parameter_store_from_spec_defaults():
     # Spot-check a couple of known defaults
     assert store.get("binary.separation_as") == 10.0
     assert store.get("binary.position_angle_deg") == 90.0
-    assert store.get("source.log_flux_total") == 8.0
+    assert store.get("binary.log_flux_total") == 8.0
 
 def test_parameter_store_validate_against_inference_spec_basic():
     """
