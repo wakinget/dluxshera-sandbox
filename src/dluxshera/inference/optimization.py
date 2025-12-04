@@ -1,7 +1,9 @@
-# Classes/optimization.py
+# src/dluxshera/inference/optimization.py
+from __future__ import annotations
 
 import jax
 import jax.numpy as np
+import jax.scipy.stats as jstats
 import numpy as onp
 from jax import config, grad, linearize, jit, lax
 import dLux.utils as dlu
@@ -11,6 +13,7 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
+from typing import Optional, Literal
 
 ############################
 # Exports
@@ -37,6 +40,186 @@ __all__ = [
     # priors
     "construct_priors_from_dict",
 ]
+
+
+
+############################
+# New P0 likelihood kernels
+############################
+
+NoiseModel = Literal["gaussian", "poisson"]
+
+def gaussian_loglikelihood_image(
+    model_image: np.ndarray,
+    data_image: np.ndarray,
+    var_image: np.ndarray,
+    *,
+    reduce: Optional[Literal["sum", "mean"]] = "sum",
+) -> np.ndarray:
+    """
+    Per-pixel Gaussian log-likelihood for an image.
+
+    Parameters
+    ----------
+    model_image :
+        Model prediction (expected value) per pixel.
+    data_image :
+        Observed data per pixel.
+    var_image :
+        Per-pixel variance (σ^2). Must be positive; no check is enforced here.
+    reduce :
+        If "sum", returns scalar sum over pixels.
+        If "mean", returns mean over pixels.
+        If None, returns the per-pixel log-likelihood array.
+
+    Returns
+    -------
+    np.ndarray
+        Log-likelihood (scalar if reduced, otherwise same shape as inputs).
+    """
+    # Convert variance → standard deviation
+    sigma = np.sqrt(var_image)
+
+    # jstats.norm.logpdf expects (x, loc, scale)
+    logp = jstats.norm.logpdf(data_image, loc=model_image, scale=sigma)
+
+    if reduce == "sum":
+        return np.nansum(logp)
+    elif reduce == "mean":
+        return np.nanmean(logp)
+    else:
+        return logp
+
+
+def poisson_loglikelihood_image(
+    model_image: np.ndarray,
+    data_image: np.ndarray,
+    *,
+    reduce: Optional[Literal["sum", "mean"]] = "sum",
+) -> np.ndarray:
+    """
+    Per-pixel Poisson log-likelihood for an image.
+
+    Parameters
+    ----------
+    model_image :
+        Expected counts λ per pixel (must be non-negative).
+    data_image :
+        Observed integer counts per pixel.
+    reduce :
+        If "sum", returns scalar sum over pixels.
+        If "mean", returns mean over pixels.
+        If None, returns the per-pixel log-likelihood array.
+
+    Notes
+    -----
+    This uses jax.scipy.stats.poisson.logpmf, which implements:
+        logP(d | λ) = d * log(λ) - λ - log(d!)
+
+    The -log(d!) term does not depend on the model, but is included in
+    the result; it's harmless for optimization.
+    """
+    logp = jstats.poisson.logpmf(data_image, model_image)
+
+    if reduce == "sum":
+        return np.nansum(logp)
+    elif reduce == "mean":
+        return np.nanmean(logp)
+    else:
+        return logp
+
+
+
+def gaussian_loss(
+    model,
+    data: np.ndarray,
+    var: np.ndarray,
+    *,
+    reduce: Literal["sum", "mean"] = "sum",
+) -> np.ndarray:
+    """
+    Negative Gaussian log-likelihood for a Shera model object.
+
+    Parameters
+    ----------
+    model :
+        Object with a `.model()` method returning the predicted image.
+    data :
+        Observed image.
+    var :
+        Per-pixel variance for the Gaussian noise model.
+    reduce :
+        "sum" or "mean" reduction over pixels.
+
+    Returns
+    -------
+    np.ndarray
+        Scalar loss (negative log-likelihood with the chosen reduction).
+    """
+    model_image = model.model()
+    loglike = gaussian_loglikelihood_image(model_image, data, var, reduce=reduce)
+    return -loglike
+
+
+def poisson_loss(
+    model,
+    data: np.ndarray,
+    var: Optional[np.ndarray] = None,
+    *,
+    reduce: Literal["sum", "mean"] = "sum",
+) -> np.ndarray:
+    """
+    Negative Poisson log-likelihood for a Shera model object.
+
+    Parameters
+    ----------
+    model :
+        Object with a `.model()` method returning the predicted expected
+        counts (λ) per pixel.
+    data :
+        Observed integer counts per pixel.
+    var :
+        Unused; kept for API compatibility with Gaussian loss.
+    reduce :
+        "sum" or "mean" reduction over pixels.
+
+    Returns
+    -------
+    np.ndarray
+        Scalar loss (negative log-likelihood with the chosen reduction).
+    """
+    del var  # unused
+    model_image = model.model()
+    loglike = poisson_loglikelihood_image(model_image, data, reduce=reduce)
+    return -loglike
+
+
+
+def make_loss_fn(
+    noise_model: NoiseModel = "gaussian",
+    *,
+    reduce: Literal["sum", "mean"] = "sum",
+):
+    """
+    Factory returning a loss function with signature (model, data, var) -> loss.
+
+    This is designed to plug directly into your existing step functions
+    that expect a `loss_fn(model, data, var)` callable.
+    """
+    if noise_model == "gaussian":
+        def _loss(model, data, var):
+            return gaussian_loss(model, data, var, reduce=reduce)
+        return _loss
+
+    elif noise_model == "poisson":
+        def _loss(model, data, var):
+            # `var` is ignored inside poisson_loss, but we keep it in
+            # the signature so existing step functions still work.
+            return poisson_loss(model, data, var, reduce=reduce)
+        return _loss
+
+    else:
+        raise ValueError(f"Unknown noise_model {noise_model!r} (expected 'gaussian' or 'poisson').")
 
 
 
