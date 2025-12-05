@@ -5,7 +5,7 @@ from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 from dluxshera.core.builder import build_shera_threeplane_model
-from dluxshera.inference.optimization import make_image_nll_fn
+from dluxshera.inference.optimization import make_image_nll_fn, run_image_gd
 
 
 def _make_store_for_smoke(cfg):
@@ -14,7 +14,7 @@ def _make_store_for_smoke(cfg):
 
     updates = {
         "binary.separation_as": 10.0,
-        "binary.position_angle_deg": 45.0,
+        "binary.position_angle_deg": 90.0,
         "binary.x_position": 0.0,
         "binary.y_position": 0.0,
         "binary.contrast": 3.0,
@@ -65,3 +65,40 @@ def test_make_image_nll_fn_smoke_gaussian():
     grad_fn = jax.grad(loss_fn)
     g0 = grad_fn(theta0)
     assert g0.shape == theta0.shape
+
+
+def test_run_image_gd_separation_smoke():
+    cfg = SHERA_TESTBED_CONFIG
+    spec, store_true = _make_store_for_smoke(cfg)
+
+    # 1) Generate synthetic data from the "truth" store
+    model_true = build_shera_threeplane_model(cfg, spec, store_true)
+    data = model_true.model()
+    var = np.ones_like(data)
+
+    # 2) Start from a slightly wrong separation
+    sep_true = store_true.get("binary.separation_as")
+    store_init = store_true.replace({"binary.separation_as": sep_true * 1.1})
+
+    infer_keys = ["binary.separation_as"]
+
+    theta_final, store_final, history = run_image_gd(
+        cfg,
+        spec,
+        store_init,
+        infer_keys,
+        data,
+        var,
+        noise_model="gaussian",
+        learning_rate=1e-1,
+        num_steps=20,
+        build_model_fn=build_shera_threeplane_model,
+    )
+
+    # Loss should go down
+    assert float(history["loss"][-1]) < float(history["loss"][0])
+
+    # Separation should move closer to the truth
+    sep_init = store_init.get("binary.separation_as")
+    sep_est = store_final.get("binary.separation_as")
+    assert abs(sep_est - sep_true) < abs(sep_init - sep_true)

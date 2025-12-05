@@ -6,6 +6,8 @@ import jax.numpy as np
 import jax.scipy.stats as jstats
 import numpy as onp
 from jax import config, grad, linearize, jit, lax
+import dLux as dl
+import dLux.layers as dll
 import dLux.utils as dlu
 import optax
 import equinox as eqx
@@ -247,6 +249,7 @@ def make_loss_fn(
 # Bridge from (cfg, spec, store, infer_keys, data, var) → loss(theta)
 # -------------------------------------------------------------------------
 
+# NLL -> Negative Log-Likelihood
 def make_image_nll_fn(
     cfg: SheraThreePlaneConfig,
     inference_spec: ParamSpec,
@@ -399,6 +402,116 @@ def run_simple_gd(
 
     history = {"loss": np.stack(losses)}
     return theta, history
+
+
+def run_image_gd(
+    cfg,
+    inference_spec,
+    store_init,
+    infer_keys,
+    data,
+    var,
+    *,
+    noise_model: NoiseModel = "gaussian",
+    learning_rate: float = 1e-2,
+    num_steps: int = 50,
+    build_model_fn=None,  # kept for API compatibility; unused in this implementation
+):
+    """
+    Run gradient descent in θ-space for image-based NLL using the Shera model.
+
+    This version **prebuilds the optics + detector once**, outside the JAX
+    gradient, and only rebuilds the source from the ParameterStore inside
+    the loss. That avoids tracing through the Zernike basis construction
+    (and the dLux noll_indices(int) path) while still keeping the forward
+    model fully differentiable w.r.t. astrometric/flux parameters.
+
+    Parameters
+    ----------
+    cfg :
+        SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
+    inference_spec :
+        ParamSpec describing the inference-level keys (e.g. build_inference_spec_basic()).
+    store_init :
+        ParameterStore providing the initial values for all parameters
+        (including both inferred and fixed ones).
+    infer_keys :
+        Sequence of parameter keys (strings) to infer, e.g.
+        ["binary.separation_as", "binary.x_position", "binary.y_position"].
+    data :
+        Observed image (JAX array).
+    var :
+        Per-pixel variance image (JAX array) for the Gaussian model.
+        Ignored for Poisson, but kept for API compatibility.
+    noise_model :
+        "gaussian" (default) or "poisson".
+    learning_rate :
+        Step size for run_simple_gd.
+    num_steps :
+        Number of GD iterations.
+    build_model_fn :
+        Kept for API compatibility but not used here. The model is built
+        explicitly from a prebuilt optics + detector and a source built
+        from the ParameterStore.
+
+    Returns
+    -------
+    theta_final : jnp.ndarray
+        Final flat parameter vector in θ-space.
+    store_final : ParameterStore
+        New store with infer_keys updated from theta_final.
+    history : dict[str, jnp.ndarray]
+        Optimization history with at least:
+          - "loss": loss value per step
+          - "theta": stacked θ values (num_steps+1, ...)
+    """
+    # Local imports to avoid circulars
+    from ..optics.builder import build_shera_threeplane_optics
+    from ..core.universe import build_alpha_cen_source
+
+    # 1) Prebuild optics + detector OUTSIDE the gradient
+    #    This runs dLux's Zernike machinery in normal Python mode, so
+    #    any int(...) usage there does not conflict with JAX tracing.
+    optics = build_shera_threeplane_optics(cfg, store=store_init, spec=inference_spec)
+
+    detector = dl.LayeredDetector(
+        layers=[("downsample", dll.Downsample(cfg.oversample))]
+    )
+
+    # 2) Build a spec subset + initial θ from the initial store
+    sub_spec = inference_spec.subset(infer_keys)
+    # Use the same dtype as data for θ by default
+    theta0 = store_pack_params(sub_spec, store_init, dtype=data.dtype)
+
+    # 3) Choose the image loss kernel (Gaussian or Poisson)
+    image_loss = make_loss_fn(noise_model=noise_model, reduce="sum")
+
+    # 4) Define θ → loss(θ) using static optics + detector
+    def loss_theta(theta):
+        # Unpack θ into a new store, updating only infer_keys
+        store_theta = store_unpack_params(sub_spec, theta, store_init)
+
+        # Build source from the updated store; optics/detector are fixed
+        source = build_alpha_cen_source(store_theta, n_wavels=cfg.n_lambda)
+
+        # Compose the telescope on-the-fly; this is cheap and JAX-friendly
+        model = dl.Telescope(source=source, optics=optics, detector=detector)
+
+        # Compute negative log-likelihood loss
+        return image_loss(model, data, var)
+
+    # 5) Run simple gradient descent in θ-space
+    theta_final, history = run_simple_gd(
+        loss_theta,
+        theta0,
+        learning_rate=learning_rate,
+        num_steps=num_steps,
+    )
+
+    # 6) Map final θ back into a ParameterStore
+    store_final = store_unpack_params(sub_spec, theta_final, store_init)
+
+    return theta_final, store_final, history
 
 
 ############################
