@@ -13,7 +13,7 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
-from typing import Optional, Literal, Callable, Sequence, Tuple
+from typing import Optional, Literal, Callable, Sequence, Tuple, Dict
 
 from ..optics.config import SheraThreePlaneConfig
 from ..params.spec import ParamSpec, ParamKey
@@ -39,11 +39,19 @@ __all__ = [
     "BaseModeller", "ModelParams",
     "SheraTwoPlaneParams", "SheraThreePlaneParams", "EigenParams",
 
-    # likelihood / step
-    "loglikelihood", "loss_fn", "step_fn",
-    "gaussian_loglikelihood_image", "poisson_loglikelihood_image",
-    "gaussian_loss", "poisson_loss", "make_loss_fn",
+    # new likelihood / loss utilities
+    "gaussian_loglikelihood_image",
+    "poisson_loglikelihood_image",
+    "gaussian_loss",
+    "poisson_loss",
+    "make_loss_fn",
     "make_image_nll_fn",
+
+    # simple θ–space optimizer
+    "run_simple_gd",
+
+    # legacy likelihood / step fns (model-params space)
+    "loglikelihood", "loss_fn", "step_fn",
 
     # reparameterisation utils
     "generate_fim_labels", "pack_params", "unpack_params", "build_basis",
@@ -51,6 +59,7 @@ __all__ = [
     # priors
     "construct_priors_from_dict",
 ]
+
 
 
 
@@ -333,6 +342,63 @@ def make_image_nll_fn(
     return loss_fn, theta0
 
 
+def run_simple_gd(
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta0: np.ndarray,
+    *,
+    learning_rate: float = 1e-2,
+    num_steps: int = 100,
+    optimizer: Optional[optax.GradientTransformation] = None,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """
+    Minimal gradient-descent loop over a packed parameter vector θ.
+
+    Parameters
+    ----------
+    loss_fn :
+        Callable taking a 1D JAX array `theta` and returning a scalar loss.
+        In our Shera use-case this will typically be the closure produced by
+        `make_image_nll_fn(...)`.
+    theta0 :
+        Initial 1D parameter vector.
+    learning_rate :
+        Step size for the default Adam optimizer (ignored if `optimizer`
+        is provided).
+    num_steps :
+        Number of gradient steps to take.
+    optimizer :
+        Optional optax optimizer. If None, `optax.adam(learning_rate)` is used.
+
+    Returns
+    -------
+    theta_final :
+        Final parameter vector after `num_steps` updates.
+    history :
+        Dict of simple diagnostics:
+          - "loss": 1D array of loss values at each step.
+    """
+    theta = np.asarray(theta0)
+
+    if optimizer is None:
+        optimizer = optax.adam(learning_rate)
+
+    opt_state = optimizer.init(theta)
+
+    @jax.jit
+    def _step(theta, opt_state):
+        loss, g = jax.value_and_grad(loss_fn)(theta)
+        updates, opt_state = optimizer.update(g, opt_state, theta)
+        theta = optax.apply_updates(theta, updates)
+        return theta, opt_state, loss
+
+    losses = []
+
+    for _ in range(num_steps):
+        theta, opt_state, loss = _step(theta, opt_state)
+        losses.append(loss)
+
+    history = {"loss": np.stack(losses)}
+    return theta, history
 
 
 ############################
