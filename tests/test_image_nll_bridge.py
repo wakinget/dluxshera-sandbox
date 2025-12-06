@@ -1,3 +1,4 @@
+# tests/test_image_nll_bridge.py
 import jax
 import jax.numpy as np
 
@@ -92,7 +93,6 @@ def test_run_image_gd_separation_smoke():
         noise_model="gaussian",
         learning_rate=1e-1,
         num_steps=20,
-        build_model_fn=build_shera_threeplane_model,
     )
 
     # Loss should go down

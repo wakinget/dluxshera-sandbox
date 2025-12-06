@@ -15,7 +15,7 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
-from typing import Optional, Literal, Callable, Sequence, Tuple, Dict
+from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any
 
 from ..optics.config import SheraThreePlaneConfig
 from ..params.spec import ParamSpec, ParamKey
@@ -405,33 +405,34 @@ def run_simple_gd(
 
 
 def run_image_gd(
-    cfg,
-    inference_spec,
-    store_init,
-    infer_keys,
+    cfg: SheraThreePlaneConfig,
+    inference_spec: ParamSpec,
+    store_init: ParameterStore,
+    infer_keys: Sequence[ParamKey],
     data,
     var,
     *,
     noise_model: NoiseModel = "gaussian",
     learning_rate: float = 1e-2,
     num_steps: int = 50,
-    build_model_fn=None,  # kept for API compatibility; unused in this implementation
 ):
     """
-    Run gradient descent in θ-space for image-based NLL using the Shera model.
+    Run gradient descent in θ-space for image-based NLL using the Shera model,
+    using a SheraThreePlaneBinder to hold the static optics + detector.
 
-    This version **prebuilds the optics + detector once**, outside the JAX
-    gradient, and only rebuilds the source from the ParameterStore inside
-    the loss. That avoids tracing through the Zernike basis construction
-    (and the dLux noll_indices(int) path) while still keeping the forward
-    model fully differentiable w.r.t. astrometric/flux parameters.
+    This version:
+
+      - Builds a SheraThreePlaneBinder(cfg, inference_spec, store_init) once.
+      - Uses the Binder's static optics + detector for all iterations.
+      - Rebuilds only the source (via the binder) from the updated store.
+      - Evaluates the image-level NLL using Gaussian or Poisson noise.
 
     Parameters
     ----------
     cfg :
         SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
     inference_spec :
-        ParamSpec describing the inference-level keys (e.g. build_inference_spec_basic()).
+        ParamSpec describing the inference-level keys.
     store_init :
         ParameterStore providing the initial values for all parameters
         (including both inferred and fixed ones).
@@ -439,9 +440,9 @@ def run_image_gd(
         Sequence of parameter keys (strings) to infer, e.g.
         ["binary.separation_as", "binary.x_position", "binary.y_position"].
     data :
-        Observed image (JAX array).
+        Observed image (array-like). Converted to jax.numpy array internally.
     var :
-        Per-pixel variance image (JAX array) for the Gaussian model.
+        Per-pixel variance image (array-like) for the Gaussian model.
         Ignored for Poisson, but kept for API compatibility.
     noise_model :
         "gaussian" (default) or "poisson".
@@ -449,10 +450,6 @@ def run_image_gd(
         Step size for run_simple_gd.
     num_steps :
         Number of GD iterations.
-    build_model_fn :
-        Kept for API compatibility but not used here. The model is built
-        explicitly from a prebuilt optics + detector and a source built
-        from the ParameterStore.
 
     Returns
     -------
@@ -462,43 +459,47 @@ def run_image_gd(
         New store with infer_keys updated from theta_final.
     history : dict[str, jnp.ndarray]
         Optimization history with at least:
-          - "loss": loss value per step
-          - "theta": stacked θ values (num_steps+1, ...)
+          - "loss": loss value per step.
     """
-    # Local imports to avoid circulars
-    from ..optics.builder import build_shera_threeplane_optics
-    from ..core.universe import build_alpha_cen_source
 
-    # 1) Prebuild optics + detector OUTSIDE the gradient
-    #    This runs dLux's Zernike machinery in normal Python mode, so
-    #    any int(...) usage there does not conflict with JAX tracing.
-    optics = build_shera_threeplane_optics(cfg, store=store_init, spec=inference_spec)
+    # Local import to avoid circulars
+    from ..core.binder import SheraThreePlaneBinder
 
-    detector = dl.LayeredDetector(
-        layers=[("downsample", dll.Downsample(cfg.oversample))]
-    )
+    # 1) Build the Binder: this validates the store against the spec,
+    #    and prebuilds static optics + detector.
+    binder = SheraThreePlaneBinder(cfg, inference_spec, store_init)
 
-    # 2) Build a spec subset + initial θ from the initial store
+    # 2) Build a spec subset + initial θ from the Binder's base_store
     sub_spec = inference_spec.subset(infer_keys)
+
     # Use the same dtype as data for θ by default
-    theta0 = store_pack_params(sub_spec, store_init, dtype=data.dtype)
+    data = np.asarray(data)
+    var = np.asarray(var)
+    theta0 = store_pack_params(sub_spec, binder.base_store, dtype=data.dtype)
 
-    # 3) Choose the image loss kernel (Gaussian or Poisson)
-    image_loss = make_loss_fn(noise_model=noise_model, reduce="sum")
+    # 3) Choose an image-level NLL kernel (on images, not model objects)
+    if noise_model == "gaussian":
+        def image_nll(image):
+            # negative log-likelihood (sum over pixels)
+            return -gaussian_loglikelihood_image(image, data, var, reduce="sum")
+    elif noise_model == "poisson":
+        def image_nll(image):
+            return -poisson_loglikelihood_image(image, data, reduce="sum")
+    else:
+        raise ValueError(
+            f"Unknown noise_model {noise_model!r} (expected 'gaussian' or 'poisson')."
+        )
 
-    # 4) Define θ → loss(θ) using static optics + detector
+    # 4) Define θ → loss(θ) using the Binder's static optics + detector
     def loss_theta(theta):
-        # Unpack θ into a new store, updating only infer_keys
-        store_theta = store_unpack_params(sub_spec, theta, store_init)
+        # Unpack θ into a (partial) store overlaying binder.base_store
+        store_theta = store_unpack_params(sub_spec, theta, binder.base_store)
 
-        # Build source from the updated store; optics/detector are fixed
-        source = build_alpha_cen_source(store_theta, n_wavels=cfg.n_lambda)
+        # Let the Binder handle merging with base_store and doing the forward model
+        image = binder.forward(store_theta)
 
-        # Compose the telescope on-the-fly; this is cheap and JAX-friendly
-        model = dl.Telescope(source=source, optics=optics, detector=detector)
-
-        # Compute negative log-likelihood loss
-        return image_loss(model, data, var)
+        # Evaluate image-level negative log-likelihood
+        return image_nll(image)
 
     # 5) Run simple gradient descent in θ-space
     theta_final, history = run_simple_gd(
@@ -509,9 +510,10 @@ def run_image_gd(
     )
 
     # 6) Map final θ back into a ParameterStore
-    store_final = store_unpack_params(sub_spec, theta_final, store_init)
+    store_final = store_unpack_params(sub_spec, theta_final, binder.base_store)
 
     return theta_final, store_final, history
+
 
 
 ############################
