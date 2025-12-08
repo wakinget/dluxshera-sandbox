@@ -319,8 +319,8 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
 
 ## 15) Tasks & Priorities
 
-============================================================
-P0 — Core plumbing
+============================================================  
+P0 — Core plumbing  
 ============================================================
 
 - [ ] ParamSpec core keys  
@@ -568,8 +568,8 @@ P0 — Core plumbing
     - Tiny optimisation and verify recovered separation within tolerance for fixed seed.  
 
 
-============================================================
-P0 — Additional helpers / ideas
+============================================================  
+P0 — Additional helpers / ideas  
 ============================================================
 
 - A `refresh()` helper to automatically update derived parameters within a store using the transform registry.  
@@ -577,8 +577,8 @@ P0 — Additional helpers / ideas
   - Later: provide a function that returns a new store with selected derived keys filled in from transforms (no mutation).  
 
 
-============================================================
-P1 — Docs & examples
+============================================================  
+P1 — Docs & examples  
 ============================================================
 
 - [ ] README quickstart  
@@ -588,8 +588,8 @@ P1 — Docs & examples
 - [ ] API docstrings for new modules (params, transforms, optics builder, Binder, inference API).  
 
 
-============================================================
-P2 — Variant support
+============================================================  
+P2 — Variant support  
 ============================================================
 
 - [ ] Four-plane transforms & builder/binder  
@@ -597,8 +597,8 @@ P2 — Variant support
 - [ ] End-to-end smoke test  
 
 
-============================================================
-P3 — Ergonomics
+============================================================  
+P3 — Ergonomics  
 ============================================================
 
 - [ ] ModelParams shim + proxy + keymap (for legacy notebooks)  
@@ -606,9 +606,9 @@ P3 — Ergonomics
 - [ ] Optional upstream PRs to dLux/dLuxToliman (e.g. Zernike/basis ergonomics, Shera helpers)  
 
 
-============================================================
-Next Sprint — Suggested Short-Term Focus
-============================================================
+============================================================  
+Next Sprint — Suggested Short-Term Focus  
+============================================================  
 
 - [ ] Finalise a **canonical θ-space loss** using Binder  
   - Implement `loss_canonical(theta, cfg, inf_spec_subset, base_store, data, var)` that wraps Binder + store pack/unpack and becomes the single reference loss.  
