@@ -64,6 +64,11 @@ __all__ = [
 
 
 
+# NOTE:
+# - Legacy ModelParams/EigenParams + FIM/step_fn live here for now.
+# - New Binder + θ-space loss/FIM/optim also live here.
+#   Once the new path stabilises, we will split FIM/eigen utilities into
+#   a dedicated inference.fim / inference.eigen module.
 
 
 ############################
@@ -512,8 +517,105 @@ def run_image_gd(
 
 
 
+# -------------------------------------------------------------------------
+# θ-space Fisher Information utilities (Binder-based)
+# -------------------------------------------------------------------------
+
+def fim_theta(
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta_ref: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute a Fisher Information Matrix (FIM) in θ-space for a given
+    scalar loss or NLL function.
+
+    This is a thin wrapper around `jax.hessian(loss_fn)(theta_ref)`,
+    but keeps the intent clear: the Hessian of the *negative*
+    log-likelihood (or loss) at a reference point.
+
+    Parameters
+    ----------
+    loss_fn :
+        Callable taking a 1D θ vector and returning a scalar loss or
+        negative log-likelihood. In Shera usage, this is usually the
+        closure returned by `make_binder_image_nll_fn(...)`.
+    theta_ref :
+        1D JAX array representing the reference parameter vector at
+        which to evaluate the FIM (e.g. truth or current MAP).
+
+    Returns
+    -------
+    F : jnp.ndarray
+        (N, N) Fisher matrix in θ coordinates, where N = theta_ref.size.
+    """
+    theta_ref = np.asarray(theta_ref)
+
+    # We don't need any special tricks here; θ is already flat.
+    return jax.hessian(loss_fn)(theta_ref)
+
+
+def fim_theta_shera(
+    cfg: SheraThreePlaneConfig,
+    inference_spec: ParamSpec,
+    base_store: ParameterStore,
+    infer_keys: Sequence[ParamKey],
+    data: np.ndarray,
+    var: np.ndarray,
+    *,
+    noise_model: NoiseModel = "gaussian",
+    reduce: Literal["sum", "mean"] = "sum",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Convenience helper: build a Binder-based θ-space NLL for Shera and
+    compute its Fisher Information Matrix at the corresponding θ₀.
+
+    Parameters
+    ----------
+    cfg :
+        SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
+    inference_spec :
+        ParamSpec describing inference-level keys.
+    base_store :
+        ParameterStore providing the baseline parameter values (truth
+        or current best-fit).
+    infer_keys :
+        Sequence of ParamKeys included in θ (order matters).
+    data :
+        Observed image.
+    var :
+        Per-pixel variance image (ignored for Poisson, but kept for API).
+    noise_model :
+        "gaussian" or "poisson".
+    reduce :
+        Reduction inside the NLL (passed through to the image kernels).
+
+    Returns
+    -------
+    F : jnp.ndarray
+        (N, N) Fisher matrix in θ-space.
+    theta0 : jnp.ndarray
+        The θ vector at which the FIM was evaluated (the same θ₀
+        returned by `make_binder_image_nll_fn`).
+    """
+    # Reuse the canonical Binder-based NLL closure
+    loss_fn, theta0 = make_binder_image_nll_fn(
+        cfg,
+        inference_spec,
+        base_store,
+        infer_keys,
+        data,
+        var,
+        noise_model=noise_model,
+        reduce=reduce,
+    )
+
+    F = fim_theta(loss_fn, theta0)
+    return F, theta0
+
+
+
 ############################
-# Fisher Matrix Utilities
+# Legacy Fisher Matrix Utilities
 ############################
 
 def hessian(f, x):
