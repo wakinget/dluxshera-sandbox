@@ -319,7 +319,9 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
 
 ## 15) Tasks & Priorities
 
-**P0 — Core plumbing**
+============================================================
+P0 — Core plumbing
+============================================================
 
 - [ ] ParamSpec core keys  
   - [x] Implement `ParamField` dataclass  
@@ -329,7 +331,7 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
     - Stores a list of `ParamField`s  
     - Provides lookup by key and iteration over fields  
   - [x] Define `build_inference_spec_basic()`  
-    - Binary parameters: separation, position angle, centroid (x/y), contrast  
+    - Binary: separation, position angle, centroid (x/y), contrast  
     - Photometry: `binary.log_flux_total`  
     - System: `system.plate_scale_as_per_pix`  
     - Wavefront: `primary.zernike_coeffs`, `secondary.zernike_coeffs` (variable-length)  
@@ -338,8 +340,8 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
     - `build_forward_model_spec_from_config(cfg: SheraThreePlaneConfig)` mirrors config geometry/band/imaging and declares derived forward keys (`system.focal_length_m`, `system.plate_scale_as_per_pix`, `binary.log_flux_total`).  
   - [ ] Cross-link ParamSpec usage in the Working Plan (explain “schema vs state” distinction)  
 
----
 
+------------------------------------------------------------
 - [ ] ParameterStore (frozen, pytree, validate)  
   - [x] Implement `ParameterStore` as a frozen dataclass  
     - Internally stores `_values: Mapping[ParamKey, Any]`  
@@ -365,28 +367,30 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
   - [ ] Decide how strictly we want validation in “production” code paths  
     - E.g. always validate against a spec at model construction vs on-demand  
 
----
 
+------------------------------------------------------------
 - [ ] Inference parameter packing (store ↔ vector)  
-  - [ ] Choose an initial inference subset of keys for separation-focused astrometry runs  
+  - [x] Choose an initial inference subset of keys for separation-focused astrometry runs  
     - e.g. `["binary.separation_as", "binary.position_angle_deg", "binary.x_position", "binary.y_position", "binary.log_flux_total"]` (+ optionally `system.plate_scale_as_per_pix`)  
     - Define `inf_spec_subset = build_inference_spec_basic().subset(infer_keys)` as the canonical ordering for the parameter vector.  
-  - [ ] Implement `pack_params(spec_subset, store)`  
+  - [x] Implement `pack_params(spec_subset, store)` in `params/packing.py`  
     - Walk keys in `spec_subset` order, pull values from `store`, flatten to 1D as needed, and concatenate into a single 1D JAX array `theta`.  
-    - Clearly document that `spec_subset` defines both *which* parameters are inferred and the *order* of coordinates in `theta`.  
-  - [ ] Implement `unpack_params(spec_subset, theta, base_store)`  
+    - `spec_subset` defines both *which* parameters are inferred and the *order* of coordinates in `theta`.  
+  - [x] Implement `unpack_params(spec_subset, theta, base_store)` in `params/packing.py`  
     - Start from `base_store` holding all parameters (inferred + fixed).  
     - Slice `theta` according to the same key order, rebuild scalars/arrays per field, and return a new `ParameterStore` via `base_store.replace({...})`.  
-    - This becomes the standard way to go from a flat optimisation vector back to a structured parameter state.  
-  - [ ] Unit tests for packing  
+    - This is now the standard way to go from a flat optimisation vector back to a structured parameter state.  
+  - [x] Unit tests for packing (plus indirect tests via image NLL bridge)  
     - Round-trip test: `store2 = unpack_params(subset, pack_params(subset, store), base_store=store)` and verify equality for all keys in the subset.  
-    - Include at least one simple vector-valued parameter in the toy spec to prove the logic works beyond pure scalars.  
+    - Include at least one vector-valued parameter in the toy spec to prove logic beyond pure scalars.  
+  - [x] Smoke usage tests  
+    - `test_image_nll_bridge.py` and `test_inference_api.py` both exercise pack/unpack via `make_image_nll_fn`, `run_image_gd`, and `run_shera_image_gd_basic`.  
 
----
 
+------------------------------------------------------------
 - [ ] Transforms registry + resolver; `psf_pixel_scale` (three-plane)  
   - [x] Implement transform registry infrastructure  
-    - A way to register transforms that compute derived keys from primitive ones  
+    - Register transforms that compute derived keys from primitive ones  
     - Resolver that:  
       - takes a target key,  
       - walks dependency graph,  
@@ -399,13 +403,13 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
     - `system.plate_scale_as_per_pix` from `system.focal_length_m`, `system.pixel_pitch_m`  
     - `binary.log_flux_total` from `system.m1_diameter_m`, `band.bandwidth_m`, `imaging.exposure_time_s`, `imaging.throughput`, `binary.spectral_flux_density`  
   - [x] Decide / document policy for conflicts  
-    - **Decision:** “store wins” — if a key exists in the `ParameterStore`, its value is used; transforms are only evaluated when the key is absent from the store.  
+    - **Policy:** “store wins” — if a key exists in the `ParameterStore`, its value is used; transforms are only evaluated when the key is absent from the store.  
   - [x] Implement and test a three-plane plate-scale transform  
     - `system.plate_scale_as_per_pix` transform uses the same effective focal-length relation as `SheraThreePlaneSystem`.  
     - Tests compare against the legacy optics `psf_pixel_scale` for consistency.  
 
----
 
+------------------------------------------------------------
 - [ ] ThreePlaneBuilder (structural hash/cache)  
   - [x] Implement `SheraThreePlaneConfig` dataclass  
     - Geometry: diameters, focal lengths, plane separation  
@@ -422,7 +426,7 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
   - [x] Implement `build_shera_threeplane_optics(cfg, store=None, spec=None)` in `optics/builder.py`  
     - Wraps `SheraThreePlaneSystem`  
     - Maps config fields → constructor arguments (units and names aligned)  
-    - Passes DP path + design wavelength through to the updated `SheraThreePlaneSystem`  
+    - Passes DP path + design wavelength through to `SheraThreePlaneSystem`  
     - Optionally validates a `ParameterStore` against a `ParamSpec` before use  
     - Injects Zernike coefficients from `ParameterStore` (when present) as `m1_coefficients` / `m2_coefficients`.  
   - [x] Smoke test for the optics builder  
@@ -437,32 +441,31 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
     - Compute a hash from `SheraThreePlaneConfig` + relevant aspects of `ParamSpec`  
     - Leave actual caching to a higher-level layer, but define the hash function here  
 
----
 
+------------------------------------------------------------
 - [ ] ThreePlaneBinder (phase/sampling bind)  
-  - [ ] Design a small “binder” helper or dataclass  
-    - Responsible for binding physical layout (config) → sampling choices (PSF grid, plate scale, oversample).  
-    - Longer-term goal is to allow switching between “geometry-driven plate scale” vs “free plate scale” without touching core model code.  
-  - [ ] Decide how `system.plate_scale_as_per_pix` interacts with geometry  
-    - Option A (P0-ish): treat `system.plate_scale_as_per_pix` as an independent inference knob (as we do now) and use geometry-derived values only in truth-generation / forward-model specs.  
-    - Option B (later): add a binder-level switch that either forces `system.plate_scale_as_per_pix` from geometry transforms or leaves it free as an effective calibration parameter.  
-  - [ ] Implement binder logic for:  
-    - Converting `pixel_pitch_m` and effective focal length → angular plate scale (using the same relation as the transforms).  
-    - Ensuring consistency with dLux’s detector / PSF sampling expectations if/when we push more geometry into the detection plane.  
-  - [ ] Test binder behavior  
-    - Given a config, verify that any binder-computed plate scale matches the transform and the internal computation in `SheraThreePlaneSystem` (where relevant).  
-    - Document any approximations (e.g. small-angle, telecentric assumptions).  
+  - [x] Design a small “binder” helper/dataclass  
+    - Implemented as `SheraThreePlaneBinder` in `core/binder.py`.  
+    - Holds static optics + detector from `SheraThreePlaneConfig` and a base `ParameterStore`.  
+  - [x] Implement binder logic for forward modelling  
+    - `_merge_store()` to overlay a partial store on the base store.  
+    - `forward(store)` builds an Alpha Cen source from the merged store and calls a fixed `dl.Telescope` (optics + detector) to produce an image.  
+  - [x] Test binder behavior  
+    - `test_binder_smoke.py`: binder builds and returns an image with expected shape.  
+  - [ ] Decide how `system.plate_scale_as_per_pix` interacts with geometry at the binder level  
+    - Option A (current default): treat `system.plate_scale_as_per_pix` as an independent inference knob and let transforms/legacy code provide geometry-derived values where needed.  
+    - Option B (later): add a binder-level switch to force plate scale from geometry or leave it free as an effective calibration parameter.  
 
----
 
+------------------------------------------------------------
 - [ ] DLuxSystemNode; wire SheraThreePlane_Model  
   - [ ] Design a “system node” or top-level model wrapper API  
-    - Decide whether to keep `SheraThreePlane_Model` as the primary entry point or introduce a more generic node class with an equivalent `.forward(...)` interface.  
-    - Clarify responsibilities:  
-      - optics construction (via `build_shera_threeplane_optics`),  
-      - source construction (via `build_alpha_cen_source`),  
-      - forward model (PSF / image generation),  
-      - parameter interface via `ParamSpec` + `ParameterStore` + packing utilities.  
+    - Decide whether to:  
+      - keep `SheraThreePlane_Model` as the primary entry point, or  
+      - introduce a more generic node class that wraps `SheraThreePlaneBinder` with a standard `.forward(store, ...)` interface.  
+    - Clarify responsibilities vs Binder:  
+      - Binder: config + optics/detector + base store → image given a store.  
+      - Node: higher-level orchestration, logging, experiment config, etc.  
   - [x] Implement a source builder (e.g. `build_alpha_cen_source`)  
     - Uses config bandpass (`wavelength_m`, `bandwidth_m`, `n_lambda`)  
     - Uses store fields:  
@@ -470,28 +473,23 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
       - `binary.x_position`, `binary.y_position`  
       - `binary.contrast`  
       - `binary.log_flux_total`  
-    - Handles unit conversions to whatever `AlphaCen` expects (m↔nm, as↔mas, etc.)  
-  - [ ] Implement `build_shera_threeplane_model(...)`  
-    - Compose:  
-      - `build_shera_threeplane_optics(cfg, store)`  
-      - `build_alpha_cen_source(cfg, store)`  
-    - Return either:  
-      - a refactored `SheraThreePlane_Model` instance, or  
-      - a new thin model wrapper with a well-defined `forward(store, ...)` method that accepts a `ParameterStore` and internally calls the builders.  
+    - Handles unit conversions to whatever `AlphaCen` expects.  
+  - [x] Implement `build_shera_threeplane_model(...)` (legacy-style)  
+    - Compose source + optics + detector into a `dl.Telescope` inside `SheraThreePlane_Model`.  
+    - Now also has a Binder-based sibling path via `SheraThreePlaneBinder.forward(...)`.  
   - [ ] Define a canonical loss function in “parameter-vector space”  
-    - `loss_canonical(theta, cfg, inf_spec_subset, base_store, data)` that:  
-      - unpacks `theta` → `ParameterStore` via `unpack_params`,  
-      - builds optics + source + model from `(cfg, store)`,  
-      - generates a model image,  
-      - computes a simple loss (e.g. sum of squared residuals or negative log-likelihood) vs observed data.  
-    - Make this JAX-friendly (`jit`, `grad`) to enable use with Optax and later MCMC.  
+    - We currently have:  
+      - `make_image_nll_fn(...)` → θ ↦ NLL using `build_shera_threeplane_model`.  
+      - `run_image_gd(...)` → θ-space GD using `SheraThreePlaneBinder` (static optics, dynamic source).  
+    - Still to do (canonically):  
+      - `loss_canonical(theta, cfg, inf_spec_subset, base_store, data)` that uses Binder internally and becomes the single reference loss for both optimisation and MCMC.  
   - [ ] Wire existing scripts / notebooks to the new builder  
     - Introduce a migration path:  
       - Old: `SheraThreePlane_Model(...)` with hand-managed params.  
-      - New: `build_shera_threeplane_model(cfg, spec, store)` + `pack_params`/`unpack_params` + `loss_canonical`.  
+      - New: `SheraThreePlaneBinder` + `ParamSpec` + `ParameterStore` + `pack_params`/`unpack_params` + canonical loss.  
 
----
 
+------------------------------------------------------------
 - [ ] Canonical astrometry demo (separation recovery in base parameterization)  
   - [ ] Truth setup for a single Shera three-plane scenario  
     - Choose a point design (e.g. `SHERA_TESTBED_CONFIG`).  
@@ -503,8 +501,7 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
       - `binary.log_flux_total` (truth-level total flux).  
     - Build an inference truth store using `build_inference_spec_basic()` and copy the truth plate scale and log flux into it.  
   - [ ] Generate synthetic data in the new pipeline  
-    - Construct a “truth” model from `(cfg, inf_spec, inf_store_truth)`.  
-    - Call the forward method to generate a synthetic PSF / image (with optional noise).  
+    - Preferred: generate via Binder (`SheraThreePlaneBinder.forward(...)`) from the truth store.  
     - Store this image as `y_obs` for the inference demo.  
   - [ ] Define an inference subset and pack/unpack  
     - Choose `infer_keys` for astrometry-focused runs (e.g. separation, PA, centroid offsets, total flux, maybe plate scale).  
@@ -512,34 +509,34 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
       - `theta_truth = pack_params(inf_spec_subset, inf_store_truth)`.  
     - Construct a starting guess store by perturbing truth (e.g. 10% error in separation) and convert to `theta0` via `pack_params`.  
   - [ ] Run an Optax-based optimisation in canonical parameter space  
-    - Implement a minimal Optax loop over `theta` using `loss_canonical(theta, ...)` and its gradient.  
+    - Use `loss_canonical(theta, ...)` (Binder-based) and its gradient.  
     - After convergence, unpack the final `theta_hat` back into a `ParameterStore` and inspect recovered values for `binary.separation_as`, etc.  
-    - This becomes the first concrete, end-to-end demonstration that the refactored pipeline can recover binary separation from synthetic data.  
+    - Note: we already have a first “mini demo” via `run_image_gd` and `run_shera_image_gd_basic`’s smoke tests; this task is about turning that into a documented, reproducible example script/notebook with plots.  
 
----
 
+------------------------------------------------------------
 - [ ] Eigenmode parameterization (built on top of canonical inference)  
   - [ ] Compute FIM in canonical θ coordinates  
     - Use the canonical loss/log-likelihood and current inference subset to compute the Fisher Information Matrix (FIM) at `theta_truth` for a given experiment.  
-    - Reuse or adapt the existing FIM machinery, but now expressed explicitly in terms of the packed parameter vector `theta`.  
+    - Reuse/adapt existing FIM machinery now that θ-space loss is explicitly defined.  
   - [ ] Diagonalize FIM and define eigenbasis maps  
     - Perform eigen-decomposition `F = V Λ Vᵀ` at the chosen reference point.  
     - Define `theta_ref = theta_truth` and build helper functions:  
       - `to_eigen(theta) = V.T @ (theta - theta_ref)`  
       - `from_eigen(z) = theta_ref + V @ z` (with optional whitening using Λ if desired).  
-    - Encapsulate this in a small helper class (e.g. `EigenParamMap`) that stores `theta_ref`, `eigen_vecs`, and optionally `eigen_vals`.  
+    - Encapsulate in a small helper (e.g. `EigenParamMap`) that stores `theta_ref`, `eigen_vecs`, and `eigen_vals`.  
   - [ ] Define and test an eigen-space loss  
     - Wrap the canonical loss to operate in eigen coordinates:  
       - `loss_eigen(z) = loss_canonical(from_eigen(z), ...)`.  
     - Run a small Optax optimisation in `z` space starting from `z0 = 0` (or a small perturbation).  
-    - Verify that mapping back to `theta_hat = from_eigen(z_final)` and then to a `ParameterStore` yields comparable or improved recovery of `binary.separation_as` relative to the canonical parameterisation.  
+    - Verify that mapping back to `theta_hat = from_eigen(z_final)` and then to a `ParameterStore` yields comparable or improved recovery relative to the canonical parameterisation.  
   - [ ] Document usage pattern  
-    - Clearly describe how eigen-modes are a pure *reparameterisation layer* on top of the same spec/store/builders.  
+    - Clearly describe how eigen-modes are a pure *reparameterisation layer* on top of the same spec/store/builders/Binder.  
     - Note that future samplers (HMC/NUTS) will operate in this eigen space by simply swapping `theta` for `z` and using the same pack/unpack and loss machinery.  
 
----
 
-- [ ] Unit tests: spec/store/transforms/node  
+------------------------------------------------------------
+- [ ] Unit tests: spec/store/transforms/node/inference  
   - [x] ParamSpec / ParameterStore  
     - Spec creation and field sanity  
     - Store construction, replacement, pytree behavior, validation  
@@ -556,38 +553,79 @@ Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate
   - [x] Source builder  
     - Smoke test constructing an `AlphaCen` (or equivalent) source from config + store  
     - Verify basic behavior (positions, contrast, flux) vs known inputs  
-  - [ ] Packing / inference-subset utilities  
+  - [x] Packing / inference-subset utilities (store-based)  
     - Tests for `pack_params` / `unpack_params` round-trip on a small toy spec (scalars + vector parameter).  
-    - Check that changing the subset order changes vector order but not the underlying store semantics.  
-  - [ ] Full model node  
-    - End-to-end test: config + forward-model spec + inference spec + stores → model → PSF with expected shape.  
-    - Optional: numerical sanity checks (e.g. flux scaling, centroid shifts).  
-    - Longer-term: a regression-style test that performs a tiny optimisation and verifies that recovered separation stays within a reasonable tolerance of truth for a fixed random seed.  
+    - Indirect coverage via `test_image_nll_bridge.py` and `test_inference_api.py`.  
+  - [x] Simple θ-space optimizer  
+    - `run_simple_gd` tested on a convex quadratic (`test_run_simple_gd.py`).  
+  - [x] Image NLL bridge + θ-space GD  
+    - `make_image_nll_fn` smoke test (Gaussian)  
+    - `run_image_gd` smoke test (separation-only, Binder-based).  
+  - [x] High-level inference API  
+    - `run_shera_image_gd_basic` smoke test in `test_inference_api.py`.  
+  - [ ] Full “model node” regression  
+    - End-to-end test: config + forward-model spec + inference spec + stores → Binder → PSF with expected shape.  
+    - Tiny optimisation and verify recovered separation within tolerance for fixed seed.  
 
 
-Additional things/ideas to keep in mind:
+============================================================
+P0 — Additional helpers / ideas
+============================================================
 
-- A `refresh()` method (or similar) to automatically update any derived parameters within a store using the transform registry.  
-  - P0: we rely on the explicit transform calls and “store wins” policy.  
-  - Later: consider a helper that returns a new store with selected derived keys filled in from transforms (without mutating the original), for users who want a “materialised” view of derived quantities.
+- A `refresh()` helper to automatically update derived parameters within a store using the transform registry.  
+  - P0: rely on explicit transform calls and “store wins” policy.  
+  - Later: provide a function that returns a new store with selected derived keys filled in from transforms (no mutation).  
 
 
-**P1 — Docs & examples**
+============================================================
+P1 — Docs & examples
+============================================================
+
 - [ ] README quickstart  
-- [ ] MkDocs concepts (spec/store/graph/transforms, plus canonical vs eigen parameterisation)  
-- [ ] Notebooks 01 & 03 runnable  
-  - Include at least one example that mirrors the “canonical astrometry demo” from P0.  
-- [ ] API docstrings  
+- [ ] MkDocs concepts (spec/store/Binder/transforms, plus canonical vs eigen parameterisation)  
+- [ ] Notebooks runnable  
+  - Include at least one example that mirrors the “canonical astrometry demo” from P0 using `run_shera_image_gd_basic`.  
+- [ ] API docstrings for new modules (params, transforms, optics builder, Binder, inference API).  
 
-**P2 — Variant support**
+
+============================================================
+P2 — Variant support
+============================================================
+
 - [ ] Four-plane transforms & builder/binder  
 - [ ] Resolver selection tests  
 - [ ] End-to-end smoke test  
 
-**P3 — Ergonomics**
-- [ ] ModelParams shim + proxy + keymap  
-- [ ] Deprecation warnings  
-- [ ] Optional upstream PRs
+
+============================================================
+P3 — Ergonomics
+============================================================
+
+- [ ] ModelParams shim + proxy + keymap (for legacy notebooks)  
+- [ ] Deprecation warnings where appropriate  
+- [ ] Optional upstream PRs to dLux/dLuxToliman (e.g. Zernike/basis ergonomics, Shera helpers)  
+
+
+============================================================
+Next Sprint — Suggested Short-Term Focus
+============================================================
+
+- [ ] Finalise a **canonical θ-space loss** using Binder  
+  - Implement `loss_canonical(theta, cfg, inf_spec_subset, base_store, data, var)` that wraps Binder + store pack/unpack and becomes the single reference loss.  
+
+- [ ] Implement a minimal **canonical astrometry demo script**  
+  - Use Binder + `run_shera_image_gd_basic` to recover separation from synthetic data.  
+  - Save loss curves and a before/after PSF plot for inclusion in docs.  
+
+- [ ] Decide and implement a provisional **plate-scale policy** at the Binder level  
+  - For now, likely “plate scale is a free calibration param for inference specs; geometry-derived value is used only in forward-model specs / truth generation.”  
+
+- [ ] Sketch the **SystemNode design**  
+  - A lightweight wrapper over Binder + ParamSpec + ParameterStore that exposes:  
+    - `.forward(store)`  
+    - `.pack(infer_keys, store)` / `.unpack(infer_keys, theta, base_store)`  
+    - hooks for logging and experiment metadata.  
+
 
 ---
 
