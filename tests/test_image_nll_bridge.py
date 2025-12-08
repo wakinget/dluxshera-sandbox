@@ -68,6 +68,41 @@ def test_make_image_nll_fn_smoke_gaussian():
     assert g0.shape == theta0.shape
 
 
+def test_make_binder_image_nll_fn_smoke_gaussian():
+    cfg = SHERA_TESTBED_CONFIG
+    spec, store = _make_store_for_smoke(cfg)
+
+    # Synthetic data from the same config/store, but via the Binder path
+    from dluxshera.core.binder import SheraThreePlaneBinder
+    binder = SheraThreePlaneBinder(cfg, spec, store)
+    data = binder.forward(store)
+    var = np.ones_like(data)
+
+    infer_keys = [
+        "binary.separation_as",
+        "binary.x_position",
+        "binary.y_position",
+    ]
+
+    from dluxshera.inference.optimization import make_binder_image_nll_fn
+
+    loss_fn, theta0 = make_binder_image_nll_fn(
+        cfg,
+        spec,
+        store,
+        infer_keys,
+        data,
+        var,
+        noise_model="gaussian",
+    )
+
+    loss0 = loss_fn(theta0)
+    assert np.isfinite(loss0)
+
+    g0 = jax.grad(loss_fn)(theta0)
+    assert g0.shape == theta0.shape
+
+
 def test_run_image_gd_separation_smoke():
     cfg = SHERA_TESTBED_CONFIG
     spec, store_true = _make_store_for_smoke(cfg)

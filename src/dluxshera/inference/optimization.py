@@ -345,6 +345,68 @@ def make_image_nll_fn(
     return loss_fn, theta0
 
 
+def make_binder_image_nll_fn(
+    cfg: SheraThreePlaneConfig,
+    inference_spec: ParamSpec,
+    base_store: ParameterStore,
+    infer_keys: Sequence[ParamKey],
+    data: np.ndarray,
+    var: np.ndarray,
+    *,
+    noise_model: NoiseModel = "gaussian",
+    reduce: Literal["sum", "mean"] = "sum",
+) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray]:
+    """
+    Canonical θ-space image NLL using SheraThreePlaneBinder.
+
+    This is the Binder-based sibling of `make_image_nll_fn`, but instead of
+    rebuilding SheraThreePlane_Model on each call, it:
+
+      - builds static optics + detector once via SheraThreePlaneBinder
+      - only rebuilds the source from a ParameterStore inside the loss
+      - uses image-level Gaussian/Poisson NLL kernels directly
+    """
+    from ..core.binder import SheraThreePlaneBinder
+
+    # 1) Build a static Binder
+    binder = SheraThreePlaneBinder(cfg, inference_spec, base_store)
+
+    # 2) Subset spec + build initial θ from base_store
+    sub_spec = inference_spec.subset(infer_keys)
+    theta0 = store_pack_params(sub_spec, base_store, dtype=data.dtype)
+
+    # 3) Choose an image-level NLL kernel
+    data = np.asarray(data)
+    var = np.asarray(var)
+
+    if noise_model == "gaussian":
+        def image_nll(model_image, data_image, var_image):
+            return -gaussian_loglikelihood_image(
+                model_image, data_image, var_image, reduce=reduce
+            )
+    elif noise_model == "poisson":
+        def image_nll(model_image, data_image, var_image):
+            # var_image unused, kept for symmetry
+            return -poisson_loglikelihood_image(
+                model_image, data_image, reduce=reduce
+            )
+    else:
+        raise ValueError(
+            f"Unknown noise_model {noise_model!r} "
+            f"(expected 'gaussian' or 'poisson')."
+        )
+
+    # 4) Define θ → loss(θ) using binder.forward(...)
+    def loss_fn(theta: np.ndarray) -> np.ndarray:
+        # θ → ParameterStore overlayed on base_store
+        store_theta = store_unpack_params(sub_spec, theta, base_store)
+        # Binder merges store_theta into its base_store internally
+        model_image = binder.forward(store_theta)
+        return image_nll(model_image, data, var)
+
+    return loss_fn, theta0
+
+
 def run_simple_gd(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
@@ -405,10 +467,10 @@ def run_simple_gd(
 
 
 def run_image_gd(
-    cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
-    store_init: ParameterStore,
-    infer_keys: Sequence[ParamKey],
+    cfg,
+    inference_spec,
+    store_init,
+    infer_keys,
     data,
     var,
     *,
@@ -417,91 +479,23 @@ def run_image_gd(
     num_steps: int = 50,
 ):
     """
-    Run gradient descent in θ-space for image-based NLL using the Shera model,
-    using a SheraThreePlaneBinder to hold the static optics + detector.
+    Run gradient descent in θ-space for image-based NLL using the Shera model.
 
-    This version:
-
-      - Builds a SheraThreePlaneBinder(cfg, inference_spec, store_init) once.
-      - Uses the Binder's static optics + detector for all iterations.
-      - Rebuilds only the source (via the binder) from the updated store.
-      - Evaluates the image-level NLL using Gaussian or Poisson noise.
-
-    Parameters
-    ----------
-    cfg :
-        SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
-    inference_spec :
-        ParamSpec describing the inference-level keys.
-    store_init :
-        ParameterStore providing the initial values for all parameters
-        (including both inferred and fixed ones).
-    infer_keys :
-        Sequence of parameter keys (strings) to infer, e.g.
-        ["binary.separation_as", "binary.x_position", "binary.y_position"].
-    data :
-        Observed image (array-like). Converted to jax.numpy array internally.
-    var :
-        Per-pixel variance image (array-like) for the Gaussian model.
-        Ignored for Poisson, but kept for API compatibility.
-    noise_model :
-        "gaussian" (default) or "poisson".
-    learning_rate :
-        Step size for run_simple_gd.
-    num_steps :
-        Number of GD iterations.
-
-    Returns
-    -------
-    theta_final : jnp.ndarray
-        Final flat parameter vector in θ-space.
-    store_final : ParameterStore
-        New store with infer_keys updated from theta_final.
-    history : dict[str, jnp.ndarray]
-        Optimization history with at least:
-          - "loss": loss value per step.
+    Now uses SheraThreePlaneBinder + `make_binder_image_nll_fn` under the hood.
     """
+    # Build canonical Binder-based loss and θ0
+    loss_theta, theta0 = make_binder_image_nll_fn(
+        cfg,
+        inference_spec,
+        store_init,
+        infer_keys,
+        data,
+        var,
+        noise_model=noise_model,
+        reduce="sum",
+    )
 
-    # Local import to avoid circulars
-    from ..core.binder import SheraThreePlaneBinder
-
-    # 1) Build the Binder: this validates the store against the spec,
-    #    and prebuilds static optics + detector.
-    binder = SheraThreePlaneBinder(cfg, inference_spec, store_init)
-
-    # 2) Build a spec subset + initial θ from the Binder's base_store
-    sub_spec = inference_spec.subset(infer_keys)
-
-    # Use the same dtype as data for θ by default
-    data = np.asarray(data)
-    var = np.asarray(var)
-    theta0 = store_pack_params(sub_spec, binder.base_store, dtype=data.dtype)
-
-    # 3) Choose an image-level NLL kernel (on images, not model objects)
-    if noise_model == "gaussian":
-        def image_nll(image):
-            # negative log-likelihood (sum over pixels)
-            return -gaussian_loglikelihood_image(image, data, var, reduce="sum")
-    elif noise_model == "poisson":
-        def image_nll(image):
-            return -poisson_loglikelihood_image(image, data, reduce="sum")
-    else:
-        raise ValueError(
-            f"Unknown noise_model {noise_model!r} (expected 'gaussian' or 'poisson')."
-        )
-
-    # 4) Define θ → loss(θ) using the Binder's static optics + detector
-    def loss_theta(theta):
-        # Unpack θ into a (partial) store overlaying binder.base_store
-        store_theta = store_unpack_params(sub_spec, theta, binder.base_store)
-
-        # Let the Binder handle merging with base_store and doing the forward model
-        image = binder.forward(store_theta)
-
-        # Evaluate image-level negative log-likelihood
-        return image_nll(image)
-
-    # 5) Run simple gradient descent in θ-space
+    # Simple θ-space GD
     theta_final, history = run_simple_gd(
         loss_theta,
         theta0,
@@ -509,10 +503,12 @@ def run_image_gd(
         num_steps=num_steps,
     )
 
-    # 6) Map final θ back into a ParameterStore
-    store_final = store_unpack_params(sub_spec, theta_final, binder.base_store)
+    # Map final θ back into a ParameterStore
+    sub_spec = inference_spec.subset(infer_keys)
+    store_final = store_unpack_params(sub_spec, theta_final, store_init)
 
     return theta_final, store_final, history
+
 
 
 
