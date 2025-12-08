@@ -42,6 +42,116 @@ After installation, your environment should include:
 
 ---
 
+##  Quickstart for Non-Python Users
+
+If you are not a regular Python user, don’t worry — this project is designed to be easy to set up.  
+Below is the recommended workflow using **Miniconda** (a lightweight Python distribution) and **VS Code** (a friendly editor).  
+This avoids modifying your system Python and keeps everything clean and isolated.
+
+---
+
+### 1. Install Miniconda (Python 3.11)
+
+1. Download Miniconda from: https://docs.conda.io/en/latest/miniconda.html  
+2. Run the installer with default settings.  
+3. Open a new terminal:
+   - **Windows**: Anaconda Prompt  
+   - **macOS/Linux**: regular terminal  
+
+Verify installation with:
+
+```
+conda --version
+```
+
+---
+
+### 2. Create a clean environment for the model
+
+```
+conda create -n dLuxShera python=3.11
+conda activate dLuxShera
+```
+
+This keeps everything isolated and easy to delete later.
+
+---
+
+### 3. Clone the repository and install dependencies
+
+```
+cd <folder-where-you-want-projects>
+git clone <REPO_URL>
+cd <REPO_FOLDER>
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+This installs all required libraries, including the correct pinned dLux commit.
+
+---
+
+### 4. Install Visual Studio Code (VS Code)
+
+Download from: https://code.visualstudio.com/
+
+Open the project:
+
+```
+code .
+```
+
+If prompted, install the **Python extension**.
+
+Select the correct interpreter:
+
+1. Ctrl/Cmd+Shift+P → “Python: Select Interpreter”  
+2. Choose: **Python 3.11 (conda env: dLuxShera)**
+
+---
+
+### 5. Verify the installation
+
+```
+python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
+```
+
+If versions print without errors, your setup is working.
+
+Try running one of the example scripts or notebooks next.
+
+---
+
+### 6. Daily usage (the only two commands you need)
+
+```
+conda activate dLuxShera
+cd <REPO_FOLDER>
+code .
+```
+
+This opens both the environment and the project.
+
+---
+
+### 7. Optional: Using Jupyter notebooks
+
+If you open a `.ipynb` file:
+
+- Select the **dLuxShera** kernel in the top-right.
+- Run cells with Shift+Enter.
+
+---
+
+### That’s it!
+
+Once Miniconda and VS Code are installed, everything should “just work.”  
+If something breaks, simply delete and recreate the `dLuxShera` environment — conda environments are disposable.
+
+
+---
+
 ## Quickstart (Jupyter Notebook)
 
 Example notebooks are provided under: `Examples/notebooks/`
