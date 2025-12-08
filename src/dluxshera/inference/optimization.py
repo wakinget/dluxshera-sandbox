@@ -418,6 +418,63 @@ def make_binder_image_nll_fn(
     return loss_fn, theta0
 
 
+def loss_canonical(
+    theta,
+    cfg,
+    inference_spec,
+    infer_keys,
+    base_store,
+    data,
+    var,
+    *,
+    noise_model: str = "gaussian",
+    reduce: str = "sum",
+):
+    """
+    Canonical θ-space negative log-likelihood for Shera image inference.
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Flat parameter vector in the ordering defined by ``infer_keys``.
+    cfg :
+        SheraThreePlaneConfig describing the structural optical configuration.
+    inference_spec : ParamSpec
+        Full ParamSpec describing *all* parameters in the model, both inferred
+        and fixed. This is what the SheraThreePlaneBinder validates against.
+    infer_keys : tuple[str, ...]
+        Keys of the parameters that live in θ-space (and their ordering).
+    base_store : ParameterStore
+        Baseline ParameterStore containing fixed parameters and nominal values
+        for the inferred ones.
+    data : jax.Array
+        Observed image data.
+    var : jax.Array
+        Per-pixel variance image (Gaussian case).
+
+    Returns
+    -------
+    loss : jax.Array
+        Scalar negative log-likelihood.
+    """
+    # Delegate to the existing Binder-based helper, which already handles:
+    #   - Binder construction
+    #   - pack/unpack between θ and ParameterStore
+    #   - Gaussian / Poisson image NLL
+    loss_fn, _theta0 = make_binder_image_nll_fn(
+        cfg,
+        inference_spec,   # FULL spec here
+        base_store,
+        infer_keys,
+        data,
+        var,
+        noise_model=noise_model,
+        reduce=reduce,
+    )
+
+    return loss_fn(theta)
+
+
 def run_simple_gd(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
