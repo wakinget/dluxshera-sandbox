@@ -16,6 +16,7 @@ import numpyro.distributions as dist
 import math
 import json
 from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any
+from dataclasses import dataclass
 
 from ..optics.config import SheraThreePlaneConfig
 from ..params.spec import ParamSpec, ParamKey
@@ -51,6 +52,10 @@ __all__ = [
 
     # simple θ–space optimizer
     "run_simple_gd",
+    "run_image_gd",
+
+    # θ-space eigen reparameterisation
+    "EigenThetaMap",
 
     # legacy likelihood / step fns (model-params space)
     "loglikelihood", "loss_fn", "step_fn",
@@ -61,6 +66,7 @@ __all__ = [
     # priors
     "construct_priors_from_dict",
 ]
+
 
 
 
@@ -612,6 +618,175 @@ def fim_theta_shera(
     F = fim_theta(loss_fn, theta0)
     return F, theta0
 
+
+@dataclass
+class EigenThetaMap:
+    """
+    Linear reparameterisation between canonical θ-coordinates and an
+    eigenbasis of a local curvature matrix (e.g. Fisher / Hessian).
+
+    This is intentionally *pure θ-space*: it doesn't know anything about
+    ParamSpec, ParameterStore, or ModelParams. It just stores:
+
+      - theta_ref : reference point in θ-space (typically the fiducial / MAP)
+      - eigvecs   : columns are eigenvectors in θ-space (shape (N, k))
+      - eigvals   : corresponding eigenvalues (shape (k,))
+      - whiten    : whether coordinates are whitened by sqrt(λ_j)
+
+    Conventions
+    ----------
+    Let F ≈ Hessian of the loss at theta_ref and F = V Λ Vᵀ with
+    eigenvalues λ_j and eigenvectors v_j (columns of V). For a perturbation
+    δθ = θ - theta_ref:
+
+    If `whiten=False` (unwhitened coordinates):
+
+        z_j = v_jᵀ δθ
+        θ   = theta_ref + Σ_j z_j v_j
+
+    If `whiten=True` (locally “σ-units” along each mode):
+
+        z_j = sqrt(λ_j) * v_jᵀ δθ
+        θ   = theta_ref + Σ_j (z_j / sqrt(λ_j)) v_j
+
+    In the whitened case, a local quadratic loss ½ δθᵀ F δθ becomes
+    ½ ||z||² in the retained subspace (up to truncation tolerances).
+    """
+
+    theta_ref: np.ndarray          # shape (N,)
+    eigvecs:   np.ndarray          # shape (N, k), columns = basis vectors
+    eigvals:   Optional[np.ndarray] = None  # shape (k,), optional metadata
+    whiten:    bool = False
+
+    # -----------------------------
+    # Constructors
+    # -----------------------------
+    @classmethod
+    def from_fim(
+        cls,
+        F: np.ndarray,
+        theta_ref: np.ndarray,
+        *,
+        truncate: Optional[int] = None,
+        whiten: bool = False,
+    ) -> "EigenThetaMap":
+        """
+        Build an EigenThetaMap from a (symmetric, PSD) curvature matrix F.
+
+        Parameters
+        ----------
+        F :
+            (N, N) Fisher / Hessian / curvature matrix at theta_ref.
+        theta_ref :
+            Reference θ vector (N,).
+        truncate :
+            If not None, keep only the top-k eigenmodes (k <= N), ordered by
+            descending eigenvalue.
+        whiten :
+            If True, coordinates z are scaled by sqrt(λ_j) so that the
+            Hessian in z-space is approximately the identity in the retained
+            subspace.
+
+        Returns
+        -------
+        EigenThetaMap
+        """
+        F_np = onp.asarray(F)
+        # eigh → eigenvalues ascending; we want descending by magnitude
+        evals, evecs = onp.linalg.eigh(F_np)
+        idx = evals.argsort()[::-1]
+        evals = evals[idx]
+        evecs = evecs[:, idx]
+
+        if truncate is not None:
+            k = int(truncate)
+            evals = evals[:k]
+            evecs = evecs[:, :k]
+
+        return cls(
+            theta_ref=np.asarray(theta_ref),
+            eigvecs=np.asarray(evecs),
+            eigvals=np.asarray(evals),
+            whiten=whiten,
+        )
+
+    # -----------------------------
+    # Maps
+    # -----------------------------
+    def to_eigen(self, theta: np.ndarray) -> np.ndarray:
+        """
+        Map θ → z in eigen coordinates.
+
+        If whiten=False:
+            z_j = v_j^T (θ - θ_ref)
+
+        If whiten=True:
+            z_j = sqrt(λ_j) * v_j^T (θ - θ_ref)
+
+        Parameters
+        ----------
+        theta :
+            Canonical parameter vector (N,).
+
+        Returns
+        -------
+        z :
+            Eigen coordinates (k,).
+        """
+        theta = np.asarray(theta)
+        delta = theta - self.theta_ref           # (N,)
+
+        # Project onto eigenvectors
+        coords = self.eigvecs.T @ delta  # (k,)
+
+        if self.whiten:
+            if self.eigvals is None:
+                raise ValueError("whiten=True but eigvals is None.")
+            scales = np.sqrt(self.eigvals + 1e-12)  # (k,)
+            coords = coords * scales
+
+        return coords   # (k, N) @ (N,) -> (k,)
+
+    def from_eigen(self, z: np.ndarray) -> np.ndarray:
+        """
+        Map eigen coordinates z → θ.
+
+        If whiten=False:
+            θ = θ_ref + sum_j z_j v_j
+
+        If whiten=True:
+            θ = θ_ref + sum_j (z_j / sqrt(λ_j)) v_j
+
+        Parameters
+        ----------
+        z :
+            Eigen coordinates (k,).
+
+        Returns
+        -------
+        theta :
+            Canonical θ vector (N,).
+        """
+        z = np.asarray(z)
+
+        if self.whiten:
+            if self.eigvals is None:
+                raise ValueError("whiten=True but eigvals is None.")
+            scales = np.sqrt(self.eigvals + 1e-12)
+            z = z / scales
+
+        delta = self.eigvecs @ z  # (N,)
+
+        return self.theta_ref + delta  # (N, k) @ (k,) -> (N,)
+
+    # Convenience properties
+    @property
+    def dim_theta(self) -> int:
+        return int(self.theta_ref.size)
+
+    @property
+    def dim_eigen(self) -> int:
+        return int(self.eigvecs.shape[1])
 
 
 ############################
