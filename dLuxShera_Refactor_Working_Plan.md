@@ -17,7 +17,7 @@ refactor. It’s designed so either of us can get back up to speed quickly and n
 **Target outcome (Partially met):**
 - ✅ Consistent `psf_pixel_scale` (and other deriveds) regardless of whether they are optimized directly or computed from primitives.
 - ⚠️ Clear primitives↔derived boundary and testable pure transforms (global registry implemented; system-scoped resolver still pending).
-- ⚠️ Structured execution graph (still relying on legacy model/binder; new SystemGraph layer absent).
+- ⚠️ Structured execution graph (minimal SystemGraph scaffold exists; still single-node and internal-only).
 - ⚠️ Minimal churn to current examples; future models (e.g., four-plane) to slot in (four-plane support missing).
 
 ---
@@ -28,7 +28,7 @@ refactor. It’s designed so either of us can get back up to speed quickly and n
 1. **ParamSpec** — declarative schema & metadata (no numbers). ✅ Exists with `ParamField`/`ParamSpec` plus inference/forward builders; primitives and derived fields share the same spec.
 2. **ParameterStore** — immutable values map. ✅ Implemented as frozen mapping + pytree; currently allows any keys (primitives/derived) depending on validation toggle.
 3. **DerivedResolver (Scoped Transform Registry)** — computes derived values as pure functions. ⚠️ Registry exists and resolves recursive deps; currently global (not system-id scoped) and limited to three transforms.
-4. **SystemGraph** — executable DAG of nodes. ❌ Missing; execution still via legacy `SheraThreePlane_Model` helpers and binder.
+4. **SystemGraph** — executable DAG of nodes. ⚠️ Minimal single-node scaffold exists (`DLuxSystemNode` + `SystemGraph`) wrapping the existing three-plane builder; still single-node/no caching.
 5. **Facade** — `SheraThreePlane_Model` wrapper. ✅ Still primary entry point; internally uses partial refactor helpers.
 
 ASCII sketch (target)
@@ -106,7 +106,7 @@ dLuxShera/
 
 - **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem` and optionally injects Zernike coefficients from store. No structural hash/cache.
 - **Binder:** Merges stores and forwards through static optics; canonical loss wrapper implemented and tested. Derived resolution step is not enforced; plate-scale binding policy unresolved.
-- **Graph layer:** Absent—execution relies on legacy model helpers rather than a DAG of nodes.
+- **Graph layer:** Minimal `DLuxSystemNode` + `SystemGraph` wrap the three-plane builder; still single-node with no caching/derived resolution enforcement.
 
 ---
 
@@ -124,8 +124,8 @@ dLuxShera/
 
 ## 10) Testing Philosophy
 
-- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, and eigenmode utilities.
-- Missing: SystemGraph/regression tests for node execution, demo workflows, four-plane variant tests, and serialization/profile coverage.
+- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, eigenmode utilities, and SystemGraph smoke/regression via new graph tests.
+- Missing: Demo workflows, four-plane variant tests, and serialization/profile coverage.
 
 ---
 
@@ -173,7 +173,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ⚠️ **ThreePlaneBuilder (structural hash/cache)**: Build path exists; add structural subset definition and caching policy.
 - ⚠️ **ThreePlaneBinder (phase/sampling bind)**: Binder exists; clarify plate-scale policy and enforce derived resolution.
 - ⚠️ **Canonical loss wiring**: New binder-based loss implemented; migrate examples once SystemGraph exists.
-- ⏳ **DLuxSystemNode / SystemGraph**: Node abstractions and DAG execution not built.
+- ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; next steps are caching, multi-node wiring, and derived resolution enforcement.
 
 **P1 — Docs, demos, and scope-aware transforms**
 - ⏳ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
@@ -187,24 +187,21 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ⏳ **Ergonomics**: `ModelParams` shim, deprecation warnings, upstream PR prep.
 
 **Next sprint follow-ups**
-- ⚠️ Canonical loss is in place; remaining sprint items: plate-scale policy decision, SystemNode sketch, demo script.
+- ⚠️ Canonical loss is in place; remaining sprint items: plate-scale policy decision, SystemGraph follow-ups (caching/multi-node), demo script.
 
 **Newly noted tasks**
 - ⏳ Structural hash/caching for three-plane builder.
 - ⏳ Enforce primitives-only store in production mode.
 - ⏳ Add serialization (`params/serialize.py`) and transform registry module (`params/registry.py`).
-- ⏳ Add SystemGraph layer (`graph/` package) with node tests.
+- ⏳ Extend SystemGraph with caching/derived resolution hooks once resolver is scoped.
 
 ---
 
 ## 16) Recommended Next 3–5 Tasks (to reach end-to-end flow)
 
-1. **Add SystemGraph + DLuxSystemNode scaffold (P0)**
-   - **Goal:** Introduce `graph/` package with node base classes and a minimal SystemGraph that wraps the existing three-plane optics call; integrate binder-based loss through the graph.
-   - **Files:** `src/dluxshera/graph/{nodes.py, system_graph.py}`, updates to `core/modeling.py` and tests in `tests/graph/`.
-   - **Dependencies:** Uses existing binder/builder; needs agreed derived resolution policy.
-   - **Risks/Ambiguities:** API shape for nodes; how to cache builder outputs per structural hash.
-   - **Tests:** Node execution smoke test, graph forward returning PSF, regression vs legacy model for a single wavelength set.
+1. **Add SystemGraph + DLuxSystemNode scaffold (P0) — DONE**
+   - **Outcome:** Added `graph/` package with `DLuxSystemNode` + `SystemGraph`, tied into binder loss via optional flag, and regression-tested against the legacy three-plane forward path.
+   - **Follow-ups:** Add caching/structural hashing, multi-node support, and derived-resolution enforcement before relying on it in production.
 
 2. **Scoped DerivedResolver with system IDs (P0)**
    - **Goal:** Refactor transform registry to be system-scoped; prevent collisions and enable future four-plane variant.

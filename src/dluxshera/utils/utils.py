@@ -12,7 +12,6 @@ import matplotlib as mpl
 import time, datetime, os
 import json
 from typing import Any, Dict, Optional, Union
-import pandas as pd
 
 
 __all__ = ["nanrms","set_array", "scale_array",
@@ -668,6 +667,8 @@ def save_results(
     Raises:
         ImportError: If the openpyxl engine is not available when appending.
     """
+    import pandas as pd
+
     if create_dirs:
         os.makedirs(save_path, exist_ok=True)
 
