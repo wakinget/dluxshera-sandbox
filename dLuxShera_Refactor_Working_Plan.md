@@ -1,7 +1,8 @@
 # dLuxShera Refactor — Working Plan & Notes
 _Last updated: 2025-11-13 01:13_
 
-This is a living document summarizing the goals, architecture, decisions, tasks, and gotchas for the dLuxShera parameterization refactor. It’s designed so either of us can get back up to speed quickly and not lose the important details.
+This is a living document summarizing the goals, architecture, decisions, tasks, and gotchas for the dLuxShera parameterization
+refactor. It’s designed so either of us can get back up to speed quickly and not lose the important details.
 
 ---
 
@@ -13,30 +14,24 @@ This is a living document summarizing the goals, architecture, decisions, tasks,
 
 **Goal:** Cleanly separate *what parameters exist*, *where values live*, *how things are derived*, and *how the system executes*—while keeping a stable facade for users and examples.
 
-**Target outcome (Done):**
-- Consistent `psf_pixel_scale` (and other deriveds) regardless of whether they are optimized directly or computed from primitives.
-- A clear primitives↔derived boundary and testable pure transforms.
-- A structured graph that executes optics cleanly (JAX-friendly).
-- Minimal churn to current examples; future models (e.g., four-plane) slot in.
+**Target outcome (Partially met):**
+- ✅ Consistent `psf_pixel_scale` (and other deriveds) regardless of whether they are optimized directly or computed from primitives.
+- ⚠️ Clear primitives↔derived boundary and testable pure transforms (global registry implemented; system-scoped resolver still pending).
+- ⚠️ Structured execution graph (still relying on legacy model/binder; new SystemGraph layer absent).
+- ⚠️ Minimal churn to current examples; future models (e.g., four-plane) to slot in (four-plane support missing).
 
 ---
 
 ## 2) Architecture (High-Level)
 
-**Layers**
-1. **ParamSpec** — declarative schema & metadata (no numbers).  
-   Defines keys, units, bounds, priors, defaults, kind _(primitive/derived)_.
+**Layers (current vs target)**
+1. **ParamSpec** — declarative schema & metadata (no numbers). ✅ Exists with `ParamField`/`ParamSpec` plus inference/forward builders; primitives and derived fields share the same spec.
+2. **ParameterStore** — immutable values map. ✅ Implemented as frozen mapping + pytree; currently allows any keys (primitives/derived) depending on validation toggle.
+3. **DerivedResolver (Scoped Transform Registry)** — computes derived values as pure functions. ⚠️ Registry exists and resolves recursive deps; currently global (not system-id scoped) and limited to three transforms.
+4. **SystemGraph** — executable DAG of nodes. ❌ Missing; execution still via legacy `SheraThreePlane_Model` helpers and binder.
+5. **Facade** — `SheraThreePlane_Model` wrapper. ✅ Still primary entry point; internally uses partial refactor helpers.
 
-2. **ParameterStore** — immutable values map for **primitives only** (JAX pytree).  
-   Pure `.replace(**overrides)` returns a new store.
-
-3. **DerivedResolver (Scoped Transform Registry)** — computes derived values as pure functions of primitives, **scoped to the active system** (e.g., `three_plane` vs `four_plane`).
-
-4. **SystemGraph** — an executable DAG of nodes; each node is a pure function that takes the store + required deriveds and produces outputs. A single node calls into the dLux **`ThreePlaneOpticalSystem.model()`** for multi-λ PSF generation.
-
-5. **Facade** — `SheraThreePlane_Model` wrapper stays as the public entry point; internally uses the new stack.
-
-### ASCII sketch
+ASCII sketch (target)
 ```
 ParamSpec  ──(validates)──▶ ParameterStore (primitives)
      │                               │
@@ -57,782 +52,203 @@ Scoped Transform Registry ──▶ DerivedResolver (system_id-aware) ──▶ 
 
 ---
 
-## 3) Repository Layout (Proposed)
+## 3) Repository Layout (Actual vs Proposed)
 
 ```
 dLuxShera/
 ├─ pyproject.toml
 ├─ README.md
-├─ mkdocs.yml
-├─ docs/
-│  ├─ getting-started/
-│  ├─ concepts/
-│  │   ├─ param-store.md
-│  │   ├─ system-graph.md
-│  │   └─ three-plane.md
-│  ├─ how-to/
-│  │   ├─ run-fit.md
-│  │   ├─ eigen-truncation.md
-│  │   └─ hmc.md
-│  └─ reference/
-├─ src/
-│  └─ dluxshera/
-│     ├─ __init__.py
-│     ├─ core/{types.py, utils.py}
-│     ├─ params/{spec.py, store.py, transforms.py, registry.py, serialize.py}
-│     ├─ graph/{nodes.py, system_graph.py, builders.py}
-│     ├─ optics/{propagation/{fresnel.py, aberrations.py}, optical_systems.py, psf.py}
-│     ├─ inference/{losses.py, priors.py, eigenbasis.py, optimizers.py, hmc.py}
-│     ├─ io/{config.py, datasets.py, save_load.py}
-│     ├─ viz/plots.py
-│     └─ legacy/{shera_threeplane.py, keymap.py, proxy.py}
-├─ examples/{notebooks/, configs/, README.md}
-├─ scripts/{run_fit.py, generate_synth_data.py}
-└─ tests/
+├─ dLuxShera_Refactor_Working_Plan.md
+├─ src/dluxshera/
+│  ├─ __init__.py
+│  ├─ core/{builder.py, binder.py, modeling.py, universe.py}
+│  ├─ params/{spec.py, store.py, transforms.py, packing.py, shera_threeplane_transforms.py}
+│  ├─ optics/{config.py, builder.py, optical_systems.py}
+│  ├─ inference/{inference.py, optimization.py}
+│  ├─ utils/utils.py
+│  └─ plot/plotting.py
+├─ tests/
+└─ Examples/
 ```
 
-**Principles:**
-- Small, testable modules; pure functions.
-- JAX-friendly (immutable dataclasses, pytrees).
-- Docs via `mkdocstrings` and NumPy-style docstrings.
+**Gaps vs proposal:** No `graph/`, `io/`, `viz/`, `docs/` tree; params registry/serialize modules absent; four-plane/variant code not present.
 
 ---
 
 ## 4) ParamSpec (Schema & Metadata)
 
-Each parameter is a `ParamField` with:
-- `key`: e.g., `m1.focal_length`
-- `kind`: `"primitive"` or `"derived"`
-- `units`, `dtype`, `shape`
-- `doc`: human-friendly description; optional LaTeX label
-- `bounds`: `(lo, hi)` or validator
-- `prior`: optional
-- `default`: concrete value, factory, or **`NO_DEFAULT`**
-- `transform`: optimization bijector (log/softplus), optional
-- `depends_on`: _(optional)_ only for documentation; actual dependency is in the transform registry
-
-**Defaults handling**
-- Safe global default → set in `default`.
-- Instrument/lab default → put in **profile** YAML (see §8).
-- Unknown by design → `NO_DEFAULT` (error if not provided).
+- `ParamField`/`ParamSpec` implemented with docstrings, defaults, bounds, dtype/shape, and builders for forward/inference subsets.
+- Derived and primitive fields coexist in single spec; separation by kind is not enforced in store validation.
+- Cross-referencing between docs/tests and spec remains manual.
 
 ---
 
-## 5) ParameterStore (Values, Primitives Only)
+## 5) ParameterStore (Values)
 
-- Frozen mapping `{key → value}` for **primitives**.
-- JAX pytree; use small arrays (jnp scalars/arrays).  
-- Methods:
-  - `.get(key)`
-  - `.replace(**overrides) -> ParameterStore` (returns new store)
-  - `.validate(spec)` for shape/dtype/bounds
-
-**Why primitives-only?** Prevents drift; deriveds are always recomputed via pure transforms.
+- Frozen mapping `{key → value}` registered as JAX pytree; supports `.replace`, iteration, and `.validate` against a `ParamSpec`.
+- Validation toggle allows derived keys; policy choice (primitives-only) still outstanding.
+- No serialization helpers; no `refresh` convenience API.
 
 ---
 
-## 6) Scoped Transform Registry (DerivedResolver)
+## 6) Transform Registry / DerivedResolver
 
-We keep the **meaning** of a derived key stable (e.g., `imaging.psf_pixel_scale`), while the **implementation** depends on `system_id`.
-
-```python
-@dataclass(frozen=True)
-class TransformSpec:
-    key: str
-    deps: tuple[str, ...]
-    fn: Callable[[dict[str, Any]], Any]  # env -> value (pure)
-```
-
-**Three- vs Four-plane example**
-```python
-register_transform("three_plane",
-  TransformSpec(
-    key="imaging.psf_pixel_scale",
-    deps=("m1.focal_length","system.plane_separation","detector.pixel_pitch"),
-    fn=lambda env: compute_psf_scale_three(env["m1.focal_length"],
-                                           env["system.plane_separation"],
-                                           env["detector.pixel_pitch"])
-))
-
-register_transform("four_plane",
-  TransformSpec(
-    key="imaging.psf_pixel_scale",
-    deps=("relay.eff_focal","detector.pixel_pitch"),
-    fn=lambda env: compute_psf_scale_four(env["relay.eff_focal"],
-                                          env["detector.pixel_pitch"])
-))
-```
-
-**Resolver**
-```python
-class DerivedResolver:
-    def compute(self, system_id: str, store, keys):
-        reg = transforms_registry.get(system_id, {})
-        out = {}
-        for k in keys:
-            ts = reg.get(k)
-            if ts is None: raise KeyError(f"No transform for {k} in {system_id}")
-            env = {d: store.get(d) for d in ts.deps}
-            miss = [d for d,v in env.items() if v is None]
-            if miss: raise ValueError(f"Missing primitives {miss} for {k}")
-            out[k] = ts.fn(env)
-        return out
-```
+- Global registry with recursive resolution, cycle detection, and depth guards.
+- Three Shera transforms registered: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist.
+- Missing per-system scoping (e.g., `three_plane` vs `four_plane`), richer transform coverage, and explicit resolver class wrapping registry per system.
 
 **Policy on setting deriveds**
-- **Default:** disallow setting deriveds; update the primitives instead.
-- **If invertible & justified:** offer explicit alias setter (opt-in).
+- Current code allows overriding deriveds if validation disabled. Target policy remains: disallow unless explicitly invertible.
 
 ---
 
 ## 7) Integrating dLux `ThreePlaneOpticalSystem`
 
-Treat dLux as the **engine**; we build/bind around it.
-
-**Split parameters:**
-- **Structural:** changing requires **rebuild** (e.g., `detector.n_pix`, geometry choices).
-- **Numeric:** changing requires **rebind** only (e.g., Zernikes, small misalignments).
-
-### Builder (cached on structural keys)
-```python
-class ThreePlaneBuilder:
-    def get_or_build(self, store: ParameterStore) -> ThreePlaneOpticalSystem:
-        # hash structural subset; cache OS per structure
-        # construct ThreePlaneOpticalSystem with structural kwargs
-        return os
-```
-
-### Binder (pure array updates using store + deriveds)
-```python
-class ThreePlaneBinder:
-    def bind(self, os, store, system_id="three_plane"):
-        needed = { "imaging.psf_pixel_scale", "m1.phase_map", "m2.phase_map" }
-        derived = resolver.compute(system_id, store, needed)
-        # Map primitives/derived -> layer arrays; return new OS/layers
-        return os_updated
-```
-
-### Graph node
-```python
-class DLuxSystemNode:
-    def __call__(self, store):
-        os = builder.get_or_build(store)
-        osb = binder.bind(os, store)
-        return osb.model(wavelengths=wgrid, weights=ww)  # multi-λ handled by dLux
-```
-
-**No upstream (dLux) changes required now.** Helpers like `os.replace(layers=...)` can be added later if desired.
+- **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem` and optionally injects Zernike coefficients from store. No structural hash/cache.
+- **Binder:** Merges stores and forwards through static optics; canonical loss wrapper implemented and tested. Derived resolution step is not enforced; plate-scale binding policy unresolved.
+- **Graph layer:** Absent—execution relies on legacy model helpers rather than a DAG of nodes.
 
 ---
 
-## 8) Config, Defaults & Profiles
+## 8) Parameter Profiles & IO (Planned)
 
-**Load order (left overrides right):**  
-`CLI overrides` → `run config` → `profile` → `spec defaults`.
-
-- **Profiles**: `profiles/toliman_A.yaml`, `profiles/lab_bench.yaml` define instrument/site defaults.
-- **NO_DEFAULT** parameters error early with a clear message listing missing keys and which node/transform needs them.
-- Example required-but-profiled: `source.wavelengths` may be required in examples but not globally defaulted in the spec.
+- Not yet implemented. Profiles (lab/instrument defaults), YAML/JSON loading, and serialization helpers remain to be built once primitives-only policy is finalized.
 
 ---
 
-## 9) Backwards Compatibility (Legacy Ergonomics)
+## 9) Docs & Examples (Planned)
 
-- `ParamsProxy` — dict-like view of store + resolver: read derived computes on the fly; write derived disallowed.
-- `ModelParams` — wrapper exposing `.replace(...)`, `extract_params()` and `__getitem__/__setitem__` via proxy.
-- `LegacyKeyMap` — maps old names → canonical keys, with optional deprecation warnings.
-
-Keep the public facade `SheraThreePlane_Model` calling into the graph. Deprecate legacy names gradually.
+- README, MkDocs structure, runnable notebooks, and scripted demos are not yet built. Existing examples rely on legacy flows.
 
 ---
 
-## 10) Examples & Docs (Minimum Lovable)
+## 10) Testing Philosophy
 
-- **Notebooks**:  
-  `00_env_check` • `01_quickstart_model` • `02_make_synth_dataset` • `03_inference_grad` • `04_eigen_truncation` • `05_plate_scale_vs_primitives` • `06_multi_init_local_bias` • `(07_hmc optional)`
-- **Scripts**: `generate_synth_data.py`, `run_fit.py` (toy/real switch).
-- **Docs**: Concepts pages for ParamSpec/Store/Graph/Transforms; How‑tos for adding parameters, registering nodes, switching systems; API via mkdocstrings.
+- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, and eigenmode utilities.
+- Missing: SystemGraph/regression tests for node execution, demo workflows, four-plane variant tests, and serialization/profile coverage.
 
 ---
 
-## 11) Testing & CI
+## 11) Gotchas & Decisions
 
-**Unit/props**
-- Spec lint: no cycles; all deriveds registered per system; bounds/unit sanity.
-- Transforms: finite-diff/analytic checks; unit scaling.
-- Store: validation; replace semantics; pytree roundtrip.
-
-**Graph & optics**
-- Tiny 16×16 forward PSF; JIT/grad smoke; shape/norm checks.
-- Selection tests for scoped transforms (three- vs four-plane).
-
-**Inference**
-- Gradient-based fit reduces loss on synthetic data (fast).
-
-**Notebooks (smoke)**
-- Run 01 & 03 via nbconvert/papermill with short runtime.
-
-**Performance**
-- Builder cache hit on structural hash; binder avoids rebuilds.
-- Document first-call JIT latency vs subsequent calls.
+- **Primitives-only store:** Decision still pending; current implementation can accept deriveds when validation is disabled.
+- **Plate-scale policy:** Whether to always recompute vs allow override is still undecided.
+- **Structural caching:** Builder currently rebuilds every call; caching keyed by structural primitives is planned.
+- **Scopes:** Transform registry is global; needs scoping by system ID to avoid collisions.
 
 ---
 
-## 12) Performance & JAX Gotchas
+## 12) Open Questions
 
-- Immutable dataclasses; explicit pytrees.
-- Keep structural choices static inside jitted fns.
-- Avoid Python side effects; return arrays only.
-- Consistent dtypes (float32/float64).
-- Wavelength vectors as arrays (avoid static_argnames if possible).
-- Minimize device↔host transfers in loops.
+- Final policy for accepting derived keys in ParameterStore (`validate` default vs production enforcement).
+- Whether to expose alias setters for invertible deriveds (e.g., pixel scale) or force primitive updates only.
+- Canonical plate-scale handling in binder (always derived? allow override?).
+- Structural hash definition for three-plane optics (which primitives are structural?).
 
 ---
 
-## 13) Migration Plan & Milestones
+## 13) Notes on Backward Compatibility
 
-**Phase 0 (now)**
-- Builder, binder, graph node; route `SheraThreePlane_Model` through them.
-- Seed `ParamSpec` & a few key params.
-
-**Phase 1**
-- Introduce `ParameterStore`; examples use it via `ModelParams` shim.
-- Add scoped transform registry; centralize `psf_pixel_scale`.
-
-**Phase 2**
-- Add `four_plane` builder + transforms.
-- `system_id` switch; end-to-end smoke tests.
-
-**Phase 3 (optional)**
-- Upstream small dLux ergonomics; deprecate legacy names by default.
+- `SheraThreePlane_Model` remains the public entry point; new plumbing should remain internal to avoid churn in existing scripts.
+- Legacy files (`modeling.py`, optics helpers) still carry pre-refactor pathways; the refactor must avoid breaking current examples until replacements land.
 
 ---
 
-## 14) Open Questions
+## 14) Prior Art / References
 
-- Allow alias setter for invertible deriveds? (default no)
-- Need transform predicates beyond `system_id`?
-- Minimal structural subset for builder hash?
-
----
-
-
-## 15) Tasks & Priorities
-
-============================================================  
-P0 — Core plumbing  
-============================================================
-
-- [ ] ParamSpec core keys  
-  - [x] Implement `ParamField` dataclass  
-    - key/group/kind/units/dtype/shape/default/bounds/doc  
-    - frozen, simple, no model dependencies  
-  - [x] Implement `ParamSpec` container  
-    - Stores a list of `ParamField`s  
-    - Provides lookup by key and iteration over fields  
-  - [x] Define `build_inference_spec_basic()`  
-    - Binary: separation, position angle, centroid (x/y), contrast  
-    - Photometry: `binary.log_flux_total`  
-    - System: `system.plate_scale_as_per_pix`  
-    - Wavefront: `primary.zernike_coeffs`, `secondary.zernike_coeffs` (variable-length)  
-  - [x] Add basic unit/meaningful docstrings for each field  
-  - [x] Add at least one additional spec builder (ForwardModelSpec)  
-    - `build_forward_model_spec_from_config(cfg: SheraThreePlaneConfig)` mirrors config geometry/band/imaging and declares derived forward keys (`system.focal_length_m`, `system.plate_scale_as_per_pix`, `binary.log_flux_total`).  
-  - [ ] Cross-link ParamSpec usage in the Working Plan (explain “schema vs state” distinction)  
-
-
-------------------------------------------------------------
-- [ ] ParameterStore (frozen, pytree, validate)  
-  - [x] Implement `ParameterStore` as a frozen dataclass  
-    - Internally stores `_values: Mapping[ParamKey, Any]`  
-    - Basic mapping interface: `keys()`, `values()`, `items()`, `as_dict()`  
-  - [x] Implement construction helpers  
-    - `from_dict(mapping)`  
-    - `from_spec_defaults(spec)` to seed a store from a `ParamSpec`  
-      - Skips fields with `kind="derived"` so transforms are the canonical source for derived values unless explicitly overridden.  
-  - [x] Implement lookup + update semantics  
-    - `get(key, default=_MISSING)` with proper error behavior  
-    - `replace(updates: Mapping, **extra_updates)` returning a new store (no mutation)  
-    - Document why dotted keys must be passed via `updates` mapping  
-  - [x] Register as a JAX pytree  
-    - Deterministic key ordering in `_store_flatten`  
-    - `_store_unflatten` to reconstruct from children + key tuple  
-  - [x] Implement `validate_against(spec)` helper  
-    - Ensures all keys in the store are present in a given `ParamSpec`  
-    - Raises helpful error listing unknown keys  
-  - [x] Unit tests  
-    - `test_parameter_store_get_and_replace`  
-    - `test_parameter_store_is_pytree`  
-    - `test_parameter_store_validate_against_spec`  
-  - [ ] Decide how strictly we want validation in “production” code paths  
-    - E.g. always validate against a spec at model construction vs on-demand  
-
-
-------------------------------------------------------------
-- [ ] Inference parameter packing (store ↔ vector)  
-  - [x] Choose an initial inference subset of keys for separation-focused astrometry runs  
-    - e.g. `["binary.separation_as", "binary.position_angle_deg", "binary.x_position", "binary.y_position", "binary.log_flux_total"]` (+ optionally `system.plate_scale_as_per_pix`)  
-    - Define `inf_spec_subset = build_inference_spec_basic().subset(infer_keys)` as the canonical ordering for the parameter vector.  
-  - [x] Implement `pack_params(spec_subset, store)` in `params/packing.py`  
-    - Walk keys in `spec_subset` order, pull values from `store`, flatten to 1D as needed, and concatenate into a single 1D JAX array `theta`.  
-    - `spec_subset` defines both *which* parameters are inferred and the *order* of coordinates in `theta`.  
-  - [x] Implement `unpack_params(spec_subset, theta, base_store)` in `params/packing.py`  
-    - Start from `base_store` holding all parameters (inferred + fixed).  
-    - Slice `theta` according to the same key order, rebuild scalars/arrays per field, and return a new `ParameterStore` via `base_store.replace({...})`.  
-    - This is now the standard way to go from a flat optimisation vector back to a structured parameter state.  
-  - [x] Unit tests for packing (plus indirect tests via image NLL bridge)  
-    - Round-trip test: `store2 = unpack_params(subset, pack_params(subset, store), base_store=store)` and verify equality for all keys in the subset.  
-    - Include at least one vector-valued parameter in the toy spec to prove logic beyond pure scalars.  
-  - [x] Smoke usage tests  
-    - `test_image_nll_bridge.py` and `test_inference_api.py` both exercise pack/unpack via `make_image_nll_fn`, `run_image_gd`, and `run_shera_image_gd_basic`.  
-
-
-------------------------------------------------------------
-- [ ] Transforms registry + resolver; `psf_pixel_scale` (three-plane)  
-  - [x] Implement transform registry infrastructure  
-    - Register transforms that compute derived keys from primitive ones  
-    - Resolver that:  
-      - takes a target key,  
-      - walks dependency graph,  
-      - supports recursion but detects cycles / missing deps  
-  - [x] Unit tests for the transform machinery  
-    - Dummy transforms using synthetic parameters  
-    - Cycle / missing-dependency behavior  
-  - [x] Define concrete derived keys and transforms relevant to Shera  
-    - `system.focal_length_m` from `system.m1_focal_length_m`, `system.m2_focal_length_m`, `system.m1_m2_separation_m`  
-    - `system.plate_scale_as_per_pix` from `system.focal_length_m`, `system.pixel_pitch_m`  
-    - `binary.log_flux_total` from `system.m1_diameter_m`, `band.bandwidth_m`, `imaging.exposure_time_s`, `imaging.throughput`, `binary.spectral_flux_density`  
-  - [x] Decide / document policy for conflicts  
-    - **Policy:** “store wins” — if a key exists in the `ParameterStore`, its value is used; transforms are only evaluated when the key is absent from the store.  
-  - [x] Implement and test a three-plane plate-scale transform  
-    - `system.plate_scale_as_per_pix` transform uses the same effective focal-length relation as `SheraThreePlaneSystem`.  
-    - Tests compare against the legacy optics `psf_pixel_scale` for consistency.  
-
-
-------------------------------------------------------------
-- [ ] ThreePlaneBuilder (structural hash/cache)  
-  - [x] Implement `SheraThreePlaneConfig` dataclass  
-    - Geometry: diameters, focal lengths, plane separation  
-    - Grids & sampling: `pupil_npix`, `psf_npix`, `oversample`, `wavelength_m`, `bandwidth_m`, `n_lambda`  
-    - Detector: `pixel_pitch_m`  
-    - Spiders: `n_struts`, `strut_width_m`, `strut_rotation_deg`  
-    - Zernike basis structure: `primary_noll_indices`, `secondary_noll_indices`  
-    - Diffractive pupil: `diffractive_pupil_path`, `dp_design_wavelength_m`  
-    - Metadata: `design_name`  
-  - [x] Define named point designs  
-    - `SHERA_TESTBED_CONFIG`  
-    - `SHERA_FLIGHT_CONFIG`  
-    - Both wired to the shared default DP file via a resolved package path  
-  - [x] Implement `build_shera_threeplane_optics(cfg, store=None, spec=None)` in `optics/builder.py`  
-    - Wraps `SheraThreePlaneSystem`  
-    - Maps config fields → constructor arguments (units and names aligned)  
-    - Passes DP path + design wavelength through to `SheraThreePlaneSystem`  
-    - Optionally validates a `ParameterStore` against a `ParamSpec` before use  
-    - Injects Zernike coefficients from `ParameterStore` (when present) as `m1_coefficients` / `m2_coefficients`.  
-  - [x] Smoke test for the optics builder  
-    - `test_build_shera_threeplane_optics_smoke`  
-    - Checks that optics build without error and basic dimensions match config  
-  - [x] Extend builder to accept `ParameterStore`  
-    - Reads `primary.zernike_coeffs` / `secondary.zernike_coeffs` from the store (when present)  
-    - Validates coefficient lengths against `primary_noll_indices` / `secondary_noll_indices`  
-    - Passes as `m1_coefficients` / `m2_coefficients` into `SheraThreePlaneSystem`  
-    - Additional tests verify that the coefficients are correctly wired through to the internal `BasisOptic` layers.  
-  - [ ] (Optional P0, or P1) Add a structural hash/cache stub  
-    - Compute a hash from `SheraThreePlaneConfig` + relevant aspects of `ParamSpec`  
-    - Leave actual caching to a higher-level layer, but define the hash function here  
-
-
-------------------------------------------------------------
-- [ ] ThreePlaneBinder (phase/sampling bind)  
-  - [x] Design a small “binder” helper/dataclass  
-    - Implemented as `SheraThreePlaneBinder` in `core/binder.py`.  
-    - Holds static optics + detector from `SheraThreePlaneConfig` and a base `ParameterStore`.  
-  - [x] Implement binder logic for forward modelling  
-    - `_merge_store()` to overlay a partial store on the base store.  
-    - `forward(store)` builds an Alpha Cen source from the merged store and calls a fixed `dl.Telescope` (optics + detector) to produce an image.  
-  - [x] Test binder behavior  
-    - `test_binder_smoke.py`: binder builds and returns an image with expected shape.  
-  - [ ] Decide how `system.plate_scale_as_per_pix` interacts with geometry at the binder level  
-    - Option A (current default): treat `system.plate_scale_as_per_pix` as an independent inference knob and let transforms/legacy code provide geometry-derived values where needed.  
-    - Option B (later): add a binder-level switch to force plate scale from geometry or leave it free as an effective calibration parameter.  
-
-
-------------------------------------------------------------
-- [ ] DLuxSystemNode; wire SheraThreePlane_Model  
-  - [ ] Design a “system node” or top-level model wrapper API  
-    - Decide whether to:  
-      - keep `SheraThreePlane_Model` as the primary entry point, or  
-      - introduce a more generic node class that wraps `SheraThreePlaneBinder` with a standard `.forward(store, ...)` interface.  
-    - Clarify responsibilities vs Binder:  
-      - Binder: config + optics/detector + base store → image given a store.  
-      - Node: higher-level orchestration, logging, experiment config, etc.  
-  - [x] Implement a source builder (e.g. `build_alpha_cen_source`)  
-    - Uses config bandpass (`wavelength_m`, `bandwidth_m`, `n_lambda`)  
-    - Uses store fields:  
-      - `binary.separation_as`, `binary.position_angle_deg`  
-      - `binary.x_position`, `binary.y_position`  
-      - `binary.contrast`  
-      - `binary.log_flux_total`  
-    - Handles unit conversions to whatever `AlphaCen` expects.  
-  - [x] Implement `build_shera_threeplane_model(...)` (legacy-style)  
-    - Compose source + optics + detector into a `dl.Telescope` inside `SheraThreePlane_Model`.  
-    - Now also has a Binder-based sibling path via `SheraThreePlaneBinder.forward(...)`.  
-  - [ ] Define a canonical loss function in “parameter-vector space”  
-    - We currently have:  
-      - `make_image_nll_fn(...)` → θ ↦ NLL using `build_shera_threeplane_model`.  
-      - `run_image_gd(...)` → θ-space GD using `SheraThreePlaneBinder` (static optics, dynamic source).  
-    - Still to do (canonically):  
-      - `loss_canonical(theta, cfg, inf_spec_subset, base_store, data)` that uses Binder internally and becomes the single reference loss for both optimisation and MCMC.  
-  - [ ] Wire existing scripts / notebooks to the new builder  
-    - Introduce a migration path:  
-      - Old: `SheraThreePlane_Model(...)` with hand-managed params.  
-      - New: `SheraThreePlaneBinder` + `ParamSpec` + `ParameterStore` + `pack_params`/`unpack_params` + canonical loss.  
-
-
-------------------------------------------------------------
-- [ ] Canonical astrometry demo (separation recovery in base parameterization)  
-  - [ ] Truth setup for a single Shera three-plane scenario  
-    - Choose a point design (e.g. `SHERA_TESTBED_CONFIG`).  
-    - Build a forward-model spec and store:  
-      - `fwd_spec = build_forward_model_spec_from_config(cfg)`  
-      - `fwd_store = ParameterStore.from_spec_defaults(fwd_spec)` and override any observation/source primitives as needed.  
-    - Use transforms to compute truth-level derived quantities:  
-      - `system.plate_scale_as_per_pix` (geometry-derived plate scale),  
-      - `binary.log_flux_total` (truth-level total flux).  
-    - Build an inference truth store using `build_inference_spec_basic()` and copy the truth plate scale and log flux into it.  
-  - [ ] Generate synthetic data in the new pipeline  
-    - Preferred: generate via Binder (`SheraThreePlaneBinder.forward(...)`) from the truth store.  
-    - Store this image as `y_obs` for the inference demo.  
-  - [ ] Define an inference subset and pack/unpack  
-    - Choose `infer_keys` for astrometry-focused runs (e.g. separation, PA, centroid offsets, total flux, maybe plate scale).  
-    - Build `inf_spec_subset` and compute:  
-      - `theta_truth = pack_params(inf_spec_subset, inf_store_truth)`.  
-    - Construct a starting guess store by perturbing truth (e.g. 10% error in separation) and convert to `theta0` via `pack_params`.  
-  - [ ] Run an Optax-based optimisation in canonical parameter space  
-    - Use `loss_canonical(theta, ...)` (Binder-based) and its gradient.  
-    - After convergence, unpack the final `theta_hat` back into a `ParameterStore` and inspect recovered values for `binary.separation_as`, etc.  
-    - Note: we already have a first “mini demo” via `run_image_gd` and `run_shera_image_gd_basic`’s smoke tests; this task is about turning that into a documented, reproducible example script/notebook with plots.  
-
-
-------------------------------------------------------------
-- [ ] Eigenmode parameterization (built on top of canonical inference)  
-  - [ ] Compute FIM in canonical θ coordinates  
-    - Use the canonical loss/log-likelihood and current inference subset to compute the Fisher Information Matrix (FIM) at `theta_truth` for a given experiment.  
-    - Reuse/adapt existing FIM machinery now that θ-space loss is explicitly defined.  
-  - [ ] Diagonalize FIM and define eigenbasis maps  
-    - Perform eigen-decomposition `F = V Λ Vᵀ` at the chosen reference point.  
-    - Define `theta_ref = theta_truth` and build helper functions:  
-      - `to_eigen(theta) = V.T @ (theta - theta_ref)`  
-      - `from_eigen(z) = theta_ref + V @ z` (with optional whitening using Λ if desired).  
-    - Encapsulate in a small helper (e.g. `EigenParamMap`) that stores `theta_ref`, `eigen_vecs`, and `eigen_vals`.  
-  - [ ] Define and test an eigen-space loss  
-    - Wrap the canonical loss to operate in eigen coordinates:  
-      - `loss_eigen(z) = loss_canonical(from_eigen(z), ...)`.  
-    - Run a small Optax optimisation in `z` space starting from `z0 = 0` (or a small perturbation).  
-    - Verify that mapping back to `theta_hat = from_eigen(z_final)` and then to a `ParameterStore` yields comparable or improved recovery relative to the canonical parameterisation.  
-  - [ ] Document usage pattern  
-    - Clearly describe how eigen-modes are a pure *reparameterisation layer* on top of the same spec/store/builders/Binder.  
-    - Note that future samplers (HMC/NUTS) will operate in this eigen space by simply swapping `theta` for `z` and using the same pack/unpack and loss machinery.  
-
-
-------------------------------------------------------------
-- [ ] Unit tests: spec/store/transforms/node/inference  
-  - [x] ParamSpec / ParameterStore  
-    - Spec creation and field sanity  
-    - Store construction, replacement, pytree behavior, validation  
-  - [x] Optics builder  
-    - Smoke test from `SHERA_TESTBED_CONFIG`  
-    - Ensure correct grid sizes and no DP errors  
-    - Test that Zernike coefficients are wired from `ParameterStore` into optics  
-  - [x] Transforms  
-    - Unit tests for transform registry / resolver (including cycles and missing deps)  
-    - Tests for concrete derived transforms (`system.focal_length_m`, `system.plate_scale_as_per_pix`, `binary.log_flux_total`) against analytic formulas and legacy optics behavior  
-  - [x] Zernike plumbing  
-    - Tests that Zernike coefficients from a `ParameterStore` are correctly passed into `SheraThreePlaneSystem`  
-    - Tests for behavior when coefficients are `None` or mismatched length  
-  - [x] Source builder  
-    - Smoke test constructing an `AlphaCen` (or equivalent) source from config + store  
-    - Verify basic behavior (positions, contrast, flux) vs known inputs  
-  - [x] Packing / inference-subset utilities (store-based)  
-    - Tests for `pack_params` / `unpack_params` round-trip on a small toy spec (scalars + vector parameter).  
-    - Indirect coverage via `test_image_nll_bridge.py` and `test_inference_api.py`.  
-  - [x] Simple θ-space optimizer  
-    - `run_simple_gd` tested on a convex quadratic (`test_run_simple_gd.py`).  
-  - [x] Image NLL bridge + θ-space GD  
-    - `make_image_nll_fn` smoke test (Gaussian)  
-    - `run_image_gd` smoke test (separation-only, Binder-based).  
-  - [x] High-level inference API  
-    - `run_shera_image_gd_basic` smoke test in `test_inference_api.py`.  
-  - [ ] Full “model node” regression  
-    - End-to-end test: config + forward-model spec + inference spec + stores → Binder → PSF with expected shape.  
-    - Tiny optimisation and verify recovered separation within tolerance for fixed seed.  
-
-
-============================================================  
-P0 — Additional helpers / ideas  
-============================================================
-
-- A `refresh()` helper to automatically update derived parameters within a store using the transform registry.  
-  - P0: rely on explicit transform calls and “store wins” policy.  
-  - Later: provide a function that returns a new store with selected derived keys filled in from transforms (no mutation).  
-
-
-============================================================  
-P1 — Docs & examples  
-============================================================
-
-- [ ] README quickstart  
-- [ ] MkDocs concepts (spec/store/Binder/transforms, plus canonical vs eigen parameterisation)  
-- [ ] Notebooks runnable  
-  - Include at least one example that mirrors the “canonical astrometry demo” from P0 using `run_shera_image_gd_basic`.  
-- [ ] API docstrings for new modules (params, transforms, optics builder, Binder, inference API).  
-
-
-============================================================  
-P2 — Variant support  
-============================================================
-
-- [ ] Four-plane transforms & builder/binder  
-- [ ] Resolver selection tests  
-- [ ] End-to-end smoke test  
-
-
-============================================================  
-P3 — Ergonomics  
-============================================================
-
-- [ ] ModelParams shim + proxy + keymap (for legacy notebooks)  
-- [ ] Deprecation warnings where appropriate  
-- [ ] Optional upstream PRs to dLux/dLuxToliman (e.g. Zernike/basis ergonomics, Shera helpers)  
-
-
-============================================================  
-Next Sprint — Suggested Short-Term Focus  
-============================================================  
-
-- [ ] Finalise a **canonical θ-space loss** using Binder  
-  - Implement `loss_canonical(theta, cfg, inf_spec_subset, base_store, data, var)` that wraps Binder + store pack/unpack and becomes the single reference loss.  
-
-- [ ] Implement a minimal **canonical astrometry demo script**  
-  - Use Binder + `run_shera_image_gd_basic` to recover separation from synthetic data.  
-  - Save loss curves and a before/after PSF plot for inclusion in docs.  
-
-- [ ] Decide and implement a provisional **plate-scale policy** at the Binder level  
-  - For now, likely “plate scale is a free calibration param for inference specs; geometry-derived value is used only in forward-model specs / truth generation.”  
-
-- [ ] Sketch the **SystemNode design**  
-  - A lightweight wrapper over Binder + ParamSpec + ParameterStore that exposes:  
-    - `.forward(store)`  
-    - `.pack(infer_keys, store)` / `.unpack(infer_keys, theta, base_store)`  
-    - hooks for logging and experiment metadata.  
-
+- dLux core APIs for `ThreePlaneOpticalSystem` and PSF generation.
+- Prior optimization scripts in `Examples/` (still legacy-style; to be updated after SystemGraph lands).
 
 ---
 
-## 16) Conventions
+## 15) Tasks & Priorities (Updated)
 
-- Keys: `element.group.name` (e.g., `m2.zernike.j4`)
-- Units in spec; validated in transforms
-- NumPy-style docstrings
-- snake_case modules; CamelCase classes
+Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
----
+**P0 — Stabilize primitives/derived boundary & binder**
+- ⚠️ **ParamSpec core keys & docs**: Spec exists with metadata; ensure docstrings cross-reference tests/examples once SystemGraph lands.
+- ⚠️ **ParameterStore policy**: Primitives-only enforcement + default validation mode; add optional `refresh` helper and serialization later.
+- ✅ **Inference parameter packing**: `pack_params`/`unpack_params` with tests.
+- ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.
+- ⚠️ **ThreePlaneBuilder (structural hash/cache)**: Build path exists; add structural subset definition and caching policy.
+- ⚠️ **ThreePlaneBinder (phase/sampling bind)**: Binder exists; clarify plate-scale policy and enforce derived resolution.
+- ⚠️ **Canonical loss wiring**: New binder-based loss implemented; migrate examples once SystemGraph exists.
+- ⏳ **DLuxSystemNode / SystemGraph**: Node abstractions and DAG execution not built.
 
-## 17) Quickstart (Dev)
+**P1 — Docs, demos, and scope-aware transforms**
+- ⏳ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
+- ⏳ **Canonical astrometry demo**: Script/notebook to generate truth, synth data, run Optax with new loss.
+- ⚠️ **Eigenmode parameterization**: FIM/eigen utilities exist; need optimizer/loss integration and docs.
+- ⏳ **Docs & examples**: README quickstart, MkDocs pages, notebooks, updated Examples using new stack.
+- ⏳ **Profile/IO helpers**: YAML/JSON profiles, serialization, and loading; depends on store policy.
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -U pip
-pip install -e ".[dev]"
-python scripts/run_fit.py --steps 200 --lr 5e-2 --seed 0
-mkdocs serve
-```
+**P2 — Variants & ergonomics**
+- ⏳ **Four-plane variant**: Transforms, builder, resolver selection tests.
+- ⏳ **Ergonomics**: `ModelParams` shim, deprecation warnings, upstream PR prep.
 
-**Git**
-```bash
-git checkout -b refactor/params-graph
-git add -p
-git commit -m "refactor: ParamSpec/Store + three-plane transforms + builder/binder"
-git push -u origin refactor/params-graph
-```
+**Next sprint follow-ups**
+- ⚠️ Canonical loss is in place; remaining sprint items: plate-scale policy decision, SystemNode sketch, demo script.
 
----
-
-## 18) Appendix — Checklists
-
-**Add a new primitive**
-- [ ] Spec entry (units/bounds/prior/default or `NO_DEFAULT`)
-- [ ] Profile defaults if instrument-specific
-- [ ] Use in transforms/nodes
-- [ ] Tests + docs
-
-**Add/modify a derived**
-- [ ] Register transform per `system_id` (deps + fn)
-- [ ] Tests: numerical sanity, missing-deps errors, selection
-- [ ] Docs: definition & interpretation
-
-**Add a new system (e.g., four-plane)**
-- [ ] New builder/binder
-- [ ] Register variant transforms
-- [ ] End-to-end smoke test; examples with `system_id`
+**Newly noted tasks**
+- ⏳ Structural hash/caching for three-plane builder.
+- ⏳ Enforce primitives-only store in production mode.
+- ⏳ Add serialization (`params/serialize.py`) and transform registry module (`params/registry.py`).
+- ⏳ Add SystemGraph layer (`graph/` package) with node tests.
 
 ---
 
-## 19) Decision Log (living table)
+## 16) Recommended Next 3–5 Tasks (to reach end-to-end flow)
 
-> Record key decisions succinctly so future you (or collaborators) can see what changed and why.
+1. **Add SystemGraph + DLuxSystemNode scaffold (P0)**
+   - **Goal:** Introduce `graph/` package with node base classes and a minimal SystemGraph that wraps the existing three-plane optics call; integrate binder-based loss through the graph.
+   - **Files:** `src/dluxshera/graph/{nodes.py, system_graph.py}`, updates to `core/modeling.py` and tests in `tests/graph/`.
+   - **Dependencies:** Uses existing binder/builder; needs agreed derived resolution policy.
+   - **Risks/Ambiguities:** API shape for nodes; how to cache builder outputs per structural hash.
+   - **Tests:** Node execution smoke test, graph forward returning PSF, regression vs legacy model for a single wavelength set.
 
-| Date       | Decision                                                                 | Rationale                                                                                                                                  | Status   | Owner | Links |
-|------------|---------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|----------|-------|-------|
-| 2025-11-13 | Use **scoped transform registry** for derived keys (per `system_id`).        | Same user-facing meaning (e.g., `imaging.psf_pixel_scale`) with system-specific math; keeps API stable and internals swappable.            | AGREED   | DMK   |  |
-| 2025-11-13 | Adopt **Builder (structural) + Binder (numeric)** around `ThreePlaneOpticalSystem`. | Avoid upstream churn in dLux; rebuild only when structure changes; rebind for numeric updates each step.                                   | AGREED   | DMK   |  |
-| 2025-11-13 | Keep `SheraThreePlane_Model` as stable facade; route through `SystemGraph`.   | Zero breakage for users; internal flexibility for graph/refactor; easy example continuity.                                                 | AGREED   | DMK   |  |
-| 2025-11-13 | **Disallow writing derived params** directly (alias setter only if invertible). | Prevents drift & ambiguity; primitives remain single source of truth; explicit alias only when reversible mapping is defined.              | AGREED   | DMK   |  |
-| 2025-11-13 | `ParameterStore` holds **primitives only**; recompute derived via transforms. | Ensures consistency; simplifies autograd & validation; fewer stale caches.                                                                | AGREED   | DMK   |  |
-| 2025-11-13 | Defaults: spec if safe; otherwise **profiles**; else `NO_DEFAULT`.           | Clear precedence; early, actionable errors; instrument/site separation.                                                                   | AGREED   | DMK   |  |
-| 2025-11-13 | Preserve legacy ergonomics via **ParamsProxy/ModelParams** shim.             | Smooth migration; deprecations later without blocking users.                                                                               | AGREED   | DMK   |  |
-| 2025-11-13 | Add **four-plane** support via new builder/binder + transforms.              | Scale architecture to new systems while reusing graph and API.                                                                             | PLANNED  | DMK   |  |
-| 2025-11-21 | Created `refactor/params-graph` branch for parameter refactor work. | Keep refactor changes isolated from stable main; enables incremental PRs. | IN PROGRESS | DMK |  |
-| 2025-11-21 | Reorganized project directory into new src/dluxshera/ hierarchy per refactor plan.         | Establish a clean package structure before implementing ParamSpec/ParameterStore; improves clarity and maintainability. | Completed   | DMK    | Moved oneoverf.py to utils/ instead of core/. |
-| 2025-11-21 | Introduce ParamField/ParamSpec schema, root tests/ layout, and pyproject/pytest setup for src-based package. | Establishes a declarative parameter schema and testing harness before wiring into SheraThreePlane; makes refactor safer/tested. | COMPLETED | DMK   |       |
-| 2025-11-21 | ParameterStore.replace() uses a mapping for updates (not kwargs) for hierarchical keys with dots.      | Param keys are canonical string IDs like "binary.separation_mas"; Python kwargs cannot represent these safely. Mapping-based updates avoid subtle key mismatches. | COMPLETED | DMK   | kwargs allowed only for simple identifier-like keys. |
-| 2025-12-02 | Introduced ForwardModelSpec + Shera three-plane transforms for EFL, plate scale, and log-flux. | ForwardModelSpec mirrors SheraThreePlaneConfig for truth-level geometry/band/imaging and uses a scoped TransformRegistry (shera_threeplane_transforms) to derive system.focal_length_m, system.plate_scale_as_per_pix, and binary.log_flux_total from primitive config/observation/source fields. | COMPLETED | DMK |  |
-| 2025-12-02 | ParameterStore.from_spec_defaults populates only primitive fields; derived fields are omitted and supplied by transforms. | Avoids the bug where derived keys were pre-populated with None and silently blocked transform evaluation. Store values always take precedence if present, but derived quantities are now transform-driven by default and can still be manually overridden via replace() when needed. | COMPLETED | DMK |  |
-| 2025-12-02 | Formalized SheraThreePlaneConfig + builder wrapper and anchored behavior with Shera three-plane transform tests. | SheraThreePlaneConfig now holds structural instrument settings (pixel_pitch_m, Noll index tuples, diffractive pupil path + design wavelength semantics, etc.), and build_shera_threeplane_optics constructs the legacy SheraThreePlaneSystem from config + optional Zernike coefficients in a ParameterStore. New tests compare transformed EFL, plate scale, and log-flux against analytic formulas and the legacy optics object, providing regression protection for the refactor. | COMPLETED | DMK |  |
+2. **Scoped DerivedResolver with system IDs (P0)**
+   - **Goal:** Refactor transform registry to be system-scoped; prevent collisions and enable future four-plane variant.
+   - **Files:** `src/dluxshera/params/{transforms.py, shera_threeplane_transforms.py}`, new `params/registry.py` tests under `tests/params/test_transforms.py`.
+   - **Dependencies:** May inform SystemGraph inputs; requires decision on primitives-only enforcement to disallow derived overrides.
+   - **Risks/Ambiguities:** Backward compatibility for existing transform registration; choosing default system_id.
+   - **Tests:** Scope-aware resolution, missing-transform errors per system, regression for three existing transforms.
 
+3. **ParameterStore enforcement + serialization (P0)**
+   - **Goal:** Enforce primitives-only store in validation by default; add `refresh` helper and serialization (`to_dict`/`from_dict` and YAML/JSON hooks).
+   - **Files:** `src/dluxshera/params/{store.py, serialize.py}`, tests in `tests/params/test_store.py`.
+   - **Dependencies:** Scoped resolver changes (deriveds recomputed); may affect binder validation.
+   - **Risks/Ambiguities:** Handling legacy flows that may pass deriveds; migration path via explicit flag.
+   - **Tests:** Validation rejecting derived keys, round-trip serialization, refresh behavior with transforms.
 
----
+4. **Structural hash/cache for ThreePlaneBuilder (P1)**
+   - **Goal:** Define structural subset and cache optics builds keyed by hash; avoid rebuilds during optimization.
+   - **Files:** `src/dluxshera/optics/builder.py`, maybe `optics/config.py`, tests in `tests/optics/test_builder.py`.
+   - **Dependencies:** ParameterStore enforcement to identify structural keys cleanly; SystemGraph can reuse cache.
+   - **Risks/Ambiguities:** Hash stability across JAX types; invalidation when structural params change.
+   - **Tests:** Cache hit/miss behavior, correctness after structural override, hash determinism.
 
-## 20) AI Collaborator — Operating Instructions
-
-When asking an AI assistant to write code or docs for this repo, include these constraints so outputs are plug-and-play:
-
-- **Purity & JAX:** Prefer pure functions, immutable dataclasses, and explicit pytree registration. No global state or side effects inside jitted paths.
-- **Structural vs numeric:** Identify which parameters are *structural* (trigger rebuild) vs *numeric* (rebind only). Keep structural choices outside of `jit` or pass as static args.
-- **Transforms:** Register derived parameters via the **scoped transform registry**. Do not hardcode derived math inside nodes or optics.
-- **Docstrings:** Use **NumPy-style** docstrings and include units, shapes, and parameter semantics; keep public APIs documented for mkdocstrings.
-- **Tests first:** For every new primitive/derived/node, provide a tiny unit test (16×16 grids) and a gradient sanity check when applicable.
-- **Naming & keys:** Use canonical keys like `element.group.name` (e.g., `m2.zernike.j4`). Avoid alternate spellings; add to `LegacyKeyMap` only when required.
-- **Examples:** Provide a runnable snippet (≤30s) and, if heavy, note how to toggle small sizes for CI.
-- **Performance:** Avoid unnecessary host-device transfers; batch wavelengths as arrays; note first-call JIT cost.
-- **Safety rails:** Never write large data to git; put scratch data under `examples/data/` (git-ignored).
-
-### Prompt templates (copy/paste)
-
-- **Add a new primitive**  
-  "Add a primitive `{key}` with units `{units}` and default `{default}`. Update `ParamSpec`, add validation to `store.validate()`, and include a unit test verifying bounds and dtype."
-
-- **Register a derived transform**  
-  "Register derived `{derived_key}` for `system_id='{sys}'` with deps `{deps}` and provide `compute_{short}`. Add tests for (1) numerical sanity and (2) missing deps error messaging."
-
-- **Create a SystemGraph node**  
-  "Create a node named `{name}` that consumes `{inputs}` and derived keys `{deriveds}`, and returns `{outputs}`. Include a topo-order test and a JIT smoke test."
-
-- **Wire builder/binder**  
-  "Implement `ThreePlaneBuilder` with structural hash `{struct_keys}` and `ThreePlaneBinder` mapping store+derived to layer arrays. Add a forward test that calls `.model()` on a 32×32 grid."
-
-- **Write a gradient sanity test**  
-  "For parameter `{key}`, compare autodiff gradient vs central finite difference on a minimal 16×16 PSF loss; assert relative error < 5e-2."
+5. **Canonical astrometry demo + docs (P1)**
+   - **Goal:** Provide runnable script/notebook demonstrating truth generation, synthetic data, and Optax run using new binder/graph.
+   - **Files:** `Examples/` (new script/notebook), `README.md`, possibly `docs/` scaffold if added.
+   - **Dependencies:** SystemGraph and scoped resolver in place; canonical loss stable.
+   - **Risks/Ambiguities:** Dataset location, runtime expectations; balancing simplicity with realism.
+   - **Tests:** CI smoke run of demo (short), docstring/unit test ensuring example executes without errors.
 
 ---
 
-## 21) Glossary (Canonical Vocabulary)
+## 17) Changelog of Decisions
 
-- **Primitive:** A parameter stored in `ParameterStore` (e.g., `m1.focal_length`). Source of truth for values.
-- **Derived:** A parameter computed from primitives via the transform registry (e.g., `imaging.psf_pixel_scale`).
-- **Structural:** Primitive whose change requires rebuilding the optical system (e.g., `detector.n_pix`).
-- **Numeric:** Primitive that only affects numeric arrays (e.g., Zernike coefficients) and can be rebound.
-- **SystemGraph:** DAG orchestrating node execution; calls into dLux via a node.
-- **Builder/Binder:** Builder constructs/caches a dLux `OpticalSystem` from structural primitives; Binder injects numeric/derived arrays each iteration.
-- **Facade:** Public class (e.g., `SheraThreePlane_Model`) offering a stable API while delegating to the new stack.
+- Transform registry implemented globally; slated for system-scoped refactor.
+- ParameterStore currently permissive; decision pending to enforce primitives-only by default.
+- Canonical binder-based loss added to inference stack; SystemGraph integration planned.
+- Structural caching not yet started; acknowledged as necessary for performance.
 
 ---
 
-## 22) PR & Issue Templates
+## 18) Parking Lot
 
-**PR title**: `refactor(params): introduce ParameterStore & psf_pixel_scale transform (three-plane)`
-
-**PR checklist**
-- [ ] New/changed params documented in `ParamSpec` with units and defaults/profiles.
-- [ ] Transform registered per `system_id` with tests.
-- [ ] Builder/binder updated; structural hash tested.
-- [ ] Examples/notebooks still run in <2 minutes.
-- [ ] Added/updated docstrings and mkdocs pages.
-- [ ] Deprecation warnings (if any) included.
-
-**Issue template** (bug)
-- **Observed**: …  
-- **Expected**: …  
-- **Repro**: script/notebook + seed  
-- **Suspected area**: spec/store/transforms/graph/optics  
-- **Artifacts**: small `.npz` or console logs
+- Four-plane optics variant design and transforms.
+- Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
+- Ergonomic shims (`ModelParams`) and deprecation strategy for legacy APIs.
 
 ---
-
-## 23) Troubleshooting Runbook
-
-- **Zero gradients at init**: Ensure non-zero tiny perturbations in init; verify transform bijectors are well-conditioned (avoid hard clamps inside jit).
-- **Shape mismatch**: Confirm consistent `[H, W]` across nodes; check structural hash rebuilds after changing `n_pix`.
-- **NaNs in PSF**: Validate units and bounds; check that phase maps are finite and sampling (`psf_pixel_scale`) is > 0.
-- **JIT recompiles frequently**: A structural arg is not static; move it outside jit or mark `static_argnames`.
-- **Slow first call**: Expected JIT; subsequent calls should be fast. If not, inspect control flow for Python branches.
-
----
-
-## 24) Code Templates (snippets)
-
-**Transform registration (three-plane)**
-```python
-register_transform("three_plane",
-  TransformSpec(
-    key="imaging.psf_pixel_scale",
-    deps=("m1.focal_length","system.plane_separation","detector.pixel_pitch"),
-    fn=compute_psf_scale_three,
-  )
-)
-```
-
-**System node skeleton**
-```python
-@dataclass(frozen=True)
-class DLuxSystemNode:
-    builder: ThreePlaneBuilder
-    binder: ThreePlaneBinder
-    wavelengths: jnp.ndarray
-    weights: jnp.ndarray | None = None
-
-    def __call__(self, store: ParameterStore) -> jnp.ndarray:
-        os = self.builder.get_or_build(store)
-        os_bound = self.binder.bind(os, store)
-        return os_bound.model(wavelengths=self.wavelengths, weights=self.weights)
-```
-
-**Gradient test**
-```python
-def test_grad_psf_pixel_scale():
-    store = make_minimal_store()
-    os = builder.get_or_build(store)
-    def loss(scale):
-        st = store.replace(**{"imaging.psf_pixel_scale": scale})  # if using alias setter; else adjust primitives
-        psf = os.model(wavelengths=W)
-        return jnp.sum((psf - target)**2)
-    g = jax.grad(loss)(1.0)
-    g_fd = finite_diff(loss, 1.0)
-    assert jnp.allclose(g, g_fd, rtol=5e-2, atol=5e-4)
-```
-
----
-
-## 25) Performance Budget & Data Policy
-
-- **PSF size**: default examples use ≤ 64×64; CI tests ≤ 32×32.
-- **Runtime**: single example notebook cell ≤ 20s on CPU; entire quickstart ≤ 2 minutes.
-- **Data**: commit only tiny `.npz` fixtures (<100 KB). Place larger data in `examples/data/` (git-ignored).
-
----
-
-## 26) Versioning & Deprecation
-
-- Semantic-ish versioning via `__version__` in `dluxshera`.
-- Deprecate legacy names with warnings for one minor release before removal.
-- Maintain a `CHANGELOG.md` summarizing user-facing changes.
