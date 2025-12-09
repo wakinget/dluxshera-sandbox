@@ -3,11 +3,14 @@ import pytest
 
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.transforms import (
+    DEFAULT_SYSTEM_ID,
+    DERIVED_RESOLVER,
+    DerivedResolver,
     Transform,
-    TransformRegistry,
-    TransformMissingDependencyError,
     TransformCycleError,
     TransformDepthError,
+    TransformMissingDependencyError,
+    TransformRegistry,
 )
 
 
@@ -28,8 +31,8 @@ def test_simple_transform_separation_pix():
 
     store = ParameterStore.from_dict(
         {
-            "binary.separation_as": 10.0,          # arcsec
-            "imaging.plate_scale_as_per_pix": 0.5, # arcsec/pixel
+            "binary.separation_as": 10.0,  # arcsec
+            "imaging.plate_scale_as_per_pix": 0.5,  # arcsec/pixel
         }
     )
 
@@ -156,3 +159,29 @@ def test_max_depth_guard():
     value = registry.compute("t0", store, max_depth=32)
     # The value should be chain_length steps above leaf.
     assert value == pytest.approx(float(chain_length))
+
+
+def test_scoped_resolver_isolates_systems():
+    resolver = DerivedResolver(default_system_id="sys_a")
+
+    @resolver.register_transform("value", depends_on=("p",), system_id="sys_a")
+    def value_a(ctx):
+        return ctx["p"] + 1
+
+    store = ParameterStore.from_dict({"p": 1})
+
+    assert resolver.compute("value", store, system_id="sys_a") == pytest.approx(2)
+
+    with pytest.raises(TransformMissingDependencyError) as excinfo:
+        resolver.compute("value", store, system_id="sys_b")
+    assert "sys_b" in str(excinfo.value)
+
+    @resolver.register_transform("value", depends_on=("p",), system_id="sys_b")
+    def value_b(ctx):
+        return ctx["p"] * 10
+
+    assert resolver.compute("value", store, system_id="sys_b") == pytest.approx(10)
+
+
+def test_global_resolver_default_system_matches_constant():
+    assert DERIVED_RESOLVER.default_system_id == DEFAULT_SYSTEM_ID

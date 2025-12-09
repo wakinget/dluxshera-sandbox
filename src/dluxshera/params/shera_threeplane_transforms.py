@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
-from .transforms import register_transform
+from .transforms import DEFAULT_SYSTEM_ID, register_transform
 from .spec import ParamKey
 
 # Type alias for the ctx mapping each transform receives
@@ -23,6 +23,7 @@ ARCSEC_PER_RAD = 206264.8062470963551565  # 180 / pi * 3600
         "system.m2_focal_length_m",
         "system.m1_m2_separation_m",
     ),
+    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_system_focal_length_m(ctx: Ctx) -> float:
     """
@@ -55,6 +56,7 @@ def transform_system_focal_length_m(ctx: Ctx) -> float:
         "system.focal_length_m",
         "system.pixel_pitch_m",
     ),
+    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
     """
@@ -91,6 +93,7 @@ def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
         "imaging.throughput",
         "binary.spectral_flux_density",
     ),
+    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_binary_log_flux_total(ctx: Ctx) -> float:
     """
