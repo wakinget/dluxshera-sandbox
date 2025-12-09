@@ -93,9 +93,9 @@ dLuxShera/
 
 ## 6) Transform Registry / DerivedResolver
 
-- Global registry with recursive resolution, cycle detection, and depth guards.
-- Three Shera transforms registered: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist.
-- Missing per-system scoping (e.g., `three_plane` vs `four_plane`), richer transform coverage, and explicit resolver class wrapping registry per system.
+- Scoped `DerivedResolver` now wraps per-system `TransformRegistry` instances with system-id aware registration and resolution helpers (defaulting to the Shera three-plane system for backward compatibility).
+- Three Shera transforms registered under `shera_threeplane`: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist.
+- Future work: expand transform coverage for additional systems (two-plane/four-plane) once those variants land.
 
 **Policy on setting deriveds**
 - Current code allows overriding deriveds if validation disabled. Target policy remains: disallow unless explicitly invertible.
@@ -134,7 +134,7 @@ dLuxShera/
 - **Primitives-only store:** Decision still pending; current implementation can accept deriveds when validation is disabled.
 - **Plate-scale policy:** Whether to always recompute vs allow override is still undecided.
 - **Structural caching:** Builder currently rebuilds every call; caching keyed by structural primitives is planned.
-- **Scopes:** Transform registry is global; needs scoping by system ID to avoid collisions.
+- **Scopes:** Per-system scoping added via `DerivedResolver`; ergonomics for additional variants will matter as new systems arrive.
 
 ---
 
@@ -176,7 +176,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; next steps are caching, multi-node wiring, and derived resolution enforcement.
 
 **P1 — Docs, demos, and scope-aware transforms**
-- ⏳ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
+- ✅ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
 - ⏳ **Canonical astrometry demo**: Script/notebook to generate truth, synth data, run Optax with new loss.
 - ⚠️ **Eigenmode parameterization**: FIM/eigen utilities exist; need optimizer/loss integration and docs.
 - ⏳ **Docs & examples**: README quickstart, MkDocs pages, notebooks, updated Examples using new stack.
@@ -203,12 +203,9 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
    - **Outcome:** Added `graph/` package with `DLuxSystemNode` + `SystemGraph`, tied into binder loss via optional flag, and regression-tested against the legacy three-plane forward path.
    - **Follow-ups:** Add caching/structural hashing, multi-node support, and derived-resolution enforcement before relying on it in production.
 
-2. **Scoped DerivedResolver with system IDs (P0)**
-   - **Goal:** Refactor transform registry to be system-scoped; prevent collisions and enable future four-plane variant.
-   - **Files:** `src/dluxshera/params/{transforms.py, shera_threeplane_transforms.py}`, new `params/registry.py` tests under `tests/params/test_transforms.py`.
-   - **Dependencies:** May inform SystemGraph inputs; requires decision on primitives-only enforcement to disallow derived overrides.
-   - **Risks/Ambiguities:** Backward compatibility for existing transform registration; choosing default system_id.
-   - **Tests:** Scope-aware resolution, missing-transform errors per system, regression for three existing transforms.
+2. **Scoped DerivedResolver with system IDs (P0) — DONE**
+   - **Outcome:** Added `params/registry.py` with system-scoped resolver/decorator, defaulting to the Shera three-plane system; tests cover isolation across system_ids and existing Shera transforms continue to resolve via the default registry.
+   - **Follow-ups:** Extend coverage for future system variants (two-/four-plane) once their specs land and align ergonomics with ParameterStore primitives-only enforcement.
 
 3. **ParameterStore enforcement + serialization (P0)**
    - **Goal:** Enforce primitives-only store in validation by default; add `refresh` helper and serialization (`to_dict`/`from_dict` and YAML/JSON hooks).
