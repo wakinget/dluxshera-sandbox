@@ -366,6 +366,7 @@ def make_binder_image_nll_fn(
     *,
     noise_model: NoiseModel = "gaussian",
     reduce: Literal["sum", "mean"] = "sum",
+    use_system_graph: bool = False,
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray]:
     """
     Canonical θ-space image NLL using SheraThreePlaneBinder.
@@ -376,11 +377,19 @@ def make_binder_image_nll_fn(
       - builds static optics + detector once via SheraThreePlaneBinder
       - only rebuilds the source from a ParameterStore inside the loss
       - uses image-level Gaussian/Poisson NLL kernels directly
+
+    The `use_system_graph` flag optionally routes forward execution through a
+    minimal SystemGraph wrapper instead of directly calling the Binder. This
+    is a no-op for outputs but exercises the new graph layer.
     """
     from ..core.binder import SheraThreePlaneBinder
+    from ..graph.system_graph import build_threeplane_system_graph
 
-    # 1) Build a static Binder
+    # 1) Build a static Binder and/or SystemGraph
     binder = SheraThreePlaneBinder(cfg, inference_spec, base_store)
+    graph = None
+    if use_system_graph:
+        graph = build_threeplane_system_graph(cfg, inference_spec, base_store)
 
     # 2) Subset spec + build initial θ from base_store
     sub_spec = inference_spec.subset(infer_keys)
@@ -411,8 +420,12 @@ def make_binder_image_nll_fn(
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         # θ → ParameterStore overlayed on base_store
         store_theta = store_unpack_params(sub_spec, theta, base_store)
-        # Binder merges store_theta into its base_store internally
-        model_image = binder.forward(store_theta)
+        # Binder merges store_theta into its base_store internally; optionally
+        # run through the SystemGraph to exercise the new execution path.
+        if graph is not None:
+            model_image = graph.forward(store_theta)
+        else:
+            model_image = binder.forward(store_theta)
         return image_nll(model_image, data, var)
 
     return loss_fn, theta0
