@@ -230,7 +230,37 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ---
 
-## 17) Changelog of Decisions
+## 17) ParamSpec + ParameterStore policy (plate_scale/log_flux) — analysis & options
+
+**Current behavior (“split personality”)**
+- `build_inference_spec_basic()` marks `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **primitive knobs** for optimisation.【F:src/dluxshera/params/spec.py†L95-L167】【F:src/dluxshera/params/spec.py†L207-L245】
+- `build_forward_model_spec_from_config()` mirrors geometry/throughput primitives from `SheraThreePlaneConfig` and declares `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **derived** with registered transforms (geometric plate scale and collecting-area × band × throughput flux).【F:src/dluxshera/params/spec.py†L337-L458】
+- The transform registry is **store-wins**: if a key is present in the `ParameterStore`, the transform is skipped; otherwise dependencies are resolved recursively.【F:src/dluxshera/params/registry.py†L117-L186】 Tests exercise this by computing plate scale/log flux from a forward-model store seeded with primitives only.【F:tests/test_shera_threeplane_transforms.py†L1-L71】
+- `ParameterStore.from_spec_defaults()` skips derived fields, so a forward-model store built from defaults contains only primitives unless the caller injects derived values. Validation today checks only key set equality and can allow extras; it does **not** enforce “primitives-only”.【F:src/dluxshera/params/store.py†L72-L167】【F:src/dluxshera/params/store.py†L202-L251】
+
+**Practical interactions & risks**
+- Forward-model workflows: build spec → seed store from defaults → run transforms to fill plate scale/log flux; these derived numbers are often copied into an inference store and then treated as primitives. If a caller modifies primitives (e.g., focal lengths) without recomputing, a stale derived could persist because validation allows it and the resolver will return the stored value.
+- Override behavior is currently used in tests and is convenient for debugging (e.g., dropping a plate scale directly into the store to avoid recomputing). Removing it abruptly would break that ergonomics.
+
+**Design options (targeting plate_scale/log_flux but generalisable)**
+- **Option A — Formalize current split (ForwardModelSpec derived, InferenceSpec primitive):**
+  - Keep forward spec transform-driven for geometry/flux; document that inference spec treats the same keys as primitives. Add `ParameterStore.validate_against(spec, allow_derived=False)` defaulting to strict mode; add an `override=True` flag or `allow_derived=True` path for expert flows. Provide a `refresh_derived(spec, store, system_id)` helper so callers can recompute deriveds before serialization/copying. Pros: minimal churn, preserves geometry-based truth generation; keeps override ergonomics opt-in. Cons: mental overhead that key “kind” depends on spec; requires discipline to call refresh when primitives change.
+- **Option B — Align specs on primitives for mainline runs:**
+  - Make ForwardModelSpec treat plate_scale/log_flux as primitives too; keep transforms registered but reserve them for specialised “physics-mode” specs (new builders) that explicitly mark those keys as derived. Default validation enforces primitives-only; transform-driven specs opt into derived resolution. Pros: reduces spec-dependent semantics for common keys; simplifies training/ops flows. Cons: truth-generation loses automatic geometry derivation unless callers pick the physics spec; more boilerplate when wanting geometric values.
+- **Option C — Hybrid calibration stance:**
+  - Keep transforms for structural/geometry-only quantities (e.g., focal_length, maybe plate_scale) but treat user-facing calibration knobs (log_flux, effective plate scale) as primitives in both specs. Use transforms in forward spec only for upstream structural nodes; log_flux becomes a primitive there. Pros: avoids stale brightness overrides; focuses derivations on geometry. Cons: still split semantics for plate scale unless it is also made primitive; may underuse existing flux transform.
+
+**Recommendation & incremental path**
+- Prefer **Option A** short term, with strict-by-default validation and explicit override/debug mode to bound risk while keeping current workflows working. Rationale: users expect inference on effective knobs, but forward-model truth generation benefits from existing geometry/flux transforms; the cost of extra keys (geom/eff/final) feels high relative to spec-as-mode clarity.
+- Near-term steps (P0/P1):
+  1. Implement `validate_against(..., allow_derived=False)` default and `refresh_derived` helper to recompute deriveds for a given spec/system_id before copying/serialization.
+  2. Add docstrings/comments in spec builders explaining the primitive/derived split and pointing to the override flag.
+  3. Add tests for stale-override prevention (strict validation rejects derived keys when flag is false) and for refresh correctness.
+- Deferred/experimental: add optional “physics-mode” inference/forward spec builders that mark plate_scale/log_flux as derived; keep override flag for manual injection; revisit whether log_flux should migrate to primitive in forward spec if calibration use-cases dominate.
+
+---
+
+## 18) Changelog of Decisions
 
 - Transform registry implemented globally; slated for system-scoped refactor.
 - ParameterStore currently permissive; decision pending to enforce primitives-only by default.
@@ -239,7 +269,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ---
 
-## 18) Parking Lot
+## 19) Parking Lot
 
 - Four-plane optics variant design and transforms.
 - Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
