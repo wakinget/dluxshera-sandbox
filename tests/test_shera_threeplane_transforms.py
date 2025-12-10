@@ -1,10 +1,12 @@
 import math
 
+import pytest
+
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.optics.builder import build_shera_threeplane_optics
 from dluxshera.params.spec import build_forward_model_spec_from_config
-from dluxshera.params.store import ParameterStore
-from dluxshera.params.transforms import TRANSFORMS
+from dluxshera.params.store import ParameterStore, refresh_derived
+from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
 
 # IMPORTANT: ensure transforms are registered at import time
 import dluxshera.params.shera_threeplane_transforms  # noqa: F401
@@ -84,3 +86,21 @@ def test_binary_log_flux_total_matches_formula():
     expected_logF = math.log10(total_flux)
 
     assert math.isclose(logF, expected_logF, rel_tol=1e-12, abs_tol=0.0)
+
+
+def test_refresh_derived_populates_forward_model_keys():
+    spec, store = _build_forward_model_store()
+
+    refreshed = refresh_derived(
+        store,
+        spec,
+        TRANSFORMS,
+        system_id=DEFAULT_SYSTEM_ID,
+        include_derived=True,
+    )
+
+    plate_scale = TRANSFORMS.compute("system.plate_scale_as_per_pix", store)
+    log_flux = TRANSFORMS.compute("binary.log_flux_total", store)
+
+    assert refreshed.get("system.plate_scale_as_per_pix") == pytest.approx(plate_scale)
+    assert refreshed.get("binary.log_flux_total") == pytest.approx(log_flux)

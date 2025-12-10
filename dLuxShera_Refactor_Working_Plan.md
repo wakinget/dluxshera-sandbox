@@ -256,6 +256,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
   1. Implement `validate_against(..., allow_derived=False)` default and `refresh_derived` helper to recompute deriveds for a given spec/system_id before copying/serialization.
   2. Add docstrings/comments in spec builders explaining the primitive/derived split and pointing to the override flag.
   3. Add tests for stale-override prevention (strict validation rejects derived keys when flag is false) and for refresh correctness.
+- Progress update: strict `ParameterStore.validate_against` now rejects derived keys by default, and helper utilities `strip_derived`, `refresh_derived`, and `check_consistency` are available to manage override/debug flows and recompute derived values deterministically.
 - Deferred/experimental: add optional “physics-mode” inference/forward spec builders that mark plate_scale/log_flux as derived; keep override flag for manual injection; revisit whether log_flux should migrate to primitive in forward spec if calibration use-cases dominate.
 
 ---

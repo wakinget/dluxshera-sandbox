@@ -2,8 +2,15 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.params.store import ParameterStore
-from dluxshera.params.spec import build_inference_spec_basic
+from dluxshera.params.registry import Transform
+from dluxshera.params.store import (
+    ParameterStore,
+    check_consistency,
+    refresh_derived,
+    strip_derived,
+)
+from dluxshera.params.spec import ParamField, ParamSpec, build_inference_spec_basic
+from dluxshera.params.transforms import TransformRegistry
 
 
 def test_parameter_store_get_and_replace():
@@ -126,3 +133,102 @@ def test_parameter_store_validate_against_with_flags():
     values_extra["debug.flag"] = True
     store_extra = ParameterStore.from_dict(values_extra)
     store_extra.validate_against(spec, allow_extra=True)
+
+
+def _make_primitive_derived_spec() -> ParamSpec:
+    return ParamSpec(
+        [
+            ParamField(
+                key="a",
+                group="g",
+                kind="primitive",
+                default=1.0,
+            ),
+            ParamField(
+                key="b",
+                group="g",
+                kind="primitive",
+                default=2.0,
+            ),
+            ParamField(
+                key="sum",
+                group="g",
+                kind="derived",
+                depends_on=("a", "b"),
+                default=None,
+            ),
+        ]
+    )
+
+
+def test_validate_against_rejects_derived_by_default():
+    spec = _make_primitive_derived_spec()
+    store = ParameterStore.from_dict({"a": 1.0, "b": 2.0, "sum": 3.0})
+
+    with pytest.raises(ValueError):
+        store.validate_against(spec)
+
+    # Explicit override/debug mode accepts derived keys
+    store.validate_against(spec, allow_derived=True)
+
+
+def test_strip_derived_and_refresh_derived():
+    spec = _make_primitive_derived_spec()
+    registry = TransformRegistry()
+    registry.register(
+        Transform(
+            key="sum",
+            depends_on=("a", "b"),
+            fn=lambda ctx: ctx["a"] + ctx["b"],
+        )
+    )
+
+    store = ParameterStore.from_dict({"a": 1.0, "b": 2.5, "sum": 100.0, "extra": True})
+
+    stripped = strip_derived(store, spec)
+    assert set(stripped.keys()) == {"a", "b", "extra"}
+
+    refresh = refresh_derived(store, spec, registry, system_id="test")
+    assert refresh.get("sum") == pytest.approx(3.5)
+    assert refresh.get("a") == 1.0
+    assert refresh.get("b") == 2.5
+    assert refresh.get("extra") is True
+
+    refresh_primitives_only = refresh_derived(
+        store, spec, registry, system_id="test", include_derived=False
+    )
+    assert "sum" not in refresh_primitives_only.keys()
+    assert refresh_primitives_only.get("a") == 1.0
+    assert refresh_primitives_only.get("b") == 2.5
+    assert refresh_primitives_only.get("extra") is True
+
+    # keep_extra=False drops keys not present in the spec
+    stripped_no_extra = strip_derived(store, spec, keep_extra=False)
+    assert set(stripped_no_extra.keys()) == {"a", "b"}
+
+
+def test_check_consistency_detects_stale_values():
+    spec = _make_primitive_derived_spec()
+    registry = TransformRegistry()
+    registry.register(
+        Transform(
+            key="sum",
+            depends_on=("a", "b"),
+            fn=lambda ctx: ctx["a"] + ctx["b"],
+        )
+    )
+
+    store = ParameterStore.from_dict({"a": 1.0, "b": 2.0, "sum": 10.0})
+
+    with pytest.raises(AssertionError):
+        check_consistency(store, spec, registry, system_id="test")
+
+    diffs = check_consistency(
+        store,
+        spec,
+        registry,
+        system_id="test",
+        raise_on_mismatch=False,
+    )
+
+    assert diffs["sum"] == pytest.approx(7.0)
