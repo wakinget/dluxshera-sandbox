@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from typing import Optional
 
 import jax.numpy as jnp
@@ -21,6 +24,85 @@ except ImportError as e:  # pragma: no cover - hard failure, not a logic branch
         "optical_systems.py defines SheraThreePlaneSystem and is "
         "installed/importable as part of dluxshera."
     ) from e
+
+
+# -----------------------------------------------------------------------------
+# Structural hash / cache helpers
+# -----------------------------------------------------------------------------
+
+_THREEPLANE_CACHE: dict[str, SheraThreePlaneSystem] = {}
+_CACHE_DISABLED_ENV = "DLUXSHERA_THREEPLANE_CACHE_DISABLED"
+
+
+def _structural_subset(cfg: SheraThreePlaneConfig) -> dict:
+    """Extract the structural subset of ``cfg`` as plain Python types."""
+
+    return {
+        "pupil_npix": int(cfg.pupil_npix),
+        "psf_npix": int(cfg.psf_npix),
+        "oversample": int(cfg.oversample),
+        "wavelength_m": float(cfg.wavelength_m),
+        "bandwidth_m": float(cfg.bandwidth_m),
+        "n_lambda": int(cfg.n_lambda),
+        "m1_diameter_m": float(cfg.m1_diameter_m),
+        "m2_diameter_m": float(cfg.m2_diameter_m),
+        "m1_focal_length_m": float(cfg.m1_focal_length_m),
+        "m2_focal_length_m": float(cfg.m2_focal_length_m),
+        "m1_m2_separation_m": float(cfg.m1_m2_separation_m),
+        "pixel_pitch_m": float(cfg.pixel_pitch_m),
+        "n_struts": int(cfg.n_struts),
+        "strut_width_m": float(cfg.strut_width_m),
+        "strut_rotation_deg": float(cfg.strut_rotation_deg),
+        "primary_noll_indices": tuple(int(i) for i in cfg.primary_noll_indices),
+        "secondary_noll_indices": tuple(int(i) for i in cfg.secondary_noll_indices),
+        "diffractive_pupil_path": None if cfg.diffractive_pupil_path is None else str(cfg.diffractive_pupil_path),
+        "dp_design_wavelength_m": None
+        if cfg.dp_design_wavelength_m is None
+        else float(cfg.dp_design_wavelength_m),
+    }
+
+
+def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
+    """Return a deterministic structural hash for ``cfg``.
+
+    The hash is stable across runs and depends only on structural fields. It is
+    used to cache optics builds so that non-structural updates (e.g., Zernike
+    coefficients in the ParameterStore) do not force a rebuild of the optics
+    geometry.
+    """
+
+    payload = _structural_subset(cfg)
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def clear_threeplane_optics_cache() -> None:
+    """Clear the cached Shera three-plane optics structures."""
+
+    _THREEPLANE_CACHE.clear()
+
+
+def _construct_threeplane_optics(cfg: SheraThreePlaneConfig) -> SheraThreePlaneSystem:
+    """Actual constructor for the Shera three-plane optics (structural only)."""
+
+    return SheraThreePlaneSystem(
+        wf_npixels=cfg.pupil_npix,
+        psf_npixels=cfg.psf_npix,
+        oversample=cfg.oversample,
+        detector_pixel_pitch=cfg.pixel_pitch_m,
+        mask=cfg.diffractive_pupil_path,
+        m1_noll_ind=tuple(cfg.primary_noll_indices) if cfg.primary_noll_indices else None,
+        m2_noll_ind=tuple(cfg.secondary_noll_indices) if cfg.secondary_noll_indices else None,
+        p1_diameter=cfg.m1_diameter_m,
+        p2_diameter=cfg.m2_diameter_m,
+        m1_focal_length=cfg.m1_focal_length_m,
+        m2_focal_length=cfg.m2_focal_length_m,
+        plane_separation=cfg.m1_m2_separation_m,
+        n_struts=cfg.n_struts,
+        strut_width=cfg.strut_width_m,
+        strut_rotation_deg=cfg.strut_rotation_deg,
+        dp_design_wavel=cfg.dp_design_wavelength_m,
+    )
 
 
 
@@ -64,20 +146,10 @@ def build_shera_threeplane_optics(
       tuples in the config. If no secondary indices are provided, the
       secondary mirror currently has no Zernike basis (i.e., it is modeled
       as a pure transmissive layer).
+    - Optics structures are cached by a structural hash (see
+      ``structural_hash_from_config``). Zernike coefficients remain outside
+      the structural hash and are applied to a copy of the cached structure.
     """
-
-    # --- Noll indices: structural configuration ------------------------
-    # Primary: tuple of Noll indices or None (no basis).
-    if cfg.primary_noll_indices and len(cfg.primary_noll_indices) > 0:
-        m1_noll_ind = tuple(cfg.primary_noll_indices)
-    else:
-        m1_noll_ind = None
-
-    # Secondary: tuple of Noll indices or None (no basis).
-    if cfg.secondary_noll_indices and len(cfg.secondary_noll_indices) > 0:
-        m2_noll_ind = tuple(cfg.secondary_noll_indices)
-    else:
-        m2_noll_ind = None
 
     # --- Zernike coefficients from the ParameterStore (optional) -------
     m1_coefficients = None
@@ -116,27 +188,33 @@ def build_shera_threeplane_optics(
                     )
                 m2_coefficients = coeffs
 
+    # --- Construct or reuse the optics ---------------------------------
+    cache_disabled = os.getenv(_CACHE_DISABLED_ENV, "").lower() in {"1", "true", "yes"}
+    struct_hash = structural_hash_from_config(cfg)
 
-    # --- Construct the optics ------------------------------------------
-    optics = SheraThreePlaneSystem(
-        wf_npixels=cfg.pupil_npix,
-        psf_npixels=cfg.psf_npix,
-        oversample=cfg.oversample,
-        detector_pixel_pitch=cfg.pixel_pitch_m,
-        mask=cfg.diffractive_pupil_path,
-        m1_noll_ind=m1_noll_ind,
-        m1_coefficients=m1_coefficients,
-        m2_noll_ind=m2_noll_ind,
-        m2_coefficients=m2_coefficients,
-        p1_diameter=cfg.m1_diameter_m,
-        p2_diameter=cfg.m2_diameter_m,
-        m1_focal_length=cfg.m1_focal_length_m,
-        m2_focal_length=cfg.m2_focal_length_m,
-        plane_separation=cfg.m1_m2_separation_m,
-        n_struts=cfg.n_struts,
-        strut_width=cfg.strut_width_m,
-        strut_rotation_deg=cfg.strut_rotation_deg,
-        dp_design_wavel=cfg.dp_design_wavelength_m,
-    )
+    base_optics = None
+    if not cache_disabled:
+        base_optics = _THREEPLANE_CACHE.get(struct_hash)
+
+    if base_optics is None:
+        base_optics = _construct_threeplane_optics(cfg)
+        if not cache_disabled:
+            _THREEPLANE_CACHE[struct_hash] = base_optics
+
+    # Create a shallow functional copy so callers cannot mutate the cached
+    # structure. Using `.set` preserves JAX pytree semantics without
+    # re-running the heavy constructor.
+    optics = base_optics.set("wf_npixels", base_optics.wf_npixels)
+
+    # Apply Zernike coefficients without mutating the cached structure
+    if m1_coefficients is not None and hasattr(optics, "m1_aperture"):
+        m1_aperture = getattr(optics, "m1_aperture")
+        if hasattr(m1_aperture, "coefficients"):
+            optics = optics.set("p1_layers.m1_aperture.coefficients", m1_coefficients)
+
+    if m2_coefficients is not None and hasattr(optics, "m2_aperture"):
+        m2_aperture = getattr(optics, "m2_aperture")
+        if hasattr(m2_aperture, "coefficients"):
+            optics = optics.set("p2_layers.m2_aperture.coefficients", m2_coefficients)
 
     return optics
