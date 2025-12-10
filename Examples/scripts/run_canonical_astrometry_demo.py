@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.inference.inference import run_shera_image_gd_eigen
 from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
 from dluxshera.optics.config import SheraThreePlaneConfig
 from dluxshera.params.packing import unpack_params as store_unpack_params
@@ -243,12 +244,48 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     final_store = store_unpack_params(sub_spec, theta_final, init_store)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 7. Summarize recovered parameters and optionally save plots
     # ------------------------------------------------------------------
     print("Step 7: Summarising recovered parameters and plotting (optional)...")
     summary = format_parameter_summary(infer_keys, truth_store, init_store, final_store)
     print(summary)
     print("Loss curve (first 5 steps):", np.array(history["loss"])[:5])
+
+    # ------------------------------------------------------------------
+    # 8. Eigenmode-based optimisation using EigenThetaMap
+    # ------------------------------------------------------------------
+    print("Step 8: Computing curvature/FIM and building EigenThetaMap...")
+    eigen_steps = 10 if fast else 60
+    eigen_results = run_shera_image_gd_eigen(
+        cfg=cfg,
+        inference_spec=inference_spec,
+        base_store=init_store,
+        infer_keys=infer_keys,
+        data=truth_psf,
+        var=var_image,
+        noise_model="gaussian",
+        num_steps=eigen_steps,
+        learning_rate=None,
+        truncate=None,
+        whiten=True,
+        theta_ref=theta0,
+        use_system_graph=not fast,
+    )
+
+    eigen_store = store_unpack_params(sub_spec, eigen_results.theta_final, init_store)
+
+    print("Step 9: Running gradient descent in eigenmode coordinates...")
+    print("  -> initial z-norm:", float(np.linalg.norm(np.array(eigen_results.z_history[0]))))
+    print("  -> final z-norm:", float(np.linalg.norm(np.array(eigen_results.z_final))))
+
+    print("Step 10: Comparing pure-θ vs eigenmode recovered parameters...")
+    print("Parameter summary (truth → pure-θ → eigenmode):")
+    for key in infer_keys:
+        truth_val = truth_store.get(key)
+        gd_val = final_store.get(key)
+        eigen_val = eigen_store.get(key)
+        print(f"  - {key}: {truth_val} → {gd_val} → {eigen_val}")
 
     if save_plots:
         output_dir = DEFAULT_RESULTS_DIR
@@ -265,9 +302,11 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(5, 3))
-        ax.plot(np.array(history["loss"]))
+        ax.plot(np.array(history["loss"]), label="Pure θ")
+        ax.plot(np.array(eigen_results.loss_history), label="Eigenmode θ")
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Loss (data + prior)")
+        ax.legend()
         fig.tight_layout()
         fig.savefig(output_dir / "loss_curve.png", dpi=200)
         plt.close(fig)

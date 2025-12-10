@@ -1,19 +1,31 @@
 # src/dluxshera/inference/inference.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Sequence, Optional, Dict, Any, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpyro as npy
 import numpyro.distributions as dist
+import optax
 
 from ..optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
 from ..params.spec import ParamSpec, ParamKey, build_inference_spec_basic
 from ..params.store import ParameterStore
-from .optimization import run_image_gd, NoiseModel
+from .optimization import (
+    EigenThetaMap,
+    fim_theta,
+    make_binder_image_nll_fn,
+    run_image_gd,
+    run_simple_gd,
+    NoiseModel,
+)
 
 __all__ = [
     "run_shera_image_gd_basic",
+    "run_shera_image_gd_eigen",
+    "EigenGdResults",
 ]
 
 
@@ -104,6 +116,199 @@ def run_shera_image_gd_basic(
     )
 
     return theta_final, store_final, history
+
+
+@dataclass
+class EigenGdResults:
+    """Container for eigenmode gradient-descent diagnostics."""
+
+    eigen_map: EigenThetaMap
+    z_history: jnp.ndarray
+    theta_history: jnp.ndarray
+    loss_history: jnp.ndarray
+    theta_final: jnp.ndarray
+    z_final: jnp.ndarray
+
+
+def run_shera_image_gd_eigen(
+    *,
+    loss_fn: Optional[callable] = None,
+    theta0: Optional[jnp.ndarray] = None,
+    cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG,
+    inference_spec: Optional[ParamSpec] = None,
+    base_store: Optional[ParameterStore] = None,
+    infer_keys: Sequence[ParamKey] = (
+        "binary.separation_as",
+        "binary.x_position",
+        "binary.y_position",
+    ),
+    data: Optional[jnp.ndarray] = None,
+    var: Optional[jnp.ndarray] = None,
+    noise_model: NoiseModel = "gaussian",
+    num_steps: int = 50,
+    learning_rate: Optional[float] = None,
+    truncate: Optional[int] = None,
+    whiten: bool = False,
+    theta_ref: Optional[jnp.ndarray] = None,
+    fim_kwargs: Optional[Dict[str, Any]] = None,
+    use_system_graph: bool = False,
+) -> EigenGdResults:
+    """
+    Run Shera image-based gradient descent in eigenmode coordinates.
+
+    The flow mirrors ``run_shera_image_gd_basic`` but inserts an
+    EigenThetaMap reparameterisation:
+
+    1) Build or accept a θ-space loss ``loss_fn``.
+    2) Compute a θ-space FIM/Hessian around ``theta_ref`` (defaults to
+       ``theta0``) and build ``EigenThetaMap.from_fim`` with optional
+       truncation/whitening.
+    3) Map θ→z, run GD in z-space, then map back to θ for inspection.
+
+    Parameters
+    ----------
+    loss_fn : callable, optional
+        θ-space loss; if not provided, one is built via
+        ``make_binder_image_nll_fn`` using the Shera config/spec/store
+        arguments. Signature: ``loss_fn(theta) -> scalar``.
+    theta0 : array-like, optional
+        Initial θ vector. Required if ``loss_fn`` is provided directly;
+        otherwise inferred from ``make_binder_image_nll_fn``.
+    cfg / inference_spec / base_store / infer_keys / data / var :
+        Inputs passed through to ``make_binder_image_nll_fn`` when
+        ``loss_fn`` is not provided. ``base_store`` defaults to
+        ``ParameterStore.from_spec_defaults`` and accepts the same
+        ``infer_keys`` defaults as ``run_shera_image_gd_basic``.
+    num_steps : int
+        Number of gradient descent iterations in eigen (z) space.
+    learning_rate : float, optional
+        Adam step size in z-space. If None, uses a curvature-derived
+        heuristic ``1/(max(eigvals)+1e-6)``.
+    truncate : int, optional
+        If provided, keep only the top-k eigenmodes when building
+        ``EigenThetaMap``.
+    whiten : bool
+        If True, eigen coordinates are scaled by ``sqrt(eigvals)`` so a
+        local quadratic loss becomes ≈ ½ ‖z‖² in the retained subspace.
+    theta_ref : array-like, optional
+        Reference θ for the FIM; defaults to ``theta0``.
+    fim_kwargs : dict, optional
+        Reserved for future extensions; currently unused but accepted to
+        mirror other FIM helpers.
+    use_system_graph : bool
+        Whether to route Binder execution through SystemGraph when
+        auto-building the loss function.
+
+    Returns
+    -------
+    EigenGdResults
+        Diagnostic container with eigen map, histories, and final θ/z.
+    """
+
+    fim_kwargs = fim_kwargs or {}
+
+    # ------------------------------------------------------------------
+    # 1) Build θ-space loss (Binder-based) if not provided
+    # ------------------------------------------------------------------
+    if loss_fn is None or theta0 is None:
+        if data is None or var is None:
+            raise ValueError("data and var must be provided when loss_fn is None")
+
+        if inference_spec is None:
+            inference_spec = build_inference_spec_basic()
+        if base_store is None:
+            base_store = ParameterStore.from_spec_defaults(inference_spec)
+
+        loss_fn, theta0 = make_binder_image_nll_fn(
+            cfg,
+            inference_spec,
+            base_store,
+            infer_keys,
+            data,
+            var,
+            noise_model=noise_model,
+            reduce="sum",
+            use_system_graph=use_system_graph,
+        )
+    else:
+        if theta0 is None:
+            raise ValueError("theta0 must accompany a custom loss_fn")
+
+    theta0 = jnp.asarray(theta0)
+    theta_ref = theta_ref if theta_ref is not None else theta0
+
+    # ------------------------------------------------------------------
+    # 2) Compute curvature / FIM in θ-space
+    # ------------------------------------------------------------------
+    if fim_kwargs:
+        raise ValueError("fim_kwargs is reserved for future use and must be empty today")
+
+    F = fim_theta(loss_fn, theta_ref)
+    F = jnp.asarray(F)
+    F = jnp.nan_to_num((F + F.T) / 2.0)
+    F = F + 1e-8 * jnp.eye(F.shape[0], dtype=F.dtype)
+
+    # ------------------------------------------------------------------
+    # 3) Build EigenThetaMap (optionally truncate/whiten)
+    # ------------------------------------------------------------------
+    eigen_map = EigenThetaMap.from_fim(
+        F,
+        theta_ref,
+        truncate=truncate,
+        whiten=whiten,
+    )
+
+    # ------------------------------------------------------------------
+    # 4) Map θ₀ → z₀ and choose learning rate if unspecified
+    # ------------------------------------------------------------------
+    z0 = eigen_map.to_eigen(theta0)
+    if learning_rate is None:
+        eigvals = eigen_map.eigvals if eigen_map.eigvals is not None else None
+        if eigvals is None or eigvals.size == 0:
+            learning_rate = 1e-2
+        else:
+            learning_rate = float(1.0 / (float(jnp.max(eigvals)) + 1e-6))
+
+    # ------------------------------------------------------------------
+    # 5) Define z-space loss = loss_theta(eigen_map.to_theta(z))
+    # ------------------------------------------------------------------
+    def loss_z(z):
+        theta = eigen_map.to_theta(z)
+        return loss_fn(theta)
+
+    optimizer = optax.adam(learning_rate)
+    opt_state = optimizer.init(z0)
+
+    @jax.jit
+    def _step(z, opt_state):
+        loss, g = jax.value_and_grad(loss_z)(z)
+        updates, opt_state = optimizer.update(g, opt_state, z)
+        z = optax.apply_updates(z, updates)
+        z = jnp.nan_to_num(z)
+        return z, opt_state, loss
+
+    z_history = []
+    theta_history = []
+    loss_history = []
+
+    z = z0
+    for _ in range(num_steps):
+        z, opt_state, loss_val = _step(z, opt_state)
+        z_history.append(z)
+        loss_history.append(loss_val)
+        theta_history.append(eigen_map.to_theta(z))
+
+    z_final = z
+    theta_final = eigen_map.to_theta(z_final)
+
+    return EigenGdResults(
+        eigen_map=eigen_map,
+        z_history=jnp.stack(z_history) if z_history else jnp.empty_like(z0),
+        theta_history=jnp.stack(theta_history) if theta_history else jnp.empty_like(theta0),
+        loss_history=jnp.stack(loss_history) if loss_history else jnp.empty((0,)),
+        theta_final=theta_final,
+        z_final=z_final,
+    )
 
 
 # ---------------------------------------------------------------------
