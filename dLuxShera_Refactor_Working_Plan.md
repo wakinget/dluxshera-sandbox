@@ -272,8 +272,10 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ## 19) Parking Lot
 
-- Four-plane optics variant design and transforms.
+- Two/Four-plane optics variant design and transforms.
 - Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
 - Ergonomic shims (`ModelParams`) and deprecation strategy for legacy APIs.
+- High-level model design / capabilities documentation describing what the Shera-style model does (optical/astrometric forward model, main outputs, supported questions) and its key assumptions/approximations, written for proposal and systems-engineering consumers rather than just implementers.
+- Model–error-budget interface and parameter dependency mapping: lightweight docs/figures that show how model outputs and sensitivities map onto specific error-budget terms, and how primitives vs. derived parameters (ParamSpec → Store → transforms) relate to those terms for traceability.
 
 ---
