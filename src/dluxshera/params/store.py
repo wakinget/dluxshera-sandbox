@@ -204,13 +204,15 @@ class ParameterStore:
             *,
             allow_missing: bool = False,
             allow_extra: bool = False,
+            allow_derived: bool = False,
     ) -> "ParameterStore":
         """
         Validate that this store is consistent with a given ParamSpec.
 
         By default this checks only that the set of keys in the store and the
-        spec match exactly. Type/shape/bounds validation can be layered on
-        later once we have concrete use cases.
+        spec match exactly and that no derived keys from the spec are present
+        in the store (strict mode). Type/shape/bounds validation can be layered
+        on later once we have concrete use cases.
 
         Parameters
         ----------
@@ -222,12 +224,18 @@ class ParameterStore:
         allow_extra:
             If False (default), require that every key in the store appears
             in the spec. If True, extra keys are allowed.
+        allow_derived:
+            If False (default / strict mode), derived keys declared in the
+            spec are considered invalid when present in the store. Set to
+            True to enable override/debug flows where derived values are
+            intentionally injected and should be accepted.
 
         Raises
         ------
         ValueError
-            If the store contains unknown keys (when allow_extra is False)
-            or is missing required keys (when allow_missing is False).
+            If the store contains unknown keys (when allow_extra is False),
+            contains derived keys while allow_derived is False, or is missing
+            required keys (when allow_missing is False).
 
         Returns
         -------
@@ -235,10 +243,18 @@ class ParameterStore:
             Returns self to allow simple chaining.
         """
         spec_keys = set(spec.keys())
+        derived_keys = {k for k, f in spec.items() if f.kind == "derived"}
         store_keys = set(self.keys())
 
         extra_keys = store_keys - spec_keys
         missing_keys = spec_keys - store_keys
+        present_derived = store_keys & derived_keys
+
+        if present_derived and not allow_derived:
+            raise ValueError(
+                "ParameterStore contains derived keys while allow_derived=False: "
+                f"{sorted(present_derived)}"
+            )
 
         if not allow_extra and extra_keys:
             raise ValueError(
@@ -253,6 +269,134 @@ class ParameterStore:
             )
 
         return self
+
+
+def _derived_keys(spec: ParamSpec) -> set[ParamKey]:
+    return {key for key, field in spec.items() if field.kind == "derived"}
+
+
+def strip_derived(
+    store: ParameterStore,
+    spec: ParamSpec,
+    *,
+    keep_extra: bool = True,
+) -> ParameterStore:
+    """
+    Return a new store with all derived keys (per `spec`) removed.
+
+    Parameters
+    ----------
+    store:
+        ParameterStore to strip derived keys from.
+    spec:
+        ParamSpec whose `kind == "derived"` fields identify which keys to drop.
+    keep_extra:
+        If True (default), keys not present in the spec are preserved. If False,
+        only primitive keys defined in the spec are kept.
+    """
+
+    derived_keys = _derived_keys(spec)
+    spec_keys = set(spec.keys())
+
+    filtered = {}
+    for key, value in store.items():
+        if key in derived_keys:
+            continue
+        if not keep_extra and key not in spec_keys:
+            continue
+        filtered[key] = value
+
+    return ParameterStore.from_dict(filtered)
+
+
+def refresh_derived(
+    store: ParameterStore,
+    spec: ParamSpec,
+    resolver,
+    system_id: str,
+    *,
+    include_derived: bool = True,
+) -> ParameterStore:
+    """
+    Recompute derived parameters for a (spec, store, system) tuple.
+
+    This helper removes any derived keys from the input store, resolves them
+    through the provided `resolver`, and returns a new store that preserves
+    primitives/extras and optionally appends recomputed derived values.
+
+    Parameters
+    ----------
+    store:
+        ParameterStore containing primitives (and possibly stale deriveds).
+    spec:
+        ParamSpec used to identify derived keys and their transforms.
+    resolver:
+        Object providing a `compute(key, store, system_id=...)` method (e.g.,
+        TransformRegistry or DerivedResolver).
+    system_id:
+        System identifier passed through to the resolver.
+    include_derived:
+        If True (default), include recomputed derived keys in the returned
+        store. If False, only primitives/extras are returned.
+    """
+
+    primitive_store = strip_derived(store, spec, keep_extra=True)
+    values = primitive_store.as_dict()
+    if include_derived:
+        for key in _derived_keys(spec):
+            values[key] = resolver.compute(key, primitive_store, system_id=system_id)
+    return ParameterStore.from_dict(values)
+
+
+def check_consistency(
+    store: ParameterStore,
+    spec: ParamSpec,
+    resolver,
+    system_id: str,
+    *,
+    keys: Optional[Iterable[ParamKey]] = None,
+    atol: float = 0.0,
+    rtol: float = 0.0,
+    raise_on_mismatch: bool = True,
+) -> Dict[ParamKey, Optional[float]]:
+    """
+    Compare stored derived values against recomputed ones.
+
+    This is primarily intended for tests/debugging of override flows where
+    derived values may have been manually injected. Keys missing from the
+    store are skipped (recorded as None).
+    """
+
+    derived_keys = _derived_keys(spec)
+    if keys is not None:
+        requested = set(keys)
+        derived_keys = derived_keys & requested
+
+    primitive_store = strip_derived(store, spec, keep_extra=True)
+    diffs: Dict[ParamKey, Optional[float]] = {}
+
+    for key in sorted(derived_keys):
+        if key not in store:
+            diffs[key] = None
+            continue
+
+        stored_value = store.get(key)
+        recomputed = resolver.compute(key, primitive_store, system_id=system_id)
+
+        stored_arr = jnp.asarray(stored_value)
+        recomputed_arr = jnp.asarray(recomputed)
+        abs_diff = jnp.max(jnp.abs(stored_arr - recomputed_arr))
+        scale = atol + rtol * jnp.max(jnp.abs(recomputed_arr))
+
+        diffs[key] = float(abs_diff)
+
+        if raise_on_mismatch and bool(abs_diff > scale):
+            raise AssertionError(
+                f"Derived value for {key!r} differs from recomputed value: "
+                f"abs_diff={float(abs_diff)} exceeds atol={atol}, rtol={rtol}"
+            )
+
+    return diffs
 
 
 # --- JAX pytree registration ------------------------------------------------------
