@@ -849,6 +849,10 @@ class EigenThetaMap:
 
         return self.theta_ref + delta  # (N, k) @ (k,) -> (N,)
 
+    # Alias for readability in downstream helpers
+    def to_theta(self, z: np.ndarray) -> np.ndarray:
+        return self.from_eigen(z)
+
     # Convenience properties
     @property
     def dim_theta(self) -> int:

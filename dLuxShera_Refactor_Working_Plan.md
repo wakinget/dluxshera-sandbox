@@ -118,14 +118,14 @@ dLuxShera/
 
 ## 9) Docs & Examples (Planned)
 
-- README, MkDocs structure, runnable notebooks, and scripted demos are not yet built. Existing examples rely on legacy flows.
+- Canonical binder/SystemGraph astrometry demo now lives in `Examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode gradient descent flows. README/MkDocs pages and additional notebooks remain to be authored.
 
 ---
 
 ## 10) Testing Philosophy
 
-- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, eigenmode utilities, and SystemGraph smoke/regression via new graph tests.
-- Missing: Demo workflows, four-plane variant tests, and serialization/profile coverage.
+- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, eigenmode utilities, SystemGraph smoke/regression via new graph tests, and the canonical astrometry demo in fast mode.
+- Missing: Four-plane variant tests and serialization/profile coverage.
 
 ---
 
@@ -177,8 +177,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **P1 — Docs, demos, and scope-aware transforms**
 - ✅ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
-- ⏳ **Canonical astrometry demo**: Script/notebook to generate truth, synth data, run Optax with new loss.
-- ⚠️ **Eigenmode parameterization**: FIM/eigen utilities exist; need optimizer/loss integration and docs.
+- ✅ **Canonical astrometry demo**: Script/notebook generates truth + synthetic data, runs binder/SystemGraph loss with Optax, and now includes a mirrored eigenmode gradient-descent segment using EigenThetaMap.
+- ✅ **Eigenmode parameterization**: FIM/eigen utilities integrated into the inference API with an eigen-space GD helper, demo walkthrough, and regression tests.
 - ⏳ **Docs & examples**: README quickstart, MkDocs pages, notebooks, updated Examples using new stack.
 - ⏳ **Profile/IO helpers**: YAML/JSON profiles, serialization, and loading; depends on store policy.
 
@@ -187,7 +187,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ⏳ **Ergonomics**: `ModelParams` shim, deprecation warnings, upstream PR prep.
 
 **Next sprint follow-ups**
-- ⚠️ Canonical loss is in place; remaining sprint items: plate-scale policy decision, SystemGraph follow-ups (caching/multi-node), demo script.
+- ⚠️ Plate-scale policy decision and SystemGraph follow-ups (caching/multi-node) remain. Extend docs/README coverage and add serialization/profile helpers to support the new demo + eigenmode pathways.
 
 **Newly noted tasks**
 - ✅ Structural hash/caching for three-plane builder (cache + clear helper landed).
