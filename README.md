@@ -190,6 +190,18 @@ A full demonstration of parameter retrieval using the eigenmode-based optimizati
 
 The notebook simulates synthetic data, initializes the SHERA model, computes its Fisher-information eigenbasis, and re-parameterizes the model in terms of these eigenmodes. An iterative optimization loop then solves for the eigenmode coefficients, recovering the underlying physical parameters. Diagnostic plots and convergence summaries are generated throughout.
 
+## Canonical astrometry demo (refactor stack)
+
+The refactor-native, end-to-end astrometry demo lives in `Examples/scripts/run_canonical_astrometry_demo.py`.
+
+Run it directly from the repository root:
+
+```bash
+python -m Examples.scripts.run_canonical_astrometry_demo
+```
+
+The script builds a Shera three-plane model via ParamSpec/ParameterStore, generates noiseless synthetic binary-star PSFs, and runs a binder/SystemGraph-based gradient descent (with tight priors) to recover astrometric and wavefront parameters using the refactored `InferenceSpec`.
+
 ---
 
 ### Notes

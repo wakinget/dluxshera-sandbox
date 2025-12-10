@@ -6,6 +6,8 @@ Examples/*
 # BUT do not ignore the notebooks folder
 !Examples/notebooks/
 !Examples/notebooks/**
+!Examples/scripts/
+!Examples/scripts/**
 
 
 

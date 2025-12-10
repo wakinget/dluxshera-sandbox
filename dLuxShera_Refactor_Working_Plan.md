@@ -216,11 +216,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
    - **Follow-ups:** Consider exposing cache stats and integrating hash/caching at the SystemGraph layer once multi-node support lands.
 
 5. **Canonical astrometry demo + docs (P1)**
-   - **Goal:** Provide runnable script/notebook demonstrating truth generation, synthetic data, and Optax run using new binder/graph.
-   - **Files:** `Examples/` (new script/notebook), `README.md`, possibly `docs/` scaffold if added.
-   - **Dependencies:** SystemGraph and scoped resolver in place; canonical loss stable.
-   - **Risks/Ambiguities:** Dataset location, runtime expectations; balancing simplicity with realism.
-   - **Tests:** CI smoke run of demo (short), docstring/unit test ensuring example executes without errors.
+   - **Status:** ✅ Added `Examples/scripts/run_canonical_astrometry_demo.py` using ParamSpec + ParameterStore + DerivedResolver to build truth/variant stores, SheraThreePlaneBinder/SystemGraph forward model, and Optax GD with prior penalties. README updated with run command; smoke test exercises `main(fast=True)`.
 
 ---
 
