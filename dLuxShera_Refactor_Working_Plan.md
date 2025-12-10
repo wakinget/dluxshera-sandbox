@@ -1,5 +1,5 @@
 # dLuxShera Refactor — Working Plan & Notes
-_Last updated: 2025-11-13 01:13_
+_Last updated: 2025-12-10 01:28_
 
 This is a living document summarizing the goals, architecture, decisions, tasks, and gotchas for the dLuxShera parameterization
 refactor. It’s designed so either of us can get back up to speed quickly and not lose the important details.
@@ -26,7 +26,7 @@ refactor. It’s designed so either of us can get back up to speed quickly and n
 
 **Layers (current vs target)**
 1. **ParamSpec** — declarative schema & metadata (no numbers). ✅ Exists with `ParamField`/`ParamSpec` plus inference/forward builders; primitives and derived fields share the same spec.
-2. **ParameterStore** — immutable values map. ✅ Implemented as frozen mapping + pytree; currently allows any keys (primitives/derived) depending on validation toggle.
+2. **ParameterStore** — immutable values map. ✅ Implemented as frozen mapping + pytree with strict-by-default validation (rejects derived keys unless explicitly allowed) and helpers for refreshing/stripping deriveds.
 3. **DerivedResolver (Scoped Transform Registry)** — computes derived values as pure functions. ⚠️ Registry exists and resolves recursive deps; currently global (not system-id scoped) and limited to three transforms.
 4. **SystemGraph** — executable DAG of nodes. ⚠️ Minimal single-node scaffold exists (`DLuxSystemNode` + `SystemGraph`) wrapping the existing three-plane builder; still single-node/no caching.
 5. **Facade** — `SheraThreePlane_Model` wrapper. ✅ Still primary entry point; internally uses partial refactor helpers.
@@ -86,8 +86,8 @@ dLuxShera/
 ## 5) ParameterStore (Values)
 
 - Frozen mapping `{key → value}` registered as JAX pytree; supports `.replace`, iteration, and `.validate` against a `ParamSpec`.
-- Validation toggle allows derived keys; policy choice (primitives-only) still outstanding.
-- No serialization helpers; no `refresh` convenience API.
+- Validation is strict by default (rejects derived keys); override/debug mode opt-in via `allow_derived=True`. Helpers `strip_derived`, `refresh_derived`, and `check_consistency` keep derived values fresh or flag stale overrides.
+- Shallow serialization helpers exist (`from_dict`, `from_spec_defaults`, `as_dict`); YAML/JSON IO still planned in the profiles/IO workstream.
 
 ---
 
@@ -104,7 +104,7 @@ dLuxShera/
 
 ## 7) Integrating dLux `ThreePlaneOpticalSystem`
 
-- **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem` and optionally injects Zernike coefficients from store. No structural hash/cache.
+- **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem`, optionally injects Zernike coefficients from store, and now caches structural builds via `structural_hash_from_config` + `clear_threeplane_optics_cache` (opt-out env flag `DLUXSHERA_THREEPLANE_CACHE_DISABLED`).
 - **Binder:** Merges stores and forwards through static optics; canonical loss wrapper implemented and tested. Derived resolution step is not enforced; plate-scale binding policy unresolved.
 - **Graph layer:** Minimal `DLuxSystemNode` + `SystemGraph` wrap the three-plane builder; still single-node with no caching/derived resolution enforcement.
 
@@ -133,7 +133,7 @@ dLuxShera/
 
 - **Primitives-only store:** Decision still pending; current implementation can accept deriveds when validation is disabled.
 - **Plate-scale policy:** Whether to always recompute vs allow override is still undecided.
-- **Structural caching:** Builder currently rebuilds every call; caching keyed by structural primitives is planned.
+- **Structural caching:** Three-plane builder now caches structural builds keyed by a deterministic hash and exposes a cache clear helper (env flag available to disable caching).
 - **Scopes:** Per-system scoping added via `DerivedResolver`; ergonomics for additional variants will matter as new systems arrive.
 
 ---
@@ -170,7 +170,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ⚠️ **ParameterStore policy**: Primitives-only enforcement + default validation mode; add optional `refresh` helper and serialization later.
 - ✅ **Inference parameter packing**: `pack_params`/`unpack_params` with tests.
 - ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.
-- ⚠️ **ThreePlaneBuilder (structural hash/cache)**: Build path exists; add structural subset definition and caching policy.
+- ✅ **ThreePlaneBuilder (structural hash/cache)**: Structural subset documented, deterministic hash added, cache + clear helper in builder with opt-out env flag.
 - ⚠️ **ThreePlaneBinder (phase/sampling bind)**: Binder exists; clarify plate-scale policy and enforce derived resolution.
 - ⚠️ **Canonical loss wiring**: New binder-based loss implemented; migrate examples once SystemGraph exists.
 - ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; next steps are caching, multi-node wiring, and derived resolution enforcement.
@@ -190,8 +190,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ⚠️ Canonical loss is in place; remaining sprint items: plate-scale policy decision, SystemGraph follow-ups (caching/multi-node), demo script.
 
 **Newly noted tasks**
-- ⏳ Structural hash/caching for three-plane builder.
-- ⏳ Enforce primitives-only store in production mode.
+- ✅ Structural hash/caching for three-plane builder (cache + clear helper landed).
+- ✅ Enforce primitives-only store in production mode (strict validation default, refresh/strip helpers).
 - ⏳ Add serialization (`params/serialize.py`) and transform registry module (`params/registry.py`).
 - ⏳ Extend SystemGraph with caching/derived resolution hooks once resolver is scoped.
 
@@ -207,19 +207,13 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
    - **Outcome:** Added `params/registry.py` with system-scoped resolver/decorator, defaulting to the Shera three-plane system; tests cover isolation across system_ids and existing Shera transforms continue to resolve via the default registry.
    - **Follow-ups:** Extend coverage for future system variants (two-/four-plane) once their specs land and align ergonomics with ParameterStore primitives-only enforcement.
 
-3. **ParameterStore enforcement + serialization (P0)**
-   - **Goal:** Enforce primitives-only store in validation by default; add `refresh` helper and serialization (`to_dict`/`from_dict` and YAML/JSON hooks).
-   - **Files:** `src/dluxshera/params/{store.py, serialize.py}`, tests in `tests/params/test_store.py`.
-   - **Dependencies:** Scoped resolver changes (deriveds recomputed); may affect binder validation.
-   - **Risks/Ambiguities:** Handling legacy flows that may pass deriveds; migration path via explicit flag.
-   - **Tests:** Validation rejecting derived keys, round-trip serialization, refresh behavior with transforms.
+3. **ParameterStore enforcement + serialization (P0) — DONE**
+   - **Outcome:** ParameterStore validation defaults to strict (rejects derived keys), with opt-in override for debug/override flows plus helpers to strip/refresh/check derived values. Shallow serialization (`from_dict`, `from_spec_defaults`, `as_dict`) is in place; YAML/JSON profile IO remains deferred to the profiles/IO task.
+   - **Follow-ups:** Add optional YAML/JSON helpers alongside the profile/IO workstream if still desired.
 
-4. **Structural hash/cache for ThreePlaneBuilder (P1)**
-   - **Goal:** Define structural subset and cache optics builds keyed by hash; avoid rebuilds during optimization.
-   - **Files:** `src/dluxshera/optics/builder.py`, maybe `optics/config.py`, tests in `tests/optics/test_builder.py`.
-   - **Dependencies:** ParameterStore enforcement to identify structural keys cleanly; SystemGraph can reuse cache.
-   - **Risks/Ambiguities:** Hash stability across JAX types; invalidation when structural params change.
-   - **Tests:** Cache hit/miss behavior, correctness after structural override, hash determinism.
+4. **Structural hash/cache for ThreePlaneBuilder (P1) — DONE**
+   - **Outcome:** Structural subset documented in `optics/config.py`; deterministic hash helper and cache/clear APIs added to `optics/builder.py` (env flag `DLUXSHERA_THREEPLANE_CACHE_DISABLED`). Tests cover cache hit/miss, non-structural reuse, and hash stability.
+   - **Follow-ups:** Consider exposing cache stats and integrating hash/caching at the SystemGraph layer once multi-node support lands.
 
 5. **Canonical astrometry demo + docs (P1)**
    - **Goal:** Provide runnable script/notebook demonstrating truth generation, synthetic data, and Optax run using new binder/graph.

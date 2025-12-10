@@ -27,6 +27,28 @@ class SheraThreePlaneConfig:
     backend-agnostic (no NumPy/JAX arrays), hashable, and safe as a frozen
     dataclass, while still being easy for the builder to consume when
     constructing Zernike `BasisOptic` layers.
+
+    Structural hashing and caching
+    ------------------------------
+    The optics builder treats the following fields as *structural* when
+    computing a hash for caching purposes:
+
+      - Grid and sampling: `pupil_npix`, `psf_npix`, `oversample`.
+      - Bandpass sampling (affects wavelength grid shapes elsewhere):
+        `wavelength_m`, `bandwidth_m`, `n_lambda`.
+      - Three-plane geometry: `m1_diameter_m`, `m2_diameter_m`,
+        `m1_focal_length_m`, `m2_focal_length_m`, `m1_m2_separation_m`,
+        `pixel_pitch_m`.
+      - Aperture features: `n_struts`, `strut_width_m`, `strut_rotation_deg`.
+      - Zernike basis selection: `primary_noll_indices`,
+        `secondary_noll_indices` (coefficients live in the ParameterStore and
+        are *not* part of the structural hash).
+      - Diffractive pupil: `diffractive_pupil_path`,
+        `dp_design_wavelength_m`.
+
+    Metadata such as `design_name` is intentionally *not* included in the
+    structural hash so that different labels can reuse the same cached optics
+    structure.
     """
 
     design_name: Optional[str] = None
