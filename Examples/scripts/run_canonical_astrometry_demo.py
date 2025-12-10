@@ -43,6 +43,11 @@ import dluxshera.params.shera_threeplane_transforms  # Registers default derived
 # Default output directory (gitignored via Results/)
 DEFAULT_RESULTS_DIR = Path("Results/CanonicalAstrometryDemo")
 
+# Define the path to the default diffractive pupil file
+_PACKAGE_ROOT = Path(dluxshera.__file__).resolve().parent
+DEFAULT_DP_PATH = _PACKAGE_ROOT / "data" / "diffractive_pupil.npy"
+# Diffractive Pupil design files are saved under src/dluxshera/data/
+# Currently, we only have a single design file
 
 @dataclass
 class DemoData:
@@ -93,32 +98,63 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     # 1. Build Shera config and forward/inference specs
     # ------------------------------------------------------------------
     print("Step 1: Building SheraThreePlaneConfig and ParamSpecs...")
+    # Construct a custom config to demonstrate all available inputs
     cfg = SheraThreePlaneConfig(
-        design_name="shera_testbed",
-        pupil_npix=128,
-        psf_npix=128,
+        design_name="shera_testbed_custom", # User-defined name
+        # Grid Sampling
+        pupil_npix=256,
+        psf_npix=256,
         oversample=2,
-        primary_noll_indices=(4, 5, 6, 7),
-        secondary_noll_indices=(4, 5, 6, 7),
+        # Wavelength Sampling
+        wavelength_m=550e-9,
+        bandwidth_m=110e-9,
+        n_lambda=3,
+        # System Geometry (three-plane layout)
+        m1_diameter_m=0.09,
+        m2_diameter_m=0.025,
+        m1_focal_length_m=0.35796,
+        m2_focal_length_m=-0.041935,
+        m1_m2_separation_m=0.320,
+        pixel_pitch_m=6.5e-6,
+        # Aperture Features
+        n_struts=4,
+        strut_width_m=0.002,
+        strut_rotation_deg=45.0,
+        # Diffractive Pupil Mask
+        diffractive_pupil_path=str(DEFAULT_DP_PATH),
+        dp_design_wavelength_m=550e-9,
+        # Zernike Basis (Noll indices)
+        primary_noll_indices=(4, 5, 6, 7, 8, 9, 10, 11),
+        secondary_noll_indices=(4, 5, 6, 7, 8, 9, 10, 11),
     )
-    forward_spec = build_forward_model_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic()
+    # Optionally, the user can import pre-defined configs:
+    # from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SHERA_FLIGHT_CONFIG
+    # cfg = SHERA_TESTBED_CONFIG
+
+    # Construct ParamSpec objects - The spec describes how we intend to use the parameters
+    # e.g. `system.plate_scale_as_per_pix` as a derived parameter vs a primitive inference knob
+    forward_spec = build_forward_model_spec_from_config(cfg) # One Spec for the forward model
+    inference_spec = build_inference_spec_basic() # Another Spec for the inference model
 
     # ------------------------------------------------------------------
     # 2. Construct truth ParameterStore and resolve derived parameters
     # ------------------------------------------------------------------
     print("Step 2: Constructing truth ParameterStore and derived parameters...")
+    # The Spec describes what parameters we intend to use and how we use them
+    # The Store actually holds real values for the parameters
+    # Here, we initialize a store from default values defined in the Spec
     forward_store = ParameterStore.from_spec_defaults(forward_spec)
+    # We may now update any parameters to set up our initial data
     forward_store = forward_store.replace(
         {
-            "binary.separation_as": 0.55,
-            "binary.position_angle_deg": 120.0,
-            "binary.x_position": 0.03,
-            "binary.y_position": -0.02,
+            "binary.separation_as": 9.5,
+            "binary.position_angle_deg": 80.0,
+            "binary.x_position": 0.50,
+            "binary.y_position": -0.25,
             # Photon budget controls
-            "binary.spectral_flux_density": 7e9,
-            "imaging.exposure_time_s": 8.0,
-            "imaging.throughput": 0.85,
+            "binary.spectral_flux_density": 1.7e17,
+            "imaging.exposure_time_s": 1.0,
+            "imaging.throughput": 0.8,
         }
     )
 
@@ -130,6 +166,7 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     truth_store = ParameterStore.from_spec_defaults(inference_spec)
     primary_zernikes = 5.0 * rng.standard_normal(len(cfg.primary_noll_indices))
     secondary_zernikes = np.zeros(len(cfg.secondary_noll_indices))
+    # ParameterStores are immutable, meaning we must use the .replace() method to provide updates
     truth_store = truth_store.replace(
         {
             "binary.separation_as": forward_store.get("binary.separation_as"),
@@ -150,6 +187,16 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     print("Step 3: Generating synthetic PSFs from the refactor stack...")
     binder = SheraThreePlaneBinder(cfg, inference_spec, truth_store)
     truth_psf = np.array(binder.forward(truth_store))
+    # binder.forward(store) merges the given store into the internal base store,
+    # then builds a new source based on the store, composes a dl.Telescope object
+    # using the new source, the internal optics, and the internal detector, then
+    # calls telescope.model() to return the PSF image.
+    # I'm worried that the provided store only updates the source object, and
+    # doesn't affect either the optics or the detector. `build_alpha_cen_source` is
+    # the only thing that uses eff_store within the .forward() method.
+    # For instance, if truth_store attempts to update system.plate_scale_as_per_pix,
+    # it appears as though this update will fall through the cracks and won't affect
+    # the output psf image
 
     if add_noise:
         truth_psf = truth_psf + rng.normal(scale=0.005, size=truth_psf.shape)
@@ -157,7 +204,7 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     # Demonstrate that changing parameters regenerates a different PSF
     variant_store = truth_store.replace(
         {
-            "binary.separation_as": truth_store.get("binary.separation_as") + 0.03,
+            "binary.separation_as": truth_store.get("binary.separation_as") + 1.0,
             "primary.zernike_coeffs": truth_store.get("primary.zernike_coeffs") + 2.0,
         }
     )
@@ -243,7 +290,6 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     )
     final_store = store_unpack_params(sub_spec, theta_final, init_store)
 
-    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # 7. Summarize recovered parameters and optionally save plots
     # ------------------------------------------------------------------
