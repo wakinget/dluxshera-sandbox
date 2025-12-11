@@ -290,7 +290,7 @@ def make_image_nll_fn(
         This is the state we *overlay* when unpacking theta.
     infer_keys
         Sequence of ParamKeys to include in theta, e.g.
-        ["binary.separation_as", "binary.x_position", ...].
+        ["binary.separation_as", "binary.x_position_as", ...].
     data
         Observed image (PSF cutout etc.), as a JAX array.
     var

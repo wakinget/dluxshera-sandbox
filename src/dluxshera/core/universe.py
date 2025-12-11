@@ -26,8 +26,8 @@ def build_alpha_cen_source(
 
         - 'binary.separation_as'        (float, arcseconds)
         - 'binary.position_angle_deg'   (float, degrees East of North)
-        - 'binary.x_position'           (float, arcseconds)
-        - 'binary.y_position'           (float, arcseconds)
+        - 'binary.x_position_as'        (float, arcseconds)
+        - 'binary.y_position_as'        (float, arcseconds)
         - 'source.log_flux_total'       (float, log10 photons)
         - 'binary.contrast'             (float, unitless flux ratio)
 
@@ -63,8 +63,8 @@ def build_alpha_cen_source(
     contrast = store.get("binary.contrast")
 
     # Optional centre; default to (0, 0) if not present
-    x_position = store.get("binary.x_position", default=0.0)
-    y_position = store.get("binary.y_position", default=0.0)
+    x_position = store.get("binary.x_position_as", default=0.0)
+    y_position = store.get("binary.y_position_as", default=0.0)
 
     # Construct a “vanilla” AlphaCen and then overwrite its parameters via .set
     source = AlphaCen(n_wavels=n_wavels)

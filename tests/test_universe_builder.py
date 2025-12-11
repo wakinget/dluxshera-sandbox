@@ -18,8 +18,8 @@ def test_build_alpha_cen_source_roundtrip():
     updates = {
         "binary.separation_as": 9.5,
         "binary.position_angle_deg": 75.0,
-        "binary.x_position": 2.0,
-        "binary.y_position": -1.5,
+        "binary.x_position_as": 2.0,
+        "binary.y_position_as": -1.5,
         "binary.log_flux_total": 7.5,
         "binary.contrast": 2.8,
     }
@@ -43,8 +43,8 @@ def test_build_alpha_cen_source_roundtrip():
     ]
     x, y, r, theta, log_flux, contrast = source.get(paths)
 
-    assert jnp.allclose(x, updates["binary.x_position"])
-    assert jnp.allclose(y, updates["binary.y_position"])
+    assert jnp.allclose(x, updates["binary.x_position_as"])
+    assert jnp.allclose(y, updates["binary.y_position_as"])
     assert jnp.allclose(r, updates["binary.separation_as"])
     assert jnp.allclose(theta, updates["binary.position_angle_deg"])
     assert jnp.allclose(log_flux, updates["binary.log_flux_total"])

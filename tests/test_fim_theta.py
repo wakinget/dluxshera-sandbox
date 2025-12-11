@@ -21,8 +21,8 @@ def _make_store_for_smoke(cfg):
     updates = {
         "binary.separation_as": 10.0,
         "binary.position_angle_deg": 90.0,
-        "binary.x_position": 0.0,
-        "binary.y_position": 0.0,
+        "binary.x_position_as": 0.0,
+        "binary.y_position_as": 0.0,
         "binary.contrast": 3.0,
         "binary.log_flux_total": 8.0,
         "system.plate_scale_as_per_pix": 0.355,
@@ -45,8 +45,8 @@ def test_fim_theta_shape_and_symmetry():
 
     infer_keys = [
         "binary.separation_as",
-        "binary.x_position",
-        "binary.y_position",
+        "binary.x_position_as",
+        "binary.y_position_as",
     ]
 
     # Synthetic data via Binder path
@@ -84,7 +84,7 @@ def test_fim_theta_shera_wrapper_consistency():
     cfg = SHERA_TESTBED_CONFIG
     spec, store = _make_store_for_smoke(cfg)
 
-    infer_keys = ["binary.separation_as", "binary.x_position"]
+    infer_keys = ["binary.separation_as", "binary.x_position_as"]
 
     binder = SheraThreePlaneBinder(cfg, spec, store)
     data = binder.forward(store)

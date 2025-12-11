@@ -94,8 +94,8 @@ def build_shera_threeplane_model(
     # For now we assume they are present; if not, KeyError is a good signal.
     sep_as = store.get("binary.separation_as")
     pa_deg = store.get("binary.position_angle_deg")
-    x_as = store.get("binary.x_position")
-    y_as = store.get("binary.y_position")
+    x_as = store.get("binary.x_position_as")
+    y_as = store.get("binary.y_position_as")
     contrast = store.get("binary.contrast")
     log_flux = store.get("binary.log_flux_total")
 

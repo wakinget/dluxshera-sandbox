@@ -49,8 +49,8 @@ def test_run_shera_image_gd_eigen_smoke():
     updates = {
         "binary.separation_as": 0.6,
         "binary.position_angle_deg": 75.0,
-        "binary.x_position": 0.02,
-        "binary.y_position": -0.015,
+        "binary.x_position_as": 0.02,
+        "binary.y_position_as": -0.015,
         "binary.contrast": 1.5,
         "binary.log_flux_total": 7.5,
         "system.plate_scale_as_per_pix": 0.3,

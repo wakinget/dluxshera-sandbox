@@ -40,8 +40,8 @@ def run_shera_image_gd_basic(
     cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG,
     infer_keys: Sequence[ParamKey] = (
         "binary.separation_as",
-        "binary.x_position",
-        "binary.y_position",
+        "binary.x_position_as",
+        "binary.y_position_as",
     ),
     init_overrides: Optional[Dict[ParamKey, Any]] = None,
     noise_model: NoiseModel = "gaussian",
@@ -71,7 +71,7 @@ def run_shera_image_gd_basic(
     infer_keys :
         Sequence of parameter keys (in the ParameterStore) to infer.
         Defaults to separation and centroid:
-          ("binary.separation_as", "binary.x_position", "binary.y_position")
+          ("binary.separation_as", "binary.x_position_as", "binary.y_position_as")
     init_overrides :
         Optional dict of {ParamKey: value} used to override the default
         ParameterStore initialisation (e.g. to start from a biased guess
@@ -139,8 +139,8 @@ def run_shera_image_gd_eigen(
     base_store: Optional[ParameterStore] = None,
     infer_keys: Sequence[ParamKey] = (
         "binary.separation_as",
-        "binary.x_position",
-        "binary.y_position",
+        "binary.x_position_as",
+        "binary.y_position_as",
     ),
     data: Optional[jnp.ndarray] = None,
     var: Optional[jnp.ndarray] = None,

@@ -138,6 +138,12 @@ class ParameterStore:
         replace these with concrete values before using the store in a
         forward model.
 
+        Derived parameters declared in the spec are intentionally *omitted*;
+        they can be populated explicitly via :func:`refresh_derived` once
+        truth-level primitives have been set. This keeps the default store
+        "primitives-only" and avoids accidental reliance on stale derived
+        values.
+
         This does not perform any validation beyond copying defaults. Use
         `store.validate_against(spec)` if you want to check key consistency.
         """
@@ -323,6 +329,13 @@ def refresh_derived(
     This helper removes any derived keys from the input store, resolves them
     through the provided `resolver`, and returns a new store that preserves
     primitives/extras and optionally appends recomputed derived values.
+
+    A canonical forward-modelling flow is::
+
+        spec = build_forward_model_spec_from_config(cfg)
+        store = ParameterStore.from_spec_defaults(spec)   # primitives only
+        store = store.replace({...truth-level primitives...})
+        store = refresh_derived(store, spec, TRANSFORMS, system_id)
 
     Parameters
     ----------

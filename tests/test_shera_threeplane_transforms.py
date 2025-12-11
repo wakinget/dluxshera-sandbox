@@ -2,6 +2,11 @@ import math
 
 import pytest
 
+import math
+from dataclasses import replace
+
+import pytest
+
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.optics.builder import build_shera_threeplane_optics
 from dluxshera.params.spec import build_forward_model_spec_from_config
@@ -17,6 +22,55 @@ def _build_forward_model_store(cfg=SHERA_TESTBED_CONFIG):
     spec = build_forward_model_spec_from_config(cfg)
     store = ParameterStore.from_spec_defaults(spec)
     return spec, store
+
+
+def test_forward_spec_includes_binary_astrometry_primitives():
+    spec, store = _build_forward_model_store()
+
+    expected_keys = {
+        "binary.x_position_as",
+        "binary.y_position_as",
+        "binary.separation_as",
+        "binary.position_angle_deg",
+        "binary.contrast",
+    }
+
+    assert expected_keys.issubset(set(spec.keys()))
+    for key in expected_keys:
+        assert key in store
+
+
+def test_forward_spec_zernike_coeffs_follow_noll_indices():
+    cfg = SHERA_TESTBED_CONFIG
+    spec = build_forward_model_spec_from_config(cfg)
+    store = ParameterStore.from_spec_defaults(spec)
+
+    n_m1 = len(cfg.primary_noll_indices)
+    n_m2 = len(cfg.secondary_noll_indices)
+
+    field_m1 = spec.get("primary.zernike_coeffs")
+    field_m2 = spec.get("secondary.zernike_coeffs")
+
+    assert field_m1.shape == (n_m1,)
+    assert field_m2.shape == (n_m2,)
+
+    assert store.get("primary.zernike_coeffs") == tuple([0.0] * n_m1)
+    assert store.get("secondary.zernike_coeffs") == tuple([0.0] * n_m2)
+
+
+def test_forward_spec_omits_zernike_when_basis_absent():
+    cfg_empty = replace(
+        SHERA_TESTBED_CONFIG,
+        primary_noll_indices=(),
+        secondary_noll_indices=(),
+    )
+    spec = build_forward_model_spec_from_config(cfg_empty)
+    store = ParameterStore.from_spec_defaults(spec)
+
+    assert "primary.zernike_coeffs" not in spec.keys()
+    assert "secondary.zernike_coeffs" not in spec.keys()
+    assert "primary.zernike_coeffs" not in store
+    assert "secondary.zernike_coeffs" not in store
 
 
 def test_system_focal_length_matches_analytic():
@@ -90,6 +144,9 @@ def test_binary_log_flux_total_matches_formula():
 
 def test_refresh_derived_populates_forward_model_keys():
     spec, store = _build_forward_model_store()
+
+    assert "system.plate_scale_as_per_pix" not in store
+    assert "binary.log_flux_total" not in store
 
     refreshed = refresh_derived(
         store,
