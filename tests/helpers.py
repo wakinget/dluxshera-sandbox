@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from dluxshera.optics.config import SheraThreePlaneConfig
+from dluxshera.optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from dluxshera.params.spec import (
     ParamSpec,
     build_forward_model_spec_from_config,
     build_inference_spec_basic,
+    build_shera_twoplane_forward_spec_from_config,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
@@ -14,12 +15,15 @@ import dluxshera.params.shera_threeplane_transforms  # Registers default transfo
 
 
 def make_forward_store(
-    cfg: SheraThreePlaneConfig,
+    cfg,
     updates: Optional[Dict[str, object]] = None,
 ) -> tuple[ParamSpec, ParameterStore]:
     """Build a forward-style spec + store with deriveds refreshed."""
 
-    spec = build_forward_model_spec_from_config(cfg)
+    if isinstance(cfg, SheraTwoPlaneConfig):
+        spec = build_shera_twoplane_forward_spec_from_config(cfg)
+    else:
+        spec = build_forward_model_spec_from_config(cfg)
     store = ParameterStore.from_spec_defaults(spec)
     if updates:
         store = store.replace(updates)

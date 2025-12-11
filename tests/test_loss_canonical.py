@@ -2,9 +2,13 @@ import jax
 import jax
 import jax.numpy as jnp
 
-from dluxshera.optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
+from dluxshera.optics.config import (
+    SheraThreePlaneConfig,
+    SheraTwoPlaneConfig,
+    SHERA_TESTBED_CONFIG,
+)
 from dluxshera.params.packing import pack_params
-from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 from dluxshera.inference.optimization import (
     make_binder_image_nll_fn,
     loss_canonical,
@@ -89,3 +93,31 @@ def test_loss_canonical_matches_binder_nll_and_is_jittable():
 
     # JIT stability is exercised elsewhere; here we only require consistency
     # between the canonical wrapper and the Binder-based loss.
+
+
+def test_make_binder_image_nll_fn_twoplane_smoke():
+    cfg = SheraTwoPlaneConfig()
+    forward_spec, base_store = make_forward_store(cfg)
+
+    infer_keys = (
+        "binary.separation_as",
+        "binary.position_angle_deg",
+        "binary.contrast",
+    )
+
+    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store)
+    image = binder.model()
+    var = jnp.ones_like(image)
+
+    loss_fn, theta0 = make_binder_image_nll_fn(
+        cfg,
+        forward_spec,
+        base_store,
+        infer_keys,
+        image,
+        var,
+        use_system_graph=True,
+    )
+
+    loss_val = loss_fn(theta0)
+    assert jnp.isfinite(loss_val)
