@@ -6,6 +6,100 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 from pathlib import Path
 
+
+@dataclass(frozen=True)
+class SheraTwoPlaneConfig:
+    """
+    Structural configuration for the Shera two-plane optical system.
+
+    This captures fixed geometry and sampling choices for the Toliman-like
+    two-plane pupil→focal relay used by SheraTwoPlaneOptics. These values are
+    separate from inference parameters (which live in ParameterStore/ParamSpec)
+    and are intended to remain constant for a given instrument setup.
+    """
+
+    design_name: Optional[str] = None
+    """Human-readable identifier for this optical design."""
+
+    # ------------------------------------------------------------------
+    # Pupil & PSF grids
+    # ------------------------------------------------------------------
+    pupil_npix: int = 256
+    """Number of pixels across the pupil grid."""
+
+    psf_npix: int = 256
+    """Number of pixels across the detector/PSF cutout."""
+
+    oversample: int = 3
+    """PSF oversampling factor relative to the on-sky plate scale."""
+
+    # ------------------------------------------------------------------
+    # Wavelength sampling
+    # ------------------------------------------------------------------
+    wavelength_m: float = 550e-9
+    """Central wavelength of the bandpass [meters]."""
+
+    bandwidth_m: float = 110e-9
+    """Width of the bandpass [meters]."""
+
+    n_lambda: int = 3
+    """Number of discrete wavelengths to sample across the bandpass."""
+
+    # ------------------------------------------------------------------
+    # System geometry (two-plane layout)
+    # ------------------------------------------------------------------
+    m1_diameter_m: float = 0.09
+    """Primary mirror clear diameter [meters]."""
+
+    central_obscuration_ratio: float = 0.0
+    """
+    Ratio of the central obscuration diameter to the primary diameter.
+
+    Defaults to 0 (no obscuration) for the simplified two-plane relay.
+    """
+
+    n_struts: int = 4
+    """Number of support struts in the primary aperture."""
+
+    strut_width_m: float = 0.002
+    """Width of the support struts [meters]."""
+
+    strut_rotation_deg: float = -45.0
+    """Rotation angle of the spider pattern [degrees]."""
+
+    # ------------------------------------------------------------------
+    # Fixed plate scale (primitive for the two-plane model)
+    # ------------------------------------------------------------------
+    plate_scale_as_per_pix: float = 0.3547
+    """
+    Plate scale in arcseconds per pixel.
+
+    For the two-plane Shera system we treat plate scale as a primitive rather
+    than deriving it from telescope geometry.
+    """
+
+    # ------------------------------------------------------------------
+    # Zernike basis selection (structure, not coefficients)
+    # ------------------------------------------------------------------
+    primary_noll_indices: Tuple[int, ...] = ()
+    """
+    Noll indices defining the Zernike basis on the primary mirror.
+
+    If this tuple is empty, the builder does not construct a Zernike BasisOptic
+    for the primary. If non-empty, the forward spec will expect
+    `primary.zernike_coeffs` of matching length.
+    """
+
+    # ------------------------------------------------------------------
+    # Diffractive pupil / fixed masks
+    # ------------------------------------------------------------------
+    diffractive_pupil_path: Optional[str] = None
+    """Optional filesystem path to a diffractive pupil mask (e.g. .npy)."""
+
+    dp_design_wavelength_m: Optional[float] = None
+    """Design wavelength for the diffractive pupil mask [meters]."""
+
+
 @dataclass(frozen=True)
 class SheraThreePlaneConfig:
     """
