@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+from dataclasses import replace
+
 import jax.numpy as jnp
 
 from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
@@ -60,3 +62,14 @@ def test_twoplane_system_graph_matches_binder():
     assert graph_psf.dtype == binder_psf.dtype
     assert jnp.all(jnp.isfinite(graph_psf))
     assert jnp.allclose(graph_psf, binder_psf)
+
+
+def test_graph_outputs_mapping_is_shared():
+    cfg = SheraTwoPlaneConfig(n_lambda=1)
+    forward_spec, forward_store = make_forward_store(cfg)
+    graph = build_shera_twoplane_system_graph(cfg, forward_spec, forward_store)
+
+    outputs = graph.evaluate(outputs=("psf", "copy"))
+
+    assert set(outputs.keys()) == {"psf", "copy"}
+    assert jnp.allclose(outputs["psf"], outputs["copy"])

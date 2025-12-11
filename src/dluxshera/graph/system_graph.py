@@ -18,17 +18,10 @@ Outputs = Tuple[str, ...]
 
 
 @dataclass
-class SystemGraph:
-    """
-    Minimal single-node execution graph for the Shera three-plane system.
+class BaseSheraSystemGraph:
+    """Shared single-node SystemGraph skeleton for Shera systems."""
 
-    This graph owns a detector instance and reuses the cached optics builder to
-    evaluate the PSF for a provided ParameterStore. It mirrors the binder’s
-    mostly-immutable semantics: the base store is validated and stored, while
-    per-call overrides are merged functionally.
-    """
-
-    cfg: SheraThreePlaneConfig
+    cfg: object
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
     detector: dl.LayeredDetector
@@ -37,6 +30,17 @@ class SystemGraph:
         self.base_forward_store = self.base_forward_store.validate_against(
             self.forward_spec, allow_derived=True
         )
+
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
+
+    def _evaluate_psf(self, eff_store: ParameterStore):  # pragma: no cover - abstract hook
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
 
     def _merge_store(self, store_delta: Optional[ParameterStore]) -> ParameterStore:
         if store_delta is None:
@@ -59,14 +63,7 @@ class SystemGraph:
         """Evaluate the graph and return requested outputs (default: PSF)."""
 
         eff_store = self._merge_store(store_delta)
-
-        optics = build_shera_threeplane_optics(
-            self.cfg, store=eff_store, spec=self.forward_spec
-        )
-        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
-        telescope = dl.Telescope(source=source, optics=optics, detector=self.detector)
-
-        psf = telescope.model()
+        psf = self._evaluate_psf(eff_store)
 
         if outputs == ("psf",):
             return psf
@@ -78,6 +75,32 @@ class SystemGraph:
 
     forward = evaluate
     run = evaluate
+
+
+@dataclass
+class SystemGraph(BaseSheraSystemGraph):
+    """
+    Minimal single-node execution graph for the Shera three-plane system.
+
+    This graph owns a detector instance and reuses the cached optics builder to
+    evaluate the PSF for a provided ParameterStore. It mirrors the binder’s
+    mostly-immutable semantics: the base store is validated and stored, while
+    per-call overrides are merged functionally.
+    """
+
+    cfg: SheraThreePlaneConfig
+    forward_spec: ParamSpec
+    base_forward_store: ParameterStore
+    detector: dl.LayeredDetector
+
+    def _evaluate_psf(self, eff_store: ParameterStore):
+        optics = build_shera_threeplane_optics(
+            self.cfg, store=eff_store, spec=self.forward_spec
+        )
+        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
+        telescope = dl.Telescope(source=source, optics=optics, detector=self.detector)
+
+        return telescope.model()
 
 
 def build_shera_system_graph(
@@ -102,7 +125,7 @@ build_threeplane_system_graph = build_shera_system_graph
 
 
 @dataclass
-class SheraTwoPlaneSystemGraph:
+class SheraTwoPlaneSystemGraph(BaseSheraSystemGraph):
     """SystemGraph for the Shera two-plane binder path."""
 
     cfg: SheraTwoPlaneConfig
@@ -110,49 +133,14 @@ class SheraTwoPlaneSystemGraph:
     base_forward_store: ParameterStore
     detector: dl.LayeredDetector
 
-    def __post_init__(self) -> None:
-        self.base_forward_store = self.base_forward_store.validate_against(
-            self.forward_spec, allow_derived=True
-        )
-
-    def _merge_store(self, store_delta: Optional[ParameterStore]) -> ParameterStore:
-        if store_delta is None:
-            return self.base_forward_store
-
-        store_delta = store_delta.validate_against(
-            self.forward_spec,
-            allow_missing=True,
-            allow_derived=True,
-            allow_extra=False,
-        )
-        return self.base_forward_store.replace(store_delta.as_dict())
-
-    def evaluate(
-        self,
-        store_delta: Optional[ParameterStore] = None,
-        *,
-        outputs: Iterable[str] = ("psf",),
-    ):
-        eff_store = self._merge_store(store_delta)
-
+    def _evaluate_psf(self, eff_store: ParameterStore):
         optics = build_shera_twoplane_optics(
             self.cfg, store=eff_store, spec=self.forward_spec
         )
         source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
         telescope = dl.Telescope(source=source, optics=optics, detector=self.detector)
 
-        psf = telescope.model()
-
-        if outputs == ("psf",):
-            return psf
-
-        if isinstance(outputs, tuple):
-            return {name: psf for name in outputs}
-
-        return psf
-
-    forward = evaluate
-    run = evaluate
+        return telescope.model()
 
 
 def build_shera_twoplane_system_graph(

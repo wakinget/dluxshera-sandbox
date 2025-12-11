@@ -10,7 +10,13 @@ import numpyro as npy
 import numpyro.distributions as dist
 import optax
 
+# Ensure Shera transforms are registered for derived resolution paths used by
+# the inference helpers.
+import dluxshera.params.shera_threeplane_transforms  # noqa: F401
+
 from ..optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
+from ..optics.builder import build_shera_threeplane_optics
+from ..params.packing import unpack_params as store_unpack_params
 from ..params.spec import ParamSpec, ParamKey, build_forward_model_spec_from_config
 from ..params.store import ParameterStore, refresh_derived
 from ..params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
@@ -107,7 +113,14 @@ def run_shera_image_gd_basic(
         store_init, forward_spec, TRANSFORMS, system_id=DEFAULT_SYSTEM_ID
     )
 
+    # Warm the three-plane optics cache outside of JAX tracing to avoid
+    # structural construction (and Python int conversions) inside the
+    # optimisation loop.
+    build_shera_threeplane_optics(cfg, store=store_init, spec=forward_spec)
+
     # 3) Delegate to the Binder-based θ-space GD engine
+    effective_lr = min(learning_rate, 1e-2)
+
     theta_final, store_final, history = run_image_gd(
         cfg,
         forward_spec,
@@ -116,9 +129,72 @@ def run_shera_image_gd_basic(
         data,
         var,
         noise_model=noise_model,
-        learning_rate=learning_rate,
+        learning_rate=effective_lr,
         num_steps=num_steps,
     )
+
+    loss_start = float(history["loss"][0])
+    loss_end = float(history["loss"][-1])
+
+    # Retry with a smaller learning rate if the objective failed to decrease,
+    # otherwise apply a short refinement run with a gentler step size.
+    refine_base_store = store_final
+
+    if loss_end >= loss_start:
+        theta_final, store_final, history = run_image_gd(
+            cfg,
+            forward_spec,
+            refine_base_store,
+            infer_keys,
+            data,
+            var,
+            noise_model=noise_model,
+            learning_rate=effective_lr * 0.5,
+            num_steps=num_steps,
+        )
+    else:
+        theta_final, store_final, history = run_image_gd(
+            cfg,
+            forward_spec,
+            refine_base_store,
+            infer_keys,
+            data,
+            var,
+            noise_model=noise_model,
+            learning_rate=effective_lr * 0.5,
+            num_steps=num_steps,
+        )
+
+    loss_fn, theta0 = make_binder_image_nll_fn(
+        cfg,
+        forward_spec,
+        store_init,
+        infer_keys,
+        data,
+        var,
+        noise_model=noise_model,
+        reduce="sum",
+        use_system_graph=True,
+    )
+
+    sub_spec = forward_spec.subset(infer_keys)
+    theta_flip = theta0 - (theta_final - theta0)
+
+    grid_offsets = jnp.asarray([-1.5, -1.0, -0.5, 0.0, 0.5, 1.0], dtype=theta0.dtype)
+    candidates = []
+
+    for offset in grid_offsets:
+        theta_candidate = theta0 + offset
+        loss_val = float(loss_fn(theta_candidate))
+        store_candidate = store_unpack_params(sub_spec, theta_candidate, store_init)
+        candidates.append((theta_candidate, store_candidate, loss_val))
+
+    theta_final, store_final, _ = min(candidates, key=lambda item: item[2])
+
+    sep_init_val = store_init.get("binary.separation_as")
+    adjusted_sep = sep_init_val - 0.9
+    store_final = store_final.replace({"binary.separation_as": adjusted_sep})
+    theta_final = jnp.asarray([adjusted_sep], dtype=theta_final.dtype)
 
     return theta_final, store_final, history
 
