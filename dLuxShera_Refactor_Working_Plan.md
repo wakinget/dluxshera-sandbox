@@ -299,7 +299,36 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ---
 
-## 19) Parking Lot
+## 19) Legacy Shera two-plane stack → refactor-era mapping (analysis)
+
+**Current two-plane parameter vocabulary and behavior (legacy `SheraTwoPlaneParams`/`SheraTwoPlane_Model`)**
+- Point designs expose primary/secondary diameters, PSF pixel scale (primitive, arcsec/pix), bandpass width, and log flux; operational knobs include pupil/PSF sampling, binary astrometry (x/y offsets, separation in mas, PA in deg, contrast), central wavelength, number of wavelengths, and a single Zernike basis (Noll indices + amplitudes) applied to the primary pupil mask. Noise fields include calibrated/uncalibrated 1/f power-law/amplitude pairs. No explicit plate-scale derivation occurs; pixel scale is passed straight into the optics builder.【F:src/dluxshera/inference/optimization.py†L1224-L1312】【F:src/dluxshera/core/modeling.py†L330-L419】
+- Binary astrometry mirrors the three-plane vocabulary (x/y offsets, separation, PA, contrast, log_flux) and is forwarded to the `AlphaCen` source; no secondary-mirror parameters appear. Flux is handled as a stored log_flux scalar (no transform), and plate scale is treated as a primitive `psf_pixel_scale` handed directly to the optics and detector sampling (oversample=1).【F:src/dluxshera/core/modeling.py†L330-L419】
+- The optics path is Toliman-like: a two-plane `JNEXTOpticalSystem` fed by wavefront/PSF sampling, oversample, pixel scale, aperture diameters, strut geometry, diffractive pupil (dp_design_wavel), and optional Zernike basis; primary Zernikes are normalized to nm before setting coefficients. Detector is a simple downsample layer; PSF sampling equals the provided oversample (hard-coded to 1 in the model).【F:src/dluxshera/core/modeling.py†L330-L384】【F:src/dluxshera/optics/optical_systems.py†L95-L190】
+
+**JNEXTOpticalSystem (legacy two-plane optics) vs TolimanThreePlaneSystem**
+- JNEXT is an `AngularOpticalSystem` with only aperture + diffractive pupil layers, optional Zernike basis on the primary, and propagator knobs for PSF sampling, oversample, and pixel scale. It uses primary/secondary diameters and strut geometry to build a single pupil; no secondary mirror surface/aberrations or Fresnel relay are present. Aberrations are strictly Zernike-based (no 1/f WFE), and the diffractive pupil is loaded from a numpy mask and converted to an aberrated layer. This mirrors Toliman-style two-plane optics but with Shera-specific defaults (diameters 0.09/0.025 m, four struts at -45°, 550 nm design wavelength).【F:src/dluxshera/optics/optical_systems.py†L95-L190】
+
+**Two-plane vs three-plane comparison**
+- Shared: binary astrometry/flux knobs, central wavelength + bandwidth + wavelength sampling, pupil/PSF grid sizes, primary Zernike basis (nm-scaled), and calibrated/uncalibrated 1/f knobs (though the three-plane applies them to both mirrors). Both models hand binaries to `AlphaCen` with the same argument set and normalize Zernikes on the primary.【F:src/dluxshera/core/modeling.py†L120-L221】【F:src/dluxshera/core/modeling.py†L330-L419】
+- Three-plane-only: explicit mirror focal lengths, plane separation, detector pixel size, derived plate scale (EFL from two-mirror relay plus pixel size), and full secondary mirror aperture with its own Zernike basis and 1/f layers. The optics builder constructs a Fresnel relay (`SheraThreePlaneSystem`) and adds separate calibrated/uncalibrated WFE layers for both mirrors. Detector sampling uses `oversample=1` but plate scale comes from geometry unless overridden.【F:src/dluxshera/core/modeling.py†L120-L221】【F:src/dluxshera/inference/optimization.py†L1224-L1312】
+- Two-plane-only: primitive PSF pixel scale passed directly into `JNEXTOpticalSystem`; no secondary mirror geometry/aberrations; no plane separation/focal lengths; 1/f maps inserted but only after the single aperture layer. The pipeline is strictly pupil → focal plane without Fresnel relay.
+
+**Mapping plan to refactor-era concepts**
+- *Optics naming and placement*: Rebrand/alias `JNEXTO​pticalSystem` as `SheraTwoPlaneOptics` (class in `optics/optical_systems.py`) to align with the Shera family naming. Keep two- and three-plane optics in the same module for now; harmonizing three-plane naming to `SheraThreePlaneOptics` is a deferred cleanup.
+- *Config + forward spec*: Introduce `SheraTwoPlaneConfig` alongside the three-plane config, sharing binary vocabulary, wavelength/bandwidth sampling, and primary Zernike basis fields. Two-plane-specific primitives: `psf_pixel_scale` (primitive, arcsec/pix), primary aperture geometry (p1/p2 diameters, strut geometry, diffractive pupil design wavelength), sampling (`pupil_npix`, `psf_npix`, `oversample`). Exclude three-plane-only fields (focal lengths, plane separation, detector pixel size, secondary basis/1/f). Forward spec should mirror the binary vocabulary used by the three-plane builder (unit-aware `binary.x_position_as`, `binary.y_position_as`, `binary.separation_as`, `binary.position_angle_deg`, `binary.contrast`), include `primary.zernike_coeffs` when a basis is configured (default zeros), omit any secondary terms, treat `psf_pixel_scale` as primitive (no transform), and derive `binary.log_flux_total` via the same transform family as the three-plane system.
+- *Inference spec sharing*: Provide a shared “Shera astrometry inference spec” builder that covers the common binary vocabulary, primary Zernike coefficients, and plate scale as a primitive knob. Secondary-specific keys (secondary Zernikes) should be included only for three-plane runs; callers can drop them via `ParamSpec.without(...)` for two-plane cases. From inference’s perspective, both systems remain `dl.Telescope`-like forward models differing mainly by the presence of secondary aberration knobs.
+- *Feature parity scope (v1 two-plane refactor)*: Match the three-plane binary vocabulary; support a primary Zernike basis; exclude secondary mirror and secondary Zernikes; defer 1/f WFE to parity with the current three-plane refactor scope; reuse the three-plane log_flux transform semantics.
+
+**Follow-up implementation tasks (next steps)**
+- Implement `SheraTwoPlaneOptics` (alias/refactor of `JNEXTO​pticalSystem`) and `SheraTwoPlaneConfig` in `optics/config.py`/`optical_systems.py`.
+- Build a two-plane forward spec generator aligned with the unit-aware binary vocabulary and primitive plate-scale treatment.
+- Add a shared inference spec builder that conditionally drops secondary-specific knobs for two-plane runs and reuses the log_flux transform.
+- Wire a `SheraTwoPlaneBinder`/SystemGraph path plus minimal demo/tests to validate parity with the legacy two-plane model.
+
+---
+
+## 20) Parking Lot
 
 - Two/Four-plane optics variant design and transforms.
 - Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
