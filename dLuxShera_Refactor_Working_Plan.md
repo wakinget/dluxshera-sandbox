@@ -81,6 +81,7 @@ dLuxShera/
 - Forward spec now mirrors the full truth-level binary vocabulary with unit-aware keys (`binary.x_position_as`, `binary.y_position_as`, `binary.separation_as`, `binary.position_angle_deg`, `binary.contrast`) and conditionally includes Zernike coefficient arrays whose lengths are tied to configured Noll indices, defaulting to zero vectors when a basis exists.
 - Derived and primitive fields coexist in single spec; separation by kind is not enforced in store validation.
 - Cross-referencing between docs/tests and spec remains manual.
+- **Include vs exclude helpers:** `ParamSpec.subset(keys)` stays strictly include-only, preserving caller-provided ordering and raising on unknown keys. A complementary `ParamSpec.without(keys)` now drops whole fields by key (including grouped/vector fields such as `primary.zernike_coeffs`) while preserving the original ordering of everything else; it raises on unknown keys for consistency with `subset`. Tests cover no-op, full-drop, complement equivalence, and vector-field removal cases.
 
 ---
 
@@ -177,6 +178,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **P0 — Stabilize primitives/derived boundary & binder**
 - ⚠️ **ParamSpec core keys & docs**: Spec exists with metadata; forward spec now includes unit-aware binary astrometry and Noll-index-tied Zernike coeffs with zero defaults; ensure docstrings cross-reference tests/examples once SystemGraph lands.
+- ✅ **ParamSpec subset ergonomics (include vs exclude)**: Confirmed `subset(keys)` remains include-only; added `ParamSpec.without(keys)` complement with ordering preservation and unknown-key errors plus regression tests in `tests/test_params_spec.py`.
 - ✅ **ParameterStore policy**: Primitives-only defaults enforced; canonical flow documented (`from_spec_defaults` → primitive overrides → `refresh_derived`); serialization still to follow.
 - ✅ **Inference parameter packing**: `pack_params`/`unpack_params` with tests.
 - ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.

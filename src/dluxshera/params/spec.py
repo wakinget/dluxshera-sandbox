@@ -160,6 +160,24 @@ class ParamSpec:
                 raise KeyError(f"ParamSpec.subset: unknown key {key!r}") from exc
         return ParamSpec(selected_fields)
 
+    def without(self, keys: Iterable[ParamKey]) -> "ParamSpec":
+        """
+        Return a new ParamSpec excluding the fields whose keys are in `keys`.
+
+        This is the complement-style sibling to :meth:`subset`, which remains
+        an include-only operation. Ordering is preserved from the original
+        spec, minus the excluded keys. Unknown keys raise ``KeyError`` for
+        consistency with :meth:`subset`.
+        """
+        exclude_set = set()
+        for key in keys:
+            if key not in self._fields:
+                raise KeyError(f"ParamSpec.without: unknown key {key!r}")
+            exclude_set.add(key)
+
+        keep_keys = [key for key in self._fields if key not in exclude_set]
+        return self.subset(keep_keys)
+
 
 # ---------------------------------------------------------------------------
 # Shera inference spec builders
