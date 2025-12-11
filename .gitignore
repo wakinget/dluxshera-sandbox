@@ -8,6 +8,10 @@
 # Matches anything beginning with "context_snapshot_"
 devtools/context_snapshot_*/
 
+# Ignore any excess context files within the base devtools/ folder
+devtools/*.json
+devtools/*.txt
+
 # If snapshots contain many file types, ignore everything inside them:
 devtools/context_snapshot_*/**
 
