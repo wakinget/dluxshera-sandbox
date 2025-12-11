@@ -22,11 +22,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.inference import run_shera_image_gd_eigen
+from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
 from dluxshera.optics.config import SheraThreePlaneConfig
 from dluxshera.params.packing import unpack_params as store_unpack_params
@@ -242,20 +244,15 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         "system.plate_scale_as_per_pix": 0.002,
         "primary.zernike_coeffs": np.full_like(truth_store.get("primary.zernike_coeffs"), 1.0),
     }
+    prior_spec = PriorSpec.from_sigmas(truth_store, priors)
 
     # ------------------------------------------------------------------
     # 5. Initialise inference store by perturbing the truth using priors
     # ------------------------------------------------------------------
     print("Step 5: Initialising inference store with prior-perturbed truth values...")
-    updates = {}
-    for key in infer_keys:
-        sigma = priors[key]
-        true_val = truth_store.get(key)
-        if isinstance(true_val, np.ndarray):
-            updates[key] = true_val + rng.normal(scale=sigma, size=true_val.shape)
-        else:
-            updates[key] = float(true_val) + float(rng.normal(scale=sigma, size=()))
-    init_store = truth_store.replace(updates)
+    jitter_key = jax.random.PRNGKey(rng.integers(0, 1_000_000))
+    init_store = prior_spec.sample_near(truth_store, jitter_key, keys=infer_keys)
+    updates = {key: init_store.get(key) for key in infer_keys}
     init_forward_store = forward_store.replace(updates)
 
     # ------------------------------------------------------------------
@@ -280,16 +277,7 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
 
     # 6b) Wrap with a simple Gaussian prior penalty to form a MAP loss
     def gaussian_prior_penalty(store_theta: ParameterStore) -> jnp.ndarray:
-        penalty = jnp.array(0.0)
-        for key in infer_keys:
-            sigma = priors[key]
-            value = store_theta.get(key)
-            truth_val = truth_store.get(key)
-            if isinstance(value, np.ndarray):
-                penalty += jnp.sum((value - truth_val) ** 2 / (2.0 * sigma**2))
-            else:
-                penalty += (value - truth_val) ** 2 / (2.0 * sigma**2)
-        return penalty
+        return prior_spec.quadratic_penalty(store_theta, center_store=truth_store, keys=infer_keys)
 
     def loss_with_prior(theta: np.ndarray) -> np.ndarray:
         store_theta = store_unpack_params(sub_spec, theta, init_forward_store)
