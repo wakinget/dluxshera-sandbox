@@ -1,105 +1,159 @@
-# This file will contain my plotting routines that I can reuse elsewhere
+"""Plotting helpers used across the refactor-era stack.
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from src.dluxshera.utils.utils import get_param_scale_and_unit
-import datetime
-import os
-import jax.numpy as np
-import numpy as onp
+The utilities in this module follow a consistent IO policy:
+
+* Accept optional Matplotlib axes/figures; create new ones when omitted.
+* Return ``(fig, ax)`` or ``(fig, axes)`` to let callers further customise.
+* Never call ``plt.show()`` implicitly; callers control display via ``show``.
+* Support optional saving through a single ``save_path`` argument.
+
+These helpers keep the spirit of the earlier plotting routines (PSF and
+parameter history visualisation, colourbar alignment) while being predictable
+for headless test environments and notebook workflows alike.
+"""
+
+from pathlib import Path
+from typing import List, Mapping, Optional, Sequence, Tuple, Union
+
 import math
 
+import jax.numpy as np
+import matplotlib.pyplot as plt
+import numpy as onp
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+from src.dluxshera.utils.utils import get_param_scale_and_unit
+
+ArrayLike = Union[onp.ndarray, np.ndarray]
+
+
+def _normalise_histories(
+    names: Optional[Union[str, Sequence[str]]],
+    histories: Union[Sequence[ArrayLike], Mapping[str, ArrayLike]],
+    true_vals: Optional[Union[Sequence[float], Mapping[str, float]]],
+) -> Tuple[List[str], List[ArrayLike], Optional[List[float]]]:
+    """Normalise flexible inputs for history plotting."""
+
+    if isinstance(histories, Mapping) and names is None:
+        names = list(histories.keys())
+        history_list = [histories[n] for n in names]
+    else:
+        if isinstance(names, str):
+            names = [names]
+            history_list = [histories]
+        else:
+            assert names is not None, "Parameter names must be provided."
+            history_list = list(histories)
+
+    names_list = list(names)
+
+    if true_vals is None:
+        true_list = None
+    elif isinstance(true_vals, Mapping):
+        true_list = [true_vals.get(name) for name in names_list]
+    else:
+        true_list = list(true_vals)
+
+    return names_list, history_list, true_list
+
+
+def _maybe_save(fig, save_path: Optional[Union[str, Path]], dpi: int = 300) -> None:
+    if save_path is None:
+        return
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi)
 
 
 def merge_cbar(ax):
+    """Append a slim colourbar axis flush with ``ax`` and return it."""
+
     return make_axes_locatable(ax).append_axes("right", size="5%", pad=0.0)
 
+
 def plot_parameter_history(
-        names,
-        histories,
-        true_vals=None,
-        figsize=(8, 5),
-        display=True,
-        save=False,
-        save_dir="../Results",
-        save_name=None,
-        log_scale=False,
-        ax=None,
-        plot_residuals=False,
-        title=None,
-        custom_labels=None,
-        scale_factors=None,
-        unit_labels=None
+    names,
+    histories,
+    true_vals=None,
+    figsize=(8, 5),
+    log_scale=False,
+    ax=None,
+    plot_residuals=False,
+    title=None,
+    custom_labels=None,
+    scale_factors=None,
+    unit_labels=None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
 ):
     """
-    Plots the optimization history or residuals of one or more parameters.
+    Plot optimisation history or residuals for one or more parameters.
 
     Parameters
     ----------
-    names : str or list of str
-        Parameter name(s).
-    histories : list or list of lists
-        Optimization history per parameter.
-    true_vals : list or float, optional
-        Ground truth value(s) for overlay or residual calculation.
-    figsize : tuple, optional
-        Figure size if creating new figure.
-    display : bool, optional
-        Whether to display the plot.
-    save : bool, optional
-        Whether to save the plot.
-    save_dir : str, optional
-        Directory to save the plot to.
-    save_name : str, optional
-        Filename to use when saving.
-    log_scale : bool, optional
-        If True, use log scale on y-axis.
-    ax : matplotlib.axes.Axes, optional
-        If provided, plot into this axis instead of creating a new figure.
-    plot_residuals : bool, optional
-        If True, plot (estimate - truth) residuals instead of raw values.
+    names : str | sequence[str] | None
+        Parameter names. If ``None`` and ``histories`` is a mapping, keys are
+        used as names.
+    histories : sequence | mapping
+        Per-parameter history arrays. When a mapping is provided and
+        ``names`` is ``None``, the mapping keys define the plotting order.
+    true_vals : sequence | mapping | None
+        Ground truth values for overlay or residual calculation.
+    figsize : tuple
+        Figure size when creating a new figure.
+    log_scale : bool
+        Plot the y-axis on a logarithmic scale.
+    ax : matplotlib.axes.Axes | None
+        Target axes. When ``None``, a new ``(fig, ax)`` is created.
+    plot_residuals : bool
+        Plot ``estimate - truth`` if ``true_vals`` are provided.
+    title : str | None
+        Custom title for the axes.
+    custom_labels : sequence[str] | None
+        Labels to use instead of derived defaults.
+    scale_factors : mapping[str, float] | None
+        Optional per-parameter scale factors applied to histories.
+    unit_labels : mapping[str, str] | None
+        Optional units per parameter to append to the y-label.
+    save_path : str | Path | None
+        If provided, save the figure to this path.
+    show : bool
+        Whether to call ``plt.show()`` at the end.
+    close : bool
+        Close the figure when ``show`` is ``False`` to avoid leaked figures in
+        tests.
 
     Returns
     -------
-    fig : matplotlib.figure.Figure
-        The matplotlib figure object.
+    fig, ax
+        Matplotlib figure and axes containing the plot.
     """
 
-    # Prepare inputs
-    if isinstance(names, str):
-        names = [names]
-        histories = [histories]
-        if true_vals is not None:
-            true_vals = [true_vals]
+    names_list, history_list, true_list = _normalise_histories(names, histories, true_vals)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
 
-    for i, (name, history) in enumerate(zip(names, histories)):
+    for i, (name, history) in enumerate(zip(names_list, history_list)):
         y_data = np.array(history)
 
-        # Subtract true value if residuals requested
-        if plot_residuals and true_vals is not None:
-            truth = true_vals[i]
+        truth = true_list[i] if true_list is not None else None
+        if plot_residuals and truth is not None:
             y_data = y_data - truth
 
-        # Apply scaling if specified
         key = custom_labels[i] if custom_labels else name
         if scale_factors and key in scale_factors:
             y_data = y_data * scale_factors[key]
 
-        # Label logic
-        if custom_labels is not None:
-            label = custom_labels[i]
-        else:
-            label = f"Residual {name}" if plot_residuals else f"Recovered {name}"
-
+        label = custom_labels[i] if custom_labels is not None else (
+            f"Residual {name}" if plot_residuals else f"Recovered {name}"
+        )
         ax.plot(y_data, label=label)
 
-        if not plot_residuals and true_vals is not None:
-            truth = true_vals[i]
+        if not plot_residuals and truth is not None:
             if np.ndim(truth) == 0:
                 ax.axhline(truth, linestyle="--", color="k", alpha=0.6, label=f"True {name}")
             else:
@@ -117,40 +171,42 @@ def plot_parameter_history(
         ax.set_title("Parameter Residuals" if plot_residuals else "Parameter History")
 
     ax.set_xlabel("Iteration")
-    # Determine y-axis unit label
     unit = None
     if unit_labels:
-        # Use first matching unit based on parameter names
-        units = [unit_labels.get(name) for name in names if name in unit_labels]
-        unique_units = list(set(u for u in units if u is not None))
+        units = [unit_labels.get(name) for name in names_list if name in unit_labels]
+        unique_units = list({u for u in units if u is not None})
         if len(unique_units) == 1:
             unit = unique_units[0]
 
     ylabel = "Residual" if plot_residuals else "Value"
     if unit:
         ylabel += f" ({unit})"
-
     ax.set_ylabel(ylabel)
 
     ax.legend()
 
-    # Save the plot if requested
-    if save:
-        if save_name is None:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_name = f"parameter_history_{timestamp}.png"
-        save_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), save_dir))
-        os.makedirs(save_dir, exist_ok=True)
-        fig.savefig(os.path.join(save_dir, save_name), dpi=300)
+    _maybe_save(fig, save_path)
 
-    if display:
+    if show:
         plt.show()
-    else:
-        plt.close()
+    elif close:
+        plt.close(fig)
 
-    return fig
+    return fig, ax
 
-def plot_parameter_history_grid(param_histories, true_vals=None, log_scale=False, cols=3, figsize=(15, 10)):
+
+def plot_parameter_history_grid(
+    param_histories,
+    true_vals=None,
+    log_scale=False,
+    cols=3,
+    figsize=(15, 10),
+    plot_residuals: bool = False,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot a grid of parameter histories using :func:`plot_parameter_history`."""
 
     param_names = list(param_histories.keys())
     n_params = len(param_names)
@@ -161,34 +217,54 @@ def plot_parameter_history_grid(param_histories, true_vals=None, log_scale=False
         r, c = divmod(i, cols)
         ax = axs[r][c]
         history = param_histories[param]
-        true_val = true_vals[param] if true_vals and param in true_vals else None
-        plot_parameter_history(param, history, true_vals=true_val, log_scale=log_scale, ax=ax, display=False)
+        if isinstance(true_vals, Mapping):
+            truth = true_vals.get(param)
+        elif true_vals is not None:
+            truth = true_vals[i]
+        else:
+            truth = None
+        plot_parameter_history(
+            param,
+            history,
+            true_vals=truth,
+            log_scale=log_scale,
+            ax=ax,
+            plot_residuals=plot_residuals,
+            show=False,
+            close=False,
+        )
 
-    # Hide unused axes
     for i in range(n_params, rows * cols):
         fig.delaxes(axs[i // cols][i % cols])
 
-    plt.tight_layout()
-    plt.show()
-    return fig
+    fig.tight_layout()
+
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, axs
 
 
 def plot_psf_single(
-        psf,
-        extent=None,
-        title="PSF",
-        display=True,
-        save=False,
-        save_dir="../Results",
-        save_name=None,
-        cmap="inferno",
-        dpi=300,
-        font_size=12,
-        normalise=True,
-        stretch="sqrt",  # "linear", "sqrt", or "log"
-        vmin=None,
-        vmax=None,
-        cbar_label=None,
+    psf,
+    extent=None,
+    title="PSF",
+    ax=None,
+    cmap="inferno",
+    dpi=300,
+    font_size=12,
+    normalise=True,
+    stretch="sqrt",  # "linear", "sqrt", or "log"
+    vmin=None,
+    vmax=None,
+    cbar_label=None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
 ):
     """
     Plot a single PSF image.
@@ -202,14 +278,8 @@ def plot_psf_single(
         If None, pixel coordinates are used.
     title : str
         Title for the PSF subplot.
-    display : bool, optional
-        Whether to display the plot.
-    save : bool, optional
-        Whether to save the figure to disk.
-    save_dir : str, optional
-        Directory to save the figure. Ignored unless `save=True`.
-    save_name : str, optional
-        Name of the saved file. Defaults to "psf_single.png".
+    ax : matplotlib.axes.Axes | None
+        Optional target axes.
     cmap : str
         Colormap for the PSF plot.
     dpi : int
@@ -226,6 +296,12 @@ def plot_psf_single(
         stretched image.
     cbar_label : str or None
         Label for the colorbar. If None, a sensible default is chosen.
+    save_path : str | Path | None
+        If provided, save the figure to this path.
+    show : bool
+        Whether to display the figure via ``plt.show()``.
+    close : bool
+        Close the figure when ``show`` is ``False``.
 
     Returns
     -------
@@ -273,7 +349,10 @@ def plot_psf_single(
         cbar_label = default_cbar
 
     # Create figure and axis
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+    else:
+        fig = ax.figure
 
     if extent is None:
         im = ax.imshow(img_to_plot, cmap=cmap, vmin=vmin, vmax=vmax)
@@ -293,36 +372,31 @@ def plot_psf_single(
 
     fig.tight_layout()
 
-    # Save the figure if requested
-    if save:
-        os.makedirs(save_dir, exist_ok=True)
-        full_name = os.path.join(save_dir, save_name or "psf_single.png")
-        fig.savefig(full_name, dpi=dpi)
+    _maybe_save(fig, save_path, dpi=dpi)
 
-    # Show or close
-    if display:
+    if show:
         plt.show()
-    else:
+    elif close:
         plt.close(fig)
 
     return fig, ax
 
 
 def plot_psf_comparison(
-        data,
-        model,
-        var=None,
-        extent=None,
-        model_label="Model PSF",
-        display=True,
-        save=False,
-        save_dir="../Results",
-        save_name=None,
-        cmap="inferno",
-        diverging_cmap="seismic",
-        dpi=300,
-        suptitle=True,
-        font_size=12
+    data,
+    model,
+    var=None,
+    extent=None,
+    model_label="Model PSF",
+    cmap="inferno",
+    diverging_cmap="seismic",
+    dpi=300,
+    suptitle=True,
+    font_size=12,
+    axes=None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
 ):
     """
     Plots a 2x2 comparison of data, model PSF, residual, and Z-score.
@@ -341,14 +415,6 @@ def plot_psf_comparison(
         If None, pixel coordinates are used.
     model_label : str
         Title for the model PSF subplot.
-    display : bool, optional
-        Whether to display the plot.
-    save : bool, optional
-        Whether to save the figure to disk.
-    save_dir : str, optional
-        Directory to save the figure. Ignored unless `save=True`.
-    save_name : str, optional
-        Name of the saved file. Defaults to "psf_comparison.png".
     cmap : str
         Colormap for the data and model PSF plots.
     diverging_cmap : str
@@ -360,11 +426,21 @@ def plot_psf_comparison(
         If a string is provided, it is used as a custom title.
     font_size : int
         Font size for all axis labels and titles.
+    axes : array-like of matplotlib.axes.Axes | None
+        Optional pre-created 2x2 axes grid.
+    save_path : str | Path | None
+        If provided, save the figure to this path.
+    show : bool
+        Whether to display the figure via ``plt.show()``.
+    close : bool
+        Close the figure when ``show`` is ``False``.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
         The resulting matplotlib figure object.
+    axes : ndarray
+        The 2x2 array of axes used for plotting.
     """
 
     # Evaluate model and data if needed
@@ -389,7 +465,11 @@ def plot_psf_comparison(
     chi2 = np.nansum(z_score**2) / dof if dof > 0 else np.nan
 
     # Create figure
-    fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+    if axes is None:
+        fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+    else:
+        axs = onp.array(axes)
+        fig = axs.ravel()[0].figure
     if suptitle:
         title_text = r"$\chi^2_\nu$: {:.3f}".format(chi2) if suptitle is True else suptitle
         fig.suptitle(title_text, fontsize=font_size + 2)
@@ -417,58 +497,69 @@ def plot_psf_comparison(
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95] if suptitle else None)
 
-    # Save the figure if requested
-    if save:
-        os.makedirs(save_dir, exist_ok=True)
-        full_name = os.path.join(save_dir, save_name or "psf_comparison.png")
-        fig.savefig(full_name, dpi=dpi)
+    _maybe_save(fig, save_path, dpi=dpi)
 
-    # Show or close
-    if display:
+    if show:
         plt.show()
-    else:
+    elif close:
         plt.close(fig)
 
-    return fig
+    return fig, axs
 
 
-def plot_opd_surface(opd, title, figsize=(8, 6), mask=None, extent=None, cmap="inferno", vmin=None, vmax=None,
-                     save=False, display=True, save_dir="../Results", save_name=None):
-    plt.figure(figsize=figsize)
+def plot_opd_surface(
+    opd,
+    title,
+    figsize=(8, 6),
+    mask=None,
+    extent=None,
+    cmap="inferno",
+    vmin=None,
+    vmax=None,
+    ax=None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot a surface of optical path difference (OPD) in nanometres."""
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
     if mask is not None:
         opd = opd * mask
-    plt.imshow(1e9 * opd, cmap=cmap, vmin=vmin, vmax=vmax, extent=extent)
-    plt.colorbar(label="OPD (nm)")
-    plt.title(title)
-    plt.xlabel("X (mm)")
-    plt.ylabel("Y (mm)")
-    plt.tight_layout()
-    # Save the plot if requested
-    if save:
-        if save_name is None: # Generate a new save_name
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_name = f"surface_opd_{timestamp}.png"
-        save_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), save_dir))
-        os.makedirs(save_dir, exist_ok=True)
-        plt.savefig(os.path.join(save_dir, save_name), dpi=300)
+    im = ax.imshow(1e9 * opd, cmap=cmap, vmin=vmin, vmax=vmax, extent=extent)
+    cax = merge_cbar(ax)
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("OPD (nm)")
+    ax.set_title(title)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    fig.tight_layout()
 
-    # Show the plot if requested
-    if display:
+    _maybe_save(fig, save_path)
+
+    if show:
         plt.show()
-    else:
-        plt.close()
+    elif close:
+        plt.close(fig)
+
+    return fig, ax
 
 
 def choose_subplot_grid(n):
-    """Choose a good (rows, cols) layout for n subplots."""
+    """Choose a reasonable ``(rows, cols)`` layout for ``n`` subplots."""
     if n <= 3:
-        return (n, 1)
+        return int(n), 1
     elif n <= 6:
-        return (np.ceil(n / 2), 2)
+        rows = int(np.ceil(n / 2))
+        return rows, 2
     else:
-        cols = np.ceil(np.sqrt(n))
-        rows = np.ceil(n / cols)
-        return (int(rows), int(cols))
+        cols = int(np.ceil(np.sqrt(n)))
+        rows = int(np.ceil(n / cols))
+        return rows, cols
 
 
 
@@ -476,18 +567,16 @@ def plot_parameter_sweeps(
     df,
     highlight_min=True,
     sharey=False,
-    display=True,
-    save=False,
-    save_dir="../Results",
-    save_name="parameter_sweeps.png",
+    show: bool = False,
+    close: bool = True,
+    save_path: Optional[Union[str, Path]] = None,
     dpi=300,
     font_size=12,
     reference_params=None,
     true_loss=None,
 ):
-    """
-    Plot loss vs. Δvalue for each parameter sweep in a grid layout.
-    """
+    """Plot loss vs. Δvalue for each parameter sweep in a grid layout."""
+
     from matplotlib.ticker import MaxNLocator
 
     all_params = df["parameter"].unique()
@@ -502,7 +591,6 @@ def plot_parameter_sweeps(
     if reference_params is not None:
         df_params = df["parameter"].unique()
 
-        # Try to get the param path map if it exists
         try:
             path_map = reference_params.get_param_path_map()
             inv_path_map = {v: k for k, v in path_map.items()}
@@ -518,9 +606,6 @@ def plot_parameter_sweeps(
             try:
                 ref_val = reference_params.get(ref_key)
             except (KeyError, ValueError):
-
-                # Try getting the ref_val from the model
-
                 print(f"⚠️  Warning: Could not resolve reference for parameter '{param}'. Skipping delta.")
                 continue
 
@@ -534,7 +619,6 @@ def plot_parameter_sweeps(
     else:
         df["delta"] = df["value"]
 
-    # Extract model-facing path -> Noll index map
     model_path_to_noll = {}
     if reference_params is not None:
         try:
@@ -549,20 +633,17 @@ def plot_parameter_sweeps(
         except AttributeError:
             pass
 
-    # Plot each parameter
     for i, param in enumerate(all_params):
         scale, unit = get_param_scale_and_unit(param)
         ax = axes[i]
         sub = df[df["parameter"] == param]
 
         if sub["index"].isna().all():
-            # Scalar parameter
             ax.plot(sub["delta"] * scale, sub["loss"], label=param, color="black")
             if highlight_min:
                 min_idx = sub["loss"].idxmin()
                 ax.axvline(sub.loc[min_idx, "delta"] * scale, color="red", linestyle="--", label="Min loss")
         else:
-            # Vector parameter
             for idx, group in sub.groupby("index"):
                 if param in model_path_to_noll:
                     try:
@@ -578,11 +659,9 @@ def plot_parameter_sweeps(
                     min_idx = group["loss"].idxmin()
                     ax.axvline(group.loc[min_idx, "delta"] * scale, color="red", linestyle=":", alpha=0.5)
 
-        # Add true loss horizontal line (once per subplot)
         if true_loss is not None:
             ax.axhline(true_loss, color="gray", linestyle="--", alpha=0.6, label="True loss")
 
-        # Final formatting
         ax.set_title(param, fontsize=font_size)
         if reference_params is not None:
             ax.set_xlabel(f"Δ{param} [{unit}]", fontsize=font_size)
@@ -592,26 +671,20 @@ def plot_parameter_sweeps(
         ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
         ax.tick_params(labelsize=font_size - 2)
 
-        # De-duplicate legend labels
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
         ax.legend(by_label.values(), by_label.keys(), fontsize=font_size - 2)
 
-    # Hide unused axes
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
     fig.tight_layout()
 
-    # Save if requested
-    if save:
-        os.makedirs(save_dir, exist_ok=True)
-        full_path = os.path.join(save_dir, save_name)
-        fig.savefig(full_path, dpi=dpi)
+    _maybe_save(fig, save_path, dpi=dpi)
 
-    if display:
+    if show:
         plt.show()
-    else:
+    elif close:
         plt.close(fig)
 
     return fig
