@@ -126,6 +126,13 @@ dLuxShera/
 - **Binder loss constructor:** `make_binder_image_nll_fn` returns `(loss_fn, theta0)` where `loss_fn(theta)` unpacks `theta` into a store delta, evaluates `binder.model(...)`, and applies the chosen noise model. A pre-built binder can be passed in or constructed internally from `(cfg, forward_spec, base_forward_store)`.
 - **Demo wiring:** `Examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
 
+### Eigenmode-based optimisation (clarified)
+
+- **Pure-θ vs eigen-θ:** Both optimisation paths now share the same Binder-based image NLL. Pure-θ gradient descent calls the loss directly. Eigen-θ runs define `loss_z(z) = loss_theta(EigenThetaMap.theta_from_z(z))`, so the only difference is a linear change of coordinates (plus optional truncation/whitening).
+- **One-time setup:** `run_shera_image_gd_eigen` builds the Binder loss via `make_binder_image_nll_fn`, computes a θ-space curvature/FIM once at `theta_ref`, constructs `EigenThetaMap` (supports truncation/whitening), and JITs the z-space loss/grad. Per-iteration cost is therefore one Binder-based loss/grad plus cheap linear transforms; Binder/SystemGraph construction and pack/unpack scaffolding stay outside the hot loop.
+- **Documentation/API:** `EigenThetaMap` now carries a detailed docstring (column eigenvectors, whitening meaning, shapes) and exposes `theta_from_z` / `z_from_theta` aliases alongside the legacy names for clarity. It is JAX-friendly (uses `jax.numpy` throughout) and safe inside jitted regions.
+- **Demo story:** The canonical astrometry script comments now state that the eigen run reuses the Binder NLL, explain curvature estimation, and describe whitening (unit-curvature scaling) and truncation (top-k modes) options. Aside from the one-time eigendecomposition, per-step cost should mirror the pure-θ path.
+
 ### Prior handling (landscape + new abstraction)
 
 - **Legacy/observed patterns:**
