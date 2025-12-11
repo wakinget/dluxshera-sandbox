@@ -89,6 +89,7 @@ def test_make_binder_image_nll_fn_smoke_gaussian():
         data,
         var,
         noise_model="gaussian",
+        binder=binder,
     )
 
     loss0 = loss_fn(theta0)

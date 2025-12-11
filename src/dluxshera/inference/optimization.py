@@ -17,6 +17,9 @@ import math
 import json
 from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from .losses import gaussian_image_nll
 
 from ..optics.config import SheraThreePlaneConfig
 from ..params.spec import ParamSpec, ParamKey
@@ -25,6 +28,9 @@ from ..params.packing import (
     pack_params as store_pack_params,
     unpack_params as store_unpack_params,
 )
+
+if TYPE_CHECKING:
+    from ..core.binder import SheraThreePlaneBinder
 
 ############################
 # Exports
@@ -43,6 +49,7 @@ __all__ = [
     "SheraTwoPlaneParams", "SheraThreePlaneParams", "EigenParams",
 
     # new likelihood / loss utilities
+    "gaussian_image_nll",
     "gaussian_loglikelihood_image",
     "poisson_loglikelihood_image",
     "gaussian_loss",
@@ -191,8 +198,7 @@ def gaussian_loss(
         Scalar loss (negative log-likelihood with the chosen reduction).
     """
     model_image = model.model()
-    loglike = gaussian_loglikelihood_image(model_image, data, var, reduce=reduce)
-    return -loglike
+    return gaussian_image_nll(model_image, data, var, reduce=reduce)
 
 
 def poisson_loss(
@@ -364,23 +370,40 @@ def make_binder_image_nll_fn(
     data: np.ndarray,
     var: np.ndarray,
     *,
+    binder: Optional["SheraThreePlaneBinder"] = None,
     noise_model: NoiseModel = "gaussian",
     reduce: Literal["sum", "mean"] = "sum",
     use_system_graph: bool = False,
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray]:
     """
-    Canonical θ-space image NLL using SheraThreePlaneBinder.
+    Canonical θ-space image NLL using :class:`SheraThreePlaneBinder`.
 
-    This is the Binder-based sibling of `make_image_nll_fn`, but instead of
-    rebuilding SheraThreePlane_Model on each call, it treats
-    ``SheraThreePlaneBinder`` as the canonical generative model. The binder is
-    constructed with a *forward-style* spec + base store (derived values
-    pre-populated) and optionally owns a SystemGraph internally.
+    The returned loss is intentionally explicit:
+
+    ``theta`` → ``ParameterStore`` delta → ``binder.model(store_delta)`` →
+    image → Gaussian/Poisson NLL.
+
+    Parameters
+    ----------
+    cfg, forward_spec, base_forward_store
+        Inputs required to construct a binder if one is not supplied.
+    infer_keys
+        Ordering of parameters packed into ``theta``.
+    data, var
+        Observed image and per-pixel variance.
+    binder
+        Optional pre-built :class:`SheraThreePlaneBinder`. If omitted a binder
+        is constructed using ``cfg``, ``forward_spec``, and ``base_forward_store``.
+    noise_model, reduce
+        Noise model selector and reduction for the NLL.
+    use_system_graph
+        Passed through when constructing a binder (ignored when ``binder`` is
+        provided).
     """
     from ..core.binder import SheraThreePlaneBinder
 
-    # 1) Build a static Binder with the requested execution backend
-    binder = SheraThreePlaneBinder(
+    # 1) Build or accept a Binder with the requested execution backend
+    binder_obj = binder or SheraThreePlaneBinder(
         cfg,
         forward_spec,
         base_forward_store,
@@ -396,15 +419,12 @@ def make_binder_image_nll_fn(
     var = np.asarray(var)
 
     if noise_model == "gaussian":
-        def image_nll(model_image, data_image, var_image):
-            return -gaussian_loglikelihood_image(
-                model_image, data_image, var_image, reduce=reduce
-            )
+        def image_nll(model_image):
+            return gaussian_image_nll(model_image, data, var, reduce=reduce)
     elif noise_model == "poisson":
-        def image_nll(model_image, data_image, var_image):
-            # var_image unused, kept for symmetry
+        def image_nll(model_image):
             return -poisson_loglikelihood_image(
-                model_image, data_image, reduce=reduce
+                model_image, data, reduce=reduce
             )
     else:
         raise ValueError(
@@ -412,12 +432,14 @@ def make_binder_image_nll_fn(
             f"(expected 'gaussian' or 'poisson')."
         )
 
-    # 4) Define θ → loss(θ) using binder.model(...)
+    # 4) θ → ParameterStore delta → binder.model(store_delta) → image NLL
+    def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
+        return store_unpack_params(sub_spec, theta, base_forward_store)
+
     def loss_fn(theta: np.ndarray) -> np.ndarray:
-        # θ → ParameterStore overlayed on base_store
-        store_theta = store_unpack_params(sub_spec, theta, base_forward_store)
-        model_image = binder.model(store_theta)
-        return image_nll(model_image, data, var)
+        store_delta = theta_to_store_delta(theta)
+        model_image = binder_obj.model(store_delta)
+        return image_nll(model_image)
 
     return loss_fn, theta0
 
