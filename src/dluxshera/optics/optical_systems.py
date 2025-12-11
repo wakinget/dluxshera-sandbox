@@ -10,7 +10,12 @@ from ..utils.utils import scale_array
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
-__all__ = ["TolimanOpticalSystem", "SheraThreePlaneSystem"]
+__all__ = [
+    "TolimanOpticalSystem",
+    "SheraTwoPlaneOptics",
+    "SheraThreePlaneSystem",
+    "JNEXTOpticalSystem",
+]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
@@ -311,6 +316,22 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         wf = wf.normalise()
         wf += self.pupil
         return wf
+
+
+class SheraTwoPlaneOptics(JNEXTOpticalSystem):
+    """
+    Refactor-era two-plane optical system used by Shera astrometry models.
+
+    This class is a light wrapper around the legacy :class:`JNEXTOpticalSystem`
+    implementation. It exposes the same Toliman-inspired pupil → focal plane
+    propagation used in two-plane Shera experiments while providing a
+    Shera-branded entry point for newer builders and binders. No additional
+    aberration terms (e.g., 1/f WFE) are introduced here; the behaviour is
+    intentionally identical to the legacy implementation.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 class TolimanSpikes(TolimanOpticalSystem):
     """

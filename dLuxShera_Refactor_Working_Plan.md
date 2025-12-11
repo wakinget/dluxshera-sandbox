@@ -320,11 +320,16 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - *Inference spec sharing*: Provide a shared “Shera astrometry inference spec” builder that covers the common binary vocabulary, primary Zernike coefficients, and plate scale as a primitive knob. Secondary-specific keys (secondary Zernikes) should be included only for three-plane runs; callers can drop them via `ParamSpec.without(...)` for two-plane cases. From inference’s perspective, both systems remain `dl.Telescope`-like forward models differing mainly by the presence of secondary aberration knobs.
 - *Feature parity scope (v1 two-plane refactor)*: Match the three-plane binary vocabulary; support a primary Zernike basis; exclude secondary mirror and secondary Zernikes; defer 1/f WFE to parity with the current three-plane refactor scope; reuse the three-plane log_flux transform semantics.
 
+**Two-plane refactor implementation status**
+- ✅ Introduced `SheraTwoPlaneOptics` as a Shera-branded wrapper around the legacy two-plane system (keeps Toliman-like pupil→focal behaviour; no new 1/f WFE added).
+- ✅ Added `SheraTwoPlaneConfig` capturing two-plane structural knobs (pupil/PSF sampling, bandpass, aperture geometry/struts/DP hooks, primitive plate scale, optional primary Zernike basis; no secondary/relay geometry).
+- ✅ Built `build_shera_twoplane_forward_spec_from_config`, mirroring the three-plane forward vocabulary with binary primitives, optional primary Zernikes, primitive plate scale, and derived log-flux via the shared transform set (no secondary terms).
+- ✅ Updated the inference-spec builder so two- and three-plane runs share the same baseline astrometry/flux/plate-scale keys, with secondary Zernikes omitted when `include_secondary=False`.
+
 **Follow-up implementation tasks (next steps)**
-- Implement `SheraTwoPlaneOptics` (alias/refactor of `JNEXTO​pticalSystem`) and `SheraTwoPlaneConfig` in `optics/config.py`/`optical_systems.py`.
-- Build a two-plane forward spec generator aligned with the unit-aware binary vocabulary and primitive plate-scale treatment.
-- Add a shared inference spec builder that conditionally drops secondary-specific knobs for two-plane runs and reuses the log_flux transform.
 - Wire a `SheraTwoPlaneBinder`/SystemGraph path plus minimal demo/tests to validate parity with the legacy two-plane model.
+- Add a minimal two-plane astrometry demo mirroring the canonical three-plane example.
+- Evaluate whether shared binder behaviour (two- vs three-plane) should live in a common base class once both paths exist.
 
 ---
 
