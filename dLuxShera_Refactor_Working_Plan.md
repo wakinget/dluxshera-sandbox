@@ -126,6 +126,16 @@ dLuxShera/
 - **Binder loss constructor:** `make_binder_image_nll_fn` returns `(loss_fn, theta0)` where `loss_fn(theta)` unpacks `theta` into a store delta, evaluates `binder.model(...)`, and applies the chosen noise model. A pre-built binder can be passed in or constructed internally from `(cfg, forward_spec, base_forward_store)`.
 - **Demo wiring:** `Examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
 
+### Prior handling (landscape + new abstraction)
+
+- **Legacy/observed patterns:**
+  - `inference/optimization.py::construct_priors_from_dict` builds NumPyro distributions (Normal/Uniform/LogNormal) directly from a `{param: {mean, sigma, dist}}` mapping; tightly coupled to NumPyro and not used elsewhere in the refactor flow.
+  - The canonical astrometry demo defines a `priors` dict of sigmas keyed by `ParamKey`, manually jitters the truth store with NumPy noise, and hand-computes a quadratic MAP penalty keyed by the same sigmas (supports both scalars and Zernike coefficient vectors). The notebook `Examples/notebooks/Shera_Eigen_Inference_Example.ipynb` mirrors this pattern, including NumPyro helper usage and prior-drawn perturbations.
+- **New backend-agnostic layer:** `inference/prior.py` introduces `PriorField` (currently Normal-only mean/sigma) and `PriorSpec` (key→field mapping) with helpers for: (a) `from_sigmas(center_store, sigmas)` to seed priors at reference values, (b) `quadratic_penalty(store, center_store)` for MAP-style sums over `(value-mean)^2/(2*sigma^2)`, and (c) `sample_near(center_store, rng_key)` to jitter an initial store from the priors. These are pure JAX operations with no PPL dependency.
+- **NumPyro bridge stub:** `inference/numpyro_bridge.py` documents the intended adapter surface (`numpyro_priors_from_spec`) but intentionally raises `NotImplementedError` to avoid hard-coding backend logic yet.
+- **Current demo usage:** The canonical demo now builds a `PriorSpec` from the `priors` sigma dict, uses `sample_near(...)` for its initialisation jitter, and wraps the MAP penalty via `quadratic_penalty(...)`, keeping binder/SystemGraph wiring unchanged.
+- **Integration plan:** Future work will thread `PriorSpec` through binder-aware loss constructors (e.g., MAP penalties layered alongside data NLL) and PPL adapters while keeping the core abstraction backend-agnostic and ParamKey-addressable.
+
 ---
 
 ## 8) Parameter Profiles & IO (Planned)
