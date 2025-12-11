@@ -394,6 +394,17 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - If/when graphs expand, introduce a shared graph builder helper mirroring the current merge→optics→source→telescope→psf skeleton, keeping system-specific optics functions injectable.
 - Re-run binder/graph smoke tests for both systems after refactors; update docs to emphasize immutability/JAX constraints and system identity.
 
+### Implementation follow-up (Task 10 landed)
+
+- Implemented `BaseSheraBinder` in `core/binder.py`, with SheraThreePlaneBinder and SheraTwoPlaneBinder now inheriting shared merge/model/with_store semantics while preserving public signatures and system-specific optics/graph hooks.
+- Added `BaseSheraSystemGraph` skeleton in `graph/system_graph.py`, adopted by the three- and two-plane SystemGraphs to centralize store merge + evaluation flow; factories remain unchanged.
+- Binder/graph smoke and regression tests cover both systems plus shared output/merge behaviour; public APIs and numerical paths are unchanged.
+
+## 23) Binder/SystemGraph shared implementation follow-through
+
+- Summary: Base implementations landed for binders and SystemGraphs (see `core/binder.py`, `graph/system_graph.py`, and new tests). Direct binder/graph paths still share detectors and preserve immutability; optics builders remain system-specific.
+- Remaining follow-ups: consider further consolidation if more variants arrive (e.g., four-plane), and revisit caching/derived-resolution hooks once multi-node graphs emerge.
+
 
 ## 22) Documentation roadmap for dLuxShera
 
