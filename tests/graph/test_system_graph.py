@@ -2,9 +2,9 @@ from dataclasses import replace
 
 import jax.numpy as jnp
 
-from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.graph.system_graph import build_threeplane_system_graph
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
+from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
+from dluxshera.graph.system_graph import build_threeplane_system_graph, build_shera_twoplane_system_graph
+from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
 from tests.helpers import inference_store_from_forward, make_forward_store
 
 
@@ -38,6 +38,22 @@ def test_system_graph_forward_matches_legacy_model():
     graph_psf = graph.evaluate()
 
     binder = SheraThreePlaneBinder(cfg, forward_spec, forward_store)
+    binder_psf = binder.model()
+
+    assert graph_psf.shape == binder_psf.shape == (cfg.psf_npix, cfg.psf_npix)
+    assert graph_psf.dtype == binder_psf.dtype
+    assert jnp.all(jnp.isfinite(graph_psf))
+    assert jnp.allclose(graph_psf, binder_psf)
+
+
+def test_twoplane_system_graph_matches_binder():
+    cfg = SheraTwoPlaneConfig(n_lambda=1)
+    forward_spec, forward_store = make_forward_store(cfg)
+
+    graph = build_shera_twoplane_system_graph(cfg, forward_spec, forward_store)
+    graph_psf = graph.evaluate()
+
+    binder = SheraTwoPlaneBinder(cfg, forward_spec, forward_store)
     binder_psf = binder.model()
 
     assert graph_psf.shape == binder_psf.shape == (cfg.psf_npix, cfg.psf_npix)

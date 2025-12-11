@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from .losses import gaussian_image_nll
 
-from ..optics.config import SheraThreePlaneConfig
+from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..params.spec import ParamSpec, ParamKey
 from ..params.store import ParameterStore
 from ..params.packing import (
@@ -30,7 +30,7 @@ from ..params.packing import (
 )
 
 if TYPE_CHECKING:
-    from ..core.binder import SheraThreePlaneBinder
+    from ..core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 
 ############################
 # Exports
@@ -363,14 +363,14 @@ def make_image_nll_fn(
 
 
 def make_binder_image_nll_fn(
-    cfg: SheraThreePlaneConfig,
+    cfg,
     forward_spec: ParamSpec,
     base_forward_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
     data: np.ndarray,
     var: np.ndarray,
     *,
-    binder: Optional["SheraThreePlaneBinder"] = None,
+    binder: Optional[object] = None,
     noise_model: NoiseModel = "gaussian",
     reduce: Literal["sum", "mean"] = "sum",
     use_system_graph: bool = False,
@@ -400,15 +400,29 @@ def make_binder_image_nll_fn(
         Passed through when constructing a binder (ignored when ``binder`` is
         provided).
     """
-    from ..core.binder import SheraThreePlaneBinder
+    from ..core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 
     # 1) Build or accept a Binder with the requested execution backend
-    binder_obj = binder or SheraThreePlaneBinder(
-        cfg,
-        forward_spec,
-        base_forward_store,
-        use_system_graph=use_system_graph,
-    )
+    if binder is not None:
+        binder_obj = binder
+    elif isinstance(cfg, SheraThreePlaneConfig):
+        binder_obj = SheraThreePlaneBinder(
+            cfg,
+            forward_spec,
+            base_forward_store,
+            use_system_graph=use_system_graph,
+        )
+    elif isinstance(cfg, SheraTwoPlaneConfig):
+        binder_obj = SheraTwoPlaneBinder(
+            cfg,
+            forward_spec,
+            base_forward_store,
+            use_system_graph=use_system_graph,
+        )
+    else:
+        raise TypeError(
+            "cfg must be a SheraThreePlaneConfig or SheraTwoPlaneConfig for binder construction"
+        )
 
     # 2) Subset spec + build initial θ from base store
     sub_spec = forward_spec.subset(infer_keys)
@@ -645,7 +659,7 @@ def fim_theta(
 
 
 def fim_theta_shera(
-    cfg: SheraThreePlaneConfig,
+    cfg,
     forward_spec: ParamSpec,
     base_forward_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
@@ -662,7 +676,7 @@ def fim_theta_shera(
     Parameters
     ----------
     cfg :
-        SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
+        SheraTwoPlaneConfig or SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
     forward_spec :
         Forward ParamSpec describing model keys.
     base_forward_store :

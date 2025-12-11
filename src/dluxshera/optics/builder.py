@@ -7,16 +7,18 @@ import json
 import os
 from typing import Optional
 
+import numpy as np
 import jax.numpy as jnp
+import dLux.layers as dll
 
-from .config import SheraThreePlaneConfig
+from .config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..params.store import ParameterStore
 from ..params.spec import ParamSpec
 
 try:
     # Legacy three-plane optics implementation, now living in the
     # refactored package under dluxshera.optics.optical_systems.
-    from .optical_systems import SheraThreePlaneSystem
+    from .optical_systems import SheraThreePlaneSystem, SheraTwoPlaneOptics
 except ImportError as e:  # pragma: no cover - hard failure, not a logic branch
     raise ImportError(
         "SheraThreePlaneSystem could not be imported from "
@@ -31,7 +33,9 @@ except ImportError as e:  # pragma: no cover - hard failure, not a logic branch
 # -----------------------------------------------------------------------------
 
 _THREEPLANE_CACHE: dict[str, SheraThreePlaneSystem] = {}
+_TWOPLANE_CACHE: dict[str, SheraTwoPlaneOptics] = {}
 _CACHE_DISABLED_ENV = "DLUXSHERA_THREEPLANE_CACHE_DISABLED"
+_TWOPLANE_CACHE_DISABLED_ENV = "DLUXSHERA_TWOPLANE_CACHE_DISABLED"
 
 
 def _structural_subset(cfg: SheraThreePlaneConfig) -> dict:
@@ -62,6 +66,47 @@ def _structural_subset(cfg: SheraThreePlaneConfig) -> dict:
     }
 
 
+def _twoplane_structural_subset(
+    cfg: SheraTwoPlaneConfig, plate_scale_as_per_pix: Optional[float]
+) -> dict:
+    """Extract structural fields for the two-plane optics.
+
+    Parameters
+    ----------
+    cfg
+        Two-plane configuration describing the fixed geometry and sampling.
+    plate_scale_as_per_pix
+        Effective plate scale (arcsec / pixel) drawn from the effective
+        ParameterStore. This is treated as structural for the two-plane system
+        because it directly sets the PSF sampling used by
+        :class:`SheraTwoPlaneOptics`.
+    """
+
+    return {
+        "pupil_npix": int(cfg.pupil_npix),
+        "psf_npix": int(cfg.psf_npix),
+        "oversample": int(cfg.oversample),
+        "wavelength_m": float(cfg.wavelength_m),
+        "bandwidth_m": float(cfg.bandwidth_m),
+        "n_lambda": int(cfg.n_lambda),
+        "m1_diameter_m": float(cfg.m1_diameter_m),
+        "central_obscuration_ratio": float(cfg.central_obscuration_ratio),
+        "n_struts": int(cfg.n_struts),
+        "strut_width_m": float(cfg.strut_width_m),
+        "strut_rotation_deg": float(cfg.strut_rotation_deg),
+        "plate_scale_as_per_pix": None
+        if plate_scale_as_per_pix is None
+        else float(plate_scale_as_per_pix),
+        "primary_noll_indices": tuple(int(i) for i in cfg.primary_noll_indices),
+        "diffractive_pupil_path": None
+        if cfg.diffractive_pupil_path is None
+        else str(cfg.diffractive_pupil_path),
+        "dp_design_wavelength_m": None
+        if cfg.dp_design_wavelength_m is None
+        else float(cfg.dp_design_wavelength_m),
+    }
+
+
 def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
     """Return a deterministic structural hash for ``cfg``.
 
@@ -76,10 +121,26 @@ def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def structural_hash_for_twoplane(
+    cfg: SheraTwoPlaneConfig, *, plate_scale_as_per_pix: Optional[float] = None
+) -> str:
+    """Deterministic structural hash for the two-plane optics stack."""
+
+    payload = _twoplane_structural_subset(cfg, plate_scale_as_per_pix)
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def clear_threeplane_optics_cache() -> None:
     """Clear the cached Shera three-plane optics structures."""
 
     _THREEPLANE_CACHE.clear()
+
+
+def clear_twoplane_optics_cache() -> None:
+    """Clear the cached Shera two-plane optics structures."""
+
+    _TWOPLANE_CACHE.clear()
 
 
 def _construct_threeplane_optics(cfg: SheraThreePlaneConfig) -> SheraThreePlaneSystem:
@@ -102,6 +163,38 @@ def _construct_threeplane_optics(cfg: SheraThreePlaneConfig) -> SheraThreePlaneS
         strut_width=cfg.strut_width_m,
         strut_rotation_deg=cfg.strut_rotation_deg,
         dp_design_wavel=cfg.dp_design_wavelength_m,
+    )
+
+
+def _construct_twoplane_optics(
+    cfg: SheraTwoPlaneConfig, plate_scale_as_per_pix: float
+) -> SheraTwoPlaneOptics:
+    """Structural constructor for the two-plane optics (no coefficients)."""
+
+    strut_rotation = float(cfg.strut_rotation_deg)
+    mask = None
+
+    if cfg.diffractive_pupil_path is None:
+        # Avoid reliance on external DP assets in tests/demos; default to a
+        # clear pupil by supplying a zero-OPD mask explicitly.
+        mask = dll.AberratedLayer(jnp.zeros((cfg.pupil_npix, cfg.pupil_npix)))
+    else:
+        mask_array = np.load(cfg.diffractive_pupil_path)
+        mask = dll.AberratedLayer(jnp.asarray(mask_array))
+
+    return SheraTwoPlaneOptics(
+        wf_npixels=cfg.pupil_npix,
+        psf_npixels=cfg.psf_npix,
+        oversample=cfg.oversample,
+        psf_pixel_scale=plate_scale_as_per_pix,
+        m1_diameter=cfg.m1_diameter_m,
+        m2_diameter=cfg.central_obscuration_ratio * cfg.m1_diameter_m,
+        n_struts=cfg.n_struts,
+        strut_width=cfg.strut_width_m,
+        strut_rotation=jnp.deg2rad(strut_rotation),
+        mask=mask,
+        dp_design_wavel=cfg.dp_design_wavelength_m,
+        noll_indices=tuple(cfg.primary_noll_indices) if cfg.primary_noll_indices else None,
     )
 
 
@@ -219,5 +312,68 @@ def build_shera_threeplane_optics(
         m2_aperture = getattr(optics, "m2_aperture")
         if hasattr(m2_aperture, "coefficients"):
             optics = optics.set("p2_layers.m2_aperture.coefficients", m2_coefficients)
+
+    return optics
+
+
+def build_shera_twoplane_optics(
+    cfg: SheraTwoPlaneConfig,
+    store: Optional[ParameterStore] = None,
+    spec: Optional[ParamSpec] = None,
+) -> SheraTwoPlaneOptics:
+    """
+    Construct the Shera two-plane optical system using structural caching.
+
+    Structural parameters come from ``cfg`` and the effective plate scale (pulled
+    from the provided ``store`` when available). Zernike coefficients for the
+    primary mirror are treated as non-structural and applied to a copy of the
+    cached optics instance.
+    """
+
+    plate_scale = cfg.plate_scale_as_per_pix
+    m1_coefficients = None
+
+    if store is not None:
+        if spec is not None:
+            store = store.validate_against(spec, allow_derived=True)
+
+        plate_scale = store.get(
+            "system.plate_scale_as_per_pix", default=cfg.plate_scale_as_per_pix
+        )
+
+        n_m1 = len(cfg.primary_noll_indices) if cfg.primary_noll_indices else 0
+        if n_m1 > 0:
+            coeffs = store.get("primary.zernike_coeffs", default=None)
+            if coeffs is not None:
+                coeffs = jnp.asarray(coeffs)
+                if coeffs.shape[0] != n_m1:
+                    raise ValueError(
+                        "primary.zernike_coeffs length does not match configured basis"
+                    )
+                m1_coefficients = coeffs
+
+    cache_disabled = os.getenv(_TWOPLANE_CACHE_DISABLED_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    struct_hash = structural_hash_for_twoplane(cfg, plate_scale_as_per_pix=plate_scale)
+
+    base_optics = None
+    if not cache_disabled:
+        base_optics = _TWOPLANE_CACHE.get(struct_hash)
+
+    if base_optics is None:
+        base_optics = _construct_twoplane_optics(cfg, plate_scale_as_per_pix=plate_scale)
+        if not cache_disabled:
+            _TWOPLANE_CACHE[struct_hash] = base_optics
+
+    optics = base_optics.set("wf_npixels", base_optics.wf_npixels)
+
+    if m1_coefficients is not None:
+        # For the two-plane system the primary aperture lives under `layers`
+        # with the tuple name "aperture". Preserve the cached structure by
+        # functional update.
+        optics = optics.set("layers.aperture.coefficients", m1_coefficients)
 
     return optics
