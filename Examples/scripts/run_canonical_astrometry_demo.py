@@ -261,7 +261,7 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     print("Step 6: Building loss and running binder/SystemGraph-based gradient descent...")
     var_image = np.ones_like(truth_psf) * 0.01
     sub_spec = forward_spec.subset(infer_keys)
-    # 6a) Build a Binder-based data term:
+    # 6a) Build a Binder-based data term shared by both optimisation paths:
     #     theta → ParameterStore delta → binder.model(delta) → image → Gaussian NLL
     loss_nll, theta0 = make_binder_image_nll_fn(
         cfg,
@@ -305,6 +305,11 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     # ------------------------------------------------------------------
     # 8. Eigenmode-based optimisation using EigenThetaMap
     # ------------------------------------------------------------------
+    # The eigen run reuses the same Binder-based data NLL as the pure-θ path.
+    # We compute a curvature/FIM at a reference point (usually theta0), build
+    # an EigenThetaMap capturing principal directions, optionally whiten the
+    # modes to unit-curvature coordinates, and then optimise in z-space.
+    # Truncation would keep only the leading eigenmodes if provided.
     print("Step 8: Computing curvature/FIM and building EigenThetaMap...")
     eigen_steps = 10 if fast else 60
     eigen_results = run_shera_image_gd_eigen(
@@ -317,8 +322,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         noise_model="gaussian",
         num_steps=eigen_steps,
         learning_rate=None,
-        truncate=None,
-        whiten=True,
+        truncate=None,  # set k to keep only top-k modes
+        whiten=True,  # rescale so local Hessian ≈ I in retained subspace
         theta_ref=theta0,
         use_system_graph=not fast,
     )

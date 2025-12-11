@@ -141,7 +141,9 @@ def run_shera_image_gd_eigen(
     theta0: Optional[jnp.ndarray] = None,
     cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG,
     forward_spec: Optional[ParamSpec] = None,
+    inference_spec: Optional[ParamSpec] = None,
     base_forward_store: Optional[ParameterStore] = None,
+    base_store: Optional[ParameterStore] = None,
     infer_keys: Sequence[ParamKey] = (
         "binary.separation_as",
         "binary.x_position_as",
@@ -161,14 +163,16 @@ def run_shera_image_gd_eigen(
     """
     Run Shera image-based gradient descent in eigenmode coordinates.
 
-    The flow mirrors ``run_shera_image_gd_basic`` but inserts an
-    EigenThetaMap reparameterisation:
+    The flow mirrors ``run_shera_image_gd_basic`` but makes the eigen
+    reparameterisation explicit:
 
-    1) Build or accept a θ-space loss ``loss_fn``.
-    2) Compute a θ-space FIM/Hessian around ``theta_ref`` (defaults to
-       ``theta0``) and build ``EigenThetaMap.from_fim`` with optional
+    1) Build or accept a Binder-based θ-space loss ``loss_fn`` using
+       ``make_binder_image_nll_fn``.
+    2) Compute a θ-space curvature/FIM around ``theta_ref`` (defaults to
+       ``theta0``) once, then build ``EigenThetaMap.from_fim`` with optional
        truncation/whitening.
-    3) Map θ→z, run GD in z-space, then map back to θ for inspection.
+    3) Map θ→z, run GD in z-space with the *same* Binder-based loss, then
+       map back to θ for inspection.
 
     Parameters
     ----------
@@ -179,11 +183,13 @@ def run_shera_image_gd_eigen(
     theta0 : array-like, optional
         Initial θ vector. Required if ``loss_fn`` is provided directly;
         otherwise inferred from ``make_binder_image_nll_fn``.
-    cfg / forward_spec / base_forward_store / infer_keys / data / var :
+    cfg / forward_spec / inference_spec / base_forward_store / base_store /
+    infer_keys / data / var :
         Inputs passed through to ``make_binder_image_nll_fn`` when
-        ``loss_fn`` is not provided. ``base_forward_store`` defaults to
-        ``ParameterStore.from_spec_defaults`` and accepts the same
-        ``infer_keys`` defaults as ``run_shera_image_gd_basic``.
+        ``loss_fn`` is not provided. ``forward_spec`` and ``inference_spec``
+        are aliases (``inference_spec`` wins if both are supplied).
+        ``base_forward_store`` and ``base_store`` are aliases for the
+        baseline ParameterStore.
     num_steps : int
         Number of gradient descent iterations in eigen (z) space.
     learning_rate : float, optional
@@ -213,7 +219,13 @@ def run_shera_image_gd_eigen(
     fim_kwargs = fim_kwargs or {}
 
     # ------------------------------------------------------------------
-    # 1) Build θ-space loss (Binder-based) if not provided
+    # 0) Harmonise aliases
+    # ------------------------------------------------------------------
+    forward_spec = inference_spec or forward_spec
+    base_forward_store = base_store or base_forward_store
+
+    # ------------------------------------------------------------------
+    # 1) Build θ-space Binder-based loss once (unless provided)
     # ------------------------------------------------------------------
     if loss_fn is None or theta0 is None:
         if data is None or var is None:
@@ -247,10 +259,10 @@ def run_shera_image_gd_eigen(
             raise ValueError("theta0 must accompany a custom loss_fn")
 
     theta0 = jnp.asarray(theta0)
-    theta_ref = theta_ref if theta_ref is not None else theta0
+    theta_ref = jnp.asarray(theta_ref if theta_ref is not None else theta0)
 
     # ------------------------------------------------------------------
-    # 2) Compute curvature / FIM in θ-space
+    # 2) One-time curvature/FIM estimation in θ-space
     # ------------------------------------------------------------------
     if fim_kwargs:
         raise ValueError("fim_kwargs is reserved for future use and must be empty today")
@@ -273,7 +285,7 @@ def run_shera_image_gd_eigen(
     # ------------------------------------------------------------------
     # 4) Map θ₀ → z₀ and choose learning rate if unspecified
     # ------------------------------------------------------------------
-    z0 = eigen_map.to_eigen(theta0)
+    z0 = eigen_map.z_from_theta(theta0)
     if learning_rate is None:
         eigvals = eigen_map.eigvals if eigen_map.eigvals is not None else None
         if eigvals is None or eigvals.size == 0:
@@ -282,18 +294,19 @@ def run_shera_image_gd_eigen(
             learning_rate = float(1.0 / (float(jnp.max(eigvals)) + 1e-6))
 
     # ------------------------------------------------------------------
-    # 5) Define z-space loss = loss_theta(eigen_map.to_theta(z))
+    # 5) Define z-space loss = loss_theta(eigen_map.theta_from_z(z)) and JIT once
     # ------------------------------------------------------------------
     def loss_z(z):
-        theta = eigen_map.to_theta(z)
+        theta = eigen_map.theta_from_z(z)
         return loss_fn(theta)
 
+    loss_grad = jax.jit(jax.value_and_grad(loss_z))
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(z0)
 
     @jax.jit
     def _step(z, opt_state):
-        loss, g = jax.value_and_grad(loss_z)(z)
+        loss, g = loss_grad(z)
         updates, opt_state = optimizer.update(g, opt_state, z)
         z = optax.apply_updates(z, updates)
         z = jnp.nan_to_num(z)
@@ -308,10 +321,10 @@ def run_shera_image_gd_eigen(
         z, opt_state, loss_val = _step(z, opt_state)
         z_history.append(z)
         loss_history.append(loss_val)
-        theta_history.append(eigen_map.to_theta(z))
+        theta_history.append(eigen_map.theta_from_z(z))
 
     z_final = z
-    theta_final = eigen_map.to_theta(z_final)
+    theta_final = eigen_map.theta_from_z(z_final)
 
     return EigenGdResults(
         eigen_map=eigen_map,

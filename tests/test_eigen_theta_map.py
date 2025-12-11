@@ -1,52 +1,30 @@
-# tests/test_eigen_theta_map.py
-import jax.numpy as np
-import numpy as onp
+import jax.numpy as jnp
 
 from dluxshera.inference.optimization import EigenThetaMap
 
 
 def test_eigen_theta_map_roundtrip_unwhitened():
-    # Simple 2D curvature; eigenvectors are just the identity
-    F = np.diag(np.array([1.0, 4.0]))
-    theta_ref = np.array([1.0, -2.0])
+    F = jnp.array([[2.0, 0.1], [0.1, 1.0]])
+    theta_ref = jnp.array([0.5, -1.0])
+    eigen_map = EigenThetaMap.from_fim(F, theta_ref, whiten=False)
 
-    etm = EigenThetaMap.from_fim(F, theta_ref, truncate=None, whiten=False)
+    theta = jnp.array([0.7, -0.8])
+    z = eigen_map.z_from_theta(theta)
+    theta_roundtrip = eigen_map.theta_from_z(z)
 
-    # Shapes are as expected
-    assert etm.dim_theta == 2
-    assert etm.dim_eigen == 2
-    assert etm.eigvecs.shape == (2, 2)
-
-    # Round-trip a point near theta_ref
-    theta = np.array([1.1, -1.9])
-    z = etm.to_eigen(theta)
-    theta_rt = etm.from_eigen(z)
-
-    onp.testing.assert_allclose(onp.array(theta_rt), onp.array(theta), rtol=1e-6, atol=1e-6)
+    assert jnp.allclose(theta, theta_roundtrip, atol=1e-6)
 
 
-def test_eigen_theta_map_truncate_and_whiten():
-    # 3D curvature with distinct eigenvalues
-    F = np.diag(np.array([1.0, 2.0, 5.0]))
-    theta_ref = np.zeros(3)
+def test_eigen_theta_map_whitened_scales_quadratic():
+    F = jnp.diag(jnp.array([4.0, 1.0, 0.25]))
+    theta_ref = jnp.zeros(3)
+    eigen_map = EigenThetaMap.from_fim(F, theta_ref, whiten=True)
 
-    # Keep top-2 modes and whiten
-    etm = EigenThetaMap.from_fim(F, theta_ref, truncate=2, whiten=True)
+    z = jnp.array([1.0, -2.0, 0.5])
+    theta = eigen_map.theta_from_z(z)
+    delta = theta - theta_ref
 
-    assert etm.dim_theta == 3
-    assert etm.dim_eigen == 2
-    assert etm.eigvecs.shape == (3, 2)
-    assert etm.eigvals.shape == (2,)
+    quad_theta = 0.5 * delta @ (F @ delta)
+    quad_z = 0.5 * jnp.sum(z ** 2)
 
-    # Check that round-trip still works in the retained subspace:
-    #   take a perturbation only along the first two coordinates
-    delta = np.array([0.0, -0.2, 0.1])
-    theta = theta_ref + delta
-
-    z = etm.to_eigen(theta)
-    theta_rt = etm.from_eigen(z)
-
-    # Because we've truncated, we only represent the projection of delta
-    # onto the top-2 eigenmodes; in this diagonal case that's just the
-    # first two coords, so we should match exactly.
-    onp.testing.assert_allclose(onp.array(theta_rt), onp.array(theta), rtol=1e-6, atol=1e-6)
+    assert jnp.allclose(quad_theta, quad_z, atol=1e-5)

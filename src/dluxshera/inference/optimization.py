@@ -705,36 +705,34 @@ def fim_theta_shera(
 
 @dataclass
 class EigenThetaMap:
-    """
-    Linear reparameterisation between canonical θ-coordinates and an
-    eigenbasis of a local curvature matrix (e.g. Fisher / Hessian).
+    """Linear reparameterisation between canonical θ-coordinates and an eigen basis.
 
-    This is intentionally *pure θ-space*: it doesn't know anything about
-    ParamSpec, ParameterStore, or ModelParams. It just stores:
-
-      - theta_ref : reference point in θ-space (typically the fiducial / MAP)
-      - eigvecs   : columns are eigenvectors in θ-space (shape (N, k))
-      - eigvals   : corresponding eigenvalues (shape (k,))
-      - whiten    : whether coordinates are whitened by sqrt(λ_j)
+    This class is intentionally *pure θ-space* and JAX-friendly. It only stores
+    the linear algebra needed to move between coordinates and is agnostic to
+    Binder/ParameterStore details. Shapes follow the convention that
+    eigenvectors are **columns** of ``eigvecs``.
 
     Conventions
     ----------
-    Let F ≈ Hessian of the loss at theta_ref and F = V Λ Vᵀ with
-    eigenvalues λ_j and eigenvectors v_j (columns of V). For a perturbation
-    δθ = θ - theta_ref:
+    Let ``F`` be a symmetric positive semi-definite curvature matrix (e.g.
+    Fisher / Hessian) at ``theta_ref`` with eigendecomposition ``F = V Λ Vᵀ``,
+    eigenvalues ``λ_j`` and eigenvectors ``v_j`` (columns of ``V``). For a
+    perturbation ``δθ = θ - theta_ref``:
 
-    If `whiten=False` (unwhitened coordinates):
+    - If ``whiten=False`` (plain eigen coordinates)::
 
-        z_j = v_jᵀ δθ
-        θ   = theta_ref + Σ_j z_j v_j
+          z_j = v_jᵀ δθ
+          θ   = theta_ref + Σ_j z_j v_j
 
-    If `whiten=True` (locally “σ-units” along each mode):
+    - If ``whiten=True`` (scaled so quadratic loss ≈ ½‖z‖²)::
 
-        z_j = sqrt(λ_j) * v_jᵀ δθ
-        θ   = theta_ref + Σ_j (z_j / sqrt(λ_j)) v_j
+          z_j = sqrt(λ_j) * v_jᵀ δθ
+          θ   = theta_ref + Σ_j (z_j / sqrt(λ_j)) v_j
 
-    In the whitened case, a local quadratic loss ½ δθᵀ F δθ becomes
-    ½ ||z||² in the retained subspace (up to truncation tolerances).
+    Optional truncation keeps only the leading ``k`` eigenmodes. For whitened
+    coordinates this makes the local quadratic form close to identity in the
+    retained subspace. Methods are light-weight and safe to call from inside
+    jitted regions.
     """
 
     theta_ref: np.ndarray          # shape (N,)
@@ -755,7 +753,7 @@ class EigenThetaMap:
         whiten: bool = False,
     ) -> "EigenThetaMap":
         """
-        Build an EigenThetaMap from a (symmetric, PSD) curvature matrix F.
+        Build an EigenThetaMap from a (symmetric, PSD) curvature matrix ``F``.
 
         Parameters
         ----------
@@ -775,10 +773,11 @@ class EigenThetaMap:
         -------
         EigenThetaMap
         """
-        F_np = onp.asarray(F)
-        # eigh → eigenvalues ascending; we want descending by magnitude
-        evals, evecs = onp.linalg.eigh(F_np)
-        idx = evals.argsort()[::-1]
+        F_np = np.asarray(F)
+        # eigh → eigenvalues ascending; reorder to descending magnitude for
+        # convenience when truncating to the most informative modes.
+        evals, evecs = np.linalg.eigh(F_np)
+        idx = np.argsort(evals)[::-1]
         evals = evals[idx]
         evecs = evecs[:, idx]
 
@@ -797,28 +796,10 @@ class EigenThetaMap:
     # -----------------------------
     # Maps
     # -----------------------------
-    def to_eigen(self, theta: np.ndarray) -> np.ndarray:
-        """
-        Map θ → z in eigen coordinates.
-
-        If whiten=False:
-            z_j = v_j^T (θ - θ_ref)
-
-        If whiten=True:
-            z_j = sqrt(λ_j) * v_j^T (θ - θ_ref)
-
-        Parameters
-        ----------
-        theta :
-            Canonical parameter vector (N,).
-
-        Returns
-        -------
-        z :
-            Eigen coordinates (k,).
-        """
+    def z_from_theta(self, theta: np.ndarray) -> np.ndarray:
+        """Map θ → z in eigen coordinates (optionally whitened)."""
         theta = np.asarray(theta)
-        delta = theta - self.theta_ref           # (N,)
+        delta = theta - self.theta_ref  # (N,)
 
         # Project onto eigenvectors
         coords = self.eigvecs.T @ delta  # (k,)
@@ -829,28 +810,10 @@ class EigenThetaMap:
             scales = np.sqrt(self.eigvals + 1e-12)  # (k,)
             coords = coords * scales
 
-        return coords   # (k, N) @ (N,) -> (k,)
+        return coords
 
-    def from_eigen(self, z: np.ndarray) -> np.ndarray:
-        """
-        Map eigen coordinates z → θ.
-
-        If whiten=False:
-            θ = θ_ref + sum_j z_j v_j
-
-        If whiten=True:
-            θ = θ_ref + sum_j (z_j / sqrt(λ_j)) v_j
-
-        Parameters
-        ----------
-        z :
-            Eigen coordinates (k,).
-
-        Returns
-        -------
-        theta :
-            Canonical θ vector (N,).
-        """
+    def theta_from_z(self, z: np.ndarray) -> np.ndarray:
+        """Map eigen coordinates z → θ (undoing whitening if requested)."""
         z = np.asarray(z)
 
         if self.whiten:
@@ -861,11 +824,17 @@ class EigenThetaMap:
 
         delta = self.eigvecs @ z  # (N,)
 
-        return self.theta_ref + delta  # (N, k) @ (k,) -> (N,)
+        return self.theta_ref + delta
 
-    # Alias for readability in downstream helpers
+    # Aliases for backward compatibility / readability
+    def to_eigen(self, theta: np.ndarray) -> np.ndarray:
+        return self.z_from_theta(theta)
+
+    def from_eigen(self, z: np.ndarray) -> np.ndarray:
+        return self.theta_from_z(z)
+
     def to_theta(self, z: np.ndarray) -> np.ndarray:
-        return self.from_eigen(z)
+        return self.theta_from_z(z)
 
     # Convenience properties
     @property
