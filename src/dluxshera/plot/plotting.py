@@ -226,7 +226,7 @@ def plot_parameter_history_grid(
         plot_parameter_history(
             param,
             history,
-            true_vals=truth,
+            true_vals=[truth] if truth is not None else None,
             log_scale=log_scale,
             ax=ax,
             plot_residuals=plot_residuals,
