@@ -213,7 +213,7 @@ def build_inference_spec_basic() -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.x_position",
+            key="binary.x_position_as",
             group="binary",
             kind="primitive",
             units="as",
@@ -224,7 +224,7 @@ def build_inference_spec_basic() -> ParamSpec:
             doc="Binary centroid offset in the detector X direction (arcseconds).",
         ),
         ParamField(
-            key="binary.y_position",
+            key="binary.y_position_as",
             group="binary",
             kind="primitive",
             units="as",
@@ -340,6 +340,10 @@ def build_forward_model_spec_from_config(
           * the geometric PSF plate scale, and
           * the effective total log-flux at the detector.
         Many of these fields are mirrored from SheraThreePlaneConfig.
+        It also carries the full unit-aware binary astrometry vocabulary
+        (centroid, separation, position angle, contrast) and optionally
+        Zernike coefficient arrays whose lengths follow the configured
+        Noll index tuples (defaulting to zero vectors when present).
 
     - Inference spec:
         Holds the effective knobs actually exposed to the optimiser
@@ -524,6 +528,80 @@ def build_forward_model_spec_from_config(
             ),
         ),
 
+        # --- Binary astrometry and photometry ---------------------------------
+        ParamField(
+            key="binary.x_position_as",
+            group="binary",
+            kind="primitive",
+            units="as",
+            dtype=float,
+            shape=None,
+            default=0.0,
+            bounds=(None, None),
+            doc=(
+                "On-sky X position of the binary system centroid in arcseconds. "
+                "Positive values follow the detector X axis (typically increasing "
+                "to the right)."
+            ),
+        ),
+        ParamField(
+            key="binary.y_position_as",
+            group="binary",
+            kind="primitive",
+            units="as",
+            dtype=float,
+            shape=None,
+            default=0.0,
+            bounds=(None, None),
+            doc=(
+                "On-sky Y position of the binary system centroid in arcseconds. "
+                "Positive values follow the detector Y axis (typically increasing "
+                "upward)."
+            ),
+        ),
+        ParamField(
+            key="binary.separation_as",
+            group="binary",
+            kind="primitive",
+            units="as",
+            dtype=float,
+            shape=None,
+            default=10.0,
+            bounds=(0.0, None),
+            doc=(
+                "Angular separation between primary and secondary components in "
+                "arcseconds."
+            ),
+        ),
+        ParamField(
+            key="binary.position_angle_deg",
+            group="binary",
+            kind="primitive",
+            units="deg",
+            dtype=float,
+            shape=None,
+            default=90.0,
+            bounds=(0.0, 360.0),
+            doc=(
+                "Position angle of the secondary relative to the primary, in "
+                "degrees East of North."
+            ),
+        ),
+        ParamField(
+            key="binary.contrast",
+            group="binary",
+            kind="primitive",
+            units=None,
+            dtype=float,
+            shape=None,
+            default=3,
+            bounds=(0.0, None),
+            doc=(
+                "Flux ratio of the binary system, defined as Primary:Secondary "
+                "(A:B). A ratio > 1 indicates the primary is brighter."
+            ),
+        ),
+
         # --- Source flux normalisation ----------------------------------
         ParamField(
             key="binary.spectral_flux_density",
@@ -625,5 +703,43 @@ def build_forward_model_spec_from_config(
             ),
         ),
     ]
+
+    if cfg.primary_noll_indices:
+        fields.append(
+            ParamField(
+                key="primary.zernike_coeffs",
+                group="primary",
+                kind="primitive",
+                units="nm",
+                dtype=float,
+                shape=(len(cfg.primary_noll_indices),),
+                default=tuple(0.0 for _ in cfg.primary_noll_indices),
+                bounds=(None, None),
+                doc=(
+                    "Primary mirror Zernike WFE coefficients (nm). Length matches "
+                    "the configured primary_noll_indices tuple; defaults to a zero "
+                    "vector for the no-aberration case."
+                ),
+            )
+        )
+
+    if cfg.secondary_noll_indices:
+        fields.append(
+            ParamField(
+                key="secondary.zernike_coeffs",
+                group="secondary",
+                kind="primitive",
+                units="nm",
+                dtype=float,
+                shape=(len(cfg.secondary_noll_indices),),
+                default=tuple(0.0 for _ in cfg.secondary_noll_indices),
+                bounds=(None, None),
+                doc=(
+                    "Secondary mirror Zernike WFE coefficients (nm). Length matches "
+                    "the configured secondary_noll_indices tuple; defaults to a zero "
+                    "vector for the no-aberration case."
+                ),
+            )
+        )
 
     return ParamSpec(fields)

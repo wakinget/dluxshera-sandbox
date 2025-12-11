@@ -16,8 +16,8 @@ def _make_store_for_smoke(cfg):
     updates = {
         "binary.separation_as": 10.0,
         "binary.position_angle_deg": 90.0,
-        "binary.x_position": 0.0,
-        "binary.y_position": 0.0,
+        "binary.x_position_as": 0.0,
+        "binary.y_position_as": 0.0,
         "binary.contrast": 3.0,
         "binary.log_flux_total": 8.0,
         "system.plate_scale_as_per_pix": 0.355,

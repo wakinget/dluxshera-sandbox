@@ -16,8 +16,8 @@ def _make_store_for_smoke(cfg):
     updates = {
         "binary.separation_as": 10.0,
         "binary.position_angle_deg": 90.0,
-        "binary.x_position": 0.0,
-        "binary.y_position": 0.0,
+        "binary.x_position_as": 0.0,
+        "binary.y_position_as": 0.0,
         "binary.contrast": 3.0,
         "binary.log_flux_total": 8.0,
         "system.plate_scale_as_per_pix": 0.355,
@@ -45,8 +45,8 @@ def test_make_image_nll_fn_smoke_gaussian():
 
     infer_keys = [
         "binary.separation_as",
-        "binary.x_position",
-        "binary.y_position",
+        "binary.x_position_as",
+        "binary.y_position_as",
     ]
 
     loss_fn, theta0 = make_image_nll_fn(
@@ -80,8 +80,8 @@ def test_make_binder_image_nll_fn_smoke_gaussian():
 
     infer_keys = [
         "binary.separation_as",
-        "binary.x_position",
-        "binary.y_position",
+        "binary.x_position_as",
+        "binary.y_position_as",
     ]
 
     from dluxshera.inference.optimization import make_binder_image_nll_fn

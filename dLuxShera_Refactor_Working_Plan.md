@@ -1,5 +1,5 @@
 # dLuxShera Refactor — Working Plan & Notes
-_Last updated: 2025-12-10 01:28_
+_Last updated: 2026-02-18 00:00_
 
 This is a living document summarizing the goals, architecture, decisions, tasks, and gotchas for the dLuxShera parameterization
 refactor. It’s designed so either of us can get back up to speed quickly and not lose the important details.
@@ -78,6 +78,7 @@ dLuxShera/
 ## 4) ParamSpec (Schema & Metadata)
 
 - `ParamField`/`ParamSpec` implemented with docstrings, defaults, bounds, dtype/shape, and builders for forward/inference subsets.
+- Forward spec now mirrors the full truth-level binary vocabulary with unit-aware keys (`binary.x_position_as`, `binary.y_position_as`, `binary.separation_as`, `binary.position_angle_deg`, `binary.contrast`) and conditionally includes Zernike coefficient arrays whose lengths are tied to configured Noll indices, defaulting to zero vectors when a basis exists.
 - Derived and primitive fields coexist in single spec; separation by kind is not enforced in store validation.
 - Cross-referencing between docs/tests and spec remains manual.
 
@@ -87,6 +88,7 @@ dLuxShera/
 
 - Frozen mapping `{key → value}` registered as JAX pytree; supports `.replace`, iteration, and `.validate` against a `ParamSpec`.
 - Validation is strict by default (rejects derived keys); override/debug mode opt-in via `allow_derived=True`. Helpers `strip_derived`, `refresh_derived`, and `check_consistency` keep derived values fresh or flag stale overrides.
+- Canonical forward-store flow is primitives-only defaults → explicit primitive overrides → `refresh_derived(...)` to populate plate scale / log flux and other deriveds; derived keys are omitted from `from_spec_defaults` by design.
 - Shallow serialization helpers exist (`from_dict`, `from_spec_defaults`, `as_dict`); YAML/JSON IO still planned in the profiles/IO workstream.
 
 ---
@@ -94,7 +96,7 @@ dLuxShera/
 ## 6) Transform Registry / DerivedResolver
 
 - Scoped `DerivedResolver` now wraps per-system `TransformRegistry` instances with system-id aware registration and resolution helpers (defaulting to the Shera three-plane system for backward compatibility).
-- Three Shera transforms registered under `shera_threeplane`: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist.
+- Three Shera transforms registered under `shera_threeplane`: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist (now exercised via a primitives-only forward-store refresh pattern).
 - Future work: expand transform coverage for additional systems (two-plane/four-plane) once those variants land.
 
 **Policy on setting deriveds**
@@ -166,8 +168,8 @@ dLuxShera/
 Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **P0 — Stabilize primitives/derived boundary & binder**
-- ⚠️ **ParamSpec core keys & docs**: Spec exists with metadata; ensure docstrings cross-reference tests/examples once SystemGraph lands.
-- ⚠️ **ParameterStore policy**: Primitives-only enforcement + default validation mode; add optional `refresh` helper and serialization later.
+- ⚠️ **ParamSpec core keys & docs**: Spec exists with metadata; forward spec now includes unit-aware binary astrometry and Noll-index-tied Zernike coeffs with zero defaults; ensure docstrings cross-reference tests/examples once SystemGraph lands.
+- ✅ **ParameterStore policy**: Primitives-only defaults enforced; canonical flow documented (`from_spec_defaults` → primitive overrides → `refresh_derived`); serialization still to follow.
 - ✅ **Inference parameter packing**: `pack_params`/`unpack_params` with tests.
 - ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.
 - ✅ **ThreePlaneBuilder (structural hash/cache)**: Structural subset documented, deterministic hash added, cache + clear helper in builder with opt-out env flag.
@@ -188,6 +190,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **Next sprint follow-ups**
 - ⚠️ Plate-scale policy decision and SystemGraph follow-ups (caching/multi-node) remain. Extend docs/README coverage and add serialization/profile helpers to support the new demo + eigenmode pathways.
+- ⚠️ Sweep remaining scripts/tests for legacy unit-less astrometry aliases once the canonical unit-aware binary keys have settled.
 
 **Newly noted tasks**
 - ✅ Structural hash/caching for three-plane builder (cache + clear helper landed).

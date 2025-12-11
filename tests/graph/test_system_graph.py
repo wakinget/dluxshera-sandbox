@@ -19,8 +19,8 @@ def _make_inference_store(cfg):
     updates = {
         "binary.separation_as": 5.0,
         "binary.position_angle_deg": 10.0,
-        "binary.x_position": 0.0,
-        "binary.y_position": 0.0,
+        "binary.x_position_as": 0.0,
+        "binary.y_position_as": 0.0,
         "binary.contrast": 2.0,
         "binary.log_flux_total": 7.5,
         "system.plate_scale_as_per_pix": 0.355,

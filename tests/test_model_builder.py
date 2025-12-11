@@ -31,8 +31,8 @@ def _make_inference_store(cfg):
         # Binary astrometry / photometry
         "binary.separation_as": 10.0,
         "binary.position_angle_deg": 45.0,
-        "binary.x_position": 0.0,
-        "binary.y_position": 0.0,
+        "binary.x_position_as": 0.0,
+        "binary.y_position_as": 0.0,
         "binary.contrast": 3.0,
         "binary.log_flux_total": 8.0,
         # System plate scale (not used by the legacy model construction yet,
@@ -77,8 +77,8 @@ def test_build_shera_threeplane_model_smoke():
     # they don't assume any particular unit convention beyond “passed through”.
     sep_store = float(store.get("binary.separation_as"))
     pa_store = float(store.get("binary.position_angle_deg"))
-    x_store = float(store.get("binary.x_position"))
-    y_store = float(store.get("binary.y_position"))
+    x_store = float(store.get("binary.x_position_as"))
+    y_store = float(store.get("binary.y_position_as"))
     contrast_store = float(store.get("binary.contrast"))
     log_flux_store = float(store.get("binary.log_flux_total"))
 

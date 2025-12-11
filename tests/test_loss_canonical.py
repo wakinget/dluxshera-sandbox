@@ -41,7 +41,11 @@ def test_loss_canonical_matches_binder_nll_and_is_jittable():
     inference_spec, base_store, data, var = _make_minimal_inference_setup(cfg)
 
     # 2) Choose a small inference subset
-    infer_keys = ("binary.separation_as", "binary.x_position", "binary.y_position")
+    infer_keys = (
+        "binary.separation_as",
+        "binary.x_position_as",
+        "binary.y_position_as",
+    )
     inf_spec_subset = inference_spec.subset(infer_keys)
 
     # (Optional) pack θ₀ using the subset helper, if you want a cross-check:
