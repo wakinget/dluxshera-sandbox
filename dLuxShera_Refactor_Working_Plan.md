@@ -336,7 +336,65 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ---
 
-## 20) Parking Lot
+## 21) Task 10 — Shared Binder / SystemGraph design options (analysis only)
+
+**Scope:** Planning-only comparison of the new SheraThreePlaneBinder/SystemGraph vs SheraTwoPlaneBinder/SystemGraph. No refactor performed; binders remain standalone classes.
+
+### Binder comparison (inventory)
+
+- **Constructor shape & stored attributes:**
+  - Both binders accept `(cfg, forward_spec, base_forward_store, use_system_graph=True)`, validate the base store against the forward spec with deriveds allowed, and eagerly build a `LayeredDetector` downsample layer tied to `cfg.oversample`. Both optionally construct a SystemGraph instance and cache it on `_graph`; both hold `_detector` for reuse across calls.【F:src/dluxshera/core/binder.py†L22-L83】【F:src/dluxshera/core/binder.py†L150-L208】
+  - Differences: `cfg`/optics builders are system-specific (`SheraThreePlaneConfig` + `build_shera_threeplane_optics` vs `SheraTwoPlaneConfig` + `build_shera_twoplane_optics`). SystemGraph factories differ accordingly (`build_shera_system_graph` vs `build_shera_twoplane_system_graph`).
+- **model(store_delta) flow:**
+  - Both expose `.model(store_delta=None)` as the single entry point: merge `store_delta` into `base_forward_store` via `_merge_store`, then either call `_graph.evaluate(..., outputs=("psf",))` when `use_system_graph` is enabled or fall back to `_direct_model` building optics/source/detector and calling `dl.Telescope.model()`.【F:src/dluxshera/core/binder.py†L61-L115】【F:src/dluxshera/core/binder.py†L188-L244】
+  - Both support `.with_store(new_base_store)` to clone with a new base store while preserving cfg/spec/use_system_graph. No structural hash/caching hooks are defined at the binder layer (delegated to the optics builder caches).
+- **Store handling:**
+  - `_merge_store` logic is identical in spirit (validate overlay allowing missing/derived, disallow extra, then `.replace` on the base store) with only minor ordering differences of keyword arguments. Derived parameters are assumed pre-populated in the base forward store; binders do not recompute deriveds themselves.
+- **System-specific responsibilities:**
+  - Optics builder selection (`build_shera_threeplane_optics` vs `build_shera_twoplane_optics`).
+  - Config types and implied structural knobs (three-plane Fresnel vs two-plane Toliman-style pixel-scale primitive). Structural-hash policies live inside the optics builders, not the binder.
+
+### Binder behaviour categorization
+
+- **Clearly shared & safe to factor:** parameter ownership (cfg/spec/base_forward_store), store-delta merge semantics, `.model(store_delta)` signature/flow, `use_system_graph` toggle with graph/direct parity, detector reuse, and `.with_store` immutability pattern.
+- **Potentially shareable with care:** structural cache integration hooks (if binders begin surfacing structural hashes), and validation nuances for derived keys (ensuring both binders keep the same strictness knobs). These could be template methods on a base class or shared helper functions.
+- **System-specific:** optics/detector construction details and config typing; any structural hash key selection remains tied to the respective optics builder (three-plane Fresnel geometry vs two-plane pixel-scale primitive) and should stay per-binder.
+
+### SystemGraph comparison
+
+- **Shape:** Both graphs are minimal single-node executors that validate `base_forward_store`, merge an optional `store_delta`, build system-specific optics, reuse a shared detector, construct the Alpha Cen source, instantiate a `dl.Telescope`, and return `psf` (or a dict when multiple outputs are requested). Each exposes `evaluate`/`forward`/`run` aliases and is built via a small factory (`build_shera_system_graph` or `build_shera_twoplane_system_graph`).【F:src/dluxshera/graph/system_graph.py†L1-L86】【F:src/dluxshera/graph/system_graph.py†L102-L157】
+- **Common skeleton:** cfg + forward_spec + base_forward_store → `_merge_store(store_delta)` → system-specific `build_shera_*plane_optics` → `build_alpha_cen_source` → `dl.Telescope(...).model()` → psf/dict.
+- **Differences:** Only the optics builder and cfg/detector typing vary; no additional nodes or transforms differentiate the graphs today.
+
+### Design options (binder layer)
+
+- **Option 1 — Shared base class (e.g., `BaseSheraBinder`):** Move the shared mechanics (init storing cfg/spec/base_store, detector construction, `_merge_store`, `.model` flow with graph/direct toggle, `.with_store`) into a base class with abstract hooks for `build_optics(eff_store)` and `build_graph(detector)`. Pros: eliminates duplication, centralizes immutability/validation semantics, eases future variants. Cons: introduces inheritance into a JAX-facing type (consider `frozen`/static fields), may obscure system identity unless type annotations remain explicit.
+- **Option 2 — Composition/helpers (no inheritance):** Extract helper functions (e.g., `merge_store(base, delta, spec)`, `maybe_build_graph(cfg, spec, base, detector, builder_fn)`, `direct_model(cfg, builder_fn, detector, store)`) and let each binder compose them. Pros: avoids inheritance and keeps type clarity; lower risk to JIT/static-arg behaviour. Cons: some duplication remains; harder to enforce consistent immutability policies.
+- **Option 3 — Meta-binder façade:** Introduce a `SheraBinder` factory that inspects cfg type and delegates to the appropriate binder (optionally leveraging Options 1 or 2 internally). Pros: single public entry point once multiple variants exist. Cons: can blur system identity for users and complicate typing; should not break direct construction of specific binder classes.
+- **Recommendation:** Start with **Option 1 (base class)** or **Option 2 (helpers)**—leaning toward a small base class because the shared surface is already large and behaviourally identical. Preserve concrete `SheraTwoPlaneBinder`/`SheraThreePlaneBinder` types to maintain system clarity and backward compatibility. Meta-binder façade can remain a later opt-in convenience once more variants emerge.
+
+### Design options (SystemGraph layer)
+
+- **Option A — Shared skeleton with pluggable nodes:** Factor a `build_shera_system_graph(cfg, spec, base_store, detector, optics_fn)` helper that assembles the common merge→optics→source→telescope→psf path, with optics_fn capturing system-specific pieces. Pros: captures the evident template, reduces duplication, aligns with a base binder. Cons: marginal benefit while graphs stay single-node; must keep type clarity for cfg/optics.
+- **Option B — Separate graphs + shared subgraphs:** Keep per-system graph classes but pull out reusable merge/source/telescope helpers. Pros: preserves explicit system identity and leaves room for divergent node shapes later. Cons: smaller deduplication win.
+- **Option C — Status quo with documentation:** Accept duplication for now and document the parallel structure; revisit if/when graphs become multi-node or need caching/derived-resolution hooks. Pros: zero refactor risk; avoids premature abstraction. Cons: ongoing duplication and risk of drift.
+- **Recommendation:** Tentatively **Option A** if/when graph complexity grows alongside a binder base class; until multi-node/caching features land, **Option C** is acceptable with clear comments noting the shared shape.
+
+### Constraints/guardrails for any future refactor
+
+- **JAX-friendliness:** Keep binders/graphs mostly static (cfg/spec/detector/graph cached); dynamic data should flow through `store_delta`/theta overlays. Avoid hidden state mutation during `model()` to remain JIT-safe.
+- **Immutability:** Preserve the current “mostly immutable” contract and `.with_store` cloning pattern; no in-place mutations inside `model`/`evaluate`.
+- **System identity clarity:** Even with shared bases/templates, it must stay obvious whether an instance is two-plane vs three-plane (distinct types or explicit mode flag). Backward compatibility for explicit `SheraThreePlaneBinder(...)` construction is required.
+- **Backward compatibility:** Existing call sites and tests constructing the concrete binders should continue to work; any façade should be additive.
+
+### Follow-on plan (future work, not yet implemented)
+
+- Prototype a lightweight `BaseSheraBinder` encapsulating shared mechanics; migrate both binders with minimal surface changes and retain concrete subclasses for clarity.
+- If/when graphs expand, introduce a shared graph builder helper mirroring the current merge→optics→source→telescope→psf skeleton, keeping system-specific optics functions injectable.
+- Re-run binder/graph smoke tests for both systems after refactors; update docs to emphasize immutability/JAX constraints and system identity.
+
+
+## 22) Parking Lot
 
 - Two/Four-plane optics variant design and transforms.
 - Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
