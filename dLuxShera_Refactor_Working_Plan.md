@@ -287,6 +287,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
   3. Add tests for stale-override prevention (strict validation rejects derived keys when flag is false) and for refresh correctness.
 - Progress update: strict `ParameterStore.validate_against` now rejects derived keys by default, and helper utilities `strip_derived`, `refresh_derived`, and `check_consistency` are available to manage override/debug flows and recompute derived values deterministically.
 - Deferred/experimental: add optional “physics-mode” inference/forward spec builders that mark plate_scale/log_flux as derived; keep override flag for manual injection; revisit whether log_flux should migrate to primitive in forward spec if calibration use-cases dominate.
+- Diagnostics & UX (Option C — Phase 1): plotting utilities have been normalised to a refactor-era IO policy. PSF visualisation (`plot_psf_single`, `plot_psf_comparison`), parameter history panels (`plot_parameter_history`, `plot_parameter_history_grid`), colourbar alignment (`merge_cbar`), OPD and sweep helpers now return figures/axes, avoid implicit `plt.show()`, and support explicit `save_path` for headless/CI usage. Open follow-ups: dedicated FIM/eigen visualisation helpers (spectra + loadings), richer `ParameterStore` inspection/pretty-printing, and a simple logging/trace container that integrates with plotting and canonical demos.
 
 ---
 
