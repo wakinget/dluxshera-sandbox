@@ -119,6 +119,13 @@ dLuxShera/
   - Option B (documented only): mutable binder updating cfg/base store in-place was rejected due to JIT/static-arg friendliness and legacy immutability expectations.
 - **Graph layer:** `SystemGraph` is now constructed eagerly and owned by Binder when `use_system_graph=True`; execution reuses the optics builder (and its structural-hash cache) and Alpha Cen source inside a lightweight `evaluate(outputs=("psf",))` call. Graph remains single-node but mirrors binder output for smoke/regression tests.
 
+### Loss stack (Binder-centric clarity)
+
+- **Flow:** `theta` → `ParameterStore` delta (restricted to `infer_keys`) → `binder.model(store_delta)` → PSF image → `gaussian_image_nll(image, data, var)` → scalar loss. This keeps Binder as the sole model API and makes the Gaussian NLL math transparent.
+- **Primitives:** A glass-box `gaussian_image_nll` helper (JAX-friendly, sum/mean/None reductions) now lives in `inference/losses.py` and is used by both the legacy `gaussian_loss` wrapper and Binder-based constructors.
+- **Binder loss constructor:** `make_binder_image_nll_fn` returns `(loss_fn, theta0)` where `loss_fn(theta)` unpacks `theta` into a store delta, evaluates `binder.model(...)`, and applies the chosen noise model. A pre-built binder can be passed in or constructed internally from `(cfg, forward_spec, base_forward_store)`.
+- **Demo wiring:** `Examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
+
 ---
 
 ## 8) Parameter Profiles & IO (Planned)
@@ -184,7 +191,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.
 - ✅ **ThreePlaneBuilder (structural hash/cache)**: Structural subset documented, deterministic hash added, cache + clear helper in builder with opt-out env flag.
 - ✅ **ThreePlaneBinder (phase/sampling bind)**: Binder is the canonical, mostly immutable model; owns an eager SystemGraph, uses forward-style base stores with deriveds refreshed, and exposes `.model(store_delta)` as the public API.
-- ✅ **Canonical loss wiring**: Binder-based image NLL helpers updated to forward-style stores and SystemGraph ownership; examples are being migrated toward the new interface.
+- ✅ **Loss function clarity / canonical loss wiring**: Binder-based image NLL helpers now route through `binder.model(store_delta)` with explicit θ→store mappings, reuse the glass-box `gaussian_image_nll` kernel, and surface a clear `(loss_fn, theta0)` API. The astrometry demo mirrors this flow and layers a Gaussian prior for MAP loss.
 - ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; eager construction now lives under Binder ownership (caching/derived resolution hooks still future work).
 
 **P1 — Docs, demos, and scope-aware transforms**
@@ -207,6 +214,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ Enforce primitives-only store in production mode (strict validation default, refresh/strip helpers).
 - ⏳ Add serialization (`params/serialize.py`) and transform registry module (`params/registry.py`).
 - ⏳ Extend SystemGraph with caching/derived resolution hooks once resolver is scoped.
+
+- **Future improvements:** integrate a declarative PriorSpec/NumPyro-friendly prior layer into the loss stack, and add alt-noise kernels (e.g., Poisson) following the same glass-box helper pattern.
 
 ---
 

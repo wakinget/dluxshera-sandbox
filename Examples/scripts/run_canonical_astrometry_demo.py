@@ -264,6 +264,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     print("Step 6: Building loss and running binder/SystemGraph-based gradient descent...")
     var_image = np.ones_like(truth_psf) * 0.01
     sub_spec = forward_spec.subset(infer_keys)
+    # 6a) Build a Binder-based data term:
+    #     theta → ParameterStore delta → binder.model(delta) → image → Gaussian NLL
     loss_nll, theta0 = make_binder_image_nll_fn(
         cfg,
         forward_spec,
@@ -276,8 +278,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         use_system_graph=not fast,
     )
 
-    def loss_with_prior(theta: np.ndarray) -> np.ndarray:
-        store_theta = store_unpack_params(sub_spec, theta, init_forward_store)
+    # 6b) Wrap with a simple Gaussian prior penalty to form a MAP loss
+    def gaussian_prior_penalty(store_theta: ParameterStore) -> jnp.ndarray:
         penalty = jnp.array(0.0)
         for key in infer_keys:
             sigma = priors[key]
@@ -287,8 +289,13 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
                 penalty += jnp.sum((value - truth_val) ** 2 / (2.0 * sigma**2))
             else:
                 penalty += (value - truth_val) ** 2 / (2.0 * sigma**2)
-        loss_val = loss_nll(theta)
-        return jnp.asarray(loss_val).sum() + jnp.asarray(penalty).sum()
+        return penalty
+
+    def loss_with_prior(theta: np.ndarray) -> np.ndarray:
+        store_theta = store_unpack_params(sub_spec, theta, init_forward_store)
+        data_term = loss_nll(theta)
+        prior_term = gaussian_prior_penalty(store_theta)
+        return jnp.asarray(data_term).sum() + jnp.asarray(prior_term).sum()
 
     num_steps = 20 if fast else 120
     theta_final, history = run_simple_gd(
