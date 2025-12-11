@@ -2,20 +2,18 @@
 
 import jax.numpy as jnp
 
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
-from dluxshera.params.spec import build_inference_spec_basic
-from dluxshera.params.store import ParameterStore
 from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.optics.config import SHERA_TESTBED_CONFIG
+from tests.helpers import make_forward_store
 
 
 def test_shera_threeplane_binder_smoke():
     cfg = SHERA_TESTBED_CONFIG
-    spec = build_inference_spec_basic()
-    store = ParameterStore.from_spec_defaults(spec)
+    forward_spec, forward_store = make_forward_store(cfg)
 
-    binder = SheraThreePlaneBinder(cfg, spec, store)
+    binder = SheraThreePlaneBinder(cfg, forward_spec, forward_store)
 
-    img = binder.forward(store)
+    img = binder.model()
 
     assert img.ndim == 2  # simple shape sanity check
     assert jnp.all(jnp.isfinite(img))

@@ -4,28 +4,22 @@ import jax.numpy as np
 import numpy as onp
 
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
-from dluxshera.params.spec import build_inference_spec_basic
-from dluxshera.params.store import ParameterStore
 from dluxshera.inference.optimization import (
     make_binder_image_nll_fn,
     fim_theta,
     fim_theta_shera,
 )
 from dluxshera.core.binder import SheraThreePlaneBinder
+from tests.helpers import make_forward_store
 
 
 def _make_store_for_smoke(cfg):
-    spec = build_inference_spec_basic()
-    store = ParameterStore.from_spec_defaults(spec)
-
     updates = {
         "binary.separation_as": 10.0,
         "binary.position_angle_deg": 90.0,
         "binary.x_position_as": 0.0,
         "binary.y_position_as": 0.0,
         "binary.contrast": 3.0,
-        "binary.log_flux_total": 8.0,
-        "system.plate_scale_as_per_pix": 0.355,
     }
 
     n_m1 = len(cfg.primary_noll_indices)
@@ -35,8 +29,7 @@ def _make_store_for_smoke(cfg):
     if n_m2 > 0:
         updates["secondary.zernike_coeffs"] = np.zeros(n_m2)
 
-    store = store.replace(updates)
-    return spec, store
+    return make_forward_store(cfg, updates=updates)
 
 
 def test_fim_theta_shape_and_symmetry():
@@ -51,7 +44,7 @@ def test_fim_theta_shape_and_symmetry():
 
     # Synthetic data via Binder path
     binder = SheraThreePlaneBinder(cfg, spec, store)
-    data = binder.forward(store)
+    data = binder.model()
     var = np.ones_like(data)
 
     # Canonical Binder-based loss
@@ -87,7 +80,7 @@ def test_fim_theta_shera_wrapper_consistency():
     infer_keys = ["binary.separation_as", "binary.x_position_as"]
 
     binder = SheraThreePlaneBinder(cfg, spec, store)
-    data = binder.forward(store)
+    data = binder.model()
     var = np.ones_like(data)
 
     # Wrapper-based FIM

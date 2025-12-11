@@ -1,47 +1,101 @@
-"""
-Minimal SystemGraph wrapper for Shera three-plane execution.
-"""
+"""Shera three-plane SystemGraph owned by :class:`SheraThreePlaneBinder`."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
+import dLux as dl
+
+from ..core.universe import build_alpha_cen_source
+from ..optics.builder import build_shera_threeplane_optics
 from ..optics.config import SheraThreePlaneConfig
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
-from ..core.builder import build_shera_threeplane_model
-from .nodes import DLuxSystemNode
+
+
+Outputs = Tuple[str, ...]
 
 
 @dataclass
 class SystemGraph:
     """
-    Minimal single-node system graph.
+    Minimal single-node execution graph for the Shera three-plane system.
 
-    For now this is intentionally lightweight and assumes a single
-    ``DLuxSystemNode`` representing the Shera three-plane system. Future
-    variants can extend this to multiple nodes / DAG execution as needed.
+    This graph owns a detector instance and reuses the cached optics builder to
+    evaluate the PSF for a provided ParameterStore. It mirrors the binder’s
+    mostly-immutable semantics: the base store is validated and stored, while
+    per-call overrides are merged functionally.
     """
 
-    node: DLuxSystemNode
+    cfg: SheraThreePlaneConfig
+    forward_spec: ParamSpec
+    base_forward_store: ParameterStore
+    detector: dl.LayeredDetector
 
-    def forward(self, store: Optional[ParameterStore] = None):
-        return self.node.forward(store)
+    def __post_init__(self) -> None:
+        self.base_forward_store = self.base_forward_store.validate_against(
+            self.forward_spec, allow_derived=True
+        )
 
-    run = forward
+    def _merge_store(self, store_delta: Optional[ParameterStore]) -> ParameterStore:
+        if store_delta is None:
+            return self.base_forward_store
+
+        store_delta = store_delta.validate_against(
+            self.forward_spec,
+            allow_missing=True,
+            allow_derived=True,
+            allow_extra=False,
+        )
+        return self.base_forward_store.replace(store_delta.as_dict())
+
+    def evaluate(
+        self,
+        store_delta: Optional[ParameterStore] = None,
+        *,
+        outputs: Iterable[str] = ("psf",),
+    ):
+        """Evaluate the graph and return requested outputs (default: PSF)."""
+
+        eff_store = self._merge_store(store_delta)
+
+        optics = build_shera_threeplane_optics(
+            self.cfg, store=eff_store, spec=self.forward_spec
+        )
+        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
+        telescope = dl.Telescope(source=source, optics=optics, detector=self.detector)
+
+        psf = telescope.model()
+
+        if outputs == ("psf",):
+            return psf
+
+        if isinstance(outputs, tuple):
+            return {name: psf for name in outputs}
+
+        return psf
+
+    forward = evaluate
+    run = evaluate
 
 
-def build_threeplane_system_graph(
+def build_shera_system_graph(
     cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
-    base_store: ParameterStore,
-):
-    """Factory for the default three-plane SystemGraph."""
-    node = DLuxSystemNode(
+    forward_spec: ParamSpec,
+    base_forward_store: ParameterStore,
+    detector: Optional[dl.LayeredDetector] = None,
+) -> SystemGraph:
+    """Factory for the default Shera three-plane SystemGraph."""
+
+    detector = detector or dl.LayeredDetector(layers=[("downsample", dl.Downsample(cfg.oversample))])
+    return SystemGraph(
         cfg=cfg,
-        inference_spec=inference_spec,
-        base_store=base_store,
-        build_model_fn=build_shera_threeplane_model,
+        forward_spec=forward_spec,
+        base_forward_store=base_forward_store,
+        detector=detector,
     )
-    return SystemGraph(node=node)
+
+
+# Backwards-compatible alias for older call sites and tests.
+build_threeplane_system_graph = build_shera_system_graph

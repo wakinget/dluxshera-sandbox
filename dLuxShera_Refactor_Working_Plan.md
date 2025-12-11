@@ -106,9 +106,17 @@ dLuxShera/
 
 ## 7) Integrating dLux `ThreePlaneOpticalSystem`
 
-- **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem`, optionally injects Zernike coefficients from store, and now caches structural builds via `structural_hash_from_config` + `clear_threeplane_optics_cache` (opt-out env flag `DLUXSHERA_THREEPLANE_CACHE_DISABLED`).
-- **Binder:** Merges stores and forwards through static optics; canonical loss wrapper implemented and tested. Derived resolution step is not enforced; plate-scale binding policy unresolved.
-- **Graph layer:** Minimal `DLuxSystemNode` + `SystemGraph` wrap the three-plane builder; still single-node with no caching/derived resolution enforcement.
+- **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem`, optionally injects Zernike coefficients from a forward store, and now caches structural builds via `structural_hash_from_config` + `clear_threeplane_optics_cache` (opt-out env flag `DLUXSHERA_THREEPLANE_CACHE_DISABLED`).
+- **Binder (canonical model object):** `SheraThreePlaneBinder` now owns a forward-style `ParamSpec`, a base forward store with deriveds refreshed, and constructs its `SystemGraph` eagerly. `.model(store_delta)` is the sole public entry point; `.forward` has been removed. Bindings are **mostly immutable (Option A)**—use `.with_store(...)` to derive new binders rather than mutating in-place. Binder treats SystemGraph as an internal detail (Binder → Graph → builders) and merges store deltas against the stored forward base.
+  - Option A (implemented): static binder captured in JAX closures; dynamic behaviour comes from `store_delta` / θ overlays. Example usage:
+    ```python
+    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
+    psf = binder.model()
+    psf_delta = binder.model(delta_store)
+    binder2 = binder.with_store(new_store)
+    ```
+  - Option B (documented only): mutable binder updating cfg/base store in-place was rejected due to JIT/static-arg friendliness and legacy immutability expectations.
+- **Graph layer:** `SystemGraph` is now constructed eagerly and owned by Binder when `use_system_graph=True`; execution reuses the optics builder (and its structural-hash cache) and Alpha Cen source inside a lightweight `evaluate(outputs=("psf",))` call. Graph remains single-node but mirrors binder output for smoke/regression tests.
 
 ---
 
@@ -173,9 +181,9 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ **Inference parameter packing**: `pack_params`/`unpack_params` with tests.
 - ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.
 - ✅ **ThreePlaneBuilder (structural hash/cache)**: Structural subset documented, deterministic hash added, cache + clear helper in builder with opt-out env flag.
-- ⚠️ **ThreePlaneBinder (phase/sampling bind)**: Binder exists; clarify plate-scale policy and enforce derived resolution.
-- ⚠️ **Canonical loss wiring**: New binder-based loss implemented; migrate examples once SystemGraph exists.
-- ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; next steps are caching, multi-node wiring, and derived resolution enforcement.
+- ✅ **ThreePlaneBinder (phase/sampling bind)**: Binder is the canonical, mostly immutable model; owns an eager SystemGraph, uses forward-style base stores with deriveds refreshed, and exposes `.model(store_delta)` as the public API.
+- ✅ **Canonical loss wiring**: Binder-based image NLL helpers updated to forward-style stores and SystemGraph ownership; examples are being migrated toward the new interface.
+- ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; eager construction now lives under Binder ownership (caching/derived resolution hooks still future work).
 
 **P1 — Docs, demos, and scope-aware transforms**
 - ✅ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
