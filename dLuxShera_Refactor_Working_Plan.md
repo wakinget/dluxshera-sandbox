@@ -395,7 +395,204 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - Re-run binder/graph smoke tests for both systems after refactors; update docs to emphasize immutability/JAX constraints and system identity.
 
 
-## 22) Parking Lot
+## 22) Documentation roadmap for dLuxShera
+
+This roadmap sketches the documentation “stack” we want for dLuxShera, how the pieces fit together, and where they live in the repo. It’s meant to guide incremental work rather than be implemented all at once.
+
+High-level goals
+----------------
+
+- Provide multiple entry points for different audiences:
+  - New users who just want to run a demo.
+  - Collaborators who need the conceptual model design.
+  - Developers who need to understand ParamSpec/ParameterStore, Binder, SystemGraph, and inference.
+- Separate conceptual model design from implementation details:
+  - Concept docs explain “how the model thinks about the world”.
+  - Architecture/API docs explain “how this is encoded in code”.
+- Keep dev-facing planning material (Working Plan, design notes) clearly separated from user-facing docs, but cross-linked.
+- Make it easy to navigate: each doc points “up” to context and “down” to details.
+
+Proposed doc families
+---------------------
+
+We’ll organise docs into a few coherent families:
+
+1. Top-level orientation  
+2. Conceptual model design  
+3. Architecture & system design  
+4. Tutorials & workflows  
+5. Developer & planning docs (including the Working Plan)  
+6. API & reference (later / optional automation)
+
+Each family is described below with suggested filenames and content boundaries.
+
+1) Top-level orientation
+------------------------
+
+Doc: README.md (root)
+
+Audience: Anyone landing on the repo.
+
+Purpose:
+- Briefly answer:
+  - What is dLuxShera?
+  - What problem does it solve (Shera/TOLIMAN astrometric modeling)?
+  - How does it relate to dLux/dLuxToliman and JAX?
+- Provide a “choose your own path” section linking into docs:
+  - Run the canonical astrometry demo
+  - Understand the modeling pipeline
+  - Modify or extend the code
+
+Status: Exists; will be updated once the docs tree is in place.
+
+2) Conceptual model design
+--------------------------
+
+Doc: docs/modeling_overview.md (new)
+
+Audience: Model users and colleagues (including non-Python folks) who need the “big picture”.
+
+Purpose:
+- Provide a high-level overview of the modeling pipeline:
+  cfg → forward_spec → forward_store (+derived) → Binder/SystemGraph → PSF → loss(θ) → optimisation → eigenmodes → priors.
+- Explain:
+  - Configs and point designs  
+  - Forward vs inference spaces  
+  - ParameterStore: primitives vs derived  
+  - Binder as the canonical generative model object  
+  - Pure-θ vs eigen-θ optimisation
+  - Where priors fit (MAP or PPL)
+- Include simple diagrams or flow charts.
+
+3) Architecture & system design
+-------------------------------
+
+These documents zoom in one level to describe how subsystems work in code.
+
+A. docs/architecture/params_and_store.md  
+   Covers:
+   - ParamField & ParamSpec (defaults, primitive/derived flags, forward vs inference)  
+   - ParameterStore behavior (from_spec_defaults, replace, validation)  
+   - Derived transforms & policy  
+   - subset(keys) vs without(keys)  
+   - Zernike basis handling tied to config
+
+B. docs/architecture/binder_and_graph.md  
+   Covers:
+   - SheraThreePlaneBinder as the primary model object  
+   - SystemGraph as the internal DAG  
+   - Structural hash + optics builder caching  
+   - How binder.model(store_delta) works step-by-step  
+   - Relationship to legacy SheraThreePlane_Model
+
+C. docs/architecture/inference_and_loss.md  
+   Covers:
+   - InferenceSpec + infer_keys  
+   - θ packing/unpacking  
+   - gaussian_image_nll (primitive)  
+   - make_binder_image_nll_fn (Binder bridge)  
+   - MAP losses and PriorSpec  
+   - run_shera_image_gd_basic
+
+D. docs/architecture/eigenmodes.md  
+   Covers:
+   - θ → FIM → EigenThetaMap → z-space  
+   - Whitening/truncation  
+   - How eigen-based optimisation wraps the same Binder-based θ-loss  
+   - Conceptual guarantees and example diagrams
+
+4) Tutorials & workflows
+------------------------
+
+Narrative, step-by-step guides for using the system.
+
+Initial tutorial: docs/tutorials/canonical_astrometry_demo.md  
+- Walk through the canonical demo script:
+  1. Build config, forward spec/store, truth PSF  
+  2. Build inference_spec + infer_keys  
+  3. Create Binder, build NLL  
+  4. Add priors (dict or PriorSpec)  
+  5. Run pure-θ GD  
+  6. Run eigen-θ GD  
+  7. Plot and inspect recovered parameters  
+
+Later tutorials may include:
+- Adding new parameters  
+- Defining new optical variants  
+- Trying different noise models  
+
+5) Developer & planning docs
+----------------------------
+
+These are internal docs for maintainers.
+
+A. Move Working Plan into docs/dev/  
+   - Source of truth for planning and design decisions  
+   - Lives under docs/dev/ to keep root clean  
+   - Cross-linked from architecture docs where appropriate
+
+B. docs/dev/code_structure.md  
+   - Summarises the repo layout  
+   - Links major modules to the relevant architecture docs  
+   - Helps onboarding new developers
+
+C. CONTRIBUTING.md (optional)  
+   - Test instructions  
+   - Coding style  
+   - How to add parameters or system variants  
+
+6) API & reference docs (optional / long-term)
+----------------------------------------------
+
+Potential later addition under docs/api/:
+- Manually curated or auto-generated references for key modules  
+- Not needed immediately; can wait until the architecture stabilises further  
+
+Suggested directory layout
+--------------------------
+
+README.md  
+docs/
+  modeling_overview.md  
+  architecture/
+    params_and_store.md  
+    binder_and_graph.md  
+    inference_and_loss.md  
+    eigenmodes.md  
+  tutorials/
+    canonical_astrometry_demo.md  
+  dev/
+    dLuxShera_Refactor_Working_Plan.md  
+    code_structure.md  
+  api/   (optional, future)
+
+Implementation phases
+---------------------
+
+Phase 1 — Skeleton & migration  
+- Create docs/ tree with empty/skeletal files  
+- Move Working Plan into docs/dev/  
+- Update README.md to link into docs  
+
+Phase 2 — Core conceptual & architecture docs  
+- Fill in modeling_overview.md  
+- Fill in params_and_store.md and binder_and_graph.md  
+- Draft inference_and_loss.md  
+
+Phase 3 — Tutorials & refinements  
+- Write canonical_astrometry_demo.md  
+- Flesh out eigenmodes.md  
+- Add code_structure.md (optional)
+
+Phase 4 — API/reference (future)  
+- Add docs/api/ if desired  
+- Consider Sphinx/mkdocs automation later  
+
+This roadmap gives us a structured, navigable documentation ecosystem: a conceptual top layer, a clear architecture layer, tutorial workflows, and well-isolated dev docs—with the Working Plan now appropriately placed under docs/dev/.
+
+---
+
+## 23) Parking Lot
 
 - Two/Four-plane optics variant design and transforms.
 - Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
