@@ -566,12 +566,14 @@ def run_simple_gd(
         return theta, opt_state, loss
 
     losses = []
+    theta_history = []
 
     for _ in range(num_steps):
         theta, opt_state, loss = _step(theta, opt_state)
         losses.append(loss)
+        theta_history.append(theta)
 
-    history = {"loss": np.stack(losses)}
+    history = {"loss": np.stack(losses), "theta": np.stack(theta_history)}
     return theta, history
 
 
