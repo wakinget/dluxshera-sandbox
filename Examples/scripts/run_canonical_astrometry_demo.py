@@ -149,8 +149,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         {
             "binary.separation_as": 9.5,
             "binary.position_angle_deg": 80.0,
-            "binary.x_position": 0.50,
-            "binary.y_position": -0.25,
+            "binary.x_position_as": 0.50,
+            "binary.y_position_as": -0.25,
             # Photon budget controls
             "binary.spectral_flux_density": 1.7e17,
             "imaging.exposure_time_s": 1.0,
@@ -162,6 +162,14 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     plate_scale = resolve_derived("system.plate_scale_as_per_pix", forward_store)
     log_flux = resolve_derived("binary.log_flux_total", forward_store)
 
+    forward_store = forward_store.replace(
+        {
+            "binary.log_flux_total": log_flux,
+            "system.plate_scale_as_per_pix": plate_scale,
+            "binary.contrast": 3.2,
+        }
+    )
+
     # Build the inference-space truth store and inject astrometric / wavefront values
     truth_store = ParameterStore.from_spec_defaults(inference_spec)
     primary_zernikes = 5.0 * rng.standard_normal(len(cfg.primary_noll_indices))
@@ -171,11 +179,11 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         {
             "binary.separation_as": forward_store.get("binary.separation_as"),
             "binary.position_angle_deg": forward_store.get("binary.position_angle_deg"),
-            "binary.x_position": forward_store.get("binary.x_position"),
-            "binary.y_position": forward_store.get("binary.y_position"),
-            "binary.log_flux_total": log_flux,
-            "binary.contrast": 3.2,
-            "system.plate_scale_as_per_pix": plate_scale,
+            "binary.x_position_as": forward_store.get("binary.x_position_as"),
+            "binary.y_position_as": forward_store.get("binary.y_position_as"),
+            "binary.log_flux_total": forward_store.get("binary.log_flux_total"),
+            "binary.contrast": forward_store.get("binary.contrast"),
+            "system.plate_scale_as_per_pix": forward_store.get("system.plate_scale_as_per_pix"),
             "primary.zernike_coeffs": primary_zernikes,
             "secondary.zernike_coeffs": secondary_zernikes,
         }
@@ -185,8 +193,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     # 3. Generate synthetic PSFs and show how parameter updates regenerate data
     # ------------------------------------------------------------------
     print("Step 3: Generating synthetic PSFs from the refactor stack...")
-    binder = SheraThreePlaneBinder(cfg, inference_spec, truth_store)
-    truth_psf = np.array(binder.forward(truth_store))
+    binder = SheraThreePlaneBinder(cfg, forward_spec, forward_store)
+    truth_psf = np.array(binder.model())
     # binder.forward(store) merges the given store into the internal base store,
     # then builds a new source based on the store, composes a dl.Telescope object
     # using the new source, the internal optics, and the internal detector, then
@@ -202,13 +210,13 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         truth_psf = truth_psf + rng.normal(scale=0.005, size=truth_psf.shape)
 
     # Demonstrate that changing parameters regenerates a different PSF
-    variant_store = truth_store.replace(
+    variant_delta = ParameterStore.from_dict(
         {
-            "binary.separation_as": truth_store.get("binary.separation_as") + 1.0,
-            "primary.zernike_coeffs": truth_store.get("primary.zernike_coeffs") + 2.0,
+            "binary.separation_as": forward_store.get("binary.separation_as") + 1.0,
+            "primary.zernike_coeffs": forward_store.get("primary.zernike_coeffs") + 2.0,
         }
     )
-    variant_psf = np.array(binder.forward(variant_store))
+    variant_psf = np.array(binder.model(variant_delta))
 
     # ------------------------------------------------------------------
     # 4. Define inference keys and tight priors around the truth
@@ -217,8 +225,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     infer_keys: Tuple[ParamKey, ...] = (
         "binary.separation_as",
         "binary.position_angle_deg",
-        "binary.x_position",
-        "binary.y_position",
+        "binary.x_position_as",
+        "binary.y_position_as",
         "binary.log_flux_total",
         "binary.contrast",
         "system.plate_scale_as_per_pix",
@@ -227,8 +235,8 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     priors: Mapping[ParamKey, object] = {
         "binary.separation_as": 0.01,
         "binary.position_angle_deg": 0.5,
-        "binary.x_position": 0.005,
-        "binary.y_position": 0.005,
+        "binary.x_position_as": 0.005,
+        "binary.y_position_as": 0.005,
         "binary.log_flux_total": 0.05,
         "binary.contrast": 0.05,
         "system.plate_scale_as_per_pix": 0.002,
@@ -248,17 +256,18 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
         else:
             updates[key] = float(true_val) + float(rng.normal(scale=sigma, size=()))
     init_store = truth_store.replace(updates)
+    init_forward_store = forward_store.replace(updates)
 
     # ------------------------------------------------------------------
     # 6. Build binder-based loss with priors and run gradient descent
     # ------------------------------------------------------------------
     print("Step 6: Building loss and running binder/SystemGraph-based gradient descent...")
     var_image = np.ones_like(truth_psf) * 0.01
-    sub_spec = inference_spec.subset(infer_keys)
+    sub_spec = forward_spec.subset(infer_keys)
     loss_nll, theta0 = make_binder_image_nll_fn(
         cfg,
-        inference_spec,
-        init_store,
+        forward_spec,
+        init_forward_store,
         infer_keys,
         truth_psf,
         var_image,
@@ -268,7 +277,7 @@ def main(fast: bool = False, save_plots: bool = False, add_noise: bool = False) 
     )
 
     def loss_with_prior(theta: np.ndarray) -> np.ndarray:
-        store_theta = store_unpack_params(sub_spec, theta, init_store)
+        store_theta = store_unpack_params(sub_spec, theta, init_forward_store)
         penalty = jnp.array(0.0)
         for key in infer_keys:
             sigma = priors[key]

@@ -358,8 +358,8 @@ def make_image_nll_fn(
 
 def make_binder_image_nll_fn(
     cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
-    base_store: ParameterStore,
+    forward_spec: ParamSpec,
+    base_forward_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
     data: np.ndarray,
     var: np.ndarray,
@@ -372,28 +372,24 @@ def make_binder_image_nll_fn(
     Canonical θ-space image NLL using SheraThreePlaneBinder.
 
     This is the Binder-based sibling of `make_image_nll_fn`, but instead of
-    rebuilding SheraThreePlane_Model on each call, it:
-
-      - builds static optics + detector once via SheraThreePlaneBinder
-      - only rebuilds the source from a ParameterStore inside the loss
-      - uses image-level Gaussian/Poisson NLL kernels directly
-
-    The `use_system_graph` flag optionally routes forward execution through a
-    minimal SystemGraph wrapper instead of directly calling the Binder. This
-    is a no-op for outputs but exercises the new graph layer.
+    rebuilding SheraThreePlane_Model on each call, it treats
+    ``SheraThreePlaneBinder`` as the canonical generative model. The binder is
+    constructed with a *forward-style* spec + base store (derived values
+    pre-populated) and optionally owns a SystemGraph internally.
     """
     from ..core.binder import SheraThreePlaneBinder
-    from ..graph.system_graph import build_threeplane_system_graph
 
-    # 1) Build a static Binder and/or SystemGraph
-    binder = SheraThreePlaneBinder(cfg, inference_spec, base_store)
-    graph = None
-    if use_system_graph:
-        graph = build_threeplane_system_graph(cfg, inference_spec, base_store)
+    # 1) Build a static Binder with the requested execution backend
+    binder = SheraThreePlaneBinder(
+        cfg,
+        forward_spec,
+        base_forward_store,
+        use_system_graph=use_system_graph,
+    )
 
-    # 2) Subset spec + build initial θ from base_store
-    sub_spec = inference_spec.subset(infer_keys)
-    theta0 = store_pack_params(sub_spec, base_store, dtype=data.dtype)
+    # 2) Subset spec + build initial θ from base store
+    sub_spec = forward_spec.subset(infer_keys)
+    theta0 = store_pack_params(sub_spec, base_forward_store, dtype=data.dtype)
 
     # 3) Choose an image-level NLL kernel
     data = np.asarray(data)
@@ -416,16 +412,11 @@ def make_binder_image_nll_fn(
             f"(expected 'gaussian' or 'poisson')."
         )
 
-    # 4) Define θ → loss(θ) using binder.forward(...)
+    # 4) Define θ → loss(θ) using binder.model(...)
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         # θ → ParameterStore overlayed on base_store
-        store_theta = store_unpack_params(sub_spec, theta, base_store)
-        # Binder merges store_theta into its base_store internally; optionally
-        # run through the SystemGraph to exercise the new execution path.
-        if graph is not None:
-            model_image = graph.forward(store_theta)
-        else:
-            model_image = binder.forward(store_theta)
+        store_theta = store_unpack_params(sub_spec, theta, base_forward_store)
+        model_image = binder.model(store_theta)
         return image_nll(model_image, data, var)
 
     return loss_fn, theta0
@@ -434,9 +425,9 @@ def make_binder_image_nll_fn(
 def loss_canonical(
     theta,
     cfg,
-    inference_spec,
+    forward_spec,
     infer_keys,
-    base_store,
+    base_forward_store,
     data,
     var,
     *,
@@ -452,12 +443,13 @@ def loss_canonical(
         Flat parameter vector in the ordering defined by ``infer_keys``.
     cfg :
         SheraThreePlaneConfig describing the structural optical configuration.
-    inference_spec : ParamSpec
-        Full ParamSpec describing *all* parameters in the model, both inferred
-        and fixed. This is what the SheraThreePlaneBinder validates against.
+    forward_spec : ParamSpec
+        Forward-model ParamSpec describing *all* parameters in the model, both
+        inferred and fixed. This is what the SheraThreePlaneBinder validates
+        against.
     infer_keys : tuple[str, ...]
         Keys of the parameters that live in θ-space (and their ordering).
-    base_store : ParameterStore
+    base_forward_store : ParameterStore
         Baseline ParameterStore containing fixed parameters and nominal values
         for the inferred ones.
     data : jax.Array
@@ -476,8 +468,8 @@ def loss_canonical(
     #   - Gaussian / Poisson image NLL
     loss_fn, _theta0 = make_binder_image_nll_fn(
         cfg,
-        inference_spec,   # FULL spec here
-        base_store,
+        forward_spec,   # FULL spec here
+        base_forward_store,
         infer_keys,
         data,
         var,
@@ -549,7 +541,7 @@ def run_simple_gd(
 
 def run_image_gd(
     cfg,
-    inference_spec,
+    forward_spec,
     store_init,
     infer_keys,
     data,
@@ -567,7 +559,7 @@ def run_image_gd(
     # Build canonical Binder-based loss and θ0
     loss_theta, theta0 = make_binder_image_nll_fn(
         cfg,
-        inference_spec,
+        forward_spec,
         store_init,
         infer_keys,
         data,
@@ -585,7 +577,7 @@ def run_image_gd(
     )
 
     # Map final θ back into a ParameterStore
-    sub_spec = inference_spec.subset(infer_keys)
+    sub_spec = forward_spec.subset(infer_keys)
     store_final = store_unpack_params(sub_spec, theta_final, store_init)
 
     return theta_final, store_final, history
@@ -632,8 +624,8 @@ def fim_theta(
 
 def fim_theta_shera(
     cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
-    base_store: ParameterStore,
+    forward_spec: ParamSpec,
+    base_forward_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
     data: np.ndarray,
     var: np.ndarray,
@@ -649,9 +641,9 @@ def fim_theta_shera(
     ----------
     cfg :
         SheraThreePlaneConfig (e.g. SHERA_TESTBED_CONFIG).
-    inference_spec :
-        ParamSpec describing inference-level keys.
-    base_store :
+    forward_spec :
+        Forward ParamSpec describing model keys.
+    base_forward_store :
         ParameterStore providing the baseline parameter values (truth
         or current best-fit).
     infer_keys :
@@ -676,8 +668,8 @@ def fim_theta_shera(
     # Reuse the canonical Binder-based NLL closure
     loss_fn, theta0 = make_binder_image_nll_fn(
         cfg,
-        inference_spec,
-        base_store,
+        forward_spec,
+        base_forward_store,
         infer_keys,
         data,
         var,

@@ -11,8 +11,9 @@ import numpyro.distributions as dist
 import optax
 
 from ..optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
-from ..params.spec import ParamSpec, ParamKey, build_inference_spec_basic
-from ..params.store import ParameterStore
+from ..params.spec import ParamSpec, ParamKey, build_forward_model_spec_from_config
+from ..params.store import ParameterStore, refresh_derived
+from ..params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
 from .optimization import (
     EigenThetaMap,
     fim_theta,
@@ -94,18 +95,22 @@ def run_shera_image_gd_basic(
         Dict with at least:
           - "loss": 1D array of loss values per step.
     """
-    # 1) Build a “basic” inference spec and default store
-    inference_spec: ParamSpec = build_inference_spec_basic()
-    store_init: ParameterStore = ParameterStore.from_spec_defaults(inference_spec)
+    # 1) Build a forward spec and default store (deriveds populated)
+    forward_spec: ParamSpec = build_forward_model_spec_from_config(cfg)
+    store_init: ParameterStore = ParameterStore.from_spec_defaults(forward_spec)
 
     # 2) Apply user-provided initial overrides, if any
     if init_overrides is not None:
         store_init = store_init.replace(init_overrides)
 
+    store_init = refresh_derived(
+        store_init, forward_spec, TRANSFORMS, system_id=DEFAULT_SYSTEM_ID
+    )
+
     # 3) Delegate to the Binder-based θ-space GD engine
     theta_final, store_final, history = run_image_gd(
         cfg,
-        inference_spec,
+        forward_spec,
         store_init,
         infer_keys,
         data,
@@ -135,8 +140,8 @@ def run_shera_image_gd_eigen(
     loss_fn: Optional[callable] = None,
     theta0: Optional[jnp.ndarray] = None,
     cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG,
-    inference_spec: Optional[ParamSpec] = None,
-    base_store: Optional[ParameterStore] = None,
+    forward_spec: Optional[ParamSpec] = None,
+    base_forward_store: Optional[ParameterStore] = None,
     infer_keys: Sequence[ParamKey] = (
         "binary.separation_as",
         "binary.x_position_as",
@@ -174,9 +179,9 @@ def run_shera_image_gd_eigen(
     theta0 : array-like, optional
         Initial θ vector. Required if ``loss_fn`` is provided directly;
         otherwise inferred from ``make_binder_image_nll_fn``.
-    cfg / inference_spec / base_store / infer_keys / data / var :
+    cfg / forward_spec / base_forward_store / infer_keys / data / var :
         Inputs passed through to ``make_binder_image_nll_fn`` when
-        ``loss_fn`` is not provided. ``base_store`` defaults to
+        ``loss_fn`` is not provided. ``base_forward_store`` defaults to
         ``ParameterStore.from_spec_defaults`` and accepts the same
         ``infer_keys`` defaults as ``run_shera_image_gd_basic``.
     num_steps : int
@@ -214,15 +219,22 @@ def run_shera_image_gd_eigen(
         if data is None or var is None:
             raise ValueError("data and var must be provided when loss_fn is None")
 
-        if inference_spec is None:
-            inference_spec = build_inference_spec_basic()
-        if base_store is None:
-            base_store = ParameterStore.from_spec_defaults(inference_spec)
+        if forward_spec is None:
+            forward_spec = build_forward_model_spec_from_config(cfg)
+        if base_forward_store is None:
+            base_forward_store = ParameterStore.from_spec_defaults(forward_spec)
+
+        base_forward_store = refresh_derived(
+            base_forward_store,
+            forward_spec,
+            TRANSFORMS,
+            system_id=DEFAULT_SYSTEM_ID,
+        )
 
         loss_fn, theta0 = make_binder_image_nll_fn(
             cfg,
-            inference_spec,
-            base_store,
+            forward_spec,
+            base_forward_store,
             infer_keys,
             data,
             var,

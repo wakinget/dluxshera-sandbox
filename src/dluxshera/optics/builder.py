@@ -157,8 +157,11 @@ def build_shera_threeplane_optics(
 
     if store is not None:
         # Optionally validate that the store keys are consistent with the spec.
+        # Forward-model stores may legitimately contain derived values, so we
+        # allow them here to keep the builder compatible with forward-style
+        # binders.
         if spec is not None:
-            store = store.validate_against(spec)
+            store = store.validate_against(spec, allow_derived=True)
 
         # Expected lengths based on the config's Noll index tuples.
         n_m1 = len(cfg.primary_noll_indices) if cfg.primary_noll_indices else 0

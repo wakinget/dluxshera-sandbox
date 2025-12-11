@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Optional
 
 import jax.numpy as jnp
 import dLux as dl
 
+from ..graph.system_graph import build_shera_system_graph
 from ..optics.config import SheraThreePlaneConfig
 from ..optics.builder import build_shera_threeplane_optics
-from ..params.spec import ParamSpec, ParamKey
+from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
 from .universe import build_alpha_cen_source
 
@@ -17,105 +18,126 @@ from .universe import build_alpha_cen_source
 @dataclass
 class SheraThreePlaneBinder:
     """
-    Lightweight "binder" for the Shera three-plane system.
+    Canonical generative model for the Shera three-plane system.
 
-    Responsibilities
-    ----------------
-    - Hold a *static* optical system and detector built from a SheraThreePlaneConfig.
-    - Track a "base" ParameterStore providing default values for all keys.
-    - Given a (possibly partial) ParameterStore of inference parameters,
-      merge it into the base store and produce a model image via dLux.
+    Binder is the successor to the legacy ``SheraThreePlane_Model`` facade and
+    is intentionally treated as **mostly immutable**: instantiate it once for a
+    given configuration + base forward store (with deriveds populated), then use
+    ``.model(store_delta)`` to evaluate PSFs without mutating internal state.
 
-    This is intentionally *not* tied to the legacy SheraThreePlane_Model class.
-    It works directly with:
-      - SheraThreePlaneConfig  (geometry, bandpass, sampling)
-      - ParameterStore         (numeric parameters)
-      - AlphaCen source builder
-      - SheraThreePlaneSystem  (via build_shera_threeplane_optics)
+    Key properties
+    --------------
+    - Holds the Shera config, forward ParamSpec, and a *forward-style* base
+      ParameterStore (derived values already populated).
+    - Eagerly constructs and owns a SystemGraph when ``use_system_graph=True``;
+      otherwise follows a direct optics + source builder path.
+    - ``.model()`` is the primary API and is intentionally lightweight: merge
+      ``store_delta`` onto the base store, then evaluate either the graph or the
+      direct builder path.
     """
 
     cfg: SheraThreePlaneConfig
-    inference_spec: ParamSpec
-    base_store: ParameterStore
+    forward_spec: ParamSpec
+    base_forward_store: ParameterStore
+    use_system_graph: bool = True
 
-    # Static components of the forward model
-    optics: dl.OpticalSystem
-    detector: dl.LayeredDetector
+    # Internal graph/detector references (prepared eagerly)
+    _graph: Optional[object] = None
+    _detector: Optional[dl.LayeredDetector] = None
 
     def __init__(
         self,
         cfg: SheraThreePlaneConfig,
-        inference_spec: ParamSpec,
-        base_store: ParameterStore,
+        forward_spec: ParamSpec,
+        base_forward_store: ParameterStore,
+        *,
+        use_system_graph: bool = True,
     ) -> None:
-        # Store config + spec for later reference
         self.cfg = cfg
-        self.inference_spec = inference_spec
+        self.forward_spec = forward_spec
+        self.use_system_graph = bool(use_system_graph)
 
-        # Optional safety: ensure all keys in the store are known to the spec.
-        # (You can drop this if it ever feels too strict.)
-        base_store = base_store.validate_against(inference_spec)
-        self.base_store = base_store
+        # Validate and freeze the base forward store; derived values are allowed
+        # because forward_spec includes them explicitly.
+        self.base_forward_store = base_forward_store.validate_against(
+            forward_spec, allow_derived=True
+        )
 
-        # Build *static* optics once, using the base_store's Zernike coeffs
-        # (or None) if present. This avoids re-constructing SheraThreePlaneSystem
-        # inside jitted loss/gradient loops.
-        optics = build_shera_threeplane_optics(cfg, store=base_store, spec=inference_spec)
-
-        # Simple detector: same pattern as SheraThreePlane_Model
-        # You can tweak this if your detector stack grows more complex later.
-        detector = dl.LayeredDetector(
+        # Detector is static for this binder; reuse across evaluations and
+        # share with the SystemGraph when enabled.
+        self._detector = dl.LayeredDetector(
             layers=[("downsample", dl.Downsample(cfg.oversample))]
         )
 
-        self.optics = optics
-        self.detector = detector
+        self._graph = None
+        if self.use_system_graph:
+            self._graph = build_shera_system_graph(
+                cfg=self.cfg,
+                forward_spec=self.forward_spec,
+                base_forward_store=self.base_forward_store,
+                detector=self._detector,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _merge_store(self, store: ParameterStore) -> ParameterStore:
-        """
-        Merge a (possibly partial) store into the base store.
+    def _merge_store(self, store_delta: Optional[ParameterStore]) -> ParameterStore:
+        """Merge a (possibly partial) store into the base forward store."""
 
-        Any keys present in `store` override the base; all other keys
-        are inherited from `base_store`.
-        """
-        return self.base_store.replace(store.as_dict())
+        if store_delta is None:
+            return self.base_forward_store
+
+        store_delta = store_delta.validate_against(
+            self.forward_spec,
+            allow_missing=True,
+            allow_extra=False,
+            allow_derived=True,
+        )
+        return self.base_forward_store.replace(store_delta.as_dict())
+
+    def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
+        optics = build_shera_threeplane_optics(
+            self.cfg, store=eff_store, spec=self.forward_spec
+        )
+        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
+        telescope = dl.Telescope(
+            source=source,
+            optics=optics,
+            detector=self._detector,
+        )
+        return telescope.model()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def forward(self, store: ParameterStore) -> jnp.ndarray:
+    def model(self, store_delta: Optional[ParameterStore] = None) -> jnp.ndarray:
         """
-        Compute a model image for the given parameter store.
+        Evaluate the Shera three-plane PSF for an optional store overlay.
 
-        Parameters
-        ----------
-        store :
-            ParameterStore containing updated values for some subset of
-            inference keys (e.g. binary separation, centroid, flux, etc.).
-            Any missing keys fall back to the values in `base_store`.
-
-        Returns
-        -------
-        image : jnp.ndarray
-            Model image array with the same shape as produced by the
-            underlying dLux Telescope (PSF/image plane).
+        ``store_delta`` is merged onto the binder's base forward store; when no
+        overlay is provided the base store is used directly. This method is the
+        canonical public API and replaces the legacy ``.forward`` entry point.
         """
-        eff_store = self._merge_store(store)
 
-        # Build a fresh Alpha Cen source for the updated parameters.
-        # Bandpass / n_lambda come from the static cfg, astrometry/flux
-        # come from eff_store.
-        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
+        eff_store = self._merge_store(store_delta)
 
-        # Compose telescope and evaluate model
-        telescope = dl.Telescope(
-            source=source,
-            optics=self.optics,
-            detector=self.detector,
+        if self.use_system_graph and self._graph is not None:
+            return self._graph.evaluate(eff_store, outputs=("psf",))
+
+        return self._direct_model(eff_store)
+
+    # ------------------------------------------------------------------
+    # Mostly immutable helpers
+    # ------------------------------------------------------------------
+
+    def with_store(self, new_base_store: ParameterStore) -> "SheraThreePlaneBinder":
+        """Return a new Binder sharing cfg/spec but with a different base store."""
+
+        return SheraThreePlaneBinder(
+            cfg=self.cfg,
+            forward_spec=self.forward_spec,
+            base_forward_store=new_base_store,
+            use_system_graph=self.use_system_graph,
         )
-        return telescope.model()
