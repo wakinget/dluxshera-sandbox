@@ -6,9 +6,10 @@ import datetime as _dt
 import io
 import json
 import sys
+from collections import defaultdict
 from dataclasses import MISSING, is_dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from devtools.introspection import print_tree, build_project_index
 
@@ -319,7 +320,7 @@ def _summarize_param_spec(spec: Any) -> Dict[str, Any]:
     primitives: List[str] = []
     derived: List[str] = []
     others: List[str] = []
-    dependency_sample: List[Dict[str, Any]] = []
+    derived_dependencies: List[Dict[str, Any]] = []
 
     for field in fields_iter:
         key = getattr(field, "key", None)
@@ -339,22 +340,25 @@ def _summarize_param_spec(spec: Any) -> Dict[str, Any]:
                 others.append(key)
 
         depends_on = getattr(field, "depends_on", ()) or ()
-        if depends_on and len(dependency_sample) < 8:
-            dependency_sample.append(
+        if kind == "derived":
+            derived_dependencies.append(
                 {"key": key, "depends_on": list(depends_on)}
             )
 
-    def _sample(values: List[str], *, limit: int = 8) -> List[str]:
+    def _sample(values: List[str], *, limit: int = 10) -> List[str]:
         return values[:limit]
 
     return {
         "count": total,
+        "primitive_count": len(primitives),
+        "derived_count": len(derived),
+        "other_count": len(others),
         "kinds": by_kind,
         "groups": by_group,
         "primitive_keys_sample": _sample(primitives),
         "derived_keys_sample": _sample(derived),
         "other_keys_sample": _sample(others),
-        "dependencies_sample": dependency_sample,
+        "derived_dependencies": derived_dependencies,
     }
 
 
@@ -366,28 +370,55 @@ def _collect_param_specs(repo_root: Path) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import param spec modules: {exc!r}"}
 
-    summaries: Dict[str, Any] = {"modules": ["dluxshera.params.spec"]}
+    specs: List[Dict[str, Any]] = []
 
-    def _safe_call(name: str, fn, *args, **kwargs):
+    spec_builders: Iterable[Dict[str, Any]] = [
+        {
+            "name": "inference_basic",
+            "builder": params_spec.build_inference_spec_basic,
+            "kwargs": {},
+            "system_id": "shera_threeplane",
+            "category": "inference",
+        },
+        {
+            "name": "forward_threeplane",
+            "builder": params_spec.build_forward_model_spec_from_config,
+            "kwargs": {"cfg": SheraThreePlaneConfig()},
+            "system_id": "shera_threeplane",
+            "category": "forward",
+        },
+        {
+            "name": "forward_twoplane",
+            "builder": params_spec.build_shera_twoplane_forward_spec_from_config,
+            "kwargs": {"cfg": SheraTwoPlaneConfig()},
+            "system_id": "shera_twoplane",
+            "category": "forward",
+        },
+    ]
+
+    for entry in spec_builders:
+        spec_meta: Dict[str, Any] = {
+            "name": entry.get("name"),
+            "system_id": entry.get("system_id"),
+            "category": entry.get("category"),
+        }
         try:
-            spec_obj = fn(*args, **kwargs)
-            summaries[name] = _summarize_param_spec(spec_obj)
+            builder_fn = entry["builder"]
+            kwargs = entry.get("kwargs", {})
+            spec_obj = builder_fn(**kwargs)
+            spec_meta.update(_summarize_param_spec(spec_obj))
         except Exception as exc:  # pragma: no cover - defensive
-            summaries[name] = {"error": f"{exc!r}"}
+            spec_meta["error"] = f"{exc!r}"
+        specs.append(spec_meta)
 
-    _safe_call("inference_basic", params_spec.build_inference_spec_basic)
-    _safe_call(
-        "forward_threeplane",
-        params_spec.build_forward_model_spec_from_config,
-        SheraThreePlaneConfig(),
-    )
-    _safe_call(
-        "forward_twoplane",
-        params_spec.build_shera_twoplane_forward_spec_from_config,
-        SheraTwoPlaneConfig(),
-    )
+    systems: Dict[str, Any] = {}
+    for spec in specs:
+        sid = spec.get("system_id") or "unspecified"
+        systems.setdefault(sid, {"spec_names": [], "count": 0})
+        systems[sid]["spec_names"].append(spec.get("name"))
+        systems[sid]["count"] += 1
 
-    return summaries
+    return {"modules": ["dluxshera.params.spec"], "specs": specs, "systems": systems}
 
 
 def _collect_transforms(repo_root: Path) -> Dict[str, Any]:
@@ -424,8 +455,8 @@ def _collect_transforms(repo_root: Path) -> Dict[str, Any]:
 
             systems[system_id] = {
                 "count": len(entries),
-                "keys": [e.get("key") for e in entries],
-                "transforms": entries[:12],
+                "transform_keys": [e.get("key") for e in entries],
+                "transforms": entries,
             }
 
         return {
@@ -518,6 +549,27 @@ def _collect_configs_metadata(repo_root: Path) -> Dict[str, Any]:
     }
 
 
+def _collect_demo_metadata(repo_root: Path) -> List[Dict[str, Any]]:
+    demos = [
+        {
+            "script": "Examples/scripts/run_canonical_astrometry_demo.py",
+            "system_id": "shera_threeplane",
+            "param_specs": ["forward_threeplane", "inference_basic"],
+        },
+        {
+            "script": "Examples/scripts/run_twoplane_astrometry_demo.py",
+            "system_id": "shera_twoplane",
+            "param_specs": ["forward_twoplane", "inference_basic"],
+        },
+    ]
+
+    for entry in demos:
+        script_path = repo_root / entry["script"]
+        entry["exists"] = script_path.exists()
+
+    return demos
+
+
 def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
     """Create a concise human-readable Markdown report."""
 
@@ -525,6 +577,7 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
     param_specs = meta.get("param_specs", {})
     transforms = meta.get("transforms", {})
     configs = meta.get("configs", {}).get("configs", []) if isinstance(meta.get("configs", {}), dict) else []
+    demos = meta.get("demos", [])
 
     lines = [
         f"# Context Snapshot ({meta.get('generated_at')})",
@@ -548,39 +601,85 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
             ]
         )
 
-    if param_specs:
+    if isinstance(param_specs, dict) and param_specs.get("specs"):
         lines.append("## Param Specs")
-        for name, data in param_specs.items():
-            if not isinstance(data, dict):
-                continue
-            if "error" in data:
-                lines.append(f"- {name}: ERROR - {data['error']}")
-            else:
-                lines.append(f"- {name}: {data.get('count', 'n/a')} keys")
-        lines.append("")
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for spec in param_specs.get("specs", []):
+            grouped[spec.get("system_id") or "unspecified"].append(spec)
 
-    if transforms:
-        lines.append("## Transforms")
-        if isinstance(transforms, list):
-            lines.append(f"- Total transforms: {len(transforms)}")
-            sample = ", ".join(t.get("key", "?") for t in transforms[:5])
-            if sample:
-                lines.append(f"- Examples: {sample}")
-        elif isinstance(transforms, dict) and "error" in transforms:
-            lines.append(f"- ERROR: {transforms['error']}")
-        elif isinstance(transforms, dict):
-            systems = transforms.get("systems", {})
-            lines.append(f"- Systems: {len(systems)}")
-            for sid, info in systems.items():
+        for system_id in sorted(grouped):
+            system_specs = grouped[system_id]
+            lines.append(f"- System: {system_id} ({len(system_specs)} specs)")
+            for spec in system_specs:
+                if "error" in spec:
+                    lines.append(f"  - {spec.get('name')}: ERROR - {spec['error']}")
+                    continue
+
+                primitive_count = spec.get("primitive_count", 0)
+                derived_count = spec.get("derived_count", 0)
                 lines.append(
-                    f"  - {sid}: {info.get('count', 'n/a')} transforms"
+                    f"  - {spec.get('name')}: {spec.get('count', 'n/a')} keys "
+                    f"({primitive_count} primitive, {derived_count} derived)"
+                )
+
+                primaries = spec.get("primitive_keys_sample") or []
+                if primaries:
+                    ellipsis = " …" if primitive_count > len(primaries) else ""
+                    lines.append(
+                        f"    • primitives: {', '.join(primaries)}{ellipsis}"
+                    )
+
+                derived_entries = spec.get("derived_dependencies", [])
+                if derived_entries:
+                    formatted = []
+                    for entry in derived_entries[:6]:
+                        deps = entry.get("depends_on") or []
+                        dep_str = ", ".join(deps) if deps else "none"
+                        formatted.append(f"{entry.get('key')}: {dep_str}")
+                    remainder = "" if len(derived_entries) <= 6 else " …"
+                    lines.append(f"    • derived: { '; '.join(formatted)}{remainder}")
+
+                groups = spec.get("groups") or {}
+                if groups:
+                    group_str = ", ".join(
+                        f"{name}={count}" for name, count in sorted(groups.items())
+                    )
+                    lines.append(f"    • groups: {group_str}")
+        lines.append("")
+    elif isinstance(param_specs, dict) and param_specs.get("error"):
+        lines.extend(["## Param Specs", f"- ERROR: {param_specs['error']}", ""])
+
+    if isinstance(transforms, dict) and transforms.get("systems"):
+        lines.append("## Transforms")
+        systems = transforms.get("systems", {})
+        for sid, info in sorted(systems.items()):
+            lines.append(f"- System: {sid} ({info.get('count', 'n/a')} transforms)")
+            for entry in info.get("transforms", []):
+                deps = entry.get("depends_on") or []
+                dep_str = ", ".join(deps) if deps else "none"
+                doc = entry.get("doc")
+                doc_str = f" – {doc}" if doc else ""
+                lines.append(
+                    f"  - {entry.get('key')}: depends on {dep_str}{doc_str}"
                 )
         lines.append("")
+    elif isinstance(transforms, dict) and "error" in transforms:
+        lines.extend(["## Transforms", f"- ERROR: {transforms['error']}", ""])
 
     if configs:
         lines.append("## Configs")
         for cfg in configs:
             lines.append(f"- {cfg.get('type')}: {len(cfg.get('fields', []))} fields")
+        lines.append("")
+
+    if demos:
+        lines.append("### Demos and ParamSpecs")
+        for demo in demos:
+            status = "present" if demo.get("exists") else "missing"
+            specs = ", ".join(demo.get("param_specs", []))
+            lines.append(
+                f"- {demo.get('script')}: system {demo.get('system_id')} → {specs} ({status})"
+            )
         lines.append("")
 
     content = "\n".join(lines).rstrip() + "\n"
@@ -655,6 +754,7 @@ def generate_context_snapshot(
     metadata["param_specs"] = _collect_param_specs(repo_root)
     metadata["transforms"] = _collect_transforms(repo_root)
     metadata["configs"] = _collect_configs_metadata(repo_root)
+    metadata["demos"] = _collect_demo_metadata(repo_root)
 
     if generate_markdown:
         try:

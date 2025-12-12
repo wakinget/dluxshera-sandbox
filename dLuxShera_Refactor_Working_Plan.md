@@ -603,6 +603,8 @@ Phase 4 — API/reference (future)
 
 This roadmap gives us a structured, navigable documentation ecosystem: a conceptual top layer, a clear architecture layer, tutorial workflows, and well-isolated dev docs—with the Working Plan now appropriately placed under docs/dev/.
 
+- Devtools context snapshot (devtools/generate_context_snapshot.py) now groups ParamSpecs and transforms by system_id, calling out primitive vs derived keys and transform dependencies in the Markdown summary to keep demos aligned with the active registry.
+
 ---
 
 ## 23) Parking Lot
