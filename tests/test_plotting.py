@@ -5,7 +5,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pytest
 
-from src.dluxshera.plot.plotting import (
+from dluxshera.plot.plotting import (
     choose_subplot_grid,
     plot_parameter_history,
     plot_parameter_history_grid,

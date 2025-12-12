@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as onp
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from src.dluxshera.utils.utils import get_param_scale_and_unit
+from dluxshera.utils.utils import get_param_scale_and_unit
 
 ArrayLike = Union[onp.ndarray, np.ndarray]
 

@@ -1838,7 +1838,7 @@ def pack_params(values_pytree, params, model_template, from_model=False):
     Flatten values into a vector + labels.
     Can handle either ModelParams/SheraThreePlaneParams or a SheraThreePlane_Model.
     """
-    from src.dluxshera.core.modeling import SheraThreePlane_Model # Importing locally avoids a circular import error
+    from dluxshera.core.modeling import SheraThreePlane_Model  # Importing locally avoids a circular import error
     labels = []
     flat_values = []
 

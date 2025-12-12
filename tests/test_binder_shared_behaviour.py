@@ -5,7 +5,7 @@ import pytest
 from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
 from dluxshera.params.store import ParameterStore
-from tests.helpers import make_forward_store
+from .helpers import make_forward_store
 
 
 @pytest.mark.parametrize(

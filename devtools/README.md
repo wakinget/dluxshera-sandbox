@@ -181,6 +181,19 @@ development, debugging, and AI-assisted workflows.
 - The `devtools/` directory *is* version-controlled.  
 - Snapshot folders under `devtools/context_snapshot_*/` are *not* tracked.  
 - Shared logic lives in `introspection.py`.  
-- Scripts under `devtools/` should remain independent of the primary 
+- Scripts under `devtools/` should remain independent of the primary
   `src/dluxshera` package for clean separation of concerns.
+
+---
+
+## 6. Import Hygiene Guardrail
+
+To ensure modules do not rely on `src.*` imports, run:
+
+```bash
+python -m devtools.check_no_src_imports
+```
+
+The script scans tracked Python files (including tests and examples) and exits
+with a non-zero status if any `src.` imports are present.
 
