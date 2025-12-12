@@ -5,11 +5,18 @@ import contextlib
 import datetime as _dt
 import io
 import json
+import sys
 from dataclasses import MISSING, is_dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from devtools.introspection import print_tree, build_project_index
+
+# NOTE: The repository uses a ``src/`` layout (package lives under ``src/dluxshera``).
+# This module intentionally nudges ``sys.path`` to include both the repo root and the
+# ``src/`` directory so that ``python -m devtools.generate_context_snapshot`` works
+# regardless of the current working directory. Imports are treated as best-effort;
+# failures are recorded in the snapshot metadata instead of aborting the run.
 
 
 def _get_repo_root(explicit_root: Optional[str] = None) -> Path:
@@ -31,6 +38,23 @@ def _get_repo_root(explicit_root: Optional[str] = None) -> Path:
     if explicit_root is not None:
         return Path(explicit_root).resolve()
     return Path(__file__).resolve().parents[1]
+
+
+def _ensure_repo_on_sys_path(repo_root: Path) -> None:
+    """Ensure the repo root (and its ``src`` dir) are importable.
+
+    This keeps introspection imports working when running the script directly via
+    ``python -m devtools.generate_context_snapshot`` without an editable install.
+    """
+
+    repo_str = str(repo_root)
+    src_dir = repo_root / "src"
+    src_str = str(src_dir)
+
+    if repo_str not in sys.path:
+        sys.path.insert(0, repo_str)
+    if src_dir.exists() and src_str not in sys.path:
+        sys.path.insert(0, src_str)
 
 
 def _default_snapshot_dir(repo_root: Path) -> Path:
@@ -281,79 +305,136 @@ def _collect_tests_metadata(repo_root: Path) -> Dict[str, Any]:
     return {"by_file": by_file, "by_module": by_module}
 
 
-def _summarize_param_spec(spec: Any) -> List[Dict[str, Any]]:
+def _summarize_param_spec(spec: Any) -> Dict[str, Any]:
     """Compact representation of ParamSpec contents."""
 
-    items: List[Dict[str, Any]] = []
     try:
-        iterator = spec.values() if hasattr(spec, "values") else []
-    except Exception:
-        iterator = []
+        fields_iter = list(spec.values()) if hasattr(spec, "values") else []
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": f"Failed to iterate spec: {exc!r}"}
 
-    for field in iterator:
-        item = {
-            "key": getattr(field, "key", None),
-            "group": getattr(field, "group", None),
-            "kind": getattr(field, "kind", None),
-            "has_default": getattr(field, "default", None) is not None,
-        }
-        depends = getattr(field, "depends_on", ())
-        if depends:
-            item["depends_on"] = list(depends)
-        items.append(item)
-    return items
+    total = len(fields_iter)
+    by_kind: Dict[str, int] = {}
+    by_group: Dict[str, int] = {}
+    primitives: List[str] = []
+    derived: List[str] = []
+    others: List[str] = []
+    dependency_sample: List[Dict[str, Any]] = []
+
+    for field in fields_iter:
+        key = getattr(field, "key", None)
+        kind = getattr(field, "kind", "unknown") or "unknown"
+        group = getattr(field, "group", None)
+
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        if group:
+            by_group[group] = by_group.get(group, 0) + 1
+
+        if key:
+            if kind == "primitive":
+                primitives.append(key)
+            elif kind == "derived":
+                derived.append(key)
+            else:
+                others.append(key)
+
+        depends_on = getattr(field, "depends_on", ()) or ()
+        if depends_on and len(dependency_sample) < 8:
+            dependency_sample.append(
+                {"key": key, "depends_on": list(depends_on)}
+            )
+
+    def _sample(values: List[str], *, limit: int = 8) -> List[str]:
+        return values[:limit]
+
+    return {
+        "count": total,
+        "kinds": by_kind,
+        "groups": by_group,
+        "primitive_keys_sample": _sample(primitives),
+        "derived_keys_sample": _sample(derived),
+        "other_keys_sample": _sample(others),
+        "dependencies_sample": dependency_sample,
+    }
 
 
-def _collect_param_specs() -> Dict[str, Any]:
+def _collect_param_specs(repo_root: Path) -> Dict[str, Any]:
+    _ensure_repo_on_sys_path(repo_root)
     try:
         from dluxshera.params import spec as params_spec
         from dluxshera.optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import param spec modules: {exc!r}"}
 
-    summaries: Dict[str, Any] = {}
+    summaries: Dict[str, Any] = {"modules": ["dluxshera.params.spec"]}
 
     def _safe_call(name: str, fn, *args, **kwargs):
         try:
             spec_obj = fn(*args, **kwargs)
-            summaries[name] = {
-                "count": len(spec_obj) if hasattr(spec_obj, "__len__") else None,
-                "keys": _summarize_param_spec(spec_obj),
-            }
+            summaries[name] = _summarize_param_spec(spec_obj)
         except Exception as exc:  # pragma: no cover - defensive
             summaries[name] = {"error": f"{exc!r}"}
 
     _safe_call("inference_basic", params_spec.build_inference_spec_basic)
-    _safe_call("forward_threeplane", params_spec.build_forward_model_spec_from_config, SheraThreePlaneConfig())
-    _safe_call("forward_twoplane", params_spec.build_shera_twoplane_forward_spec_from_config, SheraTwoPlaneConfig())
+    _safe_call(
+        "forward_threeplane",
+        params_spec.build_forward_model_spec_from_config,
+        SheraThreePlaneConfig(),
+    )
+    _safe_call(
+        "forward_twoplane",
+        params_spec.build_shera_twoplane_forward_spec_from_config,
+        SheraTwoPlaneConfig(),
+    )
 
     return summaries
 
 
-def _collect_transforms() -> Dict[str, Any]:
+def _collect_transforms(repo_root: Path) -> Dict[str, Any]:
+    _ensure_repo_on_sys_path(repo_root)
     try:
+        from dluxshera.params import registry as registry_mod
         from dluxshera.params import transforms  # Registers transforms on import
-        from dluxshera.params.shera_threeplane_transforms import (  # noqa: F401
-            transform_binary_log_flux_total,
-            transform_system_focal_length_m,
-            transform_system_plate_scale_as_per_pix,
-        )
+        from dluxshera.params import shera_threeplane_transforms  # noqa: F401
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import transforms: {exc!r}"}
 
     try:
-        registry = transforms.get_resolver()
-        transform_map = getattr(registry, "_transforms", {})
-        summaries = []
-        for key, transform in sorted(transform_map.items()):
-            summaries.append(
-                {
-                    "key": key,
-                    "depends_on": list(getattr(transform, "depends_on", ())),
-                    "doc": (getattr(transform, "doc", None) or "").strip() or None,
-                }
-            )
-        return summaries
+        resolver = getattr(transforms, "DERIVED_RESOLVER", None)
+        if resolver is None:
+            resolver = registry_mod.DerivedResolver(default_system_id="default")
+
+        systems: Dict[str, Any] = {}
+        registries = getattr(resolver, "_registries", {})
+
+        for system_id, registry in sorted(registries.items()):
+            transform_map = getattr(registry, "_transforms", {})
+            entries = []
+            for key, transform in sorted(transform_map.items()):
+                doc = (getattr(transform, "doc", None) or "").strip() or None
+                if doc and len(doc) > 200:
+                    doc = doc[:197] + "…"
+                entries.append(
+                    {
+                        "key": key,
+                        "depends_on": list(getattr(transform, "depends_on", ())),
+                        "doc": doc,
+                    }
+                )
+
+            systems[system_id] = {
+                "count": len(entries),
+                "keys": [e.get("key") for e in entries],
+                "transforms": entries[:12],
+            }
+
+        return {
+            "modules": [
+                "dluxshera.params.transforms",
+                "dluxshera.params.shera_threeplane_transforms",
+            ],
+            "systems": systems,
+        }
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to introspect transform registry: {exc!r}"}
 
@@ -365,18 +446,20 @@ def _format_default(value: Any, max_length: int = 120) -> str:
     return repr_val
 
 
-def _collect_configs_metadata() -> Dict[str, Any]:
+def _collect_configs_metadata(repo_root: Path) -> Dict[str, Any]:
+    _ensure_repo_on_sys_path(repo_root)
     try:
         from dluxshera import optics
         from dluxshera.optics import builder
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import optics configs: {exc!r}"}
 
-    cfg_classes = []
-    for name in dir(optics.config):
-        obj = getattr(optics.config, name)
-        if is_dataclass(obj):
-            cfg_classes.append(obj)
+    candidate_names = ["SheraTwoPlaneConfig", "SheraThreePlaneConfig"]
+    cfg_classes = [
+        getattr(optics.config, name)
+        for name in candidate_names
+        if hasattr(optics.config, name)
+    ]
 
     configs: List[Dict[str, Any]] = []
     for cls in cfg_classes:
@@ -410,21 +493,29 @@ def _collect_configs_metadata() -> Dict[str, Any]:
         cfg_meta: Dict[str, Any] = {
             "type": cls.__name__,
             "module": cls.__module__,
+            "field_count": len(field_summaries),
             "fields": field_summaries,
         }
 
         if instance is not None:
             try:
-                if hasattr(builder, "structural_hash_from_config") and isinstance(instance, getattr(optics.config, "SheraThreePlaneConfig", object)):
+                if hasattr(builder, "structural_hash_from_config") and isinstance(
+                    instance, getattr(optics.config, "SheraThreePlaneConfig", object)
+                ):
                     cfg_meta["structural_hash_example"] = builder.structural_hash_from_config(instance)
-                if hasattr(builder, "structural_hash_for_twoplane") and isinstance(instance, getattr(optics.config, "SheraTwoPlaneConfig", object)):
+                if hasattr(builder, "structural_hash_for_twoplane") and isinstance(
+                    instance, getattr(optics.config, "SheraTwoPlaneConfig", object)
+                ):
                     cfg_meta["structural_hash_example"] = builder.structural_hash_for_twoplane(instance)
             except Exception:
                 pass
 
         configs.append(cfg_meta)
 
-    return {"configs": configs}
+    return {
+        "modules": ["dluxshera.optics.config"],
+        "configs": configs,
+    }
 
 
 def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
@@ -477,6 +568,13 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
                 lines.append(f"- Examples: {sample}")
         elif isinstance(transforms, dict) and "error" in transforms:
             lines.append(f"- ERROR: {transforms['error']}")
+        elif isinstance(transforms, dict):
+            systems = transforms.get("systems", {})
+            lines.append(f"- Systems: {len(systems)}")
+            for sid, info in systems.items():
+                lines.append(
+                    f"  - {sid}: {info.get('count', 'n/a')} transforms"
+                )
         lines.append("")
 
     if configs:
@@ -519,6 +617,7 @@ def generate_context_snapshot(
         also written to `context_snapshot.json` inside the snapshot dir.
     """
     repo_root = _get_repo_root(root)
+    _ensure_repo_on_sys_path(repo_root)
     if out_dir is None:
         snapshot_dir = _default_snapshot_dir(repo_root)
     else:
@@ -553,9 +652,9 @@ def generate_context_snapshot(
 
     metadata["dependencies"] = _collect_dependencies(repo_root)
     metadata["tests"] = _collect_tests_metadata(repo_root)
-    metadata["param_specs"] = _collect_param_specs()
-    metadata["transforms"] = _collect_transforms()
-    metadata["configs"] = _collect_configs_metadata()
+    metadata["param_specs"] = _collect_param_specs(repo_root)
+    metadata["transforms"] = _collect_transforms(repo_root)
+    metadata["configs"] = _collect_configs_metadata(repo_root)
 
     if generate_markdown:
         try:
