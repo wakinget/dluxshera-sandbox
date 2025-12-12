@@ -1,8 +1,13 @@
-# dLuxShera Refactor — Working Plan & Notes
+# dLuxShera Working Plan & Notes (dev-facing)
 _Last updated: 2026-02-18 00:00_
 
-This is a living document summarizing the goals, architecture, decisions, tasks, and gotchas for the dLuxShera parameterization
-refactor. It’s designed so either of us can get back up to speed quickly and not lose the important details.
+This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
+
+## How to use this doc
+- **Sections 1–17:** Current architecture focus areas, gotchas, and open questions.
+- **Section 18:** Merge strategy and V1.0 milestones (active roadmap).
+- **Section 23:** Parking lot / future ideas and backlog.
+- **Historical context:** For narrative history and ADR-style rationale, see `docs/archive/REFACTOR_HISTORY.md` and `docs/archive/ARCHITECTURE_DECISIONS.md`.
 
 ---
 
@@ -50,6 +55,8 @@ Scoped Transform Registry ──▶ DerivedResolver (system_id-aware) ──▶ 
                   .model(wavelengths, weights)  →  PSF
 ```
 
+For narrative context and the rationale behind these layers, see `docs/archive/ARCHITECTURE_DECISIONS.md`.
+
 ---
 
 ## 3) Repository Layout (Actual vs Proposed)
@@ -58,7 +65,9 @@ Scoped Transform Registry ──▶ DerivedResolver (system_id-aware) ──▶ 
 dLuxShera/
 ├─ pyproject.toml
 ├─ README.md
-├─ dLuxShera_Refactor_Working_Plan.md
+├─ docs/
+│  ├─ dev/dLuxShera_Working_Plan.md
+│  └─ archive/
 ├─ src/dluxshera/
 │  ├─ __init__.py
 │  ├─ core/{builder.py, binder.py, modeling.py, universe.py}
@@ -155,7 +164,7 @@ dLuxShera/
 
 - Canonical binder/SystemGraph astrometry demo now lives in `Examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode gradient descent flows. README/MkDocs pages and additional notebooks remain to be authored.
   - The demo now showcases the refactor-era plotting helpers: PSF visualisation via `plot_psf_single` / `plot_psf_comparison` and parameter trajectories via `plot_parameter_history_grid`. Plotting utilities follow the IO policy (return fig/axes; caller decides to save/show), and the demo saves figures when a destination directory is provided (keeping smoke tests headless). Future follow-ons could add eigenmode-specific diagnostics (eigenvalue spectra, mode loadings) and prior visualisation once the pattern stabilises.
-- Phase 1 documentation skeleton exists under `docs/`: `docs/modeling_overview.md` (conceptual entry), `docs/tutorials/canonical_astrometry_demo.md` (walkthrough), architecture stubs, and dev notes (`docs/dev/dLuxShera_Refactor_Working_Plan.md` pointing to this file). Next steps include fleshing out architecture details and adding the forthcoming two-plane tutorial.
+- Phase 1 documentation skeleton exists under `docs/`: `docs/modeling_overview.md` (conceptual entry), `docs/tutorials/canonical_astrometry_demo.md` (walkthrough), architecture stubs, and dev notes (this working plan in `docs/dev/dLuxShera_Working_Plan.md`). Next steps include fleshing out architecture details and adding the forthcoming two-plane tutorial.
 
 ---
 
@@ -296,6 +305,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ## 18) Changelog of Decisions
 
+See `docs/archive/ARCHITECTURE_DECISIONS.md` for a curated, ADR-style summary of the major choices referenced here.
+
 - Transform registry implemented globally; slated for system-scoped refactor.
 - ParameterStore currently permissive; decision pending to enforce primitives-only by default.
 - Canonical binder-based loss added to inference stack; SystemGraph integration planned.
@@ -304,6 +315,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 ---
 
 ## 19) Legacy Shera two-plane stack → refactor-era mapping (analysis)
+
+For a concise mapping of legacy APIs to the current architecture, see `docs/archive/LEGACY_APIS_AND_MIGRATION.md`.
 
 **Current two-plane parameter vocabulary and behavior (legacy `SheraTwoPlaneParams`/`SheraTwoPlane_Model`)**
 - Point designs expose primary/secondary diameters, PSF pixel scale (primitive, arcsec/pix), bandpass width, and log flux; operational knobs include pupil/PSF sampling, binary astrometry (x/y offsets, separation in mas, PA in deg, contrast), central wavelength, number of wavelengths, and a single Zernike basis (Noll indices + amplitudes) applied to the primary pupil mask. Noise fields include calibrated/uncalibrated 1/f power-law/amplitude pairs. No explicit plate-scale derivation occurs; pixel scale is passed straight into the optics builder.【F:src/dluxshera/inference/optimization.py†L1224-L1312】【F:src/dluxshera/core/modeling.py†L330-L419】
@@ -403,6 +416,9 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 ## 18) Merge Strategy and V1.0 Milestones
 
 This section captures our strategy for (a) deciding when to merge the refactor work into the main dLuxShera repo, and (b) when to consider the refactor “done” and treat the current architecture as V1.0. There are currently no external users of the main repo; migration concerns are therefore purely for my own workflow and notebooks.
+
+- Historical rationale for the refactor lives in `docs/archive/REFACTOR_HISTORY.md` and `docs/archive/ARCHITECTURE_DECISIONS.md`; this section is about the current merge/V1.0 strategy.
+- V1.0 user-facing docs should describe the current architecture as the default without surfacing “refactor” or “legacy” language.
 
 ---
 
@@ -666,10 +682,14 @@ docs/
     inference_and_loss.md  
     eigenmodes.md  
   tutorials/
-    canonical_astrometry_demo.md  
+    canonical_astrometry_demo.md
   dev/
-    dLuxShera_Refactor_Working_Plan.md  
-    code_structure.md  
+    dLuxShera_Working_Plan.md
+    code_structure.md
+  archive/
+    REFACTOR_HISTORY.md
+    ARCHITECTURE_DECISIONS.md
+    LEGACY_APIS_AND_MIGRATION.md
   api/   (optional, future)
 
 Implementation phases
