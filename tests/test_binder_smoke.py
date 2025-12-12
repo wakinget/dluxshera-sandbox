@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.core.binder import SheraTwoPlaneBinder
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
-from tests.helpers import make_forward_store
+from .helpers import make_forward_store
 
 
 def test_shera_threeplane_binder_smoke():
