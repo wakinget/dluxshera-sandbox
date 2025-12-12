@@ -465,6 +465,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
     - Optical Systems: three-plane Shera optics as the baseline, two-plane optics as a simplified variant.
   - **Examples index**:
     - Lists the canonical three-plane demo, the two-plane demo, and any specialty examples (FIM, eigenmodes, priors) with one-line descriptions.
+  - **Status update:** The core architecture concept docs (params_and_store, binder_and_graph, inference_and_loss, eigenmodes) now carry a V1.0 narrative with no user-facing “refactor” or “legacy” language.
 
 - **Examples**
   - Three-plane canonical astrometry demo is polished and matches the V1.0 docs.
@@ -480,10 +481,10 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 
 ### 18.4 Near-Term Focus
 
-- Finish tightening the **basic doc structure**:
+- Finish tightening the **basic doc structure** (initial architecture concept pass done):
   - Draft or refine the V1.0-style README.
   - Solidify the canonical three-plane demo doc and script.
-  - Sketch minimal concept docs for Parameters/Stores and Binders/SystemGraphs.
+  - Expand concept docs as needed beyond the initial Parameters/Stores, Binders/SystemGraphs, inference, and eigenmodes coverage.
 - Once those are in place and tests remain green, proceed with **Milestone A (merge into main)**.
 - After merge, iterate toward **Milestone B (V1.0)** by:
   - Polishing the two-plane demo.
