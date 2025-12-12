@@ -398,6 +398,98 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ### Implementation follow-up (Task 10 landed)
 
+---
+
+## 18) Merge Strategy and V1.0 Milestones
+
+This section captures our strategy for (a) deciding when to merge the refactor work into the main dLuxShera repo, and (b) when to consider the refactor “done” and treat the current architecture as V1.0. There are currently no external users of the main repo; migration concerns are therefore purely for my own workflow and notebooks.
+
+---
+
+### 18.1 Goals
+
+- Present a clean, “this is how dLuxShera works” story to future users and collaborators.
+- Avoid user-facing mentions of “refactor” or “legacy” once V1.0 is in place.
+- Use the current sandbox / refactor branch to harden the architecture and demos before merging into main.
+- Treat “merge to main” and “V1.0” as related but distinct milestones.
+
+---
+
+### 18.2 Milestone A – Merge Refactor Branch into Main
+
+**Intent:** Switch main dLuxShera over to the new ParamSpec / ParameterStore / Binder / SystemGraph stack as the canonical implementation. This is the point where I personally prefer the new stack for any real Shera work.
+
+**Criteria for merge:**
+
+- **Code & tests**
+  - ParamSpec / ParameterStore / transforms / DerivedResolver are wired together and passing tests.
+  - Optics builders (2- and 3-plane) use the new patterns and have basic test coverage.
+  - Binder is the main way to instantiate and run models; SystemGraph is exercised in tests and at least one demo.
+  - Canonical three-plane astrometry demo runs end-to-end and has at least a smoke test.
+  - Test suite passes on my main development environment.
+
+- **Practical usability (for me)**
+  - I can:
+    - Build a Shera model via the Binder and run a forward model.
+    - Run a basic inference loop and/or FIM/eigenmode computation without touching old APIs.
+  - For any new analysis or notebook, it is natural to reach for the new stack first.
+
+- **Housekeeping**
+  - Legacy code is either removed or clearly quarantined (e.g., in a legacy module or with “deprecated” notes).
+  - Main branch is updated so that the new stack is the default entry point for Shera modeling.
+
+**Outcome:** Once these criteria are met, the sandbox/refactor work is merged into main. From this point forward, ongoing work (demos, priors, plotting, new optics variants) happens directly on main and is treated as normal feature work rather than blocking “the refactor.”
+
+---
+
+### 18.3 Milestone B – V1.0 Architecture & Documentation
+
+**Intent:** Stabilize the architecture and present dLuxShera as if this design has always existed. All user-facing docs should describe the current system as “V1.0” without mentioning “refactor,” “old stack,” or “new stack.”
+
+**Criteria for V1.0:**
+
+- **API & naming stability**
+  - Core concepts and names are settled (e.g., Binder class names, optics system names, ParamSpec / ParameterStore terminology).
+  - No further renames of the fundamental building blocks are anticipated without a major version bump.
+
+- **User-facing docs (V1.0 perspective)**
+  - **README**:
+    - Describes what dLuxShera is and how to install it.
+    - Provides a short “hello world” example: create a config, build a Binder, run a forward model and show a PSF.
+    - Links to the canonical astrometry demo and concept docs.
+  - **Quickstart / Canonical Demo doc**:
+    - Walks through the canonical three-plane astrometry workflow step-by-step (config → Binder → simulate data → loss/inference → plotting).
+  - **Concept docs** (short, focused):
+    - Parameters & Stores: ParamSpec, ParameterStore, transforms.
+    - Binders & SystemGraphs: Binder as the user-facing “model object,” SystemGraph as underlying wiring.
+    - Optical Systems: three-plane Shera optics as the baseline, two-plane optics as a simplified variant.
+  - **Examples index**:
+    - Lists the canonical three-plane demo, the two-plane demo, and any specialty examples (FIM, eigenmodes, priors) with one-line descriptions.
+
+- **Examples**
+  - Three-plane canonical astrometry demo is polished and matches the V1.0 docs.
+  - Two-plane demo is available and documented as the simplified alternative (even if lighter-weight than the three-plane example).
+
+- **Dev-facing docs**
+  - Working Plan and any architecture notes live under `docs/dev/` (or similar).
+  - These can still reference “refactor,” planning tasks, legacy notes, etc., but are not exposed as primary user docs.
+
+**Outcome:** When these conditions are met, the library is considered to have reached “V1.0” in spirit, even if version numbers are adjusted later. Any subsequent work (e.g., advanced priors, HMC, four-plane optics, additional plotting utilities) is treated as incremental feature development on top of a stable base.
+
+---
+
+### 18.4 Near-Term Focus
+
+- Finish tightening the **basic doc structure**:
+  - Draft or refine the V1.0-style README.
+  - Solidify the canonical three-plane demo doc and script.
+  - Sketch minimal concept docs for Parameters/Stores and Binders/SystemGraphs.
+- Once those are in place and tests remain green, proceed with **Milestone A (merge into main)**.
+- After merge, iterate toward **Milestone B (V1.0)** by:
+  - Polishing the two-plane demo.
+  - Filling in concept docs.
+  - Migrating the Working Plan and dev notes into `docs/dev/`.
+
 - Implemented `BaseSheraBinder` in `core/binder.py`, with SheraThreePlaneBinder and SheraTwoPlaneBinder now inheriting shared merge/model/with_store semantics while preserving public signatures and system-specific optics/graph hooks.
 - Added `BaseSheraSystemGraph` skeleton in `graph/system_graph.py`, adopted by the three- and two-plane SystemGraphs to centralize store merge + evaluation flow; factories remain unchanged.
 - Binder/graph smoke and regression tests cover both systems plus shared output/merge behaviour; public APIs and numerical paths are unchanged.
