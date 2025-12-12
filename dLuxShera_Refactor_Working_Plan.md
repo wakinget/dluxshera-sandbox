@@ -257,6 +257,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 5. **Canonical astrometry demo + docs (P1)**
    - **Status:** ✅ Added `Examples/scripts/run_canonical_astrometry_demo.py` using ParamSpec + ParameterStore + DerivedResolver to build truth/variant stores, SheraThreePlaneBinder/SystemGraph forward model, and Optax GD with prior penalties. README updated with run command; smoke test exercises `main(fast=True)`.
+   - **Two-plane companion:** Added `Examples/scripts/run_twoplane_astrometry_demo.py` as a lighter-weight analogue that exercises the SheraTwoPlaneConfig/Binder stack; both demos serve as reference examples for upcoming docs/tutorials.
 
 ---
 
@@ -332,7 +333,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ Wired a `SheraTwoPlaneBinder`/SystemGraph path plus smoke tests to validate parity with the legacy two-plane model. Binder mirrors the three-plane API (forward-style base store with deriveds refreshed, `.model(store_delta)` public entry point, optional SystemGraph) and uses the same structural hash/cache pattern, now including plate scale as a structural knob sourced from the effective store. Optics and source both consume the merged store (base + delta) in graph and non-graph modes.
 - Loss/optimisation stack now dispatches binders based on cfg type inside `make_binder_image_nll_fn`, so downstream helpers (`run_shera_image_gd`, `run_shera_image_gd_eigen`, FIM helpers) accept two- or three-plane configs without special casing.
 - Graph templates remain per-variant for clarity (single-node cfg/spec/store → optics/source/detector → telescope.model). Consider factoring shared helpers or a base binder class if/when the systems converge further.
-- Add a minimal two-plane astrometry demo mirroring the canonical three-plane example.
+- ✅ Added a minimal two-plane astrometry demo mirroring the canonical three-plane example (`Examples/scripts/run_twoplane_astrometry_demo.py` using `SheraTwoPlaneConfig` + `SheraTwoPlaneBinder`).
 - Evaluate whether shared binder behaviour (two- vs three-plane) should live in a common base class once both paths exist.
 
 ---
