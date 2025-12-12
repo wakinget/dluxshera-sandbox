@@ -13,14 +13,16 @@ The devtools package includes:
 - `introspection.py`  
   Shared helper utilities for AST parsing and project indexing.
 
-- `generate_context_snapshot.py`  
+- `generate_context_snapshot.py`
   Generates a context snapshot directory containing:
   - `project_tree.txt` (ASCII project tree)
   - `project_index.json` (static code index: modules, classes, functions)
-  - `context_snapshot.json` (metadata, including Working Plan info)
+  - `context_snapshot.json` (metadata: working plan info, summary counts,
+    dependencies, tests, ParamSpecs, transforms, configs)
+  - `context_snapshot.md` (human-readable overview)
 
-  The format is designed to be extended later with ParamSpec summaries,
-  transform registry state, SystemGraph topology, and test coverage maps.
+  The format now includes ParamSpec summaries, transform registry state, optics
+  configs, and simple test coverage maps in addition to the static tree/index.
 
 - `context_snapshot_<timestamp>/`  
   Auto-generated folders containing project tree, JSON index, and extended 
@@ -115,12 +117,19 @@ devtools/context_snapshot_20251211-162732/
     Nested JSON index describing directories/files and, for `.py` files,
     modules, classes, functions, signatures, and docstring summaries.
 
-  - `context_snapshot.json`  
-    Metadata describing the snapshot:
-    - `schema_version`, `generated_at`, `repo_root`, `snapshot_dir`
-    - a `files` section with paths to `project_tree` and `project_index`
-    - basic info about `dLuxShera_Refactor_Working_Plan.md` if present
-      (relative path, size in bytes, modification time)
+- `context_snapshot.json` (schema_version `0.2`)
+    Metadata describing the snapshot. In addition to paths and working plan
+    info it includes:
+    - `summary`: Python file/class/function counts and discovered packages
+    - `dependencies`: runtime/dev requirements parsed from pyproject/requirements
+    - `tests`: imports observed in test files (by file and by module)
+    - `param_specs`: compact summaries of baseline ParamSpecs
+    - `transforms`: registered derived parameter transforms
+    - `configs`: dataclass fields and example structural hashes for optics configs
+
+- `context_snapshot.md`
+    Lightweight Markdown overview for quick human review (optional; enabled by
+    default).
 
 CLI options:
 
@@ -137,20 +146,19 @@ Key arguments:
   Custom snapshot directory. If relative, it is interpreted relative to the
   repo root. If omitted, a timestamped folder under `devtools/` is used.
 
-- `--max-depth N`  
+- `--max-depth N`
   Maximum directory depth for the tree and index (default: 4).
+
+- `--no-markdown`
+  Skip generation of `context_snapshot.md`.
 
 ### 3.2 Planned extensions
 
-The snapshot format is intentionally minimal for now. Future extensions may add:
+Future extensions may add:
 
-- ParamSpec summaries (keys, primitive/derived flags, forward/inference subsets)
-- Transform registry state and DerivedResolver coverage
-- Config defaults and structural hashes for optics builders
 - Binder/SystemGraph wiring maps
-- Simple test → module coverage hints
-- An optional Markdown report (`context_snapshot.md`) that summarises the above
-  for quick human review
+- Additional system builder summaries
+- Richer coverage links between tests and modules
 
 ---
 
