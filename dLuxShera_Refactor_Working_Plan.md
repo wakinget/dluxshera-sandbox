@@ -151,10 +151,11 @@ dLuxShera/
 
 ---
 
-## 9) Docs & Examples (Planned)
+## 9) Docs & Examples (Phase 1 shipped)
 
 - Canonical binder/SystemGraph astrometry demo now lives in `Examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode gradient descent flows. README/MkDocs pages and additional notebooks remain to be authored.
   - The demo now showcases the refactor-era plotting helpers: PSF visualisation via `plot_psf_single` / `plot_psf_comparison` and parameter trajectories via `plot_parameter_history_grid`. Plotting utilities follow the IO policy (return fig/axes; caller decides to save/show), and the demo saves figures when a destination directory is provided (keeping smoke tests headless). Future follow-ons could add eigenmode-specific diagnostics (eigenvalue spectra, mode loadings) and prior visualisation once the pattern stabilises.
+- Phase 1 documentation skeleton exists under `docs/`: `docs/modeling_overview.md` (conceptual entry), `docs/tutorials/canonical_astrometry_demo.md` (walkthrough), architecture stubs, and dev notes (`docs/dev/dLuxShera_Refactor_Working_Plan.md` pointing to this file). Next steps include fleshing out architecture details and adding the forthcoming two-plane tutorial.
 
 ---
 
