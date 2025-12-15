@@ -552,12 +552,12 @@ def _collect_configs_metadata(repo_root: Path) -> Dict[str, Any]:
 def _collect_demo_metadata(repo_root: Path) -> List[Dict[str, Any]]:
     demos = [
         {
-            "script": "Examples/scripts/run_canonical_astrometry_demo.py",
+            "script": "examples/scripts/run_canonical_astrometry_demo.py",
             "system_id": "shera_threeplane",
             "param_specs": ["forward_threeplane", "inference_basic"],
         },
         {
-            "script": "Examples/scripts/run_twoplane_astrometry_demo.py",
+            "script": "examples/scripts/run_twoplane_astrometry_demo.py",
             "system_id": "shera_twoplane",
             "param_specs": ["forward_twoplane", "inference_basic"],
         },

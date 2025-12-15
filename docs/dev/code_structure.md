@@ -7,4 +7,4 @@
 - Highlight primary entry points (binders, configs, transforms) and how to extend them.
 
 ## Examples and tests
-- Note where example scripts/notebooks live and where to find regression/unit tests.
+- Example scripts and notebooks live under `examples/` (scripts call into modules inside `dluxshera.demos`). Tests are under `tests/`.

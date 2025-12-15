@@ -1,16 +1,15 @@
-"""Fail if ``src.*`` imports exist in tracked Python files.
+"""Fail if any Python file imports from examples/*.
 
-This guardrail ensures modules import the installed ``dluxshera`` package
-instead of relying on the repository layout being on ``PYTHONPATH``.
+Examples are runnable artifacts, not packages. This guardrail prevents
+``import examples`` or ``import Examples`` statements from creeping into the
+codebase.
 """
-
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
-PATTERN = r"^\s*(from|import)\s+src\."
+PATTERN = r"^\s*(from|import)\s+(Examples|examples)\b"
 SEARCH_DIRS = ("src", "tests", "devtools", "examples")
 
 
@@ -40,11 +39,11 @@ def main() -> int:
         return result.returncode
 
     if result.stdout.strip():
-        print("Found disallowed src.* imports:\n")
+        print("Found disallowed imports from examples/:\n")
         print(result.stdout.strip())
         return 1
 
-    print("No src.* imports detected.")
+    print("No imports from examples/ detected.")
     return 0
 
 
