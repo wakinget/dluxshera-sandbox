@@ -13,6 +13,24 @@ EXCLUDE_DIRS = {
 EXCLUDE_FILES = {".DS_Store"}
 
 
+def _iter_visible_entries(path: Path) -> List[Path]:
+    """
+    Return directory entries filtered by EXCLUDE_* rules and snapshot dirs.
+    Kept as a shared helper so print_tree and build_project_index stay aligned.
+    """
+    entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    visible: List[Path] = []
+    for entry in entries:
+        if entry.name in EXCLUDE_FILES:
+            continue
+        if entry.is_dir() and entry.name in EXCLUDE_DIRS:
+            continue
+        # Skip auto-generated context snapshot dirs (e.g. context_snapshot_YYYYmmDD-HHMMSS)
+        if entry.is_dir() and entry.name.startswith("context_snapshot_"):
+            continue
+        visible.append(entry)
+    return visible
+
 # ---------------------------------------------------------------------------
 # Tree-printing functionality
 # ---------------------------------------------------------------------------
@@ -21,8 +39,7 @@ def print_tree(root: Path, max_depth: int = 4, prefix: str = ""):
     """
     Recursively print a simple tree of the project.
 
-    This preserves all behavior from print_tree.py, including the examples/
-    special case.
+    This mirrors the traversal used by build_project_index().
     """
     root = Path(root)
 
@@ -30,16 +47,8 @@ def print_tree(root: Path, max_depth: int = 4, prefix: str = ""):
         if depth > max_depth:
             return
 
-        entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        entries = _iter_visible_entries(path)
         for i, entry in enumerate(entries):
-            if entry.name in EXCLUDE_FILES:
-                continue
-            if entry.is_dir() and entry.name in EXCLUDE_DIRS:
-                continue
-            # Skip auto-generated context snapshot dirs (e.g. context_snapshot_YYYYmmDD-HHMMSS)
-            if entry.is_dir() and entry.name.startswith("context_snapshot_"):
-                continue
-
             is_last = (i == len(entries) - 1)
             connector = "└── " if is_last else "├── "
             print(prefix + connector + entry.name)
@@ -47,15 +56,6 @@ def print_tree(root: Path, max_depth: int = 4, prefix: str = ""):
             # Descend into directories
             if entry.is_dir():
                 new_prefix = prefix + ("    " if is_last else "│   ")
-
-                # Special-case: examples → only index notebooks/
-                if entry.name == "examples":
-                    notebooks = entry / "notebooks"
-                    if notebooks.exists() and notebooks.is_dir():
-                        print(new_prefix + "└── notebooks")
-                        _recurse(notebooks, depth + 1, new_prefix + "    ")
-                    continue
-
                 _recurse(entry, depth + 1, new_prefix)
 
     print(root.name + "/")
@@ -185,7 +185,7 @@ def index_python_file(path: Path) -> Dict[str, Any]:
 def build_project_index(root: Path, max_depth: int = 4) -> Dict[str, Any]:
     """
     Build a nested JSON-friendly index with class/function metadata.
-    Mirrors print_tree's traversal and special casing for examples/.
+    Mirrors print_tree's traversal.
     """
     root = Path(root)
 
@@ -195,23 +195,8 @@ def build_project_index(root: Path, max_depth: int = 4) -> Dict[str, Any]:
 
         if path.is_dir():
             node = {"type": "directory", "name": path.name, "path": str(path), "children": []}
-            entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-
+            entries = _iter_visible_entries(path)
             for entry in entries:
-                if entry.name in EXCLUDE_FILES:
-                    continue
-                if entry.is_dir() and entry.name in EXCLUDE_DIRS:
-                    continue
-                # Skip auto-generated context snapshot dirs (e.g. context_snapshot_YYYYmmDD-HHMMSS)
-                if entry.is_dir() and entry.name.startswith("context_snapshot_"):
-                    continue
-
-                if entry.is_dir() and entry.name == "examples":
-                    notebooks = entry / "notebooks"
-                    if notebooks.exists():
-                        node["children"].append(_recurse(notebooks, depth + 1))
-                    continue
-
                 if entry.is_dir():
                     node["children"].append(_recurse(entry, depth + 1))
                 else:
