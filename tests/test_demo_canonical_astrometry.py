@@ -1,14 +1,6 @@
 """Smoke test for the canonical astrometry demo script."""
 
-import sys
-from pathlib import Path
-
-# Ensure repository root and src/ are importable for the demo script
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(REPO_ROOT))
-sys.path.append(str(REPO_ROOT / "src"))
-
-from Examples.scripts.run_canonical_astrometry_demo import main
+from dluxshera.demos.canonical_astrometry import main
 
 
 def test_canonical_astrometry_demo_runs(tmp_path):

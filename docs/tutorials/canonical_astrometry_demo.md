@@ -1,6 +1,6 @@
 # Canonical astrometry demo (three-plane)
 
-The canonical demo in `Examples/scripts/run_canonical_astrometry_demo.py` builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. The script highlights the current stack: `ParamSpec`/`ParameterStore`, `DerivedResolver`, `Binder`/`SystemGraph`, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs when enabled).
+The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (implemented in `dluxshera.demos.canonical_astrometry`) builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. The script highlights the current stack: `ParamSpec`/`ParameterStore`, `DerivedResolver`, `Binder`/`SystemGraph`, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs when enabled).
 
 ## What the demo covers
 - Shera-style three-plane optical path with Fresnel propagation.
@@ -24,11 +24,11 @@ A forthcoming two-plane canonical demo will follow the same structure with a sim
 From the repository root:
 
 ```bash
-python -m Examples.scripts.run_canonical_astrometry_demo
+python examples/scripts/run_canonical_astrometry_demo.py
 ```
 
 Use the `fast=True` flag for a quick smoke run or provide an output directory to save figures, for example:
 
 ```bash
-python -m Examples.scripts.run_canonical_astrometry_demo --fast True --output_dir /tmp/shera_demo
+python examples/scripts/run_canonical_astrometry_demo.py --fast True --save-plots-dir /tmp/shera_demo
 ```

@@ -11,7 +11,7 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 ## Documentation
 
 - Conceptual entry point: [docs/modeling_overview.md](docs/modeling_overview.md)
-- Tutorial: [docs/tutorials/canonical_astrometry_demo.md](docs/tutorials/canonical_astrometry_demo.md) alongside `Examples/scripts/run_canonical_astrometry_demo.py`
+- Tutorial: [docs/tutorials/canonical_astrometry_demo.md](docs/tutorials/canonical_astrometry_demo.md) alongside `examples/scripts/run_canonical_astrometry_demo.py`
 - Dev notes and roadmap: [docs/dev/dLuxShera_Working_Plan.md](docs/dev/dLuxShera_Working_Plan.md)
 
 ## Install
@@ -160,7 +160,7 @@ If something breaks, simply delete and recreate the `dLuxShera` environment — 
 
 ## Quickstart (Jupyter Notebook)
 
-Example notebooks are provided under: `Examples/notebooks/`
+Example notebooks are provided under: `examples/notebooks/`
 
 To run any of the examples, launch JupyterLab **from inside the virtual environment**:
 
@@ -198,12 +198,12 @@ The notebook simulates synthetic data, initializes the SHERA model, computes its
 
 ## Canonical astrometry demo
 
-The end-to-end astrometry demo lives in `Examples/scripts/run_canonical_astrometry_demo.py`.
+The end-to-end astrometry demo lives in `examples/scripts/run_canonical_astrometry_demo.py` and is implemented in `dluxshera.demos.canonical_astrometry` for reuse.
 
 Run it directly from the repository root:
 
 ```bash
-python -m Examples.scripts.run_canonical_astrometry_demo
+python examples/scripts/run_canonical_astrometry_demo.py
 ```
 
 The script builds a Shera three-plane model via ParamSpec/ParameterStore, generates noiseless synthetic binary-star PSFs, and runs a binder/SystemGraph-based gradient descent (with tight priors) to recover astrometric and wavefront parameters using the current `InferenceSpec`.
@@ -213,7 +213,7 @@ The script builds a Shera three-plane model via ParamSpec/ParameterStore, genera
 ### Notes
 
 - The new Fresnel propagation utilities for dLux are currently under review. For the time being, dLux installation uses my own local fork. When the PR is fully integrated, these installation instructions will change.
-- Notebooks rely on `notebook_setup.py` located in `Examples/notebooks/`.  
+- Notebooks rely on `notebook_setup.py` located in `examples/notebooks/`.
 - The repo is not yet a Python package; imports follow the current directory structure:
   ```
   from Classes.modeling import SheraThreePlane_Model

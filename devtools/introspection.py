@@ -21,7 +21,7 @@ def print_tree(root: Path, max_depth: int = 4, prefix: str = ""):
     """
     Recursively print a simple tree of the project.
 
-    This preserves all behavior from print_tree.py, including the Examples/
+    This preserves all behavior from print_tree.py, including the examples/
     special case.
     """
     root = Path(root)
@@ -48,8 +48,8 @@ def print_tree(root: Path, max_depth: int = 4, prefix: str = ""):
             if entry.is_dir():
                 new_prefix = prefix + ("    " if is_last else "│   ")
 
-                # Special-case: Examples → only index notebooks/
-                if entry.name == "Examples":
+                # Special-case: examples → only index notebooks/
+                if entry.name == "examples":
                     notebooks = entry / "notebooks"
                     if notebooks.exists() and notebooks.is_dir():
                         print(new_prefix + "└── notebooks")
@@ -185,7 +185,7 @@ def index_python_file(path: Path) -> Dict[str, Any]:
 def build_project_index(root: Path, max_depth: int = 4) -> Dict[str, Any]:
     """
     Build a nested JSON-friendly index with class/function metadata.
-    Mirrors print_tree's traversal and special casing for Examples/.
+    Mirrors print_tree's traversal and special casing for examples/.
     """
     root = Path(root)
 
@@ -206,7 +206,7 @@ def build_project_index(root: Path, max_depth: int = 4) -> Dict[str, Any]:
                 if entry.is_dir() and entry.name.startswith("context_snapshot_"):
                     continue
 
-                if entry.is_dir() and entry.name == "Examples":
+                if entry.is_dir() and entry.name == "examples":
                     notebooks = entry / "notebooks"
                     if notebooks.exists():
                         node["children"].append(_recurse(notebooks, depth + 1))

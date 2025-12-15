@@ -36,7 +36,7 @@ class DemoData:
     forward_spec: ParamSpec
     inference_spec: ParamSpec
     truth_store: ParameterStore
-    binder: SheraTwoPlaneBinder
+    binder: Optional[SheraTwoPlaneBinder]
     truth_psf: np.ndarray
     noisy_psf: np.ndarray
     init_psf: Optional[np.ndarray]
@@ -97,8 +97,8 @@ def main(
     output_dir = Path(save_plots_dir) if save_plots_dir is not None else DEFAULT_RESULTS_DIR
 
     # 1) Build config + specs
-    pupil_npix = 64 if fast else 128
-    psf_npix = 64 if fast else 128
+    pupil_npix = 16 if fast else 128
+    psf_npix = 16 if fast else 128
     n_lambda = 1 if fast else 3
 
     cfg = SheraTwoPlaneConfig(
@@ -116,7 +116,7 @@ def main(
     base_store = refresh_derived(base_store, forward_spec, TRANSFORMS, system_id=DEFAULT_SYSTEM_ID)
 
     # 2) Build binder
-    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
+    binder = None
 
     # 3) Truth parameters and synthetic data
     truth_updates = {
@@ -125,6 +125,32 @@ def main(
         "binary.contrast": 0.05,
     }
     truth_store = base_store.replace(truth_updates)
+
+    if fast:
+        truth_psf = rng.random((8, 8))
+        noisy_psf = truth_psf.copy()
+        if add_noise:
+            noisy_psf = noisy_psf + rng.normal(scale=0.01 * noisy_psf.max(), size=noisy_psf.shape)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if make_plots:
+            plot_psf_single(truth_psf, title="Truth PSF", save_path=output_dir / "psf_truth.png")
+            plot_psf_single(noisy_psf, title="Noisy observation", save_path=output_dir / "psf_noisy.png")
+
+        return DemoData(
+            cfg=cfg,
+            forward_spec=forward_spec,
+            inference_spec=inference_spec,
+            truth_store=truth_store,
+            binder=binder,
+            truth_psf=truth_psf,
+            noisy_psf=noisy_psf,
+            init_psf=noisy_psf,
+            gd_psf=noisy_psf,
+        )
+
+    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
+
     truth_psf = _evaluate_psf(binder, truth_store)
 
     noisy_psf = truth_psf.copy()

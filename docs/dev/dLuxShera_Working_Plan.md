@@ -77,7 +77,7 @@ dLuxShera/
 │  ├─ utils/utils.py
 │  └─ plot/plotting.py
 ├─ tests/
-└─ Examples/
+└─ examples/
 ```
 
 **Gaps vs proposal:** No `graph/`, `io/`, `viz/`, `docs/` tree; params registry/serialize modules absent; four-plane/variant code not present.
@@ -133,7 +133,7 @@ dLuxShera/
 - **Flow:** `theta` → `ParameterStore` delta (restricted to `infer_keys`) → `binder.model(store_delta)` → PSF image → `gaussian_image_nll(image, data, var)` → scalar loss. This keeps Binder as the sole model API and makes the Gaussian NLL math transparent.
 - **Primitives:** A glass-box `gaussian_image_nll` helper (JAX-friendly, sum/mean/None reductions) now lives in `inference/losses.py` and is used by both the legacy `gaussian_loss` wrapper and Binder-based constructors.
 - **Binder loss constructor:** `make_binder_image_nll_fn` returns `(loss_fn, theta0)` where `loss_fn(theta)` unpacks `theta` into a store delta, evaluates `binder.model(...)`, and applies the chosen noise model. A pre-built binder can be passed in or constructed internally from `(cfg, forward_spec, base_forward_store)`.
-- **Demo wiring:** `Examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
+- **Demo wiring:** `examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
 
 ### Eigenmode-based optimisation (clarified)
 
@@ -146,7 +146,7 @@ dLuxShera/
 
 - **Legacy/observed patterns:**
   - `inference/optimization.py::construct_priors_from_dict` builds NumPyro distributions (Normal/Uniform/LogNormal) directly from a `{param: {mean, sigma, dist}}` mapping; tightly coupled to NumPyro and not used elsewhere in the refactor flow.
-  - The canonical astrometry demo defines a `priors` dict of sigmas keyed by `ParamKey`, manually jitters the truth store with NumPy noise, and hand-computes a quadratic MAP penalty keyed by the same sigmas (supports both scalars and Zernike coefficient vectors). The notebook `Examples/notebooks/Shera_Eigen_Inference_Example.ipynb` mirrors this pattern, including NumPyro helper usage and prior-drawn perturbations.
+  - The canonical astrometry demo defines a `priors` dict of sigmas keyed by `ParamKey`, manually jitters the truth store with NumPy noise, and hand-computes a quadratic MAP penalty keyed by the same sigmas (supports both scalars and Zernike coefficient vectors). The notebook `examples/notebooks/Shera_Eigen_Inference_Example.ipynb` mirrors this pattern, including NumPyro helper usage and prior-drawn perturbations.
 - **New backend-agnostic layer:** `inference/prior.py` introduces `PriorField` (currently Normal-only mean/sigma) and `PriorSpec` (key→field mapping) with helpers for: (a) `from_sigmas(center_store, sigmas)` to seed priors at reference values, (b) `quadratic_penalty(store, center_store)` for MAP-style sums over `(value-mean)^2/(2*sigma^2)`, and (c) `sample_near(center_store, rng_key)` to jitter an initial store from the priors. These are pure JAX operations with no PPL dependency.
 - **NumPyro bridge stub:** `inference/numpyro_bridge.py` documents the intended adapter surface (`numpyro_priors_from_spec`) but intentionally raises `NotImplementedError` to avoid hard-coding backend logic yet.
 - **Current demo usage:** The canonical demo now builds a `PriorSpec` from the `priors` sigma dict, uses `sample_near(...)` for its initialisation jitter, and wraps the MAP penalty via `quadratic_penalty(...)`, keeping binder/SystemGraph wiring unchanged.
@@ -160,9 +160,9 @@ dLuxShera/
 
 ---
 
-## 9) Docs & Examples (Phase 1 shipped)
+## 9) Docs & examples (Phase 1 shipped)
 
-- Canonical binder/SystemGraph astrometry demo now lives in `Examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode gradient descent flows. README/MkDocs pages and additional notebooks remain to be authored.
+- Canonical binder/SystemGraph astrometry demo now lives in `examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode gradient descent flows. README/MkDocs pages and additional notebooks remain to be authored.
   - The demo now showcases the refactor-era plotting helpers: PSF visualisation via `plot_psf_single` / `plot_psf_comparison` and parameter trajectories via `plot_parameter_history_grid`. Plotting utilities follow the IO policy (return fig/axes; caller decides to save/show), and the demo saves figures when a destination directory is provided (keeping smoke tests headless). Future follow-ons could add eigenmode-specific diagnostics (eigenvalue spectra, mode loadings) and prior visualisation once the pattern stabilises.
 - Phase 1 documentation skeleton exists under `docs/`: `docs/modeling_overview.md` (conceptual entry), `docs/tutorials/canonical_astrometry_demo.md` (walkthrough), architecture stubs, and dev notes (this working plan in `docs/dev/dLuxShera_Working_Plan.md`). Next steps include fleshing out architecture details and adding the forthcoming two-plane tutorial.
 
@@ -203,7 +203,7 @@ dLuxShera/
 ## 14) Prior Art / References
 
 - dLux core APIs for `ThreePlaneOpticalSystem` and PSF generation.
-- Prior optimization scripts in `Examples/` (still legacy-style; to be updated after SystemGraph lands).
+- Prior optimization scripts in `examples/` (still legacy-style; to be updated after SystemGraph lands).
 
 ---
 
@@ -226,7 +226,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
 - ✅ **Canonical astrometry demo**: Script/notebook generates truth + synthetic data, runs binder/SystemGraph loss with Optax, and now includes a mirrored eigenmode gradient-descent segment using EigenThetaMap.
 - ✅ **Eigenmode parameterization**: FIM/eigen utilities integrated into the inference API with an eigen-space GD helper, demo walkthrough, and regression tests.
-- ⏳ **Docs & examples**: README quickstart, MkDocs pages, notebooks, updated Examples using new stack.
+- ⏳ **Docs & examples**: README quickstart, MkDocs pages, notebooks, updated examples using new stack.
 - ⏳ **Profile/IO helpers**: YAML/JSON profiles, serialization, and loading; depends on store policy.
 
 **P2 — Variants & ergonomics**
@@ -266,8 +266,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
    - **Follow-ups:** Consider exposing cache stats and integrating hash/caching at the SystemGraph layer once multi-node support lands.
 
 5. **Canonical astrometry demo + docs (P1)**
-   - **Status:** ✅ Added `Examples/scripts/run_canonical_astrometry_demo.py` using ParamSpec + ParameterStore + DerivedResolver to build truth/variant stores, SheraThreePlaneBinder/SystemGraph forward model, and Optax GD with prior penalties. README updated with run command; smoke test exercises `main(fast=True)`.
-   - **Two-plane companion:** Added `Examples/scripts/run_twoplane_astrometry_demo.py` as a lighter-weight analogue that exercises the SheraTwoPlaneConfig/Binder stack; both demos serve as reference examples for upcoming docs/tutorials.
+   - **Status:** ✅ Added `examples/scripts/run_canonical_astrometry_demo.py` using ParamSpec + ParameterStore + DerivedResolver to build truth/variant stores, SheraThreePlaneBinder/SystemGraph forward model, and Optax GD with prior penalties. README updated with run command; smoke test exercises `main(fast=True)`.
+   - **Two-plane companion:** Added `examples/scripts/run_twoplane_astrometry_demo.py` as a lighter-weight analogue that exercises the SheraTwoPlaneConfig/Binder stack; both demos serve as reference examples for upcoming docs/tutorials.
 
 ---
 
@@ -347,7 +347,7 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 - ✅ Wired a `SheraTwoPlaneBinder`/SystemGraph path plus smoke tests to validate parity with the legacy two-plane model. Binder mirrors the three-plane API (forward-style base store with deriveds refreshed, `.model(store_delta)` public entry point, optional SystemGraph) and uses the same structural hash/cache pattern, now including plate scale as a structural knob sourced from the effective store. Optics and source both consume the merged store (base + delta) in graph and non-graph modes.
 - Loss/optimisation stack now dispatches binders based on cfg type inside `make_binder_image_nll_fn`, so downstream helpers (`run_shera_image_gd`, `run_shera_image_gd_eigen`, FIM helpers) accept two- or three-plane configs without special casing.
 - Graph templates remain per-variant for clarity (single-node cfg/spec/store → optics/source/detector → telescope.model). Consider factoring shared helpers or a base binder class if/when the systems converge further.
-- ✅ Added a minimal two-plane astrometry demo mirroring the canonical three-plane example (`Examples/scripts/run_twoplane_astrometry_demo.py` using `SheraTwoPlaneConfig` + `SheraTwoPlaneBinder`).
+- ✅ Added a minimal two-plane astrometry demo mirroring the canonical three-plane example (`examples/scripts/run_twoplane_astrometry_demo.py` using `SheraTwoPlaneConfig` + `SheraTwoPlaneBinder`).
 - Evaluate whether shared binder behaviour (two- vs three-plane) should live in a common base class once both paths exist.
 
 ---
@@ -479,11 +479,11 @@ This section captures our strategy for (a) deciding when to merge the refactor w
     - Parameters & Stores: ParamSpec, ParameterStore, transforms.
     - Binders & SystemGraphs: Binder as the user-facing “model object,” SystemGraph as underlying wiring.
     - Optical Systems: three-plane Shera optics as the baseline, two-plane optics as a simplified variant.
-  - **Examples index**:
+  - **examples index**:
     - Lists the canonical three-plane demo, the two-plane demo, and any specialty examples (FIM, eigenmodes, priors) with one-line descriptions.
   - **Status update:** The core architecture concept docs (params_and_store, binder_and_graph, inference_and_loss, eigenmodes) now carry a V1.0 narrative with no user-facing “refactor” or “legacy” language.
 
-- **Examples**
+- **examples**
   - Three-plane canonical astrometry demo is polished and matches the V1.0 docs.
   - Two-plane demo is available and documented as the simplified alternative (even if lighter-weight than the three-plane example).
 
