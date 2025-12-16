@@ -229,7 +229,7 @@ def make_inference_subspec(
         coefficient requests are validated against the configured bases.
     include_secondary:
         Optional policy override. If explicitly False and ``infer_keys``
-        includes ``"secondary.zernike_coeffs"``, a ValueError is raised with a
+        includes ``"secondary.zernike_coeffs_nm"``, a ValueError is raised with a
         clear instruction to drop the key. If True but the configuration lacks
         a secondary basis, the configuration still wins and a ValueError is
         raised.
@@ -238,22 +238,22 @@ def make_inference_subspec(
     infer_keys_list = list(infer_keys)
 
     if cfg is not None:
-        if not cfg.primary_noll_indices and "primary.zernike_coeffs" in infer_keys_list:
+        if not cfg.primary_noll_indices and "primary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
                 "Config does not define a primary Zernike basis, but "
-                "infer_keys includes 'primary.zernike_coeffs'."
+                "infer_keys includes 'primary.zernike_coeffs_nm'."
             )
 
         has_secondary_basis = getattr(cfg, "secondary_noll_indices", ())
-        if (not has_secondary_basis) and "secondary.zernike_coeffs" in infer_keys_list:
+        if (not has_secondary_basis) and "secondary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
                 "Config does not define a secondary Zernike basis, but "
-                "infer_keys includes 'secondary.zernike_coeffs'."
+                "infer_keys includes 'secondary.zernike_coeffs_nm'."
             )
 
-    if include_secondary is False and "secondary.zernike_coeffs" in infer_keys_list:
+    if include_secondary is False and "secondary.zernike_coeffs_nm" in infer_keys_list:
         raise ValueError(
-            "include_secondary=False but infer_keys includes 'secondary.zernike_coeffs'; "
+            "include_secondary=False but infer_keys includes 'secondary.zernike_coeffs_nm'; "
             "remove it from the inference view."
         )
 
@@ -395,7 +395,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
         # Optical wavefront errors
         # ----------------------
         ParamField(
-            key="primary.zernike_coeffs",
+            key="primary.zernike_coeffs_nm",
             group="primary",
             kind="primitive",
             units="nm",
@@ -409,7 +409,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="secondary.zernike_coeffs",
+            key="secondary.zernike_coeffs_nm",
             group="secondary",
             kind="primitive",
             units="nm",
@@ -425,7 +425,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
     ]
 
     if not include_secondary:
-        fields = [f for f in fields if f.key != "secondary.zernike_coeffs"]
+        fields = [f for f in fields if f.key != "secondary.zernike_coeffs_nm"]
 
     return ParamSpec(fields, system_id=SHERA_THREEPLANE_SYSTEM_ID)
 
@@ -816,7 +816,7 @@ def build_forward_model_spec_from_config(
     if cfg.primary_noll_indices:
         fields.append(
             ParamField(
-                key="primary.zernike_coeffs",
+                key="primary.zernike_coeffs_nm",
                 group="primary",
                 kind="primitive",
                 units="nm",
@@ -835,7 +835,7 @@ def build_forward_model_spec_from_config(
     if cfg.secondary_noll_indices:
         fields.append(
             ParamField(
-                key="secondary.zernike_coeffs",
+                key="secondary.zernike_coeffs_nm",
                 group="secondary",
                 kind="primitive",
                 units="nm",
@@ -1066,7 +1066,7 @@ def build_shera_twoplane_forward_spec_from_config(
     if cfg.primary_noll_indices:
         fields.append(
             ParamField(
-                key="primary.zernike_coeffs",
+                key="primary.zernike_coeffs_nm",
                 group="primary",
                 kind="primitive",
                 units="nm",
