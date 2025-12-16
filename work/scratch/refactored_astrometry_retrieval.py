@@ -76,6 +76,8 @@ add_noise = False
 ##########################
 # Start Building the model
 ##########################
+print("Starting Simulation...")
+print("Creating Config, Spec, Store, and Binder...")
 
 rng_key = jr.PRNGKey(rng_seed)
 
@@ -103,13 +105,17 @@ forward_truth_store = forward_truth_store.replace(
 )
 
 # Compute derived parameters
-sys_id = "shera_threeplane"
-forward_truth_store = refresh_derived(forward_truth_store, forward_spec, get_resolver(sys_id), system_id=sys_id)
+forward_truth_store = forward_truth_store.refresh_derived(forward_spec)
 
 # Create the Binder
 binder = SheraThreePlaneBinder(cfg, forward_spec, forward_truth_store)
 # The binder is the object that acts like the dLux Telescope.
 # It holds the source, optics + detector, and exposes the .model() method
+
+###############
+# Generate data
+###############
+print("Generating synthetic data...")
 
 # Generate the true Data PSF
 data = binder.model()
@@ -129,6 +135,7 @@ data_var = data
 ######################
 # Set up the inference
 ######################
+print("Configuring Inference...")
 
 # Choose inference keys
 infer_keys = (
@@ -158,13 +165,13 @@ priors = {
 }
 prior_spec = PriorSpec.from_sigmas(forward_truth_store, priors)
 
-
+print("Drawing starting point from priors...")
 # Draw an initial point for the model from the priors
 rng_key, split_key = jr.split(rng_key)
 init_store = prior_spec.sample_near(forward_truth_store, rng_key=split_key, keys=infer_keys)
 init_psf = binder.model(init_store)
 
-
+print("Building the loss function...")
 # Build the Loss function
 nll_loss_fn, theta0 = make_binder_image_nll_fn(
     cfg=binder.cfg,
@@ -190,6 +197,7 @@ def map_loss_fn(theta: np.ndarray) -> np.ndarray:
 loss_fn = nll_loss_fn
 loss0 = loss_fn(theta0)
 
+print("Running gradient descent optimization...")
 # Now run the gradient descent optimization
 n_iter = 100
 theta_final, history = run_simple_gd(
@@ -203,10 +211,97 @@ theta_final, history = run_simple_gd(
 final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 final_psf = binder.model(final_store)
 
+##################
+# Print a Summary
+##################
+def _as_np(x):
+    return np.asarray(x)
+
+def _fmt_scalar(x, *, prec=8):
+    try:
+        return f"{float(x):.{prec}g}"
+    except Exception:
+        return str(x)
+
+def _is_scalar(arr: np.ndarray) -> bool:
+    arr = np.asarray(arr)
+    return arr.ndim == 0 or arr.size == 1
+
+def _iter_labels_for_key(key: str, n: int):
+    # Special-case Zernike coeff labels if we can
+    if key == "primary.zernike_coeffs":
+        nolls = getattr(cfg, "primary_noll_indices", None)
+        if nolls is not None and len(nolls) == n:
+            return [f"Z{int(z)}" for z in nolls]
+    if key == "secondary.zernike_coeffs":
+        nolls = getattr(cfg, "secondary_noll_indices", None)
+        if nolls is not None and len(nolls) == n:
+            return [f"Z{int(z)}" for z in nolls]
+
+    # Generic fallback: index labels
+    return [str(i) for i in range(n)]
+
+def _print_vector(key: str, true_val, init_val, final_val, *, prec=8):
+    t = np.ravel(_as_np(true_val))
+    i = np.ravel(_as_np(init_val))
+    f = np.ravel(_as_np(final_val))
+
+    if t.size != i.size or t.size != f.size:
+        print(f"    [WARN] size mismatch: true={t.size}, init={i.size}, final={f.size}")
+        n = min(t.size, i.size, f.size)
+        t, i, f = t[:n], i[:n], f[:n]
+
+    labels = _iter_labels_for_key(key, t.size)
+
+    # Print one line per element
+    for idx, lab, tv, iv, fv in zip(range(t.size), labels, t, i, f):
+        dt_i = float(iv - tv)
+        dt_f = float(fv - tv)
+        print(
+            f"    [{idx:>3}] {lab:>4} : "
+            f"true={_fmt_scalar(tv, prec=prec)}  "
+            f"init={_fmt_scalar(iv, prec=prec)}  (Δ={_fmt_scalar(dt_i, prec=prec)})  "
+            f"final={_fmt_scalar(fv, prec=prec)} (Δ={_fmt_scalar(dt_f, prec=prec)})"
+        )
+
+print("\n==============================")
+print("Gradient Descent Summary")
+print("==============================")
+print(f"n_iter = {n_iter}")
+print(f"loss(init theta0) = {_fmt_scalar(loss0)}")
+print(f"loss(final)       = {_fmt_scalar(loss_fn(theta_final))}")
+print("")
+
+for k in infer_keys:
+    true_val = forward_truth_store.get(k)
+    init_val = init_store.get(k)
+    final_val = final_store.get(k)
+
+    t = _as_np(true_val)
+    i = _as_np(init_val)
+    f = _as_np(final_val)
+
+    print(f"- {k}")
+    if _is_scalar(t) and _is_scalar(i) and _is_scalar(f):
+        # Scalar print
+        tv = t.reshape(()) if t.size == 1 else t
+        iv = i.reshape(()) if i.size == 1 else i
+        fv = f.reshape(()) if f.size == 1 else f
+        print(f"    true : {_fmt_scalar(tv)}")
+        print(f"    init : {_fmt_scalar(iv)}  (Δ={_fmt_scalar(float(iv - tv))})")
+        print(f"    final: {_fmt_scalar(fv)}  (Δ={_fmt_scalar(float(fv - tv))})")
+    else:
+        # Full vector print (flattened)
+        print(f"    shape true/init/final: {t.shape} / {i.shape} / {f.shape}")
+        _print_vector(k, t, i, f)
+
+    print("")
+
 
 ##################
 # Plot the Outputs
 ##################
+print("Plotting outputs...")
 
 # Make a plot of our Starting Point
 plot_psf_comparison(
@@ -232,9 +327,9 @@ fig, axes = plt.subplots(1, 2, figsize=(9, 4))
 axes = axes.flatten()
 # Left: Full loss history
 plot_parameter_history(
-    names="Loss",
-    histories=losses,
-    true_vals=loss0,
+    names=("Loss",),
+    histories=(losses,),
+    true_vals=(float(loss0),),
     ax=axes[0],
     title="Optimization Loss History",
     show=False,
