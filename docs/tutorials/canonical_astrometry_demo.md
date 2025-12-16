@@ -18,7 +18,7 @@ The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (imple
       oversample=4,
   )
   ```
-- **Create the base forward ParameterStore:** Use the spec defaults to create a primitives-only store and call `refresh_derived` to populate values such as pixel scale and log flux via `DerivedResolver` transforms. We typically do not construct a separate `inference_store`; instead we reuse `forward_store` (or `init_store`) as the base store for packing/unpacking.
+- **Create the base forward ParameterStore:** Use the spec defaults to create a primitives-only store and call `store.refresh_derived(forward_spec)` to populate values such as pixel scale and log flux. Derived transform modules are registered lazily, so the store method is the one-stop "compute deriveds" entrypoint. We typically do not construct a separate `inference_store`; instead we reuse `forward_store` (or `init_store`) as the base store for packing/unpacking.
 - **Define the inference view:** Choose the subset/order of parameters to infer (e.g., astrometry-only) and build an inference subspec directly from the forward spec using `make_inference_subspec`. Validate that the base store already contains the needed keys (and shapes) with `validate_inference_base_store` before packing θ vectors, for example:
 
   ```python

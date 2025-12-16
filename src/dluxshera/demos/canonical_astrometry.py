@@ -27,9 +27,7 @@ from dluxshera.params.spec import (
     build_forward_model_spec_from_config,
     build_inference_spec_basic,
 )
-from dluxshera.params.store import ParameterStore, refresh_derived
-from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS, resolve_derived
-import dluxshera.params.shera_threeplane_transforms  # Registers default derived transforms
+from dluxshera.params.store import ParameterStore
 from dluxshera.plot.plotting import plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 
 DEFAULT_RESULTS_DIR = Path("Results/CanonicalAstrometryDemo")
@@ -148,19 +146,11 @@ def build_system(
             "binary.spectral_flux_density": 1.7e17,
             "imaging.exposure_time_s": 1.0,
             "imaging.throughput": 0.8,
-        }
-    )
-
-    plate_scale = resolve_derived("system.plate_scale_as_per_pix", forward_store)
-    log_flux = resolve_derived("binary.log_flux_total", forward_store)
-    forward_store = forward_store.replace(
-        {
-            "binary.log_flux_total": log_flux,
-            "system.plate_scale_as_per_pix": plate_scale,
             "binary.contrast": 3.2,
         }
     )
-    forward_store = refresh_derived(forward_store, forward_spec, TRANSFORMS, system_id=DEFAULT_SYSTEM_ID)
+
+    forward_store = forward_store.refresh_derived(forward_spec)
 
     truth_store = ParameterStore.from_spec_defaults(inference_spec)
     primary_zernikes = 5.0 * rng.standard_normal(len(cfg.primary_noll_indices))

@@ -58,7 +58,11 @@ def test_twoplane_forward_spec_refresh():
     assert "binary.log_flux_total" not in store
 
     refreshed = refresh_derived(
-        store, spec, DERIVED_RESOLVER, DEFAULT_SYSTEM_ID, include_derived=True
+        store,
+        spec,
+        resolver=DERIVED_RESOLVER,
+        system_id=DEFAULT_SYSTEM_ID,
+        include_derived=True,
     )
 
     assert refreshed.get("system.plate_scale_as_per_pix") == pytest.approx(

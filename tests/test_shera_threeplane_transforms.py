@@ -9,10 +9,7 @@ from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.optics.builder import build_shera_threeplane_optics
 from dluxshera.params.spec import build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived
-from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
-
-# IMPORTANT: ensure transforms are registered at import time
-import dluxshera.params.shera_threeplane_transforms  # noqa: F401
+from dluxshera.params.transforms import TRANSFORMS
 
 
 def _build_forward_model_store(cfg=SHERA_TESTBED_CONFIG):
@@ -148,8 +145,6 @@ def test_refresh_derived_populates_forward_model_keys():
     refreshed = refresh_derived(
         store,
         spec,
-        TRANSFORMS,
-        system_id=DEFAULT_SYSTEM_ID,
         include_derived=True,
     )
 

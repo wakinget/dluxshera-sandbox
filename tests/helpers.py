@@ -8,10 +8,10 @@ from dluxshera.params.spec import (
     build_forward_model_spec_from_config,
     build_inference_spec_basic,
     build_shera_twoplane_forward_spec_from_config,
+    SHERA_TWOPLANE_SYSTEM_ID,
 )
-from dluxshera.params.store import ParameterStore, refresh_derived
-from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
-import dluxshera.params.shera_threeplane_transforms  # Registers default transforms
+from dluxshera.params.store import ParameterStore
+from dluxshera.params.transforms import DEFAULT_SYSTEM_ID
 
 
 def make_forward_store(
@@ -27,7 +27,8 @@ def make_forward_store(
     store = ParameterStore.from_spec_defaults(spec)
     if updates:
         store = store.replace(updates)
-    store = refresh_derived(store, spec, TRANSFORMS, system_id=DEFAULT_SYSTEM_ID)
+    system_id = DEFAULT_SYSTEM_ID if spec.system_id == SHERA_TWOPLANE_SYSTEM_ID else None
+    store = store.refresh_derived(spec, system_id=system_id)
     return spec, store
 
 

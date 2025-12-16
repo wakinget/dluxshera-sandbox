@@ -99,7 +99,7 @@ dLuxShera/
 
 - Frozen mapping `{key → value}` registered as JAX pytree; supports `.replace`, iteration, and `.validate` against a `ParamSpec`.
 - Validation is strict by default (rejects derived keys); override/debug mode opt-in via `allow_derived=True`. Helpers `strip_derived`, `refresh_derived`, and `check_consistency` keep derived values fresh or flag stale overrides.
-- Canonical forward-store flow is primitives-only defaults → explicit primitive overrides → `refresh_derived(...)` to populate plate scale / log flux and other deriveds; derived keys are omitted from `from_spec_defaults` by design.
+- Canonical forward-store flow is primitives-only defaults → explicit primitive overrides → `store.refresh_derived(forward_spec)` to populate plate scale / log flux and other deriveds; derived keys are omitted from `from_spec_defaults` by design. `ParamSpec.system_id` (set by the forward builders) feeds through to resolver selection so most call sites no longer need to thread system IDs explicitly.
 - Single-store inference workflow: build an inference subspec from the forward spec and call `validate_inference_base_store(forward_store, subspec)` to fail fast on missing/shape/dtype issues before packing θ vectors. Inference specs/subspecs act as views + ordering + validation; they do not require seeding a dedicated store.
 - Shallow serialization helpers exist (`from_dict`, `from_spec_defaults`, `as_dict`); YAML/JSON IO still planned in the profiles/IO workstream.
 - Shera configs mirror this immutability: they are frozen dataclasses for structural hashing/caching safety and should be tweaked via the new `BaseConfig.replace(**kwargs)` helper (e.g., `SHERA_TESTBED_CONFIG.replace(oversample=4)`).
@@ -108,7 +108,7 @@ dLuxShera/
 
 ## 6) Transform Registry / DerivedResolver
 
-- Scoped `DerivedResolver` now wraps per-system `TransformRegistry` instances with system-id aware registration and resolution helpers (defaulting to the Shera three-plane system for backward compatibility).
+- Scoped `DerivedResolver` now wraps per-system `TransformRegistry` instances with system-id aware registration and resolution helpers (defaulting to the Shera three-plane system for backward compatibility). Transform modules register lazily via `ensure_registered(system_id)` so user scripts do not need explicit side-effect imports before refreshing deriveds.
 - Three Shera transforms registered under `shera_threeplane`: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist (now exercised via a primitives-only forward-store refresh pattern).
 - Future work: expand transform coverage for additional systems (two-plane/four-plane) once those variants land.
 
