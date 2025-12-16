@@ -1,7 +1,5 @@
 from dataclasses import replace
 
-from dataclasses import replace
-
 import jax.numpy as jnp
 
 from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
@@ -33,7 +31,7 @@ def _make_forward_and_inference_stores(cfg):
 
 
 def test_system_graph_forward_matches_legacy_model():
-    cfg = replace(SHERA_TESTBED_CONFIG, n_lambda=1)
+    cfg = SHERA_TESTBED_CONFIG.replace(n_lambda=1)
     forward_spec, forward_store, inference_spec, inference_store = _make_forward_and_inference_stores(cfg)
 
     graph = build_threeplane_system_graph(cfg, forward_spec, forward_store)

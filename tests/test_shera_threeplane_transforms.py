@@ -3,8 +3,6 @@ import math
 import pytest
 
 import math
-from dataclasses import replace
-
 import pytest
 
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
@@ -59,8 +57,7 @@ def test_forward_spec_zernike_coeffs_follow_noll_indices():
 
 
 def test_forward_spec_omits_zernike_when_basis_absent():
-    cfg_empty = replace(
-        SHERA_TESTBED_CONFIG,
+    cfg_empty = SHERA_TESTBED_CONFIG.replace(
         primary_noll_indices=(),
         secondary_noll_indices=(),
     )
