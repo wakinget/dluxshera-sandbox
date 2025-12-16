@@ -38,7 +38,7 @@ from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
+from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd, fim_theta, fim_theta_shera
 from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 
 
@@ -302,12 +302,14 @@ for k in infer_keys:
 # Plot the Outputs
 ##################
 print("Plotting outputs...")
+psf_extent_as = binder.cfg.psf_npix * binder.base_forward_store.get("system.plate_scale_as_per_pix") / 2 * np.array([-1, 1, -1, 1])
 
 # Make a plot of our Starting Point
 plot_psf_comparison(
     data=data,
     model=init_psf,
     var=data_var,
+    extent=psf_extent_as,
     model_label="Initial Model",
     save_path=DEFAULT_RESULTS_DIR / "initial_psf_comparison.png",
 )
@@ -317,6 +319,7 @@ plot_psf_comparison(
     data=data,
     model=final_psf,
     var=data_var,
+    extent=psf_extent_as,
     model_label="Final Model",
     save_path=DEFAULT_RESULTS_DIR / "final_psf_comparison.png",
 )
