@@ -601,6 +601,8 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             basis = np.array([dlu.zernike(i, coords, p1_diameter) for i in self.m1_noll_ind])
             coefficients = np.zeros(len(self.m1_noll_ind)) if m1_coefficients is None else m1_coefficients
             m1_aperture = dll.BasisOptic(basis, m1_transmission, coefficients, normalise=True)
+            # Normalize basis so Zernike coefficients represent nanometers of OPD
+            m1_aperture = m1_aperture.multiply('basis', 1e-9)
 
         # Generate Zernike basis for M2
         if self.m2_noll_ind is None:
@@ -610,6 +612,8 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
             basis = np.array([dlu.zernike(i, coords, p2_diameter) for i in self.m2_noll_ind])
             coefficients = np.zeros(len(self.m2_noll_ind)) if m2_coefficients is None else m2_coefficients
             m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
+            # Normalize basis so Zernike coefficients represent nanometers of OPD
+            m2_aperture = m2_aperture.multiply('basis', 1e-9)
 
         # ------------------------------------------------------------------
         # Generate Diffractive Pupil Mask layer
