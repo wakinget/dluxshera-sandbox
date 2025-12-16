@@ -18,7 +18,18 @@ The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (imple
       oversample=4,
   )
   ```
-- **Create the base forward ParameterStore:** Use the spec defaults to create a primitives-only store and call `refresh_derived` to populate values such as pixel scale and log flux via `DerivedResolver` transforms.
+- **Create the base forward ParameterStore:** Use the spec defaults to create a primitives-only store and call `refresh_derived` to populate values such as pixel scale and log flux via `DerivedResolver` transforms. We typically do not construct a separate `inference_store`; instead we reuse `forward_store` (or `init_store`) as the base store for packing/unpacking.
+- **Define the inference view:** Choose the subset/order of parameters to infer (e.g., astrometry-only) and build an inference subspec directly from the forward spec using `make_inference_subspec`. Validate that the base store already contains the needed keys (and shapes) with `validate_inference_base_store` before packing θ vectors, for example:
+
+  ```python
+  inference_subspec = make_inference_subspec(
+      base_spec=forward_spec,
+      infer_keys=["binary.separation_as", "binary.position_angle_deg"],
+      cfg=cfg,
+      include_secondary=False,
+  )
+  validate_inference_base_store(forward_store, inference_subspec)
+  ```
 - **Construct the Binder/SystemGraph:** Instantiate a `SheraThreePlaneBinder` (optionally `use_system_graph=True`) so evaluation is a single `binder.model(store_delta)` call that runs through the DAG.
 - **Generate synthetic data:** Draw a "truth" `ParameterStore`, evaluate the binder to get a noiseless image, and add Gaussian noise to obtain observations.
 - **Build the binder-based loss:** `make_binder_image_nll_fn` returns a θ-packing loss and the initial θ vector. The demo adds a quadratic prior penalty for MAP optimisation.

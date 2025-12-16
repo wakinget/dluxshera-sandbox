@@ -180,6 +180,65 @@ class ParamSpec:
 
 
 # ---------------------------------------------------------------------------
+# Inference helpers
+# ---------------------------------------------------------------------------
+
+def make_inference_subspec(
+    *,
+    base_spec: ParamSpec,
+    infer_keys: Iterable[ParamKey],
+    cfg: SheraTwoPlaneConfig | SheraThreePlaneConfig | None = None,
+    include_secondary: bool | None = None,
+) -> ParamSpec:
+    """Construct an inference ParamSpec view from a base specification.
+
+    This helper is intentionally lightweight: it validates the requested keys
+    against the optional optical configuration and returns ``base_spec.subset``
+    preserving the caller-provided ordering.
+
+    Parameters
+    ----------
+    base_spec:
+        The source ParamSpec (typically a forward spec) to subset.
+    infer_keys:
+        Iterable of parameter keys to include, in the desired packing order.
+    cfg:
+        Optional Shera optical configuration. When provided, Zernike
+        coefficient requests are validated against the configured bases.
+    include_secondary:
+        Optional policy override. If explicitly False and ``infer_keys``
+        includes ``"secondary.zernike_coeffs"``, a ValueError is raised with a
+        clear instruction to drop the key. If True but the configuration lacks
+        a secondary basis, the configuration still wins and a ValueError is
+        raised.
+    """
+
+    infer_keys_list = list(infer_keys)
+
+    if cfg is not None:
+        if not cfg.primary_noll_indices and "primary.zernike_coeffs" in infer_keys_list:
+            raise ValueError(
+                "Config does not define a primary Zernike basis, but "
+                "infer_keys includes 'primary.zernike_coeffs'."
+            )
+
+        has_secondary_basis = getattr(cfg, "secondary_noll_indices", ())
+        if (not has_secondary_basis) and "secondary.zernike_coeffs" in infer_keys_list:
+            raise ValueError(
+                "Config does not define a secondary Zernike basis, but "
+                "infer_keys includes 'secondary.zernike_coeffs'."
+            )
+
+    if include_secondary is False and "secondary.zernike_coeffs" in infer_keys_list:
+        raise ValueError(
+            "include_secondary=False but infer_keys includes 'secondary.zernike_coeffs'; "
+            "remove it from the inference view."
+        )
+
+    return base_spec.subset(infer_keys_list)
+
+
+# ---------------------------------------------------------------------------
 # Shera inference spec builders
 # ---------------------------------------------------------------------------
 

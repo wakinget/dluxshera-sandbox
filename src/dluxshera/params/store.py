@@ -277,6 +277,76 @@ class ParameterStore:
         return self
 
 
+def validate_inference_base_store(
+    base_store: ParameterStore,
+    subspec: ParamSpec,
+    *,
+    check_shapes: bool = True,
+    check_dtypes: bool = False,
+) -> None:
+    """Validate that a base store is compatible with an inference subspec.
+
+    This performs presence/shape/dtype checks (as configured) for every field
+    in the subspec and raises a consolidated ValueError on any mismatch.
+    """
+
+    missing_keys = []
+    shape_mismatches = []
+    dtype_mismatches = []
+
+    def _shape_of(value: Any) -> Optional[Tuple[int, ...]]:
+        if hasattr(value, "shape"):
+            shape_attr = getattr(value, "shape")
+            if shape_attr is not None:
+                try:
+                    return tuple(shape_attr)
+                except TypeError:
+                    return None
+        if isinstance(value, (tuple, list)):
+            return (len(value),)
+        return None
+
+    def _dtype_matches(value: Any, expected) -> bool:
+        try:
+            actual_dtype = getattr(value, "dtype", None)
+            if actual_dtype is not None:
+                try:
+                    return jnp.issubdtype(actual_dtype, jnp.dtype(expected))
+                except TypeError:
+                    pass
+            return isinstance(value, expected)
+        except Exception:
+            return False
+
+    for key, field in subspec.items():
+        try:
+            value = base_store.get(key)
+        except KeyError:
+            missing_keys.append(key)
+            continue
+
+        if check_shapes and field.shape is not None:
+            actual_shape = _shape_of(value)
+            if actual_shape != field.shape:
+                shape_mismatches.append((key, field.shape, actual_shape))
+
+        if check_dtypes and field.dtype is not None:
+            if not _dtype_matches(value, field.dtype):
+                dtype_mismatches.append((key, field.dtype, getattr(value, "dtype", type(value))))
+
+    if missing_keys or shape_mismatches or dtype_mismatches:
+        parts = []
+        if missing_keys:
+            parts.append(f"missing keys: {sorted(missing_keys)}")
+        if shape_mismatches:
+            formatted = [f"{k} (expected {exp}, found {found})" for k, exp, found in shape_mismatches]
+            parts.append("shape mismatches: " + "; ".join(formatted))
+        if dtype_mismatches:
+            formatted = [f"{k} (expected {exp}, found {found})" for k, exp, found in dtype_mismatches]
+            parts.append("dtype mismatches: " + "; ".join(formatted))
+        raise ValueError("; ".join(parts))
+
+
 def _derived_keys(spec: ParamSpec) -> set[ParamKey]:
     return {key for key, field in spec.items() if field.kind == "derived"}
 
