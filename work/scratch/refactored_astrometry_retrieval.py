@@ -32,7 +32,7 @@ from dluxshera.params.spec import (
     ParamKey,
     ParamSpec,
     build_forward_model_spec_from_config,
-    build_inference_spec_basic,
+    make_inference_subspec,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
@@ -87,7 +87,6 @@ cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
 
 # Create Parameter Specs from the config
 forward_spec = build_forward_model_spec_from_config(cfg)
-inference_spec = build_inference_spec_basic()
 
 # Create forward Parameter Store from the specs
 forward_truth_store = ParameterStore.from_spec_defaults(forward_spec)
@@ -143,7 +142,7 @@ infer_keys = (
     "primary.zernike_coeffs",
     # "secondary.zernike_coeffs", # Remove secondary Zernike's for stability
 )
-inference_subspec = inference_spec.subset(infer_keys)
+inference_subspec = make_inference_subspec(base_spec=forward_spec, infer_keys=infer_keys, cfg=cfg)
 
 # Set up prior knowledge
 priors = {
