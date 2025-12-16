@@ -81,10 +81,9 @@ rng_key = jr.PRNGKey(rng_seed)
 
 # Start with a pre-defined config
 cfg = SHERA_TESTBED_CONFIG
-
 # Use the config to set Zernike Noll indices
-cfg.primary_noll_indices = tuple(range(4, 12))
-cfg.secondary_noll_indices = tuple(range(4, 12))
+cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
+                  secondary_noll_indices=tuple(range(4, 12)))
 
 # Create Parameter Specs from the config
 forward_spec = build_forward_model_spec_from_config(cfg)
@@ -107,26 +106,6 @@ forward_truth_store = forward_truth_store.replace(
 # Compute derived parameters
 sys_id = "shera_threeplane"
 forward_truth_store = refresh_derived(forward_truth_store, forward_spec, get_resolver(sys_id), system_id=sys_id)
-
-# Create an inference Parameter Store
-inference_store = ParameterStore.from_spec_defaults(inference_spec)
-# Update the inference_store with values from forward_truth_store
-# This should align inference_store and forward_truth_store
-inference_store = inference_store.replace(
-    {
-        "binary.separation_as": forward_truth_store.get("binary.separation_as"),
-        "binary.position_angle_deg": forward_truth_store.get("binary.position_angle_deg"),
-        "binary.x_position_as": forward_truth_store.get("binary.x_position_as"),
-        "binary.y_position_as": forward_truth_store.get("binary.y_position_as"),
-        "binary.log_flux_total": forward_truth_store.get("binary.log_flux_total"),
-        "binary.contrast": forward_truth_store.get("binary.contrast"),
-        "system.plate_scale_as_per_pix": forward_truth_store.get("system.plate_scale_as_per_pix"),
-        "primary.zernike_coeffs": forward_truth_store.get("primary.zernike_coeffs"),
-        "secondary.zernike_coeffs": forward_truth_store.get("secondary.zernike_coeffs"),
-    }
-)
-# This specific way of aligning the inference store with the forward_truth_store could be improved using a method
-# Ex. inference_store = inference_store.update_from_store(forward_truth_store) or similar
 
 # Create the Binder
 binder = SheraThreePlaneBinder(cfg, forward_spec, forward_truth_store)
@@ -175,16 +154,15 @@ priors = {
     "binary.log_flux_total": 1e-3,
     "binary.contrast": 1e-3,
     "system.plate_scale_as_per_pix": 1e-3,
-    "primary.zernike_coeffs": np.full_like(inference_store.get("primary.zernike_coeffs"), 1.0),
-    "secondary.zernike_coeffs": np.full_like(inference_store.get("primary.zernike_coeffs"), 1.0),
+    "primary.zernike_coeffs": np.full_like(forward_truth_store.get("primary.zernike_coeffs"), 1.0),
+    "secondary.zernike_coeffs": np.full_like(forward_truth_store.get("primary.zernike_coeffs"), 1.0),
 }
-prior_spec = PriorSpec.from_sigmas(inference_store, priors)
+prior_spec = PriorSpec.from_sigmas(forward_truth_store, priors)
 
 
 # Draw an initial point for the model from the priors
 rng_key, split_key = jr.split(rng_key)
-init_store = prior_spec.sample_near(inference_store, rng_key=split_key, keys=infer_keys)
-init_update = {key: init_store.get(key) for key in infer_keys}
+init_store = prior_spec.sample_near(forward_truth_store, rng_key=split_key, keys=infer_keys)
 init_psf = binder.model(init_store)
 
 
