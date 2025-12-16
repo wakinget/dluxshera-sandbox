@@ -198,6 +198,15 @@ dLuxShera/
 
 ## 13) Notes on Backward Compatibility
 
+---
+
+## Attribute Access
+
+- **Baseline test status:** `pytest` currently fails during collection with `ModuleNotFoundError: No module named 'dluxshera'` across the suite, so Binder-related tests (`tests/test_binder_smoke.py`, `tests/test_binder_shared_behaviour.py`, graph smoke, and Binder-backed loss/optimization tests) are not running without adding `src/` to `PYTHONPATH` or installing the package.
+- **Binder mutability/shape:** `SheraThreePlaneBinder` instances are `dataclasses` with `frozen=False` and `slots=False`; they do not present as `equinox.Module` or `zodiax.Base`, so mutation is guarded only by convention rather than framework-level immutability.
+- **Store surface area:** `binder.base_forward_store` is a `ParameterStore` exposing `get/keys/items/values/as_dict/replace/validate_against` and similar mapping semantics.
+- **Derived placement:** With the default forward spec + refreshed forward store (via `tests.helpers.make_forward_store`), derived values such as `system.plate_scale_as_per_pix` are present directly in the base forward store prior to any evaluation.
+
 - `SheraThreePlane_Model` remains the public entry point; new plumbing should remain internal to avoid churn in existing scripts.
 - Legacy files (`modeling.py`, optics helpers) still carry pre-refactor pathways; the refactor must avoid breaking current examples until replacements land.
 
