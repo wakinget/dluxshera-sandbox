@@ -101,7 +101,7 @@ class SheraTwoPlaneConfig(BaseConfig):
 
     If this tuple is empty, the builder does not construct a Zernike BasisOptic
     for the primary. If non-empty, the forward spec will expect
-    `primary.zernike_coeffs` of matching length.
+    `primary.zernike_coeffs_nm` of matching length.
     """
 
     # ------------------------------------------------------------------
@@ -242,7 +242,7 @@ class SheraThreePlaneConfig(BaseConfig):
 
     If this tuple is empty, the builder should *not* construct a Zernike
     BasisOptic for the primary. If non-empty, the builder will construct a
-    basis using these indices and will expect `primary.zernike_coeffs` in
+    basis using these indices and will expect `primary.zernike_coeffs_nm` in
     the ParameterStore to have matching length. Forward-model specs constructed
     from this config default the coefficients to a zero vector (no-aberration
     case) whenever a basis is present.
@@ -255,7 +255,7 @@ class SheraThreePlaneConfig(BaseConfig):
     Same convention as `primary_noll_indices`: an empty tuple means no
     Zernike basis is constructed for the secondary; a non-empty tuple means
     the builder constructs a BasisOptic and expects compatible coefficients
-    under `secondary.zernike_coeffs`. Forward-model specs built from this
+    under `secondary.zernike_coeffs_nm`. Forward-model specs built from this
     config seed those coefficients with a zero vector when the basis exists.
     """
 

@@ -86,17 +86,17 @@ def _build_param_history(
     )
     histories = {key: [] for key in keys}
     for idx in zernike_indices:
-        histories[f"primary.zernike_coeffs[{idx}]"] = []
+        histories[f"primary.zernike_coeffs_nm[{idx}]"] = []
 
     for theta_vec in theta_sequence:
         store = store_unpack_params(sub_spec, theta_vec, base_store)
         for key in keys:
             histories[key].append(np.array(store.get(key)))
 
-        zernikes = np.array(store.get("primary.zernike_coeffs"))
+        zernikes = np.array(store.get("primary.zernike_coeffs_nm"))
         for idx in zernike_indices:
             if idx < len(zernikes):
-                histories[f"primary.zernike_coeffs[{idx}]"].append(zernikes[idx])
+                histories[f"primary.zernike_coeffs_nm[{idx}]"].append(zernikes[idx])
 
     return {k: np.stack(v) for k, v in histories.items()}
 
@@ -164,8 +164,8 @@ def build_system(
             "binary.log_flux_total": forward_store.get("binary.log_flux_total"),
             "binary.contrast": forward_store.get("binary.contrast"),
             "system.plate_scale_as_per_pix": forward_store.get("system.plate_scale_as_per_pix"),
-            "primary.zernike_coeffs": primary_zernikes,
-            "secondary.zernike_coeffs": secondary_zernikes,
+            "primary.zernike_coeffs_nm": primary_zernikes,
+            "secondary.zernike_coeffs_nm": secondary_zernikes,
         }
     )
 
@@ -188,7 +188,8 @@ def simulate_data(
     variant_delta = ParameterStore.from_dict(
         {
             "binary.separation_as": forward_store.get("binary.separation_as") + 1.0,
-            "primary.zernike_coeffs": np.asarray(forward_store.get("primary.zernike_coeffs")) + 2.0,
+            "primary.zernike_coeffs_nm": np.asarray(forward_store.get("primary.zernike_coeffs_nm"))
+            + 2.0,
         }
     )
     variant_psf = _evaluate_psf(binder, variant_delta)
@@ -214,7 +215,7 @@ def make_inference_setup(
         "binary.log_flux_total",
         "binary.contrast",
         "system.plate_scale_as_per_pix",
-        "primary.zernike_coeffs",
+        "primary.zernike_coeffs_nm",
     )
     priors: Mapping[ParamKey, object] = {
         "binary.separation_as": 0.01,
@@ -224,7 +225,9 @@ def make_inference_setup(
         "binary.log_flux_total": 0.05,
         "binary.contrast": 0.05,
         "system.plate_scale_as_per_pix": 0.002,
-        "primary.zernike_coeffs": np.full_like(truth_store.get("primary.zernike_coeffs"), 1.0),
+        "primary.zernike_coeffs_nm": np.full_like(
+            truth_store.get("primary.zernike_coeffs_nm"), 1.0
+        ),
     }
     prior_spec = PriorSpec.from_sigmas(truth_store, priors)
 
@@ -405,7 +408,10 @@ def plot_results(
         )
     }
     true_values.update(
-        {f"primary.zernike_coeffs[{i}]": truth_store.get("primary.zernike_coeffs")[i] for i in (0, 1)}
+        {
+            f"primary.zernike_coeffs_nm[{i}]": truth_store.get("primary.zernike_coeffs_nm")[i]
+            for i in (0, 1)
+        }
     )
 
     plot_parameter_history_grid(
@@ -449,8 +455,12 @@ def main(
             "binary.x_position_as": np.array([truth_store.get("binary.x_position_as")]),
             "binary.y_position_as": np.array([truth_store.get("binary.y_position_as")]),
             "binary.contrast": np.array([truth_store.get("binary.contrast")]),
-            "primary.zernike_coeffs[0]": np.array([truth_store.get("primary.zernike_coeffs")[0]]),
-            "primary.zernike_coeffs[1]": np.array([truth_store.get("primary.zernike_coeffs")[1]]),
+            "primary.zernike_coeffs_nm[0]": np.array(
+                [truth_store.get("primary.zernike_coeffs_nm")[0]]
+            ),
+            "primary.zernike_coeffs_nm[1]": np.array(
+                [truth_store.get("primary.zernike_coeffs_nm")[1]]
+            ),
         }
 
         plot_results(

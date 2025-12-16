@@ -9,15 +9,15 @@ def _base_spec():
     return ParamSpec(
         [
             ParamField("a", group="g", kind="primitive"),
-            ParamField("primary.zernike_coeffs", group="primary", kind="primitive", shape=(2,)),
-            ParamField("secondary.zernike_coeffs", group="secondary", kind="primitive", shape=(1,)),
+            ParamField("primary.zernike_coeffs_nm", group="primary", kind="primitive", shape=(2,)),
+            ParamField("secondary.zernike_coeffs_nm", group="secondary", kind="primitive", shape=(1,)),
         ]
     )
 
 
 def test_make_inference_subspec_preserves_order():
     spec = _base_spec()
-    infer_keys = ["secondary.zernike_coeffs", "a"]
+    infer_keys = ["secondary.zernike_coeffs_nm", "a"]
 
     subspec = make_inference_subspec(base_spec=spec, infer_keys=infer_keys)
 
@@ -30,7 +30,7 @@ def test_make_inference_subspec_raises_when_basis_missing():
 
     with pytest.raises(ValueError):
         make_inference_subspec(
-            base_spec=spec, infer_keys=["primary.zernike_coeffs"], cfg=cfg
+            base_spec=spec, infer_keys=["primary.zernike_coeffs_nm"], cfg=cfg
         )
 
 
@@ -41,7 +41,7 @@ def test_make_inference_subspec_respects_include_secondary_false():
     with pytest.raises(ValueError):
         make_inference_subspec(
             base_spec=spec,
-            infer_keys=["secondary.zernike_coeffs"],
+            infer_keys=["secondary.zernike_coeffs_nm"],
             cfg=cfg,
             include_secondary=False,
         )
