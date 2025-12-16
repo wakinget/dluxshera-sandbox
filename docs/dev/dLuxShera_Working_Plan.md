@@ -100,6 +100,7 @@ dLuxShera/
 - Validation is strict by default (rejects derived keys); override/debug mode opt-in via `allow_derived=True`. Helpers `strip_derived`, `refresh_derived`, and `check_consistency` keep derived values fresh or flag stale overrides.
 - Canonical forward-store flow is primitives-only defaults → explicit primitive overrides → `refresh_derived(...)` to populate plate scale / log flux and other deriveds; derived keys are omitted from `from_spec_defaults` by design.
 - Shallow serialization helpers exist (`from_dict`, `from_spec_defaults`, `as_dict`); YAML/JSON IO still planned in the profiles/IO workstream.
+- Shera configs mirror this immutability: they are frozen dataclasses for structural hashing/caching safety and should be tweaked via the new `BaseConfig.replace(**kwargs)` helper (e.g., `SHERA_TESTBED_CONFIG.replace(oversample=4)`).
 
 ---
 

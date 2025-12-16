@@ -110,7 +110,7 @@ def test_threeplane_optics_cache_miss_on_structural_change(monkeypatch):
     clear_threeplane_optics_cache()
 
     cfg = SHERA_TESTBED_CONFIG
-    tweaked_cfg = replace(cfg, m1_diameter_m=cfg.m1_diameter_m + 0.01)
+    tweaked_cfg = cfg.replace(m1_diameter_m=cfg.m1_diameter_m + 0.01)
     calls = {"count": 0}
     original_construct = builder._construct_threeplane_optics
 
@@ -130,7 +130,7 @@ def test_threeplane_cache_ignores_nonstructural_design_name(monkeypatch):
     clear_threeplane_optics_cache()
 
     cfg = SHERA_TESTBED_CONFIG
-    renamed_cfg = replace(cfg, design_name="alternate_label")
+    renamed_cfg = cfg.replace(design_name="alternate_label")
 
     calls = {"count": 0}
     original_construct = builder._construct_threeplane_optics

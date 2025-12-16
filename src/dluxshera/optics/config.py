@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, replace as dataclass_replace
+from typing import Optional, Tuple, Self
 from pathlib import Path
 
 
+class BaseConfig:
+    """Shared helpers for immutable Shera configuration dataclasses."""
+
+    def replace(self, **kwargs) -> Self:
+        """Return a new config with the provided fields updated.
+
+        This is a thin wrapper around :func:`dataclasses.replace` that keeps the
+        configs frozen/immutable while providing an ergonomic, discoverable
+        update path mirroring :meth:`dluxshera.params.store.ParameterStore.replace`.
+        """
+
+        return dataclass_replace(self, **kwargs)
+
+
 @dataclass(frozen=True)
-class SheraTwoPlaneConfig:
+class SheraTwoPlaneConfig(BaseConfig):
     """
     Structural configuration for the Shera two-plane optical system.
 
@@ -101,7 +115,7 @@ class SheraTwoPlaneConfig:
 
 
 @dataclass(frozen=True)
-class SheraThreePlaneConfig:
+class SheraThreePlaneConfig(BaseConfig):
     """
     Structural configuration for the Shera three-plane optical system.
 

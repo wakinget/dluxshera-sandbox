@@ -1,4 +1,5 @@
 from .config import (
+    BaseConfig,
     SheraThreePlaneConfig,
     SheraTwoPlaneConfig,
     SHERA_TESTBED_CONFIG,
@@ -6,6 +7,7 @@ from .config import (
 )
 
 __all__ = [
+    "BaseConfig",
     "SheraThreePlaneConfig",
     "SheraTwoPlaneConfig",
     "SHERA_TESTBED_CONFIG",

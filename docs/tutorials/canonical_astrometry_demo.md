@@ -9,7 +9,15 @@ The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (imple
 - Plotting helpers for PSF comparison and parameter history.
 
 ## Step-by-step walkthrough
-- **Build the config and forward ParamSpec:** The script seeds a Shera configuration, then calls the forward `ParamSpec` builder (see `build_forward_spec` in the script) to define primitives and derived fields for inference.
+- **Build the config and forward ParamSpec:** The script seeds a Shera configuration, then calls the forward `ParamSpec` builder (see `build_forward_spec` in the script) to define primitives and derived fields for inference. Shera configs are frozen dataclasses for structural hashing/caching, so tweak predefined designs (e.g., `SHERA_TESTBED_CONFIG`) with the ergonomic `.replace(...)` helper rather than attribute assignment, for example:
+
+  ```python
+  cfg = SHERA_TESTBED_CONFIG.replace(
+      primary_noll_indices=(4, 5, 6, 7, 8),
+      secondary_noll_indices=(4, 5, 6, 7, 8),
+      oversample=4,
+  )
+  ```
 - **Create the base forward ParameterStore:** Use the spec defaults to create a primitives-only store and call `refresh_derived` to populate values such as pixel scale and log flux via `DerivedResolver` transforms.
 - **Construct the Binder/SystemGraph:** Instantiate a `SheraThreePlaneBinder` (optionally `use_system_graph=True`) so evaluation is a single `binder.model(store_delta)` call that runs through the DAG.
 - **Generate synthetic data:** Draw a "truth" `ParameterStore`, evaluate the binder to get a noiseless image, and add Gaussian noise to obtain observations.
