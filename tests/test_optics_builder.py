@@ -48,8 +48,8 @@ def test_build_shera_threeplane_optics_uses_zernike_coeffs():
 
     store = store.replace(
         {
-            "primary.zernike_coeffs": m1_coeffs,
-            "secondary.zernike_coeffs": m2_coeffs,
+            "primary.zernike_coeffs_nm": m1_coeffs,
+            "secondary.zernike_coeffs_nm": m2_coeffs,
         }
     )
 

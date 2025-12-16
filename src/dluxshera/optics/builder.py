@@ -221,8 +221,8 @@ def build_shera_threeplane_optics(
 
     store:
         Optional ParameterStore holding numeric parameter values. If
-        provided, this is used to populate `primary.zernike_coeffs`
-        and `secondary.zernike_coeffs` (when present) into the optics.
+        provided, this is used to populate `primary.zernike_coeffs_nm`
+        and `secondary.zernike_coeffs_nm` (when present) into the optics.
 
     spec:
         Optional ParamSpec used to validate the store keys. If provided,
@@ -262,24 +262,24 @@ def build_shera_threeplane_optics(
 
         # Primary mirror coefficients
         if n_m1 > 0:
-            coeffs = store.get("primary.zernike_coeffs", default=None)
+            coeffs = store.get("primary.zernike_coeffs_nm", default=None)
             if coeffs is not None:
                 coeffs = jnp.asarray(coeffs)
                 if coeffs.shape[0] != n_m1:
                     raise ValueError(
-                        f"primary.zernike_coeffs length {coeffs.shape[0]} does not "
+                        f"primary.zernike_coeffs_nm length {coeffs.shape[0]} does not "
                         f"match number of primary_noll_indices {n_m1}."
                     )
                 m1_coefficients = coeffs
 
         # Secondary mirror coefficients
         if n_m2 > 0:
-            coeffs = store.get("secondary.zernike_coeffs", default=None)
+            coeffs = store.get("secondary.zernike_coeffs_nm", default=None)
             if coeffs is not None:
                 coeffs = jnp.asarray(coeffs)
                 if coeffs.shape[0] != n_m2:
                     raise ValueError(
-                        f"secondary.zernike_coeffs length {coeffs.shape[0]} does not "
+                        f"secondary.zernike_coeffs_nm length {coeffs.shape[0]} does not "
                         f"match number of secondary_noll_indices {n_m2}."
                     )
                 m2_coefficients = coeffs
@@ -343,12 +343,12 @@ def build_shera_twoplane_optics(
 
         n_m1 = len(cfg.primary_noll_indices) if cfg.primary_noll_indices else 0
         if n_m1 > 0:
-            coeffs = store.get("primary.zernike_coeffs", default=None)
+            coeffs = store.get("primary.zernike_coeffs_nm", default=None)
             if coeffs is not None:
                 coeffs = jnp.asarray(coeffs)
                 if coeffs.shape[0] != n_m1:
                     raise ValueError(
-                        "primary.zernike_coeffs length does not match configured basis"
+                        "primary.zernike_coeffs_nm length does not match configured basis"
                     )
                 m1_coefficients = coeffs
 

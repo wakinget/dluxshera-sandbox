@@ -21,9 +21,9 @@ def _make_forward_and_inference_stores(cfg):
     }
 
     if n_m1 > 0:
-        updates["primary.zernike_coeffs"] = jnp.zeros(n_m1, dtype=jnp.float32)
+        updates["primary.zernike_coeffs_nm"] = jnp.zeros(n_m1, dtype=jnp.float32)
     if n_m2 > 0:
-        updates["secondary.zernike_coeffs"] = jnp.zeros(n_m2, dtype=jnp.float32)
+        updates["secondary.zernike_coeffs_nm"] = jnp.zeros(n_m2, dtype=jnp.float32)
 
     forward_spec, forward_store = make_forward_store(cfg, updates=updates)
     inference_spec, inference_store = inference_store_from_forward(forward_store)

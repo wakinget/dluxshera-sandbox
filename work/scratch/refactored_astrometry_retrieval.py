@@ -146,8 +146,8 @@ infer_keys = (
     "binary.log_flux_total",
     "binary.contrast",
     "system.plate_scale_as_per_pix",
-    "primary.zernike_coeffs",
-    # "secondary.zernike_coeffs", # Remove secondary Zernike's for stability
+    "primary.zernike_coeffs_nm",
+    # "secondary.zernike_coeffs_nm", # Remove secondary Zernike's for stability
 )
 inference_subspec = make_inference_subspec(base_spec=forward_spec, infer_keys=infer_keys, cfg=cfg)
 
@@ -160,8 +160,12 @@ priors = {
     "binary.log_flux_total": 1e-3,
     "binary.contrast": 1e-3,
     "system.plate_scale_as_per_pix": 1e-3,
-    "primary.zernike_coeffs": np.full_like(forward_truth_store.get("primary.zernike_coeffs"), 1.0),
-    "secondary.zernike_coeffs": np.full_like(forward_truth_store.get("primary.zernike_coeffs"), 1.0),
+    "primary.zernike_coeffs_nm": np.full_like(
+        forward_truth_store.get("primary.zernike_coeffs_nm"), 1.0
+    ),
+    "secondary.zernike_coeffs_nm": np.full_like(
+        forward_truth_store.get("secondary.zernike_coeffs_nm"), 1.0
+    ),
 }
 prior_spec = PriorSpec.from_sigmas(forward_truth_store, priors)
 
@@ -229,11 +233,11 @@ def _is_scalar(arr: np.ndarray) -> bool:
 
 def _iter_labels_for_key(key: str, n: int):
     # Special-case Zernike coeff labels if we can
-    if key == "primary.zernike_coeffs":
+    if key == "primary.zernike_coeffs_nm":
         nolls = getattr(cfg, "primary_noll_indices", None)
         if nolls is not None and len(nolls) == n:
             return [f"Z{int(z)}" for z in nolls]
-    if key == "secondary.zernike_coeffs":
+    if key == "secondary.zernike_coeffs_nm":
         nolls = getattr(cfg, "secondary_noll_indices", None)
         if nolls is not None and len(nolls) == n:
             return [f"Z{int(z)}" for z in nolls]

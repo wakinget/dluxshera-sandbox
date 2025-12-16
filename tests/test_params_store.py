@@ -82,7 +82,7 @@ def test_parameter_store_validate_against_inference_spec_basic():
     values = {}
 
     for key in spec.keys():
-        if key.endswith("zernike_coeffs"):
+        if key.endswith("zernike_coeffs_nm"):
             # Zernikes are arbitrary-length arrays; use a small example.
             values[key] = jnp.zeros(3)
         else:

@@ -20,9 +20,9 @@ def _make_store_for_smoke(cfg):
     n_m1 = len(cfg.primary_noll_indices)
     n_m2 = len(cfg.secondary_noll_indices)
     if n_m1 > 0:
-        updates["primary.zernike_coeffs"] = np.zeros(n_m1)
+        updates["primary.zernike_coeffs_nm"] = np.zeros(n_m1)
     if n_m2 > 0:
-        updates["secondary.zernike_coeffs"] = np.zeros(n_m2)
+        updates["secondary.zernike_coeffs_nm"] = np.zeros(n_m2)
 
     forward_spec, forward_store = make_forward_store(cfg, updates=updates)
     inference_spec, inference_store = inference_store_from_forward(forward_store)

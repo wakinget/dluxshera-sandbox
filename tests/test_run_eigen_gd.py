@@ -57,7 +57,7 @@ def test_run_shera_image_gd_eigen_smoke():
     }
     n_m1 = len(cfg.primary_noll_indices)
     if n_m1 > 0:
-        updates["primary.zernike_coeffs"] = np.zeros(n_m1)
+        updates["primary.zernike_coeffs_nm"] = np.zeros(n_m1)
     store = store.replace(updates)
 
     infer_keys = ["binary.separation_as"]

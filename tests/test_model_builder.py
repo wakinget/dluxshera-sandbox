@@ -41,9 +41,9 @@ def _make_inference_store(cfg):
     }
 
     if n_m1 > 0:
-        updates["primary.zernike_coeffs"] = jnp.zeros(n_m1, dtype=jnp.float32)
+        updates["primary.zernike_coeffs_nm"] = jnp.zeros(n_m1, dtype=jnp.float32)
     if n_m2 > 0:
-        updates["secondary.zernike_coeffs"] = jnp.zeros(n_m2, dtype=jnp.float32)
+        updates["secondary.zernike_coeffs_nm"] = jnp.zeros(n_m2, dtype=jnp.float32)
 
     store = store.replace(updates)
     return spec, store

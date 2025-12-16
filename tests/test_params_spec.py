@@ -25,7 +25,7 @@ def _toy_spec() -> ParamSpec:
         (
             ParamField(key="a", group="g1", kind="primitive"),
             ParamField(key="b", group="g1", kind="primitive"),
-            ParamField(key="primary.zernike_coeffs", group="primary", kind="primitive", shape=(3,)),
+            ParamField(key="primary.zernike_coeffs_nm", group="primary", kind="primitive", shape=(3,)),
             ParamField(key="c", group="g2", kind="derived"),
         )
     )
@@ -34,7 +34,7 @@ def _toy_spec() -> ParamSpec:
 def test_param_spec_without_basic_complement():
     spec = _toy_spec()
     excluded = spec.without(["b"])
-    assert list(excluded.keys()) == ["a", "primary.zernike_coeffs", "c"]
+    assert list(excluded.keys()) == ["a", "primary.zernike_coeffs_nm", "c"]
 
     no_exclusions = spec.without([])
     assert list(no_exclusions.keys()) == list(spec.keys())
@@ -58,8 +58,8 @@ def test_param_spec_without_unknown_key_raises():
 
 def test_param_spec_without_vector_field_removes_whole_field():
     spec = _toy_spec()
-    excluded = spec.without(["primary.zernike_coeffs"])
-    assert "primary.zernike_coeffs" not in excluded
+    excluded = spec.without(["primary.zernike_coeffs_nm"])
+    assert "primary.zernike_coeffs_nm" not in excluded
     assert list(excluded.keys()) == ["a", "b", "c"]
 
 

@@ -111,11 +111,11 @@ def build_shera_threeplane_model(
     # ------------------------------------------------------------------
     # These map cleanly onto the legacy params because SheraThreePlane_Model
     # scales the basis by 1e-9 so nm-valued coefficients become OPD in meters.
-    m1_coeffs = store.get("primary.zernike_coeffs", default=None)
+    m1_coeffs = store.get("primary.zernike_coeffs_nm", default=None)
     if m1_coeffs is not None:
         params = params.set("m1_zernike_amp", jnp.asarray(m1_coeffs))
 
-    m2_coeffs = store.get("secondary.zernike_coeffs", default=None)
+    m2_coeffs = store.get("secondary.zernike_coeffs_nm", default=None)
     if m2_coeffs is not None:
         params = params.set("m2_zernike_amp", jnp.asarray(m2_coeffs))
 
