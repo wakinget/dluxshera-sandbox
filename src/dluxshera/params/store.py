@@ -155,6 +155,50 @@ class ParameterStore:
             values[key] = field.default
         return cls(values)
 
+    def refresh_derived(
+        self,
+        spec: ParamSpec,
+        *,
+        resolver=None,
+        system_id: Optional[str] = None,
+        include_derived: bool = True,
+    ) -> "ParameterStore":
+        """Return a new store with derived keys recomputed for ``spec``.
+
+        The effective system identifier is resolved in priority order:
+
+        1. Explicit ``system_id`` argument
+        2. ``spec.system_id`` (if present)
+        3. The global default system configured for the transform resolver
+
+        Derived transform modules are lazily imported via
+        :func:`dluxshera.params.transforms.ensure_registered`.
+        """
+
+        from .transforms import DEFAULT_SYSTEM_ID, ensure_registered, get_resolver
+
+        sid = system_id or getattr(spec, "system_id", None) or DEFAULT_SYSTEM_ID
+
+        if resolver is None:
+            ensure_registered(sid)
+            effective_resolver = get_resolver(sid)
+        else:
+            effective_resolver = resolver
+            try:
+                # Attempt to register built-in transforms when the system is known;
+                # ignore unknown systems for custom resolvers.
+                ensure_registered(sid)
+            except (ValueError, ModuleNotFoundError):
+                pass
+
+        return _refresh_derived_internal(
+            store=self,
+            spec=spec,
+            resolver=effective_resolver,
+            system_id=sid,
+            include_derived=include_derived,
+        )
+
 
     def replace(
         self,
@@ -351,6 +395,22 @@ def _derived_keys(spec: ParamSpec) -> set[ParamKey]:
     return {key for key, field in spec.items() if field.kind == "derived"}
 
 
+def _refresh_derived_internal(
+    *,
+    store: ParameterStore,
+    spec: ParamSpec,
+    resolver,
+    system_id: str,
+    include_derived: bool,
+) -> ParameterStore:
+    primitive_store = strip_derived(store, spec, keep_extra=True)
+    values = primitive_store.as_dict()
+    if include_derived:
+        for key in sorted(_derived_keys(spec)):
+            values[key] = resolver.compute(key, primitive_store, system_id=system_id)
+    return ParameterStore.from_dict(values)
+
+
 def strip_derived(
     store: ParameterStore,
     spec: ParamSpec,
@@ -388,8 +448,8 @@ def strip_derived(
 def refresh_derived(
     store: ParameterStore,
     spec: ParamSpec,
-    resolver,
-    system_id: str,
+    resolver=None,
+    system_id: Optional[str] = None,
     *,
     include_derived: bool = True,
 ) -> ParameterStore:
@@ -397,15 +457,16 @@ def refresh_derived(
     Recompute derived parameters for a (spec, store, system) tuple.
 
     This helper removes any derived keys from the input store, resolves them
-    through the provided `resolver`, and returns a new store that preserves
-    primitives/extras and optionally appends recomputed derived values.
+    through a resolver (defaulting to the system-aware registry), and returns
+    a new store that preserves primitives/extras and optionally appends
+    recomputed derived values.
 
     A canonical forward-modelling flow is::
 
         spec = build_forward_model_spec_from_config(cfg)
         store = ParameterStore.from_spec_defaults(spec)   # primitives only
         store = store.replace({...truth-level primitives...})
-        store = refresh_derived(store, spec, TRANSFORMS, system_id)
+        store = store.refresh_derived(spec)
 
     Parameters
     ----------
@@ -414,21 +475,40 @@ def refresh_derived(
     spec:
         ParamSpec used to identify derived keys and their transforms.
     resolver:
-        Object providing a `compute(key, store, system_id=...)` method (e.g.,
-        TransformRegistry or DerivedResolver).
+        Optional object providing a `compute(key, store, system_id=...)` method
+        (e.g., TransformRegistry or DerivedResolver). If omitted, the resolver
+        for the inferred system is used.
     system_id:
-        System identifier passed through to the resolver.
+        Optional system identifier passed through to the resolver. If omitted,
+        ``spec.system_id`` is used when present; otherwise the resolver's
+        default system is used.
     include_derived:
         If True (default), include recomputed derived keys in the returned
         store. If False, only primitives/extras are returned.
     """
 
-    primitive_store = strip_derived(store, spec, keep_extra=True)
-    values = primitive_store.as_dict()
-    if include_derived:
-        for key in _derived_keys(spec):
-            values[key] = resolver.compute(key, primitive_store, system_id=system_id)
-    return ParameterStore.from_dict(values)
+    from .transforms import DEFAULT_SYSTEM_ID, ensure_registered, get_resolver
+
+    sid = system_id or getattr(spec, "system_id", None) or DEFAULT_SYSTEM_ID
+
+    if resolver is None:
+        ensure_registered(sid)
+        effective_resolver = get_resolver(sid)
+    else:
+        effective_resolver = resolver
+        try:
+            ensure_registered(sid)
+        except (ValueError, ModuleNotFoundError):
+            # Allow custom system IDs when the caller supplies a resolver.
+            pass
+
+    return _refresh_derived_internal(
+        store=store,
+        spec=spec,
+        resolver=effective_resolver,
+        system_id=sid,
+        include_derived=include_derived,
+    )
 
 
 def check_consistency(

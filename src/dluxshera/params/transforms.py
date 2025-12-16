@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Iterable, Optional
 
 from .registry import (
@@ -21,10 +22,38 @@ DEFAULT_SYSTEM_ID = "shera_threeplane"
 # Scoped resolver instance that all modules should use.
 DERIVED_RESOLVER = DerivedResolver(default_system_id=DEFAULT_SYSTEM_ID)
 
+# Track which system-specific transform modules have been imported.
+_REGISTERED_SYSTEMS: set[str] = set()
+
+
+def ensure_registered(system_id: Optional[str]) -> None:
+    """Lazily import system-specific transforms once per system ID."""
+
+    sid = system_id or DEFAULT_SYSTEM_ID
+    if sid in _REGISTERED_SYSTEMS:
+        return
+
+    if sid == "shera_threeplane":
+        module = "dluxshera.params.shera_threeplane_transforms"
+    elif sid == "shera_twoplane":
+        module = "dluxshera.params.shera_twoplane_transforms"
+    else:
+        raise ValueError(f"Unknown system_id {sid!r} for transform registration")
+
+    try:
+        importlib.import_module(module)
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            f"Missing transform module {module!r} for system_id {sid!r}"
+        ) from exc
+
+    _REGISTERED_SYSTEMS.add(sid)
+
 
 def get_resolver(system_id: Optional[str] = None) -> TransformRegistry:
     """Return the TransformRegistry for the given system_id (lazy-created)."""
 
+    ensure_registered(system_id)
     return DERIVED_RESOLVER.get_registry(system_id)
 
 
@@ -37,6 +66,7 @@ def resolve_derived(
 ):
     """Resolve a derived parameter for the requested system."""
 
+    ensure_registered(system_id)
     return DERIVED_RESOLVER.compute(
         key,
         store,
@@ -84,6 +114,7 @@ __all__ = [
     "DerivedResolver",
     "DERIVED_RESOLVER",
     "DEFAULT_SYSTEM_ID",
+    "ensure_registered",
     "register_transform",
     "get_resolver",
     "resolve_derived",

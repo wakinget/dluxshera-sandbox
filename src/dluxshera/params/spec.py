@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 
+SHERA_THREEPLANE_SYSTEM_ID = "shera_threeplane"
+SHERA_TWOPLANE_SYSTEM_ID = "shera_twoplane"
+
 ParamKey = str  # simple alias for clarity
 
 
@@ -72,15 +75,21 @@ class ParamSpec:
 
     At this stage it does not know about ParameterStore; we will add
     validation helpers once the store type is defined.
+
+    A ParamSpec can optionally carry a ``system_id`` used to select the
+    appropriate transform registry when refreshing derived parameters.
     """
 
-    def __init__(self, fields: Iterable[ParamField] = ()) -> None:
+    def __init__(
+        self, fields: Iterable[ParamField] = (), *, system_id: Optional[str] = None
+    ) -> None:
         field_dict: Dict[ParamKey, ParamField] = {}
         for f in fields:
             if f.key in field_dict:
                 raise ValueError(f"Duplicate parameter key in ParamSpec: {f.key!r}")
             field_dict[f.key] = f
         self._fields: Dict[ParamKey, ParamField] = field_dict
+        self.system_id: Optional[str] = system_id
 
     # --- basic container protocol -------------------------------------------------
 
@@ -127,7 +136,7 @@ class ParamSpec:
             raise ValueError(f"ParamSpec already contains key {field.key!r}")
         new_fields = dict(self._fields)
         new_fields[field.key] = field
-        return ParamSpec(new_fields.values())
+        return ParamSpec(new_fields.values(), system_id=self.system_id)
 
     def merge(self, other: "ParamSpec") -> "ParamSpec":
         """
@@ -141,7 +150,20 @@ class ParamSpec:
             if key in new_fields:
                 raise ValueError(f"ParamSpec merge conflict on key {key!r}")
             new_fields[key] = field
-        return ParamSpec(new_fields.values())
+
+        merged_system_id = self.system_id or getattr(other, "system_id", None)
+        other_system_id = getattr(other, "system_id", None)
+        if (
+            self.system_id is not None
+            and other_system_id is not None
+            and self.system_id != other_system_id
+        ):
+            raise ValueError(
+                "Cannot merge ParamSpecs with different system_id values: "
+                f"{self.system_id!r} vs {other_system_id!r}"
+            )
+
+        return ParamSpec(new_fields.values(), system_id=merged_system_id)
 
     # --- subset / view helpers ---------------------------------------------------
 
@@ -158,7 +180,7 @@ class ParamSpec:
                 selected_fields.append(self._fields[key])
             except KeyError as exc:
                 raise KeyError(f"ParamSpec.subset: unknown key {key!r}") from exc
-        return ParamSpec(selected_fields)
+        return ParamSpec(selected_fields, system_id=self.system_id)
 
     def without(self, keys: Iterable[ParamKey]) -> "ParamSpec":
         """
@@ -405,7 +427,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
     if not include_secondary:
         fields = [f for f in fields if f.key != "secondary.zernike_coeffs"]
 
-    return ParamSpec(fields)
+    return ParamSpec(fields, system_id=SHERA_THREEPLANE_SYSTEM_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +851,7 @@ def build_forward_model_spec_from_config(
             )
         )
 
-    return ParamSpec(fields)
+    return ParamSpec(fields, system_id=SHERA_THREEPLANE_SYSTEM_ID)
 
 
 def build_shera_twoplane_forward_spec_from_config(
@@ -1060,4 +1082,4 @@ def build_shera_twoplane_forward_spec_from_config(
             )
         )
 
-    return ParamSpec(fields)
+    return ParamSpec(fields, system_id=SHERA_TWOPLANE_SYSTEM_ID)

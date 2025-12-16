@@ -188,14 +188,18 @@ def test_strip_derived_and_refresh_derived():
     stripped = strip_derived(store, spec)
     assert set(stripped.keys()) == {"a", "b", "extra"}
 
-    refresh = refresh_derived(store, spec, registry, system_id="test")
+    refresh = refresh_derived(store, spec, resolver=registry, system_id="test")
     assert refresh.get("sum") == pytest.approx(3.5)
     assert refresh.get("a") == 1.0
     assert refresh.get("b") == 2.5
     assert refresh.get("extra") is True
 
     refresh_primitives_only = refresh_derived(
-        store, spec, registry, system_id="test", include_derived=False
+        store,
+        spec,
+        resolver=registry,
+        system_id="test",
+        include_derived=False,
     )
     assert "sum" not in refresh_primitives_only.keys()
     assert refresh_primitives_only.get("a") == 1.0

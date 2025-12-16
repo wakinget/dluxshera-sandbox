@@ -10,16 +10,11 @@ import numpyro as npy
 import numpyro.distributions as dist
 import optax
 
-# Ensure Shera transforms are registered for derived resolution paths used by
-# the inference helpers.
-import dluxshera.params.shera_threeplane_transforms  # noqa: F401
-
 from ..optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
 from ..optics.builder import build_shera_threeplane_optics
 from ..params.packing import unpack_params as store_unpack_params
 from ..params.spec import ParamSpec, ParamKey, build_forward_model_spec_from_config
-from ..params.store import ParameterStore, refresh_derived
-from ..params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
+from ..params.store import ParameterStore
 from .optimization import (
     EigenThetaMap,
     fim_theta,
@@ -109,9 +104,7 @@ def run_shera_image_gd_basic(
     if init_overrides is not None:
         store_init = store_init.replace(init_overrides)
 
-    store_init = refresh_derived(
-        store_init, forward_spec, TRANSFORMS, system_id=DEFAULT_SYSTEM_ID
-    )
+    store_init = store_init.refresh_derived(forward_spec)
 
     # Warm the three-plane optics cache outside of JAX tracing to avoid
     # structural construction (and Python int conversions) inside the
@@ -312,12 +305,7 @@ def run_shera_image_gd_eigen(
         if base_forward_store is None:
             base_forward_store = ParameterStore.from_spec_defaults(forward_spec)
 
-        base_forward_store = refresh_derived(
-            base_forward_store,
-            forward_spec,
-            TRANSFORMS,
-            system_id=DEFAULT_SYSTEM_ID,
-        )
+        base_forward_store = base_forward_store.refresh_derived(forward_spec)
 
         loss_fn, theta0 = make_binder_image_nll_fn(
             cfg,
