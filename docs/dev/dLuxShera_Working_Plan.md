@@ -91,6 +91,7 @@ dLuxShera/
 - Derived and primitive fields coexist in single spec; separation by kind is not enforced in store validation.
 - Cross-referencing between docs/tests and spec remains manual.
 - **Include vs exclude helpers:** `ParamSpec.subset(keys)` stays strictly include-only, preserving caller-provided ordering and raising on unknown keys. A complementary `ParamSpec.without(keys)` now drops whole fields by key (including grouped/vector fields such as `primary.zernike_coeffs`) while preserving the original ordering of everything else; it raises on unknown keys for consistency with `subset`. Tests cover no-op, full-drop, complement equivalence, and vector-field removal cases.
+- **Inference views:** `make_inference_subspec` builds an inference ParamSpec view directly from a base spec, optionally gating primary/secondary Zernike requests against the Shera config and an `include_secondary` policy flag. This supports the single-store inference workflow where `forward_store` (or `init_store`) is reused as the base for packing/unpacking rather than constructing a separate `inference_store`.
 
 ---
 
@@ -99,6 +100,7 @@ dLuxShera/
 - Frozen mapping `{key → value}` registered as JAX pytree; supports `.replace`, iteration, and `.validate` against a `ParamSpec`.
 - Validation is strict by default (rejects derived keys); override/debug mode opt-in via `allow_derived=True`. Helpers `strip_derived`, `refresh_derived`, and `check_consistency` keep derived values fresh or flag stale overrides.
 - Canonical forward-store flow is primitives-only defaults → explicit primitive overrides → `refresh_derived(...)` to populate plate scale / log flux and other deriveds; derived keys are omitted from `from_spec_defaults` by design.
+- Single-store inference workflow: build an inference subspec from the forward spec and call `validate_inference_base_store(forward_store, subspec)` to fail fast on missing/shape/dtype issues before packing θ vectors. Inference specs/subspecs act as views + ordering + validation; they do not require seeding a dedicated store.
 - Shallow serialization helpers exist (`from_dict`, `from_spec_defaults`, `as_dict`); YAML/JSON IO still planned in the profiles/IO workstream.
 - Shera configs mirror this immutability: they are frozen dataclasses for structural hashing/caching safety and should be tweaked via the new `BaseConfig.replace(**kwargs)` helper (e.g., `SHERA_TESTBED_CONFIG.replace(oversample=4)`).
 
