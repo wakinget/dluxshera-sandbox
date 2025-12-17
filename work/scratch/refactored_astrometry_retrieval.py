@@ -205,6 +205,10 @@ theta_true = pack_params(inference_subspec, forward_truth_store)
 loss_true = loss_fn(theta_true)
 loss0 = loss_fn(theta0)
 
+# Calculate the gradients
+grads_true = jax.grad(loss_fn)(theta_true)
+grads0 = jax.grad(loss_fn)(theta0)
+
 print("Running gradient descent optimization...")
 # Now run the gradient descent optimization
 n_iter = 200
