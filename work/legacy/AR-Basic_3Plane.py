@@ -11,11 +11,32 @@ from jax import tree
 import zodiax as zdx
 import optax
 
-# Optics
-from src.dluxshera.inference.optimization import FIM, get_optimiser, get_lr_model, loss_fn, step_fn, construct_priors_from_dict
-from src.dluxshera.inference.optimization import SheraThreePlaneParams
-from src.dluxshera.core.modeling import SheraThreePlane_Model
-from src.dluxshera.utils.utils import calculate_log_flux, set_array, merge_cbar, nanrms, plot_psf_comparison, plot_parameter_history, choose_subplot_grid
+# Optics / inference
+from dluxshera.inference.optimization import (
+    FIM,
+    get_optimiser,
+    get_lr_model,
+    loss_fn,
+    step_fn,
+    construct_priors_from_dict,
+    SheraThreePlaneParams,
+)
+from dluxshera.core.modeling import SheraThreePlane_Model
+
+# Utilities (math / array helpers)
+from dluxshera.utils.utils import (
+    calculate_log_flux,
+    set_array,
+    nanrms,
+)
+
+# Plotting helpers
+from dluxshera.plot.plotting import (
+    merge_cbar,
+    plot_psf_comparison,
+    plot_parameter_history,
+    choose_subplot_grid,
+)
 
 # Plotting/visualisation
 import numpy as onp  # original numpy
@@ -26,6 +47,7 @@ from tqdm import tqdm
 import time, datetime, os
 import pandas as pd
 import pickle
+from pathlib import Path
 
 inferno = mpl.colormaps["inferno"]
 seismic = mpl.colormaps["seismic"]
@@ -51,8 +73,12 @@ jax.config.update("jax_enable_x64", True)
 # Start simulation timer
 t0_script = time.time()
 
-save_path = os.path.join(os.getcwd(), "..", "Results")
-script_name = os.path.splitext((os.path.basename(__file__)))[0]
+# Set up file paths
+script_path = Path(__file__).resolve()
+script_dir = script_path.parent
+save_path = script_dir / "Results"
+save_path.mkdir(parents=True, exist_ok=True)
+script_name = script_path.stem
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 print(f"Starting Simulation: {script_name} - {timestamp}")
 
@@ -71,11 +97,11 @@ starting_seed = 0
 
 # Source Settings
 star_contrast = 0.3
-initial_separation = 10
-initial_angle = 90
-initial_center = (0, 0)
-central_wavelength = 550 # nm
-bandwidth = 110 # nm
+initial_separation = 10.
+initial_angle = 90.
+initial_center = (0., 0.)
+central_wavelength = 550. # nm
+bandwidth = 110. # nm
 n_wavelengths = 3
 
 # Telescope Parameters
@@ -101,14 +127,14 @@ psf_npix = 256
 # Zernike OPD Settings
 # 11, 16, 22, 29, 37, 46, 56, 67, 79, 92, 106
 # Define the list of Zernikes that the model will use
-m1_noll_model = np.arange(4, 11)
+m1_noll_model = np.arange(4, 12)
 # m2_noll_model = np.arange(4, 11)
-m2_noll_model = np.arange(4, 11)
+m2_noll_model = np.arange(4, 12)
 
 # Define the list of Zernikes that the data will contain
-m1_noll_data = np.arange(4, 11)
+m1_noll_data = np.arange(4, 12)
 # m2_noll_data = np.arange(4, 11)
-m2_noll_data = np.arange(4, 11)
+m2_noll_data = np.arange(4, 12)
 
 # Define the initial Zernike coefficients
 # The list of coefficients should be the same size as the list of indices included in the data
@@ -635,17 +661,17 @@ for obs_i in np.arange(N_observations):
     opt_params = models_out[-1].extract_params()
     # Save the Data + var arrays
     save_name = f"{script_name}_Data+Var_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.pkl"
-    with open(os.path.join("../Results", save_name), "wb") as f:
+    with open(os.path.join(save_path, save_name), "wb") as f:
         pickle.dump({"data": data, "var": var}, f)
     # Save data_params
     save_name = f"{script_name}_DataParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-    data_parms.to_json(os.path.join("../Results", save_name))
+    data_parms.to_json(os.path.join(save_path, save_name))
     # Save initial_model_params
     save_name = f"{script_name}_InitialModelParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-    model_parms.to_json(os.path.join("../Results", save_name))
+    model_parms.to_json(os.path.join(save_path, save_name))
     # Save opt_params
     save_name = f"{script_name}_OptimizedModelParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-    opt_params.to_json(os.path.join("../Results", save_name))
+    opt_params.to_json(os.path.join(save_path, save_name))
 
     # # Save them all as a pickle file
     # save_name = f"{script_name}_SweepBundle_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.pkl"
@@ -656,7 +682,7 @@ for obs_i in np.arange(N_observations):
     #     "initial_model_params": model_parms,  # SheraThreePlaneParams
     #     "optimized_model_params": opt_params  # SheraThreePlaneParams
     # }
-    # with open(os.path.join("../Results", save_name), "wb") as f:
+    # with open(os.path.join(save_path, save_name), "wb") as f:
     #     pickle.dump(bundle, f)
 
 
@@ -768,7 +794,7 @@ for obs_i in np.arange(N_observations):
             axes[1].set_ylim(true_loss-3*final_delta, true_loss+3*final_delta)
 
         fig.tight_layout()
-        fig.savefig(f"../Results/{save_name}", dpi=300)
+        fig.savefig(save_path / save_name, dpi=300)
         if present_plots:
             plt.show()
         else:
