@@ -14,7 +14,7 @@ def pack_params(
     spec_subset: ParamSpec,
     store: ParameterStore,
     *,
-    dtype: Optional[jnp.dtype] = jnp.float32,
+    dtype: Optional[jnp.dtype] = None,
 ) -> jnp.ndarray:
     """
     Pack a subset of parameters from a ParameterStore into a flat 1D vector.
@@ -30,9 +30,11 @@ def pack_params(
         ParameterStore holding numeric values for each key in `spec_subset`.
 
     dtype:
-        JAX dtype for the packed vector (default: float32). This allows you
-        to choose float32 vs float64 depending on your JAX configuration.
-        All values are cast to this dtype during packing.
+        Optional JAX dtype for the packed vector. When ``None`` (default),
+        values retain their existing dtype; otherwise they are cast to the
+        requested dtype. This lets callers preserve high-precision truth
+        values (e.g., float64) when constructing θ vectors for gradient
+        checks.
 
     Returns
     -------
@@ -72,7 +74,7 @@ def pack_params(
                 "numeric values."
             )
 
-        arr = jnp.asarray(value, dtype=dtype)
+        arr = jnp.asarray(value, dtype=dtype) if dtype is not None else jnp.asarray(value)
         pieces.append(arr.ravel())
 
     theta = jnp.concatenate(pieces) if pieces else jnp.zeros((0,), dtype=dtype)
