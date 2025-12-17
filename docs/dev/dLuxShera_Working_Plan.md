@@ -741,3 +741,4 @@ This roadmap gives us a structured, navigable documentation ecosystem: a concept
 - Model–error-budget interface and parameter dependency mapping: lightweight docs/figures that show how model outputs and sensitivities map onto specific error-budget terms, and how primitives vs. derived parameters (ParamSpec → Store → transforms) relate to those terms for traceability.
 
 ---
+- Task 1A completed: binder.get implemented and tests added.

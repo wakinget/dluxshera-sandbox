@@ -88,6 +88,25 @@ class BaseSheraBinder:
     # Public API
     # ------------------------------------------------------------------
 
+    def get(self, paths, default=None):
+        """Retrieve values from the binder configuration or base store."""
+
+        if isinstance(paths, (list, tuple)):
+            return [self.get(path, default=default) for path in paths]
+
+        path = paths
+        if isinstance(path, str) and "." in path:
+            if default is None:
+                return self.base_forward_store.get(path)
+            return self.base_forward_store.get(path, default)
+
+        if hasattr(self.cfg, path):
+            return getattr(self.cfg, path)
+
+        if default is None:
+            return self.base_forward_store.get(path)
+        return self.base_forward_store.get(path, default)
+
     def model(self, store_delta: Optional[ParameterStore] = None) -> jnp.ndarray:
         """Evaluate the Shera PSF for an optional store overlay."""
 
