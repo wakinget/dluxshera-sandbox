@@ -40,7 +40,7 @@ from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd, fim_theta, fim_theta_shera
 from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
-
+from dluxshera.params.packing import pack_params, unpack_params
 
 # Plotting
 import matplotlib as mpl
@@ -153,18 +153,18 @@ inference_subspec = make_inference_subspec(base_spec=forward_spec, infer_keys=in
 
 # Set up prior knowledge
 priors = {
-    "binary.separation_as": 1e-3,
-    "binary.position_angle_deg": 1e-1,
-    "binary.x_position_as": 1e-3,
-    "binary.y_position_as": 1e-3,
-    "binary.log_flux_total": 1e-3,
-    "binary.contrast": 1e-3,
-    "system.plate_scale_as_per_pix": 1e-3,
+    "binary.separation_as": 1e-6,
+    "binary.position_angle_deg": 1e-3,
+    "binary.x_position_as": 1e-6,
+    "binary.y_position_as": 1e-6,
+    "binary.log_flux_total": 1e-6,
+    "binary.contrast": 1e-6,
+    "system.plate_scale_as_per_pix": 1e-6,
     "primary.zernike_coeffs_nm": np.full_like(
-        forward_truth_store.get("primary.zernike_coeffs_nm"), 1.0
+        forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2
     ),
     "secondary.zernike_coeffs_nm": np.full_like(
-        forward_truth_store.get("secondary.zernike_coeffs_nm"), 1.0
+        forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2
     ),
 }
 prior_spec = PriorSpec.from_sigmas(forward_truth_store, priors)
@@ -199,15 +199,19 @@ def map_loss_fn(theta: np.ndarray) -> np.ndarray:
 
 # Choose which loss function to use
 loss_fn = nll_loss_fn
+
+# Calculate True + Initial Loss values
+theta_true = pack_params(inference_subspec, forward_truth_store)
+loss_true = loss_fn(theta_true)
 loss0 = loss_fn(theta0)
 
 print("Running gradient descent optimization...")
 # Now run the gradient descent optimization
-n_iter = 100
+n_iter = 200
 theta_final, history = run_simple_gd(
     loss_fn=loss_fn, # nll_loss_fn, or map_loss_fn
     theta0=theta0,
-    learning_rate=0.5,
+    learning_rate=1e-2,
     num_steps=n_iter,
 )
 
@@ -272,8 +276,9 @@ print("\n==============================")
 print("Gradient Descent Summary")
 print("==============================")
 print(f"n_iter = {n_iter}")
+print(f"loss(true theta) = {_fmt_scalar(loss_true)}")
 print(f"loss(init theta0) = {_fmt_scalar(loss0)}")
-print(f"loss(final)       = {_fmt_scalar(loss_fn(theta_final))}")
+print(f"loss(final theta)       = {_fmt_scalar(loss_fn(theta_final))}")
 print("")
 
 for k in infer_keys:
