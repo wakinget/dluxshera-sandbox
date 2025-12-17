@@ -24,16 +24,33 @@ from ..optics.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
 from ..inference.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
 from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
 from ..utils.utils import nanrms
+from pathlib import Path
+import importlib.resources as resources
 
 
-
+# exports
 __all__ = [
     "SheraThreePlane_ForwardModel",
     "SheraThreePlane_Model"
 ]
 
 
-def SheraThreePlane_ForwardModel(params, return_model=False):
+# Sentinel meaning “no argument provided”
+_UNSET = object()
+
+def _default_dp_path() -> str:
+    # Preferred: package resource (works in editable installs + normal installs)
+    try:
+        return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
+    except Exception:
+        # Fallback: resolve relative to this file (…/dluxshera/core/modeling.py -> …/dluxshera/data/…)
+        return str((Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy"))
+
+DEFAULT_DP_PATH = _default_dp_path()
+
+
+
+def SheraThreePlane_ForwardModel(params, return_model=False, mask=_UNSET):
     """
     Builds a SheraThreePlane Optical Model using the given params,
     Generates a PSF for the given parameters, optionally outputs the model itself
@@ -58,18 +75,23 @@ def SheraThreePlane_ForwardModel(params, return_model=False):
     # A note: M2 zernike nolls are currently assumed to be the same as M1 zernike nolls.
     # I will need to modify the SheraThreePlaneOpticalSystem to fix this.
 
+    if mask is _UNSET:
+        mask = DEFAULT_DP_PATH
+
     # Initialize the optical system given input params
     model_optics = SheraThreePlaneSystem(
         wf_npixels = params.get("pupil_npix"),
         psf_npixels = params.get("psf_npix"),
         oversample = 3,
         detector_pixel_pitch = params.get("pixel_size"),
-        noll_indices = params.get("m1_zernike_noll"),
-        p1_diameter = params.get("m1_diameter"),
-        p2_diameter = params.get("m2_diameter"),
-        m1_focal_length = params.get("m1_focal"),
-        m2_focal_length = params.get("m2_focal"),
-        plane_separation = params.get("plane_separation")
+        mask=mask,
+        m1_noll_ind=params.get("m1_zernike_noll"),
+        m2_noll_ind=params.get("m2_zernike_noll"),
+        p1_diameter=params.get("p1_diameter"),
+        p2_diameter=params.get("p2_diameter"),
+        m1_focal_length=params.get("m1_focal_length"),
+        m2_focal_length=params.get("m2_focal_length"),
+        plane_separation=params.get("plane_separation")
     )
 
     # Normalise the zernike basis to be in units of nm
@@ -134,12 +156,14 @@ class SheraThreePlane_Model(dl.Telescope):
         The full Telescope model object, with source, optics, and detector.
     """
 
-    def __init__(self, params=None):
+    def __init__(self, params=None, mask=_UNSET):
         if params is None:
             params = SheraThreePlaneParams()
+        if mask is _UNSET:
+            mask = DEFAULT_DP_PATH
 
         # Initialize the optical system given input params
-        model_optics = self._initialize_optics(params)
+        model_optics = self._initialize_optics(params, mask=mask)
 
         # Initialize the source
         source = self._initialize_source(params)
@@ -152,15 +176,18 @@ class SheraThreePlane_Model(dl.Telescope):
         # Initialize the parent Telescope class
         super().__init__(source=source, optics=model_optics, detector=detector)
 
-    def _initialize_optics(self, params):
+    def _initialize_optics(self, params, mask=_UNSET):
         """
         Initialize the optical system.
         """
+        if mask is _UNSET:
+            mask = DEFAULT_DP_PATH
         optics = SheraThreePlaneSystem(
             wf_npixels = params.get("pupil_npix"),
             psf_npixels = params.get("psf_npix"),
             oversample = 1,
             detector_pixel_pitch = params.get("pixel_size"),
+            mask=mask,
             m1_noll_ind = params.get("m1_zernike_noll"),
             m2_noll_ind = params.get("m2_zernike_noll"),
             p1_diameter = params.get("p1_diameter"),
