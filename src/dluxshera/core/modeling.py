@@ -94,9 +94,6 @@ def SheraThreePlane_ForwardModel(params, return_model=False, mask=_UNSET):
         plane_separation=params.get("plane_separation")
     )
 
-    # Normalise the zernike basis to be in units of nm
-    model_optics = model_optics.multiply('m1_aperture.basis', 1e-9)
-    model_optics = model_optics.multiply('m2_aperture.basis', 1e-9)
 
     # Set Zernike coefficients (units of nm)
     model_optics = model_optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
@@ -199,10 +196,8 @@ class SheraThreePlane_Model(dl.Telescope):
 
         # Normalize the Zernike basis so that the coefficients are scaled to units of nm
         if params.get("m1_zernike_noll") is not None:
-            optics = optics.multiply('m1_aperture.basis', 1e-9)
             optics = optics.set('m1_aperture.coefficients', params.get("m1_zernike_amp"))
         if params.get("m2_zernike_noll") is not None:
-            optics = optics.multiply('m2_aperture.basis', 1e-9)
             optics = optics.set('m2_aperture.coefficients', params.get("m2_zernike_amp"))
 
         # Initialize the Calibrated 1/f WFE
