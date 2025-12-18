@@ -1196,20 +1196,9 @@ class ModelParams(BaseModeller):
 
     @property
     def grad_paths(self):
-        """Zodiax-compatible paths to differentiable leaves.
+        """Return differentiable keys (kept for backwards compatibility)."""
 
-        Notes
-        -----
-        - Our differentiable leaves live under the ``params`` dict, and some
-          external parameter names include dots (e.g. ``"m1_aperture.coefficients"``).
-        - Passing those dotted strings directly to :func:`zdx.filter_value_and_grad`
-          makes zodiax interpret them as structural paths ("m1_aperture" →
-          "coefficients"), which do not exist on :class:`ModelParams`/
-          :class:`SheraThreePlaneParams`.
-        - Providing explicit tuple paths keeps the entire string as the final key,
-          avoiding the path-splitting behaviour.
-        """
-        return [["params", k] for k in self.params.keys()]
+        return list(self.params.keys())
 
     def replace(self, values):
         """
@@ -1742,13 +1731,21 @@ def step_fn_general(model_params, data, var, model, lr_model, optim, state, loss
 # ============ PURE SPACE ============
 @eqx.filter_jit
 def step_fn(model_params, data, var, model, lr_model, optim, state, loss_fn):
-    # grads wrt external keys in ModelParams
-    loss, raw_grads = zdx.filter_value_and_grad(model_params.grad_paths)(
-        lambda p, m, d, v: _loss_with_params(p, m, d, v, loss_fn)
-    )(model_params, model, data, var)
+    def _loss_from_params(params_dict, m, d, v):
+        mp = model_params.set("params", params_dict)
+        return loss_with_injected(mp, m, d, v, loss_fn)
 
-    # scale grads elementwise by lr_model (same ModelParams structure)
-    scaled_grads = jax.tree_util.tree_map(lambda g, s: g * s, raw_grads, lr_model)
+    loss, raw_grads_dict = jax.value_and_grad(_loss_from_params)(
+        model_params.params, model, data, var
+    )
+
+    none_tree = jax.tree_util.tree_map(lambda _: None, model_params)
+    raw_grads = none_tree.set("params", raw_grads_dict)
+
+    scaled_grads_dict = jax.tree_util.tree_map(
+        lambda g, s: g * s, raw_grads_dict, lr_model.params
+    )
+    scaled_grads = none_tree.set("params", scaled_grads_dict)
 
     updates, state = optim.update(scaled_grads, state, model_params)
     model_params = zdx.apply_updates(model_params, updates)

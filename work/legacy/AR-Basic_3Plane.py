@@ -242,7 +242,8 @@ optimisers = {
     # "m2_aperture.coefficients": opt,
 }
 params = list(optimisers.keys())
-param_paths = [("params", p) for p in params]
+# Paths into the model object; dots are meaningful within the model tree.
+param_paths = params
 
 
 ######################
@@ -364,7 +365,7 @@ true_vals["m2_total_opd"] = true_vals["m2_zernike_opd"] + data_model.m2_wfe.opd
 true_vals["m2_total_opd_rms_nm"] = 1e9 * nanrms(true_vals["m2_total_opd"][m2_mask.astype(bool)])
 
 
-# Take the value and gradient transformation of the loss function
+# Take the value and gradient transformation of the loss function for the model object
 val_grad_fn = zdx.filter_value_and_grad(param_paths)(loss_fn)
 
 

@@ -184,6 +184,7 @@ dLuxShera/
 - **Plate-scale policy:** Whether to always recompute vs allow override is still undecided.
 - **Structural caching:** Three-plane builder now caches structural builds keyed by a deterministic hash and exposes a cache clear helper (env flag available to disable caching).
 - **Scopes:** Per-system scoping added via `DerivedResolver`; ergonomics for additional variants will matter as new systems arrive.
+- **Zodiax dotted-key trap:** Model-parameter containers can carry external names with dots (e.g., `m1_aperture.coefficients`). Passing those names to `zdx.filter_value_and_grad` makes Zodiax interpret them as traversal paths, yielding missing-attribute errors; tuple paths also fail because Zodiax's internal `hasattr` expects strings. When taking gradients over params containers, call `jax.value_and_grad` directly on the params dict and let `eqx.filter_jit` mask non-differentiable leaves; reserve Zodiax filtering for model-object gradients where dotted paths intentionally traverse the model tree.
 
 ---
 
