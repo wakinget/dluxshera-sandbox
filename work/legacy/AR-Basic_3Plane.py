@@ -226,7 +226,7 @@ if save_params:
 
 # Optimization Settings
 n_iter = 100
-lr = 0.1
+lr = 0.5
 opt = optax.sgd(lr)
 optimiser_label = "optax.sgd"
 # Define the parameters to solve for
