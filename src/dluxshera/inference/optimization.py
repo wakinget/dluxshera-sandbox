@@ -1967,7 +1967,13 @@ def pack_params(values_pytree, params, model_template, from_model=False):
         else:
             # Internal storage key lookup from Params container
             actual_key = inv_path_map.get(param, param)
-            value = values_pytree.get(actual_key)
+            # NOTE: some optimization containers store external keys directly
+            # (e.g. "m1_aperture.coefficients") even if they are of type
+            # SheraThreePlaneParams. Prefer external if present.
+            if hasattr(values_pytree, "params") and (param in values_pytree.params):
+                value = values_pytree.get(param)
+            else:
+                value = values_pytree.get(actual_key)
 
         if np.ndim(value) == 0:
             flat_values.append(value)
