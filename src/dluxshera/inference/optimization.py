@@ -402,6 +402,13 @@ def make_binder_image_nll_fn(
     use_system_graph
         Passed through when constructing a binder (ignored when ``binder`` is
         provided).
+    return_predict_fn
+        If ``True``, also return a callable ``predict_fn(theta) -> image`` that
+        uses the exact binder/model path underlying the loss. This is helpful
+        for debugging stationary-point issues (e.g. verifying that
+        ``pred(theta_true)`` matches the stored ``data`` when gradients are
+        unexpectedly non-zero). Set to ``False`` for the standard
+        loss-only tuple.
     """
     from ..core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 
