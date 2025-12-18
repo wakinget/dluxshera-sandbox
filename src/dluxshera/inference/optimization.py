@@ -56,6 +56,7 @@ __all__ = [
     "poisson_loss",
     "make_loss_fn",
     "make_image_nll_fn",
+    "make_binder_nll_fn",
 
     # simple θ–space optimizer
     "run_simple_gd",
@@ -362,6 +363,83 @@ def make_image_nll_fn(
     return loss_fn, theta0
 
 
+def make_binder_nll_fn(
+    *,
+    binder: object,
+    infer_keys: Sequence[ParamKey],
+    data: np.ndarray,
+    var: np.ndarray,
+    noise_model: NoiseModel = "gaussian",
+    reduce: Literal["sum", "mean"] = "sum",
+    theta0_store: ParameterStore | None = None,
+    return_predict_fn: bool = False,
+):
+    """
+    Build a Binder-first θ-space image NLL closure.
+
+    Parameters
+    ----------
+    binder :
+        Pre-built Shera binder providing ``forward_spec`` and
+        ``base_forward_store``. All θ unpacking overlays the binder's base
+        store to guarantee semantic alignment with the data-generating
+        forward path.
+    infer_keys :
+        Sequence of keys to include in θ (ordering defines packing order).
+    data, var :
+        Observed image and per-pixel variance (Gaussian) or placeholder array
+        (Poisson). Both are converted to JAX arrays.
+    noise_model, reduce :
+        Noise model selector and reduction for the NLL.
+    theta0_store :
+        Optional store used *only* to initialise ``theta0``. The binder's base
+        store is still used as the unpack overlay. If ``None``, uses
+        ``binder.base_forward_store``.
+    return_predict_fn :
+        If True, also return ``predict_fn(theta) -> image`` that mirrors the
+        loss path.
+    """
+    forward_spec = binder.forward_spec
+    base_forward_store = binder.base_forward_store
+
+    sub_spec = forward_spec.subset(infer_keys)
+
+    data = np.asarray(data)
+    var = np.asarray(var)
+
+    theta0_store = base_forward_store if theta0_store is None else theta0_store
+    theta0 = store_pack_params(sub_spec, theta0_store, dtype=data.dtype)
+
+    if noise_model == "gaussian":
+        def image_nll(model_image):
+            return gaussian_image_nll(model_image, data, var, reduce=reduce)
+    elif noise_model == "poisson":
+        def image_nll(model_image):
+            return -poisson_loglikelihood_image(model_image, data, reduce=reduce)
+    else:
+        raise ValueError(
+            f"Unknown noise_model {noise_model!r} "
+            f"(expected 'gaussian' or 'poisson')."
+        )
+
+    def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
+        return store_unpack_params(sub_spec, theta, base_forward_store)
+
+    def loss_fn(theta: np.ndarray) -> np.ndarray:
+        store_delta = theta_to_store_delta(theta)
+        model_image = binder.model(store_delta)
+        return image_nll(model_image)
+
+    if return_predict_fn:
+        def predict_fn(theta: np.ndarray) -> np.ndarray:
+            store_delta = theta_to_store_delta(theta)
+            return binder.model(store_delta)
+
+        return loss_fn, theta0, predict_fn
+
+    return loss_fn, theta0
+
+
 def make_binder_image_nll_fn(
     cfg,
     forward_spec: ParamSpec,
@@ -412,16 +490,32 @@ def make_binder_image_nll_fn(
     """
     from ..core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 
-    # 1) Build or accept a Binder with the requested execution backend
     if binder is not None:
-        binder_obj = binder
-        # Ensure packing/unpacking uses the binder's own reference state when
-        # one is supplied. This keeps the θ semantics aligned with the binder
-        # used to generate/interpret the data even if a different
-        # base_forward_store is passed in by the caller.
-        forward_spec = getattr(binder_obj, "forward_spec", forward_spec)
-        base_forward_store = getattr(binder_obj, "base_forward_store", base_forward_store)
-    elif isinstance(cfg, SheraThreePlaneConfig):
+        mismatches = []
+        if cfg is not None and getattr(binder, "cfg", cfg) is not cfg:
+            mismatches.append("cfg")
+        if forward_spec is not None and getattr(binder, "forward_spec", forward_spec) is not forward_spec:
+            mismatches.append("forward_spec")
+        if base_forward_store is not None and getattr(binder, "base_forward_store", base_forward_store) is not base_forward_store:
+            mismatches.append("base_forward_store")
+        if mismatches:
+            raise ValueError(
+                "binder provided alongside cfg/forward_spec/base_forward_store that do not "
+                "match the binder. Use make_binder_nll_fn for binder-first construction."
+            )
+
+        return make_binder_nll_fn(
+            binder=binder,
+            infer_keys=infer_keys,
+            data=data,
+            var=var,
+            noise_model=noise_model,
+            reduce=reduce,
+            theta0_store=base_forward_store,
+            return_predict_fn=return_predict_fn,
+        )
+
+    if isinstance(cfg, SheraThreePlaneConfig):
         binder_obj = SheraThreePlaneBinder(
             cfg,
             forward_spec,
@@ -440,45 +534,16 @@ def make_binder_image_nll_fn(
             "cfg must be a SheraThreePlaneConfig or SheraTwoPlaneConfig for binder construction"
         )
 
-    # 2) Subset spec + build initial θ from base store
-    sub_spec = forward_spec.subset(infer_keys)
-    theta0 = store_pack_params(sub_spec, base_forward_store, dtype=data.dtype)
-
-    # 3) Choose an image-level NLL kernel
-    data = np.asarray(data)
-    var = np.asarray(var)
-
-    if noise_model == "gaussian":
-        def image_nll(model_image):
-            return gaussian_image_nll(model_image, data, var, reduce=reduce)
-    elif noise_model == "poisson":
-        def image_nll(model_image):
-            return -poisson_loglikelihood_image(
-                model_image, data, reduce=reduce
-            )
-    else:
-        raise ValueError(
-            f"Unknown noise_model {noise_model!r} "
-            f"(expected 'gaussian' or 'poisson')."
-        )
-
-    # 4) θ → ParameterStore delta → binder.model(store_delta) → image NLL
-    def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
-        return store_unpack_params(sub_spec, theta, base_forward_store)
-
-    def loss_fn(theta: np.ndarray) -> np.ndarray:
-        store_delta = theta_to_store_delta(theta)
-        model_image = binder_obj.model(store_delta)
-        return image_nll(model_image)
-
-    if return_predict_fn:
-        def predict_fn(theta: np.ndarray) -> np.ndarray:
-            store_delta = theta_to_store_delta(theta)
-            return binder_obj.model(store_delta)
-
-        return loss_fn, theta0, predict_fn
-
-    return loss_fn, theta0
+    return make_binder_nll_fn(
+        binder=binder_obj,
+        infer_keys=infer_keys,
+        data=data,
+        var=var,
+        noise_model=noise_model,
+        reduce=reduce,
+        theta0_store=base_forward_store,
+        return_predict_fn=return_predict_fn,
+    )
 
 
 def loss_canonical(

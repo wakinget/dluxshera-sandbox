@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from dluxshera.inference.inference import run_shera_image_gd_eigen
-from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
+from dluxshera.inference.optimization import make_binder_image_nll_fn, make_binder_nll_fn, run_simple_gd
 from dluxshera.optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import build_forward_model_spec_from_config, build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
@@ -110,15 +110,19 @@ def test_eigen_and_pure_theta_share_binder_loss():
     )
 
     class _LinearBinder:
-        def __init__(self, base_image):
+        def __init__(self, base_image, *, forward_spec, base_forward_store):
             self.base_image = base_image
+            self.forward_spec = forward_spec
+            self.base_forward_store = base_forward_store
 
         def model(self, store_delta):
             shift = store_delta.get("binary.x_position_as") + store_delta.get("binary.y_position_as")
             return self.base_image + shift
 
     truth_image = jnp.ones((4, 4)) * 0.2
-    binder = _LinearBinder(truth_image)
+    binder = _LinearBinder(
+        truth_image, forward_spec=forward_spec, base_forward_store=base_store
+    )
     var_image = jnp.ones_like(truth_image) * 0.01
 
     infer_keys = ["binary.x_position_as", "binary.y_position_as"]
@@ -127,17 +131,14 @@ def test_eigen_and_pure_theta_share_binder_loss():
 
     biased_store = base_store.replace({"binary.x_position_as": 0.05, "binary.y_position_as": -0.03})
 
-    loss_nll, theta0 = make_binder_image_nll_fn(
-        cfg,
-        forward_spec,
-        biased_store,
-        infer_keys,
-        truth_image,
-        var_image,
+    loss_nll, theta0 = make_binder_nll_fn(
         binder=binder,
+        infer_keys=infer_keys,
+        data=truth_image,
+        var=var_image,
         noise_model="gaussian",
         reduce="sum",
-        use_system_graph=False,
+        theta0_store=biased_store,
     )
 
     initial_loss = float(loss_nll(theta0))
