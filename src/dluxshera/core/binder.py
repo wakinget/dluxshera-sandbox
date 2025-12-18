@@ -66,6 +66,15 @@ class BaseSheraBinder:
         if self.use_system_graph:
             self._graph = self._build_graph()
 
+    def __getattr__(self, name):
+        if name in BINDER_RESERVED_NAMES:
+            raise AttributeError(name)
+
+        if hasattr(self.cfg, name):
+            return getattr(self.cfg, name)
+
+        raise AttributeError(name)
+
     # ------------------------------------------------------------------
     # Hooks for subclasses
     # ------------------------------------------------------------------

@@ -52,3 +52,21 @@ def test_binder_get_reads_cfg_and_store(binder_cls, cfg):
 
     values = binder.get(["psf_npix", plate_scale_path])
     assert values == [psf_npix_value, plate_scale_value]
+
+
+@pytest.mark.parametrize(
+    "binder_cls,cfg",
+    [
+        (SheraThreePlaneBinder, SHERA_TESTBED_CONFIG),
+        (SheraTwoPlaneBinder, SheraTwoPlaneConfig()),
+    ],
+)
+def test_binder_cfg_field_forwarding(binder_cls, cfg):
+    forward_spec, forward_store = make_forward_store(cfg)
+    binder = binder_cls(cfg, forward_spec, forward_store, use_system_graph=False)
+
+    assert binder.cfg is cfg
+    assert binder.psf_npix == binder.cfg.psf_npix
+
+    with pytest.raises(AttributeError):
+        binder.this_does_not_exist
