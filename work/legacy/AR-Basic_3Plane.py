@@ -242,6 +242,7 @@ optimisers = {
     # "m2_aperture.coefficients": opt,
 }
 params = list(optimisers.keys())
+param_paths = [("params", p) for p in params]
 
 
 ######################
@@ -364,7 +365,7 @@ true_vals["m2_total_opd_rms_nm"] = 1e9 * nanrms(true_vals["m2_total_opd"][m2_mas
 
 
 # Take the value and gradient transformation of the loss function
-val_grad_fn = zdx.filter_value_and_grad(params)(loss_fn)
+val_grad_fn = zdx.filter_value_and_grad(param_paths)(loss_fn)
 
 
 # Compute CRLB in pure parameter space
@@ -599,11 +600,11 @@ for obs_i in np.arange(N_observations):
     # lr_model must match model_params’ PyTree type/structure
     lr_model = get_lr_from_curvature(np.diag(fim), model_params, order=params)
 
-    loss_value_fn = eqx.filter_jit(
-        zdx.filter_value_and_grad(model_params.keys)(
-            lambda p, m, d, v: loss_with_injected(p, m, d, v, loss_fn)
-        )
-    )
+    def _loss_with_params(params_dict, m, d, v):
+        mp = model_params.set("params", params_dict)
+        return loss_with_injected(mp, m, d, v, loss_fn)
+
+    loss_value_fn = eqx.filter_jit(jax.value_and_grad(_loss_with_params))
 
     # Now we can Optimize
     t0_optim = time.time()
