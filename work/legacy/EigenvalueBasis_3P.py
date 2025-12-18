@@ -88,7 +88,7 @@ save_params = False
 
 
 # Eigenmode Options
-use_eigen = True # Enables re-parameterization
+use_eigen = False # Enables re-parameterization
 whiten_basis = True # Bool, optionally scales each eigenvector by 1/sqrt(lambda)
 truncate_k = None # Integer or None, optionally truncates to top k eigenmodes
 
