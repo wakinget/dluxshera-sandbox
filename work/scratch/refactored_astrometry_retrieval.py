@@ -38,7 +38,7 @@ from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd, fim_theta, fim_theta_shera
+from dluxshera.inference.optimization import make_binder_nll_fn, run_simple_gd, fim_theta, fim_theta_shera
 from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 from dluxshera.params.packing import pack_params, unpack_params
 
@@ -177,15 +177,14 @@ init_psf = binder.model(init_store)
 
 print("Building the loss function...")
 # Build the Loss function
-nll_loss_fn, theta0 = make_binder_image_nll_fn(
-    cfg=binder.cfg,
-    forward_spec=forward_spec,
-    base_forward_store=init_store,
+nll_loss_fn, theta0 = make_binder_nll_fn(
+    binder=binder,
     infer_keys=infer_keys,
     data=data,
     var=data_var,
     noise_model="gaussian",
     reduce="sum",
+    theta0_store=init_store,
 )
 # nll_loss_fn(theta) gives the negative log-likelihood loss for a given input theta vector
 

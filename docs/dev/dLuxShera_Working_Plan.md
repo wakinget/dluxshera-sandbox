@@ -136,6 +136,7 @@ dLuxShera/
 - **Flow:** `theta` → `ParameterStore` delta (restricted to `infer_keys`) → `binder.model(store_delta)` → PSF image → `gaussian_image_nll(image, data, var)` → scalar loss. This keeps Binder as the sole model API and makes the Gaussian NLL math transparent.
 - **Primitives:** A glass-box `gaussian_image_nll` helper (JAX-friendly, sum/mean/None reductions) now lives in `inference/losses.py` and is used by both the legacy `gaussian_loss` wrapper and Binder-based constructors.
 - **Binder loss constructor:** `make_binder_image_nll_fn` returns `(loss_fn, theta0)` where `loss_fn(theta)` unpacks `theta` into a store delta, evaluates `binder.model(...)`, and applies the chosen noise model. A pre-built binder can be passed in or constructed internally from `(cfg, forward_spec, base_forward_store)`.
+- **Binder-first API (2024-05-30):** New `make_binder_nll_fn` *requires* a Binder and always overlays θ unpacking on `binder.base_forward_store`, preventing mixed cfg/spec/store inputs from silently re-binding theta semantics. Optional `theta0_store` lets callers initialise θ from a different store (e.g., prior samples) without changing the binder reference state. Prefer this over the legacy builder for loss construction.
 - **Demo wiring:** `examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
 
 ### Eigenmode-based optimisation (clarified)

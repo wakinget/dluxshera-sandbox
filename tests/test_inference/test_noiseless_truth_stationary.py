@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 
 from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.inference.optimization import make_binder_image_nll_fn
+from dluxshera.inference.optimization import make_binder_nll_fn
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.params.packing import pack_params
 from dluxshera.params.spec import (
@@ -54,23 +54,21 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll():
     )
     theta_true = pack_params(inference_subspec, truth_store)
 
-    # Deliberately perturb a non-inference key; the Binder should still use its
-    # own base store when unpacking theta.
+    # Deliberately perturb a non-inference key in an alternate store. Supplying
+    # this via theta0_store must not affect the unpack base used by the binder
+    # inside the loss.
     mismatched_base = truth_store.replace(
         {"imaging.exposure_time_s": truth_store.get("imaging.exposure_time_s") * 2.0}
     )
 
-    loss_fn, _theta0, predict_fn = make_binder_image_nll_fn(
-        cfg,
-        forward_spec,
-        mismatched_base,
-        infer_keys,
-        data,
-        var,
+    loss_fn, _theta0, predict_fn = make_binder_nll_fn(
         binder=binder_truth,
+        infer_keys=infer_keys,
+        data=data,
+        var=var,
         noise_model="gaussian",
         reduce="sum",
-        use_system_graph=False,
+        theta0_store=mismatched_base,
         return_predict_fn=True,
     )
 
