@@ -374,7 +374,10 @@ def make_binder_image_nll_fn(
     noise_model: NoiseModel = "gaussian",
     reduce: Literal["sum", "mean"] = "sum",
     use_system_graph: bool = False,
-) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray]:
+    return_predict_fn: bool = False,
+) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray] | Tuple[
+    Callable[[np.ndarray], np.ndarray], np.ndarray, Callable[[np.ndarray], np.ndarray]
+]:
     """
     Canonical θ-space image NLL using :class:`SheraThreePlaneBinder`.
 
@@ -405,6 +408,12 @@ def make_binder_image_nll_fn(
     # 1) Build or accept a Binder with the requested execution backend
     if binder is not None:
         binder_obj = binder
+        # Ensure packing/unpacking uses the binder's own reference state when
+        # one is supplied. This keeps the θ semantics aligned with the binder
+        # used to generate/interpret the data even if a different
+        # base_forward_store is passed in by the caller.
+        forward_spec = getattr(binder_obj, "forward_spec", forward_spec)
+        base_forward_store = getattr(binder_obj, "base_forward_store", base_forward_store)
     elif isinstance(cfg, SheraThreePlaneConfig):
         binder_obj = SheraThreePlaneBinder(
             cfg,
@@ -454,6 +463,13 @@ def make_binder_image_nll_fn(
         store_delta = theta_to_store_delta(theta)
         model_image = binder_obj.model(store_delta)
         return image_nll(model_image)
+
+    if return_predict_fn:
+        def predict_fn(theta: np.ndarray) -> np.ndarray:
+            store_delta = theta_to_store_delta(theta)
+            return binder_obj.model(store_delta)
+
+        return loss_fn, theta0, predict_fn
 
     return loss_fn, theta0
 

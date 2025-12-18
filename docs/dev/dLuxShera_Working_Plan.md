@@ -730,6 +730,12 @@ This roadmap gives us a structured, navigable documentation ecosystem: a concept
 
 - Devtools context snapshot (devtools/generate_context_snapshot.py) now groups ParamSpecs and transforms by system_id, calling out primitive vs derived keys and transform dependencies in the Markdown summary to keep demos aligned with the active registry.
 
+### 2025-02-16 — Binder NLL stationary-point regression
+
+- Added a focused regression (`tests/test_inference/test_noiseless_truth_stationary.py`) to assert that noiseless data generated from a Binder forward path produces both zero residual and ~zero gradient at the truth point for the Gaussian NLL.
+- Root cause: `make_binder_image_nll_fn` trusted the caller-provided `base_forward_store` even when a Binder instance was supplied, so a mismatched base (with different fixed parameters) led to a forward-model mismatch and non-zero ∇NLL at the truth parameters.
+- Fix: when a Binder is passed in, the loss now reuses the Binder's own `forward_spec` and `base_forward_store` for packing/unpacking, keeping θ semantics aligned with the data-generating forward path. The loss helper can also optionally return a `predict_fn` for diagnostics.
+
 ---
 
 ## 23) Parking Lot
