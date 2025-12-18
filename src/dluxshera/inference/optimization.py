@@ -1171,6 +1171,23 @@ class ModelParams(BaseModeller):
     def values(self):
         return list(self.params.values())
 
+    @property
+    def grad_paths(self):
+        """Zodiax-compatible paths to differentiable leaves.
+
+        Notes
+        -----
+        - Our differentiable leaves live under the ``params`` dict, and some
+          external parameter names include dots (e.g. ``"m1_aperture.coefficients"``).
+        - Passing those dotted strings directly to :func:`zdx.filter_value_and_grad`
+          makes zodiax interpret them as structural paths ("m1_aperture" →
+          "coefficients"), which do not exist on :class:`ModelParams`/
+          :class:`SheraThreePlaneParams`.
+        - Providing explicit tuple paths keeps the entire string as the final key,
+          avoiding the path-splitting behaviour.
+        """
+        return [["params", k] for k in self.params.keys()]
+
     def replace(self, values):
         """
         Replace all parameters with the provided values.
@@ -1703,7 +1720,7 @@ def step_fn_general(model_params, data, var, model, lr_model, optim, state, loss
 @eqx.filter_jit
 def step_fn(model_params, data, var, model, lr_model, optim, state, loss_fn):
     # grads wrt external keys in ModelParams
-    loss, raw_grads = zdx.filter_value_and_grad(model_params.keys)(
+    loss, raw_grads = zdx.filter_value_and_grad(model_params.grad_paths)(
         lambda p, m, d, v: _loss_with_params(p, m, d, v, loss_fn)
     )(model_params, model, data, var)
 
