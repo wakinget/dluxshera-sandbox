@@ -112,6 +112,20 @@ class BaseSheraBinder:
         )
         return self.base_forward_store.replace(store_delta.as_dict())
 
+    def _leaf_index(self) -> dict[str, list[str]]:
+        """Build an index mapping leaf names to full store paths."""
+
+        leaf_index: dict[str, list[str]] = {}
+
+        for key in self.base_forward_store.keys():
+            if "." not in key:
+                continue
+
+            leaf = key.split(".")[-1]
+            leaf_index.setdefault(leaf, []).append(key)
+
+        return leaf_index
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
