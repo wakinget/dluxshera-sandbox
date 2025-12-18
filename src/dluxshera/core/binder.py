@@ -73,6 +73,12 @@ class BaseSheraBinder:
         if hasattr(self.cfg, name):
             return getattr(self.cfg, name)
 
+        has_prefix = name.isidentifier() and any(
+            key.startswith(f"{name}.") for key in self.base_forward_store.keys()
+        )
+        if has_prefix:
+            return self.ns(name)
+
         raise AttributeError(name)
 
     # ------------------------------------------------------------------

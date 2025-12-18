@@ -198,6 +198,11 @@ dLuxShera/
 
 ---
 
+### Binder namespace tasks (Task 1A–1E status)
+
+- Task 1A–1E: Completed (binder.get, StoreNamespace proxy, Binder.ns explicit access, cfg-field attribute raising, store-prefix attribute raising).
+- Supported access patterns so far: `binder.get(...)`, `binder.ns("prefix")`, cfg forwarding such as `binder.psf_npix`, and store prefix raising such as `binder.system.plate_scale_as_per_pix` / `binder.binary.x_position_as`.
+
 ## 13) Notes on Backward Compatibility
 
 ---
