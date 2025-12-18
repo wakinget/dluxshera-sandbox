@@ -1665,13 +1665,25 @@ def loss_with_injected(model_params, model, data, var, loss_fn):
 # ============ GENERAL - Should work for Pure Modes + Eigenmodes ============
 @eqx.filter_jit
 def step_fn_general(model_params, data, var, model, lr_model, optim, state, loss_fn):
-    # grads w.r.t. the leaves listed by model_params.keys
-    loss, raw_grads = zdx.filter_value_and_grad(model_params.keys)(
-        lambda p, m, d, v: loss_with_injected(p, m, d, v, loss_fn)
-    )(model_params, model, data, var)
+    # NOTE: model_params.params may contain keys with dots (e.g. "m1_aperture.coefficients").
+    # zodiax treats dots as path navigation, so we take grads w.r.t. the params dict directly.
+    def _loss_from_params(params_dict, m, d, v):
+        mp = model_params.set("params", params_dict)
+        return loss_with_injected(mp, m, d, v, loss_fn)
 
-    # elementwise LR scaling (same tree structure as model_params)
-    scaled_grads = jax.tree_util.tree_map(lambda g, s: g * s, raw_grads, lr_model)
+    loss, raw_grads_dict = jax.value_and_grad(_loss_from_params)(
+        model_params.params, model, data, var
+    )
+
+    # Lift dict grads back into a pytree matching model_params (non-param leaves -> None)
+    none_tree = jax.tree_util.tree_map(lambda _: None, model_params)
+    raw_grads = none_tree.set("params", raw_grads_dict)
+
+    # Elementwise LR scaling on the params dict only
+    scaled_grads_dict = jax.tree_util.tree_map(
+        lambda g, s: g * s, raw_grads_dict, lr_model.params
+    )
+    scaled_grads = none_tree.set("params", scaled_grads_dict)
 
     # optax update on exactly those leaves
     updates, state = optim.update(scaled_grads, state, model_params)
