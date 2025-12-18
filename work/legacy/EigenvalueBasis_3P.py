@@ -32,6 +32,7 @@ import matplotlib.gridspec as gridspec
 from tqdm import tqdm
 import time, datetime, os
 import scipy.io
+from pathlib import Path
 
 inferno = mpl.colormaps["inferno"]
 seismic = mpl.colormaps["seismic"]
@@ -56,11 +57,15 @@ jax.config.update("jax_enable_x64", True)
 
 # Start simulation timer
 t0_script = time.time()
-save_path = os.path.join(os.getcwd(), "..", "Results")
-script_name = os.path.splitext((os.path.basename(__file__)))[0]
+
+# Set up file paths
+script_path = Path(__file__).resolve()
+script_dir = script_path.parent
+save_path = script_dir / "Results"
+save_path.mkdir(parents=True, exist_ok=True)
+script_name = script_path.stem
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 print(f"Starting Simulation: {script_name} - {timestamp}")
-
 
 
 # Plotting/Saving Settings
@@ -79,8 +84,7 @@ overwrite_results = False
 data_param_filename = None
 model_param_filename = None
 prior_info_filename = None
-# prior_info_filename = "AR-3P_PriorInfo_20250718_134125.json"
-save_params = True
+save_params = False
 
 
 # Eigenmode Options
@@ -115,7 +119,7 @@ data_initial_params = ModelParams({
     "pupil_npix": 256,
     "psf_npix": 256,
     "wavelength": 550.,
-    "n_wavelengths": 101,
+    "n_wavelengths": 3,
     # Astrometry Settings
     "x_position": 0.0,
     "y_position": 0.0,
@@ -149,7 +153,7 @@ model_initial_params = ModelParams({
     "pupil_npix": 256,
     "psf_npix": 256,
     "wavelength": 550.,
-    "n_wavelengths": 51,
+    "n_wavelengths": 3,
     # Astrometry Settings
     "x_position": 0,
     "y_position": 0,
@@ -196,22 +200,21 @@ if save_params:
     # Save parameters to a file, so we can load them later
     # Save data_params
     save_name = f"{script_name}_DataParams_{timestamp}.json"
-    data_initial_params.to_json(os.path.join("../Results", save_name))
+    data_initial_params.to_json(os.path.join(save_path, save_name))
     # Save initial_model_params
     save_name = f"{script_name}_ModelParams_{timestamp}.json"
-    model_initial_params.to_json(os.path.join("../Results", save_name))
+    model_initial_params.to_json(os.path.join(save_path, save_name))
     # Save prior_info
     save_name = f"{script_name}_PriorInfo_{timestamp}.json"
-    save_prior_info(prior_info, os.path.join("../Results", save_name))
+    save_prior_info(prior_info, os.path.join(save_path, save_name))
     # prior_info_loaded = load_prior_info("priors.json")
 
 # Optimization Settings
 n_iter = 100
-# Define the parameters to solve for
 lr = 0.5
-# opt = optax.sgd(lr,0)
 opt = optax.sgd(lr)
 optimiser_label = "optax.sgd"
+# Define the parameters to solve for
 optimisers = {
     "separation": opt,
     "position_angle": opt,
@@ -268,7 +271,7 @@ data_psf = data_model.model()
 if save_params:
     data_saved_params = data_model.extract_params()
     save_name = f"{script_name}_DataParams_{timestamp}.json"
-    data_saved_params.to_json(os.path.join("../Results", save_name))
+    data_saved_params.to_json(os.path.join(save_path, save_name))
 
 # fig = plt.figure(figsize=(5, 5))
 # ax = plt.axes()
@@ -341,7 +344,7 @@ else:
 if save_FIM:
     # Save the FIM as a .mat file
     save_name = f"{script_name}_FIM_Data_{timestamp}.mat"
-    scipy.io.savemat(os.path.join("../Results", save_name), {
+    scipy.io.savemat(os.path.join(save_path, save_name), {
         'FIM': onp.asarray(fim, dtype=onp.float64),  # NumPy 2D array
         'param_names': onp.array(fim_labels, dtype=object)  # List of parameter names (str)
     })
@@ -916,7 +919,7 @@ for obs_i in range(N_observations):
     opt_params = models_out[-1].extract_params()
     if save_params:
         save_name = f"{script_name}_OptimizedModelParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-        opt_params.to_json(os.path.join("../Results", save_name))
+        opt_params.to_json(os.path.join(save_path, save_name))
 
     # pre-update loss for iteration j should equal the loss of models_out[j]
     j = 10
@@ -1001,18 +1004,17 @@ for obs_i in range(N_observations):
         residuals["m2_total_opd_rms_nm"] = [ 1e9 * nanrms(opd[m2_mask.astype(bool)]) for opd in residuals["m2_total_opd"] ]
 
 
-    # Compare Data to Initial Model - Shows the initial result of the optimization
+    # Compare Data to Original Model - These PSFs should be identical
     if save_plots and obs_i < N_saved_obs:
-        save_name = f"{script_name}_Initial0_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
+        save_name = f"{script_name}_Original_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
             model=model,
             var=var,
             extent=psf_extent_as,
-            model_label="Recovered PSF",
-            display=present_plots,
-            save=True,
-            save_name=save_name,
+            model_label="Original PSF",
+            show=present_plots,
+            save_path=os.path.join(save_path, save_name),
         )
 
     # Compare Data to Initial Model - Shows the initial result of the optimization
@@ -1023,10 +1025,9 @@ for obs_i in range(N_observations):
             model=models_out[0],
             var=var,
             extent=psf_extent_as,
-            model_label="Recovered PSF",
-            display=present_plots,
-            save=True,
-            save_name=save_name,
+            model_label="Initial PSF",
+            show=present_plots,
+            save_path=os.path.join(save_path, save_name),
         )
 
     # Compare Data to Recovered Model - Shows the final result of the optimization
@@ -1038,9 +1039,8 @@ for obs_i in range(N_observations):
             var=var,
             extent=psf_extent_as,
             model_label="Recovered PSF",
-            display=present_plots,
-            save=True,
-            save_name=save_name,
+            show=present_plots,
+            save_path=os.path.join(save_path, save_name),
         )
 
     # Plot loss history
@@ -1051,13 +1051,13 @@ for obs_i in range(N_observations):
         # Left: Full loss history
         save_name = f"{script_name}_Loss_History_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_parameter_history(
-            names="Loss",
-            histories=losses,
-            true_vals=true_loss,
+            names=("Loss",),
+            histories=(losses,),
+            true_vals=(float(loss0),),
             ax=axes[0],
             title="Optimization Loss History",
-            display=False,
-            save=False
+            show=False,
+            close=False,
         )
         # Right: Zoom into last 10 iterations
         axes[1].plot(np.arange(n_iter - 10, n_iter) + 1, losses[-10:])
@@ -1070,7 +1070,7 @@ for obs_i in range(N_observations):
             axes[1].set_ylim(true_loss - 3 * final_delta, true_loss + 3 * final_delta)
 
         fig.tight_layout()
-        fig.savefig(f"../Results/{save_name}", dpi=300)
+        fig.savefig(save_path / save_name, dpi=300)
         if present_plots:
             plt.show()
         else:
