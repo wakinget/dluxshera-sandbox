@@ -15,6 +15,19 @@ from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..optics.builder import build_shera_threeplane_optics, build_shera_twoplane_optics
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
+from ..params.store_namespace import StoreNamespace
+
+
+BINDER_RESERVED_NAMES = {
+    "cfg",
+    "forward_spec",
+    "base_forward_store",
+    "get",
+    "ns",
+    "model",
+    "with_store",
+    "use_system_graph",
+}
 from .universe import build_alpha_cen_source
 
 
@@ -106,6 +119,23 @@ class BaseSheraBinder:
         if default is None:
             return self.base_forward_store.get(path)
         return self.base_forward_store.get(path, default)
+
+    def ns(self, prefix: str) -> StoreNamespace:
+        """Return a StoreNamespace proxy for a prefix in the base forward store."""
+
+        if not isinstance(prefix, str) or not prefix.isidentifier():
+            raise ValueError(f"Invalid namespace prefix: {prefix!r}")
+
+        if prefix in BINDER_RESERVED_NAMES:
+            raise ValueError(f"Namespace prefix {prefix!r} is reserved")
+
+        has_prefix = any(
+            key.startswith(f"{prefix}.") for key in self.base_forward_store.keys()
+        )
+        if not has_prefix:
+            raise ValueError(f"No store keys found under prefix {prefix!r}")
+
+        return StoreNamespace(self.base_forward_store, prefix)
 
     def model(self, store_delta: Optional[ParameterStore] = None) -> jnp.ndarray:
         """Evaluate the Shera PSF for an optional store overlay."""
