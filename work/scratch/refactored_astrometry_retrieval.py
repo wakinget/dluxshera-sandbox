@@ -84,6 +84,9 @@ rng_key = jr.PRNGKey(rng_seed)
 # Start with a pre-defined config
 cfg = SHERA_TESTBED_CONFIG
 # Use the config to set Zernike Noll indices
+# The Noll indices are a 'structural' parameter of the model,
+# this setting influences the size of the basis, and
+# generally shouldn't be changed after creation.
 cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
                   secondary_noll_indices=tuple(range(4, 12)))
 
@@ -123,10 +126,10 @@ data = binder.model()
 # Optionally add noise to the data
 if add_noise:
     rng_key, split_key = jr.split(rng_key)
-    if np.min(data) > 100:
-        data = np.sqrt(data) * jr.normal(split_key, data.shape) + data # Gaussian Approximation
-    else:
-        data = jr.poisson(split_key, data) # Add Poisson shot noise
+    if np.min(data) > 100: # Use Gaussian Approximation
+        data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
+    else: # Add Poisson shot noise
+        data = jr.poisson(split_key, data)
 
 # Assume image variance is given by shot noise
 data_var = data
@@ -136,7 +139,6 @@ data_var = data
 # Set up the inference
 ######################
 print("Configuring Inference...")
-
 # Choose inference keys
 infer_keys = (
     "binary.separation_as",
@@ -214,7 +216,7 @@ n_iter = 200
 theta_final, history = run_simple_gd(
     loss_fn=loss_fn, # nll_loss_fn, or map_loss_fn
     theta0=theta0,
-    learning_rate=1e-2,
+    learning_rate=1e-1,
     num_steps=n_iter,
 )
 
@@ -365,3 +367,6 @@ plt.close()
 
 # Plot parameter histories
 # plot_parameter_history_grid()
+
+
+print("Finished!")
