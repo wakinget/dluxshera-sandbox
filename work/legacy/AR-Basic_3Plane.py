@@ -8,17 +8,24 @@ import jax.random as jr
 from jax import tree
 
 # Optimisation
+import equinox as eqx
 import zodiax as zdx
 import optax
 
 # Optics / inference
 from dluxshera.inference.optimization import (
     FIM,
+    generate_fim_labels,
+    pack_params,
+    unpack_params,
     get_optimiser,
     get_lr_model,
+    get_lr_from_curvature,
     loss_fn,
-    step_fn,
+    loss_with_injected,
+    step_fn_general,
     construct_priors_from_dict,
+    ModelParams,
     SheraThreePlaneParams,
 )
 from dluxshera.core.modeling import SheraThreePlane_Model
@@ -28,7 +35,12 @@ from dluxshera.utils.utils import (
     calculate_log_flux,
     set_array,
     nanrms,
+    save_prior_info,
+    load_prior_info,
+    save_results as write_results_xlsx,
+    log_step_jsonl,
 )
+
 
 # Plotting helpers
 from dluxshera.plot.plotting import (
@@ -48,6 +60,7 @@ import time, datetime, os
 import pandas as pd
 import pickle
 from pathlib import Path
+import scipy.io
 
 inferno = mpl.colormaps["inferno"]
 seismic = mpl.colormaps["seismic"]
@@ -83,127 +96,140 @@ timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 print(f"Starting Simulation: {script_name} - {timestamp}")
 
 # Plotting/Saving Settings
-save_plots = True # True / False
-N_saved_plots = 5 # Limit the number of plots that are saved, the first N plots will be saved
-present_plots = False # True / False
-save_results = True
+save_plots = True
+N_saved_obs = 5
+present_plots = False
 print2console = True
+save_FIM = False
 
-# RNG Settings
-starting_seed = 0
+save_results = True
+results_savename = f"{script_name}_{timestamp}.xlsx"
+overwrite_results = False
 
-# # Pointing Error Settings
-# jitter_amplitude = 0 # as
-
-# Source Settings
-star_contrast = 0.3
-initial_separation = 10.
-initial_angle = 90.
-initial_center = (0., 0.)
-central_wavelength = 550. # nm
-bandwidth = 110. # nm
-n_wavelengths = 3
-
-# Telescope Parameters
-point_design = 'shera_testbed'
-pupil_npix = 256
-psf_npix = 256
-# # SHERA Testbed Prescription
-# m1_diam = 0.09
-# m2_diam = 0.025
-# m1_focal_length = 0.35796
-# m2_focal_length = -0.041935
-# m1_m2_separation = 0.320
-# detector_pixel_pitch = 6.5 # um, detector pixel size
-# # SHERA Flight Prescription
-# m1_diam = 0.22
-# m2_diam = 0.025
-# m1_focal_length = 0.604353
-# m2_focal_length = -0.0545
-# m1_m2_separation = 0.554130
-# detector_pixel_pitch = 4.6 # um, detector pixel size
+# Provide filenames here if you want to load in previously saved settings
+data_param_filename = None
+model_param_filename = None
+prior_info_filename = None
+save_params = True
 
 
-# Zernike OPD Settings
-# 11, 16, 22, 29, 37, 46, 56, 67, 79, 92, 106
-# Define the list of Zernikes that the model will use
-m1_noll_model = np.arange(4, 12)
-# m2_noll_model = np.arange(4, 11)
-m2_noll_model = np.arange(4, 12)
-
-# Define the list of Zernikes that the data will contain
-m1_noll_data = np.arange(4, 12)
-# m2_noll_data = np.arange(4, 11)
-m2_noll_data = np.arange(4, 12)
-
-# Define the initial Zernike coefficients
-# The list of coefficients should be the same size as the list of indices included in the data
-# The model will be initialized with the same initial coefficients (except where noll indices differ)
-# Only noll ind that are common between the model and data will be initialized, others set to 0
-initial_m1_coeffs = np.zeros_like(m1_noll_data)
-initial_m2_coeffs = np.zeros_like(m2_noll_data)
-
-# # Randomized initial coefficients
-# m1_key, m2_key = jr.split(jr.PRNGKey(starting_seed))
-# initial_m1_coeffs = np.ones_like(m1_noll_data)*jr.normal(m1_key, m1_noll_data.shape)
-# initial_m2_coeffs = np.ones_like(m2_noll_data)*jr.normal(m2_key, m2_noll_data.shape)
-
-
-# Calibration Settings (1/f wfe)
-m1_cal_alpha = 2.5
-m1_cal_amp = 0e-9
-m2_cal_alpha = 2.5
-m2_cal_amp = 0e-9
-
-# Uncalibrated WFE Settings (1/f wfe)
-m1_wfe_alpha = 2.5
-m1_wfe_amp = 0e-9
-m2_wfe_alpha = 2.5
-m2_wfe_amp = 0e-9
+# Observation Settings
+N_observations = 1  # Number of repeated observations
+exposure_time = 1800  # sec, total exposure time of the observation
+frame_rate = 20  # Hz, observation frame rate
+exposure_per_frame = 1 / frame_rate  # seconds
+N_frames = frame_rate * exposure_time  # frames
 
 # Image Noise Settings
 add_shot_noise = False
-sigma_read = 0 # e-/frame rms read noise
+sigma_read = 0  # e-/frame rms read noise
 
-# Observation Settings
-N_observations = 1 # Number of repeated observations
-exposure_time = 1800 # sec, total exposure time of the observation
-frame_rate = 20 # Hz, observation frame rate
-exposure_per_frame = 1/frame_rate  # seconds
-N_frames = frame_rate*exposure_time  # frames
+# Set up initial parameters
+point_design = 'shera_testbed'
+default_params = SheraThreePlaneParams(point_design=point_design)  # Gets default parameters
+default_params = default_params.set("rng_seed", 0)  # Specify a seed here
+log_flux = calculate_log_flux(default_params.p1_diameter, default_params.bandwidth / 1000, exposure_time)
+default_params = default_params.set('log_flux', log_flux)
 
+# First define the initial parameters for the data
+data_initial_params = ModelParams({
+    "pupil_npix": 256,
+    "psf_npix": 256,
+    "wavelength": 550.,
+    "n_wavelengths": 3,
+    # Astrometry Settings
+    "x_position": 0.0,
+    "y_position": 0.0,
+    "separation": 10,
+    "position_angle": 90.0,
+    "contrast": 0.3,
+    # "log_flux": 6.78,
+    "pixel_size": 6.5e-6,
 
-# Set up priors, specifies distribution sigma, and type
-# The optimized model will be initially perturbed according to these priors
-prior_info = {
-    'x_position':               (1e-6, "Normal"),
-    'y_position':               (1e-6, "Normal"),
-    'separation':               (1e-6, "Normal"),
-    'position_angle':           (1e-6, "Uniform"),
-    'log_flux':                 (1e-6, "LogNormal"),
-    'contrast':                 (1e-6, "LogNormal"),
-    'psf_pixel_scale':          (1e-6, "LogNormal"),
-    'm1_aperture.coefficients': (1e-6, "Normal"),
-    'm2_aperture.coefficients': (1e-6, "Normal")
-}
-# prior_info = {
-#     'x_position': (30*1.5e-6, "Normal"),
-#     'y_position': (30*1.5e-6, "Normal"),
-#     'separation': (30*3e-6, "Normal"),
-#     'position_angle': (30*1.8e-5, "Uniform"),
-#     'log_flux': (30*1e-6, "LogNormal"),
-#     'contrast': (30*2e-6, "LogNormal"),
-#     'psf_pixel_scale': (30*1e-7, "LogNormal"),
-#     'coefficients': (30*5e-4, "Normal"),
-# }
+    # Zernike Settings
+    "m1_zernike_noll": np.arange(4, 12),
+    "m1_zernike_amp": np.zeros(8),
+    "m2_zernike_noll": np.arange(4, 12),
+    "m2_zernike_amp": np.zeros(8),
+
+    # Calibrated 1/f WFE Settings
+    "m1_calibrated_power_law": 2.5,
+    "m1_calibrated_amplitude": 0,
+    "m2_calibrated_power_law": 2.5,
+    "m2_calibrated_amplitude": 0,
+
+    # Uncalibrated 1/f WFE Settings
+    "m1_uncalibrated_power_law": 2.5,
+    "m1_uncalibrated_amplitude": 0,
+    "m2_uncalibrated_power_law": 2.5,
+    "m2_uncalibrated_amplitude": 0
+})
+
+# Then define the initial parameters for the model
+model_initial_params = ModelParams({
+    "pupil_npix": 256,
+    "psf_npix": 256,
+    "wavelength": 550.,
+    "n_wavelengths": 3,
+    # Astrometry Settings
+    "x_position": 0,
+    "y_position": 0,
+    "separation": 10,
+    "position_angle": 90.0,
+    "contrast": 0.3,
+    # "log_flux": 6.78,
+    "pixel_size": 6.5e-6,
+
+    # Zernike Settings
+    "m1_zernike_noll": np.arange(4, 12),
+    "m1_zernike_amp": np.zeros(8),
+    "m2_zernike_noll": np.arange(4, 12),
+    "m2_zernike_amp": np.zeros(8),
+
+    # Calibrated 1/f WFE Settings
+    "m1_calibrated_power_law": 2.5,
+    "m1_calibrated_amplitude": 0,
+    "m2_calibrated_power_law": 2.5,
+    "m2_calibrated_amplitude": 0,
+})
+
+if prior_info_filename is not None:
+    # Load prior_info from json file
+    prior_info = load_prior_info(os.path.join(save_path, prior_info_filename))
+else:
+    # Set up priors, specifies distribution type, and sigma
+    # The optimized model will be initially perturbed according to these priors
+    prior_info = {
+        'x_position': (1e-2, "Normal"),               # as
+        'y_position': (1e-2, "Normal"),               # as
+        'separation': (1e-4, "Normal"),               # as
+        'position_angle': (1e-3, "Uniform"),          # deg
+        'log_flux': (1e-3, "LogNormal"),              # log10(flux)
+        'contrast': (1e-3, "LogNormal"),              # ratio (unitless)
+        'psf_pixel_scale': (1e-3, "LogNormal"),       # as/pix
+        'm1_aperture.coefficients': (5, "Normal"), # nm
+        'm2_aperture.coefficients': (5, "Normal")  # nm
+    }
+
+if save_params:
+    # Save parameters to a file, so we can load them later
+    # Save data_params
+    save_name = f"{script_name}_DataParams_{timestamp}.json"
+    data_initial_params.to_json(os.path.join(save_path, save_name))
+    # Save initial_model_params
+    save_name = f"{script_name}_ModelParams_{timestamp}.json"
+    model_initial_params.to_json(os.path.join(save_path, save_name))
+    # Save prior_info
+    save_name = f"{script_name}_PriorInfo_{timestamp}.json"
+    save_prior_info(prior_info, os.path.join(save_path, save_name))
+    # prior_info_loaded = load_prior_info("priors.json")
 
 # Optimization Settings
-n_iter = 200
-# Define the parameters to solve for
-lr = 0.5
-# opt = optax.sgd(lr,0)
+n_iter = 100
+lr = 0.1
 opt = optax.sgd(lr)
 optimiser_label = "optax.sgd"
+# Define the parameters to solve for
 optimisers = {
     "separation": opt,
     "position_angle": opt,
@@ -213,7 +239,7 @@ optimisers = {
     "contrast": opt,
     "psf_pixel_scale": opt,
     "m1_aperture.coefficients": opt,
-    "m2_aperture.coefficients": opt,
+    # "m2_aperture.coefficients": opt,
 }
 params = list(optimisers.keys())
 
@@ -223,72 +249,31 @@ params = list(optimisers.keys())
 ######################
 
 # Start the simulation(s)
-t0_simulation = time.time() # Start simulation timer
-rng_key = jr.PRNGKey(starting_seed)
+t0_simulation = time.time()
+rng_key = jr.PRNGKey(default_params.rng_seed)
+path_map = default_params.get_param_path_map()
+inv_path_map = {v: k for k, v in path_map.items()}
+row_counter = 1
+obs_digits = len(str(N_observations))
 
-
-# Create a 3-plane optical model with the specified parameters
-parms = SheraThreePlaneParams(point_design=point_design) # Gets default parameters
-# Update Sampling
-parms = parms.set('rng_seed', starting_seed)
-parms = parms.set('pupil_npix', pupil_npix)
-parms = parms.set('psf_npix', psf_npix)
-# Update Source Settings
-parms = parms.set('x_position', initial_center[0])
-parms = parms.set('y_position', initial_center[1])
-parms = parms.set('separation', initial_separation)
-parms = parms.set('position_angle', initial_angle)
-parms = parms.set('contrast', star_contrast)
-parms = parms.set('wavelength', central_wavelength)
-parms = parms.set('n_wavelengths', n_wavelengths)
-log_flux = calculate_log_flux(parms.p1_diameter, bandwidth/1000, exposure_time)
-parms = parms.set('log_flux', log_flux)
-
-# Update Zernike basis for the model
-m1_noll = np.union1d(m1_noll_data, m1_noll_model)  # Uniquely combines the model and data noll indices
-m2_noll = np.union1d(m2_noll_data, m2_noll_model)  # Used later to compare true coeffs to recovered coeffs
-# Find the correct initial coefficients for the model
-# The following extracts the coefficients that are present in initial_m1_coeffs, and defaults to 0 if missing
-m1_coeff_dict = dict(zip(m1_noll_data.tolist(), initial_m1_coeffs))
-initial_m1_coeffs_model = np.array([m1_coeff_dict.get(int(n), 0.0) for n in m1_noll_model])
-parms = parms.set('m1_zernike_noll', m1_noll_model)
-parms = parms.set('m1_zernike_amp', initial_m1_coeffs_model) # Initialize the model coefficients
-# Repeat for the Secondary mirror
-m2_coeff_dict = dict(zip(m2_noll_data.tolist(), initial_m2_coeffs))
-initial_m2_coeffs_model = np.array([m2_coeff_dict.get(int(n), 0.0) for n in m2_noll_model])
-parms = parms.set('m2_zernike_noll', m2_noll_model)
-parms = parms.set('m2_zernike_amp', initial_m2_coeffs_model) # Initialize the model coefficients
-
-# Update 1/f WFE - Model only includes calibrated WFE
-parms = parms.set('m1_calibrated_power_law', m1_cal_alpha)
-parms = parms.set('m1_calibrated_amplitude', m1_cal_amp)
-parms = parms.set('m2_calibrated_power_law', m2_cal_alpha)
-parms = parms.set('m2_calibrated_amplitude', m2_cal_amp)
+# Create the Data model
+data_params = data_initial_params.inject(default_params)
+data_model = SheraThreePlane_Model(data_params)
+# data_model = SheraThreePlane_Model(default_params)
 
 # Create the model
-model_parms = parms
-# for parm in model_parms:
-#     print(f"{parm}: {model_parms.(parm)}")
-model = SheraThreePlane_Model(parms) # Model used for the optimization
-
-# Update Zernike basis for the data
-parms = parms.set('m1_zernike_noll', m1_noll_data)
-parms = parms.set('m1_zernike_amp', initial_m1_coeffs) # Initialize the data coefficients
-parms = parms.set('m2_zernike_noll', m2_noll_data)
-parms = parms.set('m2_zernike_amp', initial_m2_coeffs) # Initialize the data coefficients
-
-# Update Uncalibrated 1/f WFE
-parms = parms.set('m1_uncalibrated_power_law', m1_wfe_alpha)
-parms = parms.set('m1_uncalibrated_amplitude', m1_wfe_amp)
-parms = parms.set('m2_uncalibrated_power_law', m2_wfe_alpha)
-parms = parms.set('m2_uncalibrated_amplitude', m2_wfe_amp)
-
-# Create the model
-data_parms = parms
-data_model = SheraThreePlane_Model(parms) # Model used to create the data
+initial_model_params = model_initial_params.inject(default_params)
+model = SheraThreePlane_Model(initial_model_params)
+# model = SheraThreePlane_Model(default_params)
 
 # Model the Data PSF
 data_psf = data_model.model()
+# model_psf = model.model()
+if save_params:
+    data_saved_params = data_model.extract_params()
+    save_name = f"{script_name}_DataParams_{timestamp}.json"
+    data_saved_params.to_json(os.path.join(save_path, save_name))
+
 
 fig = plt.figure(figsize=(5, 5))
 ax = plt.axes()
@@ -302,8 +287,6 @@ plt.tight_layout()
 plt.show(block=False)
 
 # Calculate priors centered on current values
-path_map = parms.get_param_path_map()
-inv_path_map = {v: k for k, v in path_map.items()}
 prior_info = {
     k: {
         "mean": model.get(k if k not in path_map else path_map[k]),
@@ -336,14 +319,7 @@ fim = FIM(
 )
 print("FIM shape:", fim.shape)
 # === Plot the Fisher Information Matrix ===
-fim_labels = [] # Define proper axis labels for the FIM plot
-for param in params:
-    if param == "m1_aperture.coefficients":
-        fim_labels.extend([f"M1 Z{n}" for n in m1_noll_model])
-    elif param == "m2_aperture.coefficients":
-        fim_labels.extend([f"M2 Z{n}" for n in m2_noll_model])
-    else:
-        fim_labels.append(param)
+fim_labels = generate_fim_labels(params, initial_model_params)
 fim_log = np.log10(np.abs(fim) + 1e-20)
 fig, ax = plt.subplots(figsize=(8, 6))
 im = ax.imshow(fim_log, cmap="viridis", vmin=4, vmax=14)
@@ -358,7 +334,6 @@ cbar = fig.colorbar(im, ax=ax)
 cbar.set_label("Log Information")
 plt.tight_layout()
 if save_plots:
-    obs_digits = len(str(N_observations))
     plot_name = "FIM"
     save_name = f"{script_name}_{plot_name}_{timestamp}.png"
     plt.savefig(os.path.join(save_path, save_name))
@@ -367,6 +342,13 @@ if present_plots:
 else:
     plt.close()
 
+if save_FIM:
+    # Save the FIM as a .mat file
+    save_name = f"{script_name}_FIM_Data_{timestamp}.mat"
+    scipy.io.savemat(os.path.join(save_path, save_name), {
+        'FIM': onp.asarray(fim, dtype=onp.float64),  # NumPy 2D array
+        'param_names': onp.array(fim_labels, dtype=object)  # List of parameter names (str)
+    })
 
 # Record true values
 true_vals = {param: data_model.get(param) for param in params}
@@ -384,41 +366,33 @@ true_vals["m2_total_opd_rms_nm"] = 1e9 * nanrms(true_vals["m2_total_opd"][m2_mas
 # Take the value and gradient transformation of the loss function
 val_grad_fn = zdx.filter_value_and_grad(params)(loss_fn)
 
-# Get the learning rate model (variance estimate)
-lr_model = get_lr_model(model, params, loss_fn, model_psf, model_psf)
-param_std = tree.map(lambda x: np.sqrt(x), lr_model)
-# print("lr_model:")
-# for name, value in lr_model.params.items():
-#     if np.ndim(value) == 0:  # Scalar case
-#         std = np.sqrt(value)
-#         print(f"{name}: var={value:.3e}, std={std:.3e}")
-#     else:  # Array case
-#         value_flat = np.ravel(value)
-#         std_flat = np.sqrt(value_flat)
-#         var_str = ", ".join(f"{v:.3e}" for v in value_flat)
-#         std_str = ", ".join(f"{s:.3e}" for s in std_flat)
-#         print(f"{name}:\n  var=[{var_str}]\n  std=[{std_str}]")
 
+# Compute CRLB in pure parameter space
+target_for_crlb = ModelParams({
+    p: initial_model_params.get(inv_path_map.get(p, p)) for p in params
+})
+crlb_model = get_lr_from_curvature(np.diag(fim), target_for_crlb, order=params)
+param_std = jax.tree_util.tree_map(np.sqrt, crlb_model)
 if print2console:
     print("Cramer Rao Lower Bound from FIM:")
-    print("Source X, Y Position STD: %.3f uas, %.3f uas" % (
-    param_std.get("x_position") * 1e6, param_std.get("y_position") * 1e6))
-    print("Separation STD: %.3f uas" % (param_std.get("separation") * 1e6))
-    print("Source Angle STD: %.3f as" % (param_std.get("position_angle") * 60 ** 2))
-    print("Log Flux STD: %.3f" % param_std.get("log_flux"))
-    print("Contrast STD: %.3f" % param_std.get("contrast"))
-    print("Platescale STD: %.3f" % param_std.get("psf_pixel_scale"))
+    print("Source X, Y Position STD: %.3g uas, %.3g uas" % (
+        param_std.get("x_position") * 1e6, param_std.get("y_position") * 1e6))
+    print("Separation STD: %.3g uas" % (param_std.get("separation") * 1e6))
+    print("Source Angle STD: %.3g as" % (param_std.get("position_angle") * 60 ** 2))
+    print("Log Flux STD: %.3g" % param_std.get("log_flux"))
+    print("Contrast STD: %.3g" % param_std.get("contrast"))
+    print("Platescale STD: %.3g" % param_std.get("psf_pixel_scale"))
     m1_coeff_str = ", ".join(f"{coeff:.3f}" for coeff in param_std.get("m1_aperture.coefficients"))
     print("M1 Zernike Coefficients: [" + m1_coeff_str + "] nm")
-    # print("M1 Zernike Coeff RMS: %.3f nm" % (nanrms(param_std.get("m1_aperture.coefficients"))))
-    m2_coeff_str = ", ".join(f"{coeff:.3f}" for coeff in param_std.get("m2_aperture.coefficients"))
-    print("M2 Zernike Coefficients: [" + m2_coeff_str + "] nm")
-    # print("M2 Zernike Coeff RMS: %.3f nm" % (nanrms(param_std.get("m2_aperture.coefficients"))))
+    if "m2_aperture.coefficients" in params:
+        m2_coeff_str = ", ".join(f"{coeff:.3f}" for coeff in param_std.get("m2_aperture.coefficients"))
+        print("M2 Zernike Coefficients: [" + m2_coeff_str + "] nm")
 
 
 # Start the Observation Loop
 obs_keys = jr.split(rng_key, N_observations)  # One key per observation
 for obs_i in np.arange(N_observations):
+    t0_obs = time.time()  # Start observation timer
     obs_key = obs_keys[obs_i]
 
     # Add Shot Noise to the PSF
@@ -459,30 +433,33 @@ for obs_i in np.arange(N_observations):
 
     if print2console: # Print Summary of Inputs
         print("\nAstrometry Retrieval Initial Inputs:")
-        print("Starting RNG Seed: %d" % starting_seed)
+        print("Starting RNG Seed: %d" % default_params.rng_seed)
         print("Source X, Y Position: %.3f as, %.3f as" % (true_vals["x_position"], true_vals["y_position"]))
         print("Source Angle: %.3f deg" % true_vals["position_angle"])
         print("Source Separation: %.3f as" % true_vals["separation"])
         print("Source Log Flux: %.3f" % true_vals["log_flux"])
         print("Source Contrast: %.3f A:B" % true_vals["contrast"])
         print("Detector Platescale: %.3f as/pix" % true_vals["psf_pixel_scale"])
-        print("Data Includes %.3f nm rms of calibrated 1/f^%.2f noise" % (m1_cal_amp*1e9, m1_cal_alpha))
-        print("Data Includes %.3f nm rms of uncalibrated 1/f^%.2f noise" % (m1_wfe_amp*1e9, m1_wfe_alpha))
-        # print("Data Includes %d Zernikes on M1: Z%d - Z%d @%.2f nm rms" % (m1_noll_data.size, np.min(m1_noll_data), np.max(m1_noll_data), nanrms(initial_m1_coeffs)))
-        # print("Data Includes %d Zernikes on M2: Z%d - Z%d @%.2f nm rms" % (m2_noll_data.size, np.min(m2_noll_data), np.max(m2_noll_data), nanrms(initial_m2_coeffs)))
+        print("Data Simulated with %d wavelengths" % int(data_params.n_wavelengths))
+        print("Data Modelled with %d wavelengths" % int(initial_model_params.n_wavelengths))
+        print("Data Includes %.3f nm rms of calibrated 1/f^%.2f noise" % (initial_model_params.m1_calibrated_amplitude*1e9, initial_model_params.m1_calibrated_power_law))
+        print("Data Includes %.3f nm rms of uncalibrated 1/f^%.2f noise" % (data_params.m1_uncalibrated_amplitude*1e9, data_params.m1_uncalibrated_power_law))
         print("Data Includes %d Zernikes on M1: %s @%.2f nm rms" %
-              (m1_noll_data.size, ", ".join(f"Z{z}" for z in m1_noll_data), nanrms(initial_m1_coeffs)) )
+              (data_params.m1_zernike_noll.size, ", ".join(f"Z{z}" for z in data_params.m1_zernike_noll), nanrms(data_params.m1_zernike_amp)) )
         print("Data Includes %d Zernikes on M2: %s @%.2f nm rms" %
-              (m2_noll_data.size, ", ".join(f"Z{z}" for z in m2_noll_data), nanrms(initial_m2_coeffs)) )
+              (data_params.m2_zernike_noll.size, ", ".join(f"Z{z}" for z in data_params.m2_zernike_noll), nanrms(data_params.m2_zernike_amp)) )
         # print("Data Includes %.3f as of jitter" % jitter_amplitude)
         print("Data Includes Shot Noise: %s" % add_shot_noise)
         print("Data Includes Read Noise @ %.2f e- per frame" % sigma_read)
-        # print("Model Fits for %d Zernikes on M1: Z%d - Z%d" % (m1_noll_model.size, np.min(m1_noll_model), np.max(m1_noll_model)))
-        # print("Model Fits for %d Zernikes on M2: Z%d - Z%d" % (m2_noll_model.size, np.min(m2_noll_model), np.max(m2_noll_model)))
+        # print("Model Fits for %d Zernikes on M1: Z%d - Z%d" % (initial_model_params.m1_zernike_noll.size, np.min(initial_model_params.m1_zernike_noll), np.max(initial_model_params.m1_zernike_noll)))
+        # print("Model Fits for %d Zernikes on M2: Z%d - Z%d" % (initial_model_params.m2_zernike_noll.size, np.min(initial_model_params.m2_zernike_noll), np.max(initial_model_params.m2_zernike_noll)))
         print("Model Fits for %d Zernikes on M1: %s" %
-              (m1_noll_model.size, ", ".join(f"Z{z}" for z in m1_noll_model)) )
-        print("Model Fits for %d Zernikes on M2: %s" %
-              (m2_noll_model.size, ", ".join(f"Z{z}" for z in m2_noll_model)) )
+              (initial_model_params.m1_zernike_noll.size, ", ".join(f"Z{z}" for z in initial_model_params.m1_zernike_noll)) )
+        if "m2_aperture.coefficients" in params:
+            print("Model Fits for %d Zernikes on M2: %s" %
+                  (initial_model_params.m2_zernike_noll.size, ", ".join(f"Z{z}" for z in initial_model_params.m2_zernike_noll)) )
+        else:
+            print("Model does NOT Fit for M2 Zernikes")
         print("True Loss Value: %.5g" % true_loss)
 
 
@@ -491,7 +468,7 @@ for obs_i in np.arange(N_observations):
     fig = plt.figure(figsize=(15, 5))
     ax = plt.subplot(2, 4, 1) # M1 Calibrated WFE
     # data_model.m1_calibration.opd
-    plt.title("M1 Calibrated 1/f WFE: %.3f nm rms" % (m1_cal_amp * 1e9))
+    plt.title("M1 Calibrated 1/f WFE: %.3f nm rms" % (initial_model_params.m1_calibrated_amplitude * 1e9))
     plt.xlabel("X (mm)")
     plt.ylabel("Y (mm)")
     im = ax.imshow(1e9 * data_model.m1_calibration.opd * m1_nanmask, inferno, extent=pupil_extent_mm)
@@ -499,7 +476,7 @@ for obs_i in np.arange(N_observations):
     cbar.set_label("nm")
     ax = plt.subplot(2, 4, 2) # M1 Uncalibrated WFE
     # data_model.m1_wfe.opd
-    plt.title("M1 Uncalibrated 1/f WFE: %.3f nm rms" % (m1_wfe_amp * 1e9))
+    plt.title("M1 Uncalibrated 1/f WFE: %.3f nm rms" % (data_params.m1_uncalibrated_amplitude * 1e9))
     plt.xlabel("X (mm)")
     im = ax.imshow(1e9 * data_model.m1_wfe.opd * m1_nanmask, inferno, extent=pupil_extent_mm)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
@@ -519,7 +496,7 @@ for obs_i in np.arange(N_observations):
     cbar.set_label("nm")
     ax = plt.subplot(2, 4, 5) # M2 Calibrated WFE
     # data_model.m2_calibration.opd
-    plt.title("M2 Calibrated 1/f WFE: %.3f nm rms" % (m2_cal_amp * 1e9))
+    plt.title("M2 Calibrated 1/f WFE: %.3f nm rms" % (initial_model_params.m2_calibrated_amplitude * 1e9))
     plt.xlabel("X (mm)")
     plt.ylabel("Y (mm)")
     im = ax.imshow(1e9 * data_model.m2_calibration.opd * m2_nanmask, inferno, extent=m2_extent_mm)
@@ -527,7 +504,7 @@ for obs_i in np.arange(N_observations):
     cbar.set_label("nm")
     ax = plt.subplot(2, 4, 6) # M2 Uncalibrated WFE
     # data_model.m2_wfe.opd
-    plt.title("M2 Uncalibrated 1/f WFE: %.3f nm rms" % (m2_wfe_amp * 1e9))
+    plt.title("M2 Uncalibrated 1/f WFE: %.3f nm rms" % (data_params.m2_uncalibrated_amplitude * 1e9))
     plt.xlabel("X (mm)")
     im = ax.imshow(1e9 * data_model.m2_wfe.opd * m2_nanmask, inferno, extent=m2_extent_mm)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
@@ -545,7 +522,7 @@ for obs_i in np.arange(N_observations):
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("Photons")
     plt.tight_layout()
-    if save_plots and obs_i < N_saved_plots:
+    if save_plots and obs_i < N_saved_obs:
         obs_digits = len(str(N_observations))
         plot_name = "DataInput"
         save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i+1:0{obs_digits}d}.png"
@@ -555,25 +532,6 @@ for obs_i in np.arange(N_observations):
     else:
         plt.close()
 
-
-
-
-
-
-    # # Use the LR model to initialise an incorrect model
-    # leaves = [np.array(lr_model.get(param)) for param in params]
-    # keys = jr.split(obs_key, len(leaves))
-    # perturbations = [30 * np.sqrt(leaf) * jr.normal(keys[i], leaf.shape) for i, leaf in enumerate(leaves)]
-    # model = set_array(model.add(params, perturbations), params)
-    # print("model perturbations:")
-    # for i, param in enumerate(params):
-    #     pert = perturbations[i]
-    #     if np.ndim(pert) == 0:  # Scalar
-    #         print(f"{param}: {pert:.3e}")
-    #     else:  # Array
-    #         pert_flat = np.ravel(pert)
-    #         pert_str = ", ".join(f"{v:.3e}" for v in pert_flat)
-    #         print(f"{param}: [{pert_str}]")
 
 
     # Draw perturbations from priors
@@ -594,7 +552,14 @@ for obs_i in np.arange(N_observations):
         # sample = true_vals[param]
 
         nominal = true_vals[param]
-        delta = sample - nominal
+        if param == "m1_aperture.coefficients" and nominal.shape != sample.shape:
+            delta = sample - nominal[:sample.shape[0]]
+        else:
+            delta = sample - nominal
+
+        # nominal = true_vals[param]
+        # delta = sample - nominal
+        # delta = sample - nominal[:sample.shape[0]]
         perturbations[param] = delta
         initial_vals[param] = sample
 
@@ -609,81 +574,86 @@ for obs_i in np.arange(N_observations):
 
 
     # Apply the perturbations to the model
-    model = set_array(model.add(params, list(perturbations.values())), params)
+    obs_model = set_array(model.add(params, list(perturbations.values())), params)
+    # This is meant to pull the original values from model, and create a new obs_model to use for this observation,
+    # essentially resetting the model after each observation
 
     # Record initial values
-    initial_loss, initial_grads = val_grad_fn(model, data, var)
-    initial_vals["raw_fluxes"] = model.raw_fluxes
-    initial_vals["m1_zernike_opd"] = model.m1_aperture.eval_basis()
-    initial_vals["m1_zernike_opd_rms_nm"] = 1e9* nanrms(initial_vals["m1_zernike_opd"][m1_mask.astype(bool)])
-    initial_vals["m2_zernike_opd"] = model.m2_aperture.eval_basis()
-    initial_vals["m2_zernike_opd_rms_nm"] = 1e9* nanrms(initial_vals["m2_zernike_opd"][m2_mask.astype(bool)])
-
+    initial_loss, initial_grads = val_grad_fn(obs_model, data, var)
+    initial_vals["raw_fluxes"] = obs_model.raw_fluxes
+    initial_vals["m1_zernike_opd"] = obs_model.m1_aperture.eval_basis()
+    initial_vals["m1_zernike_opd_rms_nm"] = 1e9 * nanrms(initial_vals["m1_zernike_opd"][m1_mask.astype(bool)])
+    if "m2_aperture.coefficients" in params:
+        initial_vals["m2_zernike_opd"] = model.m2_aperture.eval_basis()
+        initial_vals["m2_zernike_opd_rms_nm"] = 1e9* nanrms(initial_vals["m2_zernike_opd"][m2_mask.astype(bool)])
 
     # Initialise our solver
-    model_params, optim, state = get_optimiser(model, optimisers)
+    # start from the observation's current values (internal names)
+    start_params = obs_model.extract_params()  # SheraThreePlaneParams
+    model_params, optim, state = get_optimiser(
+        start_params,  # <- pass a *params* container
+        optimisers,
+        parameters=params,  # external names you’re optimizing
+    )
 
+    # lr_model must match model_params’ PyTree type/structure
+    lr_model = get_lr_from_curvature(np.diag(fim), model_params, order=params)
+
+    loss_value_fn = eqx.filter_jit(
+        zdx.filter_value_and_grad(model_params.keys)(
+            lambda p, m, d, v: loss_with_injected(p, m, d, v, loss_fn)
+        )
+    )
 
     # Now we can Optimize
     t0_optim = time.time()
     # history = dict([(param, []) for param in params])
     history = {param: [initial_vals[param]] for param in params}
-    losses, models_out = [initial_loss], [model]
+    losses, models_out = [initial_loss], [obs_model]
     for i in tqdm(range(n_iter)):
-        loss, model, model_params, state = step_fn(
-            model_params, data, var, model, lr_model, optim, state
+        loss, _, _, _, obs_model, model_params, state = step_fn_general(
+            model_params, data, var, obs_model, lr_model, optim, state, loss_fn
         )
 
         losses.append(loss)
-        models_out.append(model)
+        models_out.append(obs_model)
+        # Save history
         for param, value in model_params.params.items():
-            history[param].append(value)
+            history.setdefault(param, []).append(value)
 
 
     #######################
     ## Post-Optimization ##
     #######################
 
+    # Model and data exactly consistent, no noise:
+    m_true = data_model
+    loss0, g0 = val_grad_fn(m_true, data, var)  # same val_grad_fn you use
+    print("||grad at truth||:", float(jax.tree_util.tree_reduce(
+        lambda a, b: a + np.sum(b ** 2), g0, 0.0)) ** 0.5)
+
     # Record additional optimization histories
+    true_loss, true_grads = loss_value_fn(model_params, data_model, data, var)
+    # final_loss, _ = val_grad_fn(models_out[-1], data, var) # Different execution path gave a slightly different Loss value
+    final_loss, _ = loss_value_fn(model_params, obs_model, data, var)
+    losses.append(final_loss)
     history["raw_fluxes"] = [m.raw_fluxes for m in models_out]
     history["m1_zernike_opd"] = [m.m1_aperture.eval_basis() for m in models_out]
-    history["m1_zernike_opd_rms_nm"] = [ 1e9 * nanrms(opd[m1_mask.astype(bool)]) for opd in history["m1_zernike_opd"] ]
-    history["m2_zernike_opd"] = [m.m2_aperture.eval_basis() for m in models_out]
-    history["m2_zernike_opd_rms_nm"] = [ 1e9 * nanrms(opd[m2_mask.astype(bool)]) for opd in history["m2_zernike_opd"] ]
+    history["m1_zernike_opd_rms_nm"] = [1e9 * nanrms(opd[m1_mask.astype(bool)]) for opd in history["m1_zernike_opd"]]
+    if "m2_aperture.coefficients" in params:
+        history["m2_zernike_opd"] = [m.m2_aperture.eval_basis() for m in models_out]
+        history["m2_zernike_opd_rms_nm"] = [ 1e9 * nanrms(opd[m2_mask.astype(bool)]) for opd in history["m2_zernike_opd"] ]
 
     # history contains lists for each iteration, convert them all to arrays for easier operations
     history = {k: np.array(v) for k, v in history.items()}
 
 
-
-    # Save what we need to perform a parameter sweep around the final optimized parameters
-    # Final Optimized Model Params
+    # Extract Final Optimized Model Params
     opt_params = models_out[-1].extract_params()
-    # Save the Data + var arrays
-    save_name = f"{script_name}_Data+Var_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.pkl"
-    with open(os.path.join(save_path, save_name), "wb") as f:
-        pickle.dump({"data": data, "var": var}, f)
-    # Save data_params
-    save_name = f"{script_name}_DataParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-    data_parms.to_json(os.path.join(save_path, save_name))
-    # Save initial_model_params
-    save_name = f"{script_name}_InitialModelParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-    model_parms.to_json(os.path.join(save_path, save_name))
-    # Save opt_params
-    save_name = f"{script_name}_OptimizedModelParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
-    opt_params.to_json(os.path.join(save_path, save_name))
+    if save_params:
+        save_name = f"{script_name}_OptimizedModelParams_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.json"
+        opt_params.to_json(os.path.join(save_path, save_name))
 
-    # # Save them all as a pickle file
-    # save_name = f"{script_name}_SweepBundle_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.pkl"
-    # bundle = {
-    #     "data": data,
-    #     "var": var,
-    #     "data_params": data_parms,  # SheraThreePlaneParams
-    #     "initial_model_params": model_parms,  # SheraThreePlaneParams
-    #     "optimized_model_params": opt_params  # SheraThreePlaneParams
-    # }
-    # with open(os.path.join(save_path, save_name), "wb") as f:
-    #     pickle.dump(bundle, f)
 
 
 
@@ -691,31 +661,38 @@ for obs_i in np.arange(N_observations):
     # If the data and model used different noll indices, we need to align their array sizes
     # The reason is that we want to compute residuals = history - true_vals, but their array sizes must align
     # First the primary mirror Zernike terms
-    if not np.array_equal(m1_noll_model, m1_noll_data): # Checks if the noll indices are different
+    m1_noll = onp.union1d(data_params.m1_zernike_noll,
+                          model_initial_params.m1_zernike_noll)  # Uniquely combines the model and data noll indices
+    m2_noll = np.union1d(data_params.m2_zernike_noll, model_initial_params.m2_zernike_noll)  # Used later to compare true coeffs to recovered coeffs
+    m1_coeff_dict = dict(zip(data_params.m1_zernike_noll.tolist(), data_params.m1_zernike_amp))
+    m2_coeff_dict = dict(zip(data_params.m2_zernike_noll.tolist(), data_params.m2_zernike_amp))
+    if not np.array_equal(model_initial_params.m1_zernike_noll,
+                          data_params.m1_zernike_noll):  # Checks if the noll indices are different
         # Expand the true_vals, fill in any missing coefficients with 0
         # m1_coeff_dict is defined earlier, it maps data noll indices to true coefficients
-        true_vals["m1_aperture.coefficients"] = np.array([m1_coeff_dict.get(n, 0.0) for n in m1_noll])
+        true_vals["m1_aperture.coefficients"] = np.array([m1_coeff_dict.get(int(n), 0.0) for n in m1_noll])
         # Expand the recovered values in history
-        # history["m1_aperture.coefficients"] is an array of size (n_iter, len(m1_noll_model))
-        aligned = np.full((n_iter, m1_noll.size), np.nan) # An expanded 2D array filled with nans
-        model_indices = np.searchsorted(m1_noll, m1_noll_model) # locates the model nolls within the expanded array
+        # history["m1_aperture.coefficients"] is an array of size (n_iter, len(model_initial_params.m1_zernike_noll))
+        aligned = np.full((n_iter + 1, m1_noll.size), np.nan)  # An expanded 2D array filled with nans
+        model_indices = np.searchsorted(m1_noll, model_initial_params.m1_zernike_noll)  # locates the model nolls within the expanded array
         # Fill in columns present in history array, remaining columns are left as nan
-        aligned[:, model_indices] = history["m1_aperture.coefficients"]
+        aligned = aligned.at[:, model_indices].set(history["m1_aperture.coefficients"])
         # Now replace the original array with the expanded array
         history["m1_aperture.coefficients"] = aligned
-    # Now for the secondary mirror Zernike terms
-    if not np.array_equal(m2_noll_model, m2_noll_data):  # Checks if the noll indices are different
-        # Expand the true_vals, fill in any missing coefficients with 0
-        # m2_coeff_dict is defined earlier, it maps data noll indices to true coefficients
-        true_vals["m2_aperture.coefficients"] = np.array([m2_coeff_dict.get(n, 0.0) for n in m2_noll])
-        # Expand the recovered values in history
-        # history["m2_aperture.coefficients"] is an array of size (n_iter, len(m2_noll_model))
-        aligned = np.full((n_iter, m2_noll.size), np.nan)  # An expanded 2D array filled with nans
-        model_indices = np.searchsorted(m2_noll, m2_noll_model) # locates the model nolls within the expanded array
-        # Fill in columns present in history array, remaining columns are left as nan
-        aligned[:, model_indices] = history["m2_aperture.coefficients"]
-        # Now replace the original array with the expanded array
-        history["m2_aperture.coefficients"] = aligned
+    if "m2_aperture.coefficients" in params:
+        # Now for the secondary mirror Zernike terms
+        if not np.array_equal(model_initial_params.m2_zernike_noll, data_params.m2_zernike_noll):  # Checks if the noll indices are different
+            # Expand the true_vals, fill in any missing coefficients with 0
+            # m2_coeff_dict is defined earlier, it maps data noll indices to true coefficients
+            true_vals["m2_aperture.coefficients"] = np.array([m2_coeff_dict.get(int(n), 0.0) for n in m2_noll])
+            # Expand the recovered values in history
+            # history["m2_aperture.coefficients"] is an array of size (n_iter, len(model_initial_params.m2_zernike_noll))
+            aligned = np.full((n_iter + 1, m2_noll.size), np.nan)  # An expanded 2D array filled with nans
+            model_indices = np.searchsorted(m2_noll, model_initial_params.m2_zernike_noll) # locates the model nolls within the expanded array
+            # Fill in columns present in history array, remaining columns are left as nan
+            aligned = aligned.at[:, model_indices].set(history["m2_aperture.coefficients"])
+            # Now replace the original array with the expanded array
+            history["m2_aperture.coefficients"] = aligned
 
 
 
@@ -724,19 +701,9 @@ for obs_i in np.arange(N_observations):
     for param in history.keys():
         residuals[param] = history[param] - true_vals[param]
 
-    # # Prepend the initial starting point to the list of residuals
-    # for param in initial_vals.keys():
-    #     init_resid = initial_vals[param] - true_vals[param]
-    #     # Add the initial residual to the list
-    #     if np.ndim(init_resid) == 0:
-    #         residuals[param] = np.insert(residuals[param], 0, init_resid)
-    #     else:
-    #         residuals[param] = np.insert(residuals[param], 0, init_resid, axis=0)
-
-
     # Convert certain residuals into fractional errors
-    residuals["raw_flux_error_ppm"] = 1e6* residuals["raw_fluxes"] / true_vals["raw_fluxes"]
-    residuals["platescale_error_ppm"] = 1e6* residuals["psf_pixel_scale"] / true_vals["psf_pixel_scale"]
+    residuals["raw_flux_error_ppm"] = 1e6 * residuals["raw_fluxes"] / true_vals["raw_fluxes"]
+    residuals["platescale_error_ppm"] = 1e6 * residuals["psf_pixel_scale"] / true_vals["psf_pixel_scale"]
 
     # Compute Total OPD residuals
     # Total OPD is considered to include the Zernike WFE + Uncalibrated 1/f WFE
@@ -746,14 +713,40 @@ for obs_i in np.arange(N_observations):
     # If uncalibrated WFE is present, then the recovered coefficients include some signal coming from the 1/f WFE
     # I could attempt to fit the Total OPD surface to a set of zernike coefficients, which might make for a better 'Ground Truth'
     residuals["m1_total_opd"] = history["m1_zernike_opd"] - true_vals["m1_total_opd"]
-    residuals["m1_total_opd_rms_nm"] = [ 1e9 * nanrms(opd[m1_mask.astype(bool)]) for opd in residuals["m1_total_opd"] ]
-    residuals["m2_total_opd"] = history["m2_zernike_opd"] - true_vals["m2_total_opd"]
-    residuals["m2_total_opd_rms_nm"] = [ 1e9 * nanrms(opd[m2_mask.astype(bool)]) for opd in residuals["m2_total_opd"] ]
+    residuals["m1_total_opd_rms_nm"] = [1e9 * nanrms(opd[m1_mask.astype(bool)]) for opd in residuals["m1_total_opd"]]
+    if "m2_aperture.coefficients" in params:
+        residuals["m2_total_opd"] = history["m2_zernike_opd"] - true_vals["m2_total_opd"]
+        residuals["m2_total_opd_rms_nm"] = [ 1e9 * nanrms(opd[m2_mask.astype(bool)]) for opd in residuals["m2_total_opd"] ]
 
 
+    # Compare Data to Original Model - These PSFs should be identical
+    if save_plots and obs_i < N_saved_obs:
+        save_name = f"{script_name}_Original_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
+        plot_psf_comparison(
+            data=data,
+            model=model,
+            var=var,
+            extent=psf_extent_as,
+            model_label="Original PSF",
+            show=present_plots,
+            save_path=os.path.join(save_path, save_name),
+        )
+
+    # Compare Data to Initial Model - Shows the initial result of the optimization
+    if save_plots and obs_i < N_saved_obs:
+        save_name = f"{script_name}_Initial_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
+        plot_psf_comparison(
+            data=data,
+            model=models_out[0],
+            var=var,
+            extent=psf_extent_as,
+            model_label="Initial PSF",
+            show=present_plots,
+            save_path=os.path.join(save_path, save_name),
+        )
 
     # Compare Data to Recovered Model - Shows the final result of the optimization
-    if save_plots and obs_i < N_saved_plots:
+    if save_plots and obs_i < N_saved_obs:
         save_name = f"{script_name}_Recovered_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -761,27 +754,26 @@ for obs_i in np.arange(N_observations):
             var=var,
             extent=psf_extent_as,
             model_label="Recovered PSF",
-            display=present_plots,
-            save=True,
-            save_name=save_name,
+            show=present_plots,
+            save_path=os.path.join(save_path, save_name),
         )
 
 
     # Plot loss history
-    if save_plots and obs_i < N_saved_plots:
+    if save_plots and obs_i < N_saved_obs:
         fig, axes = plt.subplots(1, 2, figsize=(9, 4))
         axes = axes.flatten()
 
         # Left: Full loss history
         save_name = f"{script_name}_Loss_History_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_parameter_history(
-            names="Loss",
-            histories=losses,
-            true_vals=true_loss,
+            names=("Loss",),
+            histories=(losses,),
+            true_vals=(float(loss0),),
             ax=axes[0],
             title="Optimization Loss History",
-            display=False,
-            save=False
+            show=False,
+            close=False,
         )
         # Right: Zoom into last 10 iterations
         axes[1].plot(np.arange(n_iter - 10, n_iter) + 1, losses[-10:])
@@ -806,14 +798,15 @@ for obs_i in np.arange(N_observations):
     # Show the Losses, Flux, and Position Errors
     fig = plt.figure(figsize=(15, 10))
     plt.subplot(4, 2, 1)
-    plt.title(f"Binary Separation Error, Final= {residuals['separation'][-1]*1e6:.3f} uas")
+    plt.title(f"Binary Separation Error, Final= {residuals['separation'][-1] * 1e6:.3f} uas")
     plt.xlabel("Iteration")
     plt.ylabel("Separation Error (uas)")
     plt.plot(np.arange(n_iter + 1), 1e6 * residuals["separation"])
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
 
     plt.subplot(4, 2, 2)
-    plt.title(f"Binary XY Position Error, Final= {residuals['x_position'][-1]*1e6:.3f}, {residuals['y_position'][-1]*1e6:.3f} uas")
+    plt.title(
+        f"Binary XY Position Error, Final= {residuals['x_position'][-1] * 1e6:.3f}, {residuals['y_position'][-1] * 1e6:.3f} uas")
     plt.xlabel("Iteration")
     plt.ylabel("Position Error (uas)")
     plt.plot(np.arange(n_iter + 1), 1e6 * residuals["x_position"], label="X")
@@ -822,19 +815,20 @@ for obs_i in np.arange(N_observations):
     plt.legend()
 
     plt.subplot(4, 2, 3)
-    plt.title(f"Binary Flux Error, Final= ({residuals['raw_flux_error_ppm'][-1, 0]:.3f}, {residuals['raw_flux_error_ppm'][-1, 1]:.3f}) ppm")
+    plt.title(
+        f"Binary Flux Error, Final= ({residuals['raw_flux_error_ppm'][-1, 0]:.3f}, {residuals['raw_flux_error_ppm'][-1, 1]:.3f}) ppm")
     plt.xlabel("Iteration")
     plt.ylabel("Flux Error (ppm)")
-    plt.plot(np.arange(n_iter + 1), residuals['raw_flux_error_ppm'][:,0], label="Star A")
-    plt.plot(np.arange(n_iter + 1), residuals['raw_flux_error_ppm'][:,1], label="Star B")
+    plt.plot(np.arange(n_iter + 1), residuals['raw_flux_error_ppm'][:, 0], label="Star A")
+    plt.plot(np.arange(n_iter + 1), residuals['raw_flux_error_ppm'][:, 1], label="Star B")
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
     plt.legend()
 
     plt.subplot(4, 2, 4)
-    plt.title(f"Binary Angle Error, Final= {residuals['position_angle'][-1]*60**2:.3f} as")
+    plt.title(f"Binary Angle Error, Final= {residuals['position_angle'][-1] * 60 ** 2:.3f} as")
     plt.xlabel("Iteration")
     plt.ylabel("Angle Error (as)")
-    plt.plot(np.arange(n_iter + 1), 60**2 * residuals['position_angle'])
+    plt.plot(np.arange(n_iter + 1), 60 ** 2 * residuals['position_angle'])
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
 
     plt.subplot(4, 2, 5)
@@ -845,26 +839,28 @@ for obs_i in np.arange(N_observations):
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
 
     plt.subplot(4, 2, 7)
-    plt.title(f"M1 Zernike Coefficients, Final= {nanrms(residuals['m1_aperture.coefficients'][-1,:]):.3f} nm rms")
+    plt.title(f"M1 Zernike Coefficients, Final= {nanrms(residuals['m1_aperture.coefficients'][-1, :]):.3f} nm rms")
     plt.xlabel("Iteration")
     plt.ylabel("Z Coefficient Error (nm)")
-    [plt.plot(np.arange(n_iter + 1), residuals['m1_aperture.coefficients'][:, i], label=f"Z{n}") for i, n in enumerate(m1_noll)]
+    [plt.plot(np.arange(n_iter + 1), residuals['m1_aperture.coefficients'][:, i], label=f"Z{n}") for i, n in
+     enumerate(m1_noll)]
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
     plt.legend(loc="upper right")
 
-    plt.subplot(4, 2, 8)
-    plt.title(f"M2 Zernike Coefficients, Final= {nanrms(residuals['m2_aperture.coefficients'][-1,:]):.3f} nm rms")
-    plt.xlabel("Iteration")
-    plt.ylabel("Z Coefficient Error (nm)")
-    [plt.plot(np.arange(n_iter + 1), residuals['m2_aperture.coefficients'][:, i], label=f"Z{n}") for i, n in enumerate(m2_noll)]
-    plt.axhline(0, linestyle="--", color="k", alpha=0.6)
-    plt.legend(loc="upper right")
+    if "m2_aperture.coefficients" in params:
+        plt.subplot(4, 2, 8)
+        plt.title(f"M2 Zernike Coefficients, Final= {nanrms(residuals['m2_aperture.coefficients'][-1,:]):.3f} nm rms")
+        plt.xlabel("Iteration")
+        plt.ylabel("Z Coefficient Error (nm)")
+        [plt.plot(np.arange(n_iter + 1), residuals['m2_aperture.coefficients'][:, i], label=f"Z{n}") for i, n in enumerate(m2_noll)]
+        plt.axhline(0, linestyle="--", color="k", alpha=0.6)
+        plt.legend(loc="upper right")
 
     fig.suptitle("Parameter Optimization", fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.95], h_pad=2.0)
 
-    if save_plots and obs_i < N_saved_plots:
-        save_name = f"{script_name}_Recovered_Parameters_{timestamp}_Obs{obs_i+1:0{obs_digits}d}.png"
+    if save_plots and obs_i < N_saved_obs:
+        save_name = f"{script_name}_Recovered_Parameters_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plt.savefig(os.path.join(save_path, save_name))
     if present_plots:
         plt.show()
@@ -875,126 +871,61 @@ for obs_i in np.arange(N_observations):
 
     # Plot the recovered M1 Zernike Coefficients + OPD
     # Define noll index x-ticks for plotting
-    nticks_max = 12 # Never show more than this many
-    tstep = max(1, (m1_noll.size-1)//nticks_max + 1)
+    nticks_max = 12  # Never show more than this many
+    tstep = max(1, (m1_noll.size - 1) // nticks_max + 1)
     m1_noll_ticks = m1_noll[::tstep]
 
-    vmin = 1e9* np.min(np.array([true_vals["m1_total_opd"], history["m1_zernike_opd"][-1]]))
-    vmax = 1e9* np.max(np.array([true_vals["m1_total_opd"], history["m1_zernike_opd"][-1]]))
+    vmin = 1e9 * np.min(np.array([true_vals["m1_total_opd"], history["m1_zernike_opd"][-1]]))
+    vmax = 1e9 * np.max(np.array([true_vals["m1_total_opd"], history["m1_zernike_opd"][-1]]))
 
     fig = plt.figure(figsize=(20, 10))
     plt.suptitle("M1 OPD Recovery", fontsize=16)
-    gs = gridspec.GridSpec(2, 3) # Creates a grid of subplots that I can address
+    gs = gridspec.GridSpec(2, 3)  # Creates a grid of subplots that I can address
 
-    ax = fig.add_subplot(gs[0, 0]) # OPD Residual RMS Error
+    ax = fig.add_subplot(gs[0, 0])  # OPD Residual RMS Error
     plt.title(f"OPD RMS Residual, Final= {residuals['m1_total_opd_rms_nm'][-1]:.3f} nm rms")
     plt.xlabel("Iteration")
     plt.ylabel("OPD RMS Error (nm)")
     plt.plot(np.arange(n_iter + 1), residuals["m1_total_opd_rms_nm"])
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
 
-    ax = fig.add_subplot(gs[0, 1:3]) # Z Coefficient Residual Bar Plot
-    plt.title("Recovered Coefficients")
-    plt.xlabel("Noll Index")
-    plt.ylabel("Coefficient Amplitude (nm)")
-    plt.scatter(m1_noll, true_vals["m1_aperture.coefficients"], label="True", zorder=2)
-    plt.scatter(m1_noll_model, initial_vals["m1_aperture.coefficients"], label="Initial", marker='+', zorder=3)
-    plt.scatter(m1_noll, history["m1_aperture.coefficients"][-1,:], label="Recovered", marker='x', zorder=4)
-    plt.bar(m1_noll, residuals["m1_aperture.coefficients"][-1,:], label='Residual', zorder=1)
-    plt.axhline(0, linestyle="--", color="k", alpha=0.6)
-    plt.xticks(m1_noll_ticks)
-    plt.legend(loc="upper left")
-
-
-    ax = fig.add_subplot(gs[1, 0]) # True Total OPD
-    plt.title(f"True Total OPD: %.3fnm rms" % true_vals["m1_total_opd_rms_nm"])
-    plt.xlabel("X (mm)")
-    im = plt.imshow(1e9* true_vals["m1_total_opd"] * m1_nanmask, inferno, vmin=vmin, vmax=vmax, extent=pupil_extent_mm)
-    cbar = fig.colorbar(im, cax=merge_cbar(ax))
-    cbar.set_label("nm", labelpad=0)
-
-    ax = fig.add_subplot(gs[1, 1]) # Recovered OPD
-    plt.title(f"Found OPD: %.3fnm rms" % history["m1_zernike_opd_rms_nm"][-1])
-    plt.xlabel("X (mm)")
-    im = plt.imshow(1e9* history["m1_zernike_opd"][-1,:,:] * m1_nanmask, inferno, vmin=vmin, vmax=vmax, extent=pupil_extent_mm)
-    cbar = fig.colorbar(im, cax=merge_cbar(ax))
-    cbar.set_label("nm", labelpad=0)
-
-    ax = fig.add_subplot(gs[1, 2]) # Residual OPD
-    plt.title(f"OPD Residual: %.3fnm rms" % residuals["m1_total_opd_rms_nm"][-1])
-    plt.xlabel("X (mm)")
-    im = plt.imshow(1e9* residuals["m1_total_opd"][-1,:,:] * m1_nanmask, inferno, extent=pupil_extent_mm)
-    cbar = fig.colorbar(im, cax=merge_cbar(ax))
-    cbar.set_label("nm", labelpad=0)
-
-    if save_plots and obs_i < N_saved_plots:
-        plot_name = "M1-OPD-Recovery"
-        save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i+1:0{obs_digits}d}.png"
-        plt.savefig(os.path.join(save_path, save_name))
-    if present_plots:
-        plt.show()
-    else:
-        plt.close()
-
-
-
-
-    # Plot the recovered M2 Zernike Coefficients + OPD
-    # Define noll index x-ticks for plotting
-    nticks_max = 12  # Never show more than this many
-    tstep = max(1, (m2_noll.size - 1) // nticks_max + 1)
-    m2_noll_ticks = m2_noll[::tstep]
-
-    vmin = 1e9 * np.min(np.array([true_vals["m2_total_opd"], history["m2_zernike_opd"][-1]]))
-    vmax = 1e9 * np.max(np.array([true_vals["m2_total_opd"], history["m2_zernike_opd"][-1]]))
-
-    fig = plt.figure(figsize=(20, 10))
-    plt.suptitle("M2 OPD Recovery", fontsize=16)
-    gs = gridspec.GridSpec(2, 3)  # Creates a grid of subplots that I can address
-
-    ax = fig.add_subplot(gs[0, 0])  # OPD Residual RMS Error
-    plt.title(f"OPD RMS Residual, Final= {residuals['m2_total_opd_rms_nm'][-1]:.3f} nm rms")
-    plt.xlabel("Iteration")
-    plt.ylabel("OPD RMS Error (nm)")
-    plt.plot(np.arange(n_iter + 1), residuals["m2_total_opd_rms_nm"])
-    plt.axhline(0, linestyle="--", color="k", alpha=0.6)
-
     ax = fig.add_subplot(gs[0, 1:3])  # Z Coefficient Residual Bar Plot
     plt.title("Recovered Coefficients")
     plt.xlabel("Noll Index")
     plt.ylabel("Coefficient Amplitude (nm)")
-    plt.scatter(m2_noll, true_vals["m2_aperture.coefficients"], label="True", zorder=2)
-    plt.scatter(m2_noll_model, initial_vals["m2_aperture.coefficients"], label="Initial", marker='+', zorder=3)
-    plt.scatter(m2_noll, history["m2_aperture.coefficients"][-1, :], label="Recovered", marker='x', zorder=4)
-    plt.bar(m2_noll, residuals["m2_aperture.coefficients"][-1, :], label='Residual', zorder=1)
+    plt.scatter(m1_noll, true_vals["m1_aperture.coefficients"], label="True", zorder=2)
+    plt.scatter(model_initial_params.m1_zernike_noll, initial_vals["m1_aperture.coefficients"], label="Initial", marker='+',
+                zorder=3)
+    plt.scatter(m1_noll, history["m1_aperture.coefficients"][-1, :], label="Recovered", marker='x', zorder=4)
+    plt.bar(m1_noll, residuals["m1_aperture.coefficients"][-1, :], label='Residual', zorder=1)
     plt.axhline(0, linestyle="--", color="k", alpha=0.6)
-    plt.xticks(m2_noll_ticks)
+    plt.xticks(m1_noll_ticks)
     plt.legend(loc="upper left")
 
     ax = fig.add_subplot(gs[1, 0])  # True Total OPD
-    plt.title(f"True Total OPD: %.3fnm rms" % true_vals["m2_total_opd_rms_nm"])
+    plt.title(f"True Total OPD: %.3fnm rms" % true_vals["m1_total_opd_rms_nm"])
     plt.xlabel("X (mm)")
-    im = plt.imshow(1e9 * true_vals["m2_total_opd"] * m2_nanmask, inferno, vmin=vmin, vmax=vmax, extent=pupil_extent_mm)
+    im = plt.imshow(1e9 * true_vals["m1_total_opd"] * m1_nanmask, inferno, vmin=vmin, vmax=vmax, extent=pupil_extent_mm)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("nm", labelpad=0)
 
     ax = fig.add_subplot(gs[1, 1])  # Recovered OPD
-    plt.title(f"Found OPD: %.3fnm rms" % history["m2_zernike_opd_rms_nm"][-1])
+    plt.title(f"Found OPD: %.3fnm rms" % history["m1_zernike_opd_rms_nm"][-1])
     plt.xlabel("X (mm)")
-    im = plt.imshow(1e9 * history["m2_zernike_opd"][-1, :, :] * m2_nanmask, inferno, vmin=vmin, vmax=vmax,
+    im = plt.imshow(1e9 * history["m1_zernike_opd"][-1, :, :] * m1_nanmask, inferno, vmin=vmin, vmax=vmax,
                     extent=pupil_extent_mm)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("nm", labelpad=0)
 
     ax = fig.add_subplot(gs[1, 2])  # Residual OPD
-    plt.title(f"OPD Residual: %.3fnm rms" % residuals["m2_total_opd_rms_nm"][-1])
+    plt.title(f"OPD Residual: %.3fnm rms" % residuals["m1_total_opd_rms_nm"][-1])
     plt.xlabel("X (mm)")
-    im = plt.imshow(1e9 * residuals["m2_total_opd"][-1, :, :] * m2_nanmask, inferno, extent=pupil_extent_mm)
+    im = plt.imshow(1e9 * residuals["m1_total_opd"][-1, :, :] * m1_nanmask, inferno, extent=pupil_extent_mm)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("nm", labelpad=0)
 
-    if save_plots and obs_i < N_saved_plots:
-        plot_name = "M2-OPD-Recovery"
+    if save_plots and obs_i < N_saved_obs:
+        plot_name = "M1-OPD-Recovery"
         save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plt.savefig(os.path.join(save_path, save_name))
     if present_plots:
@@ -1005,44 +936,71 @@ for obs_i in np.arange(N_observations):
 
 
 
+    if "m2_aperture.coefficients" in params:
+        # Plot the recovered M2 Zernike Coefficients + OPD
+        # Define noll index x-ticks for plotting
+        nticks_max = 12  # Never show more than this many
+        tstep = max(1, (m2_noll.size - 1) // nticks_max + 1)
+        m2_noll_ticks = m2_noll[::tstep]
 
-    # Now I want to create a plot that compares the recovered M1 and M2 zernike coefficients against each other
-    common_noll = np.intersect1d(m1_noll_model, m2_noll_model) # Finds common zernike terms
-    n_plots = len(common_noll)
-    rows, cols = choose_subplot_grid(n_plots)
-    fig, axes = plt.subplots(int(rows), int(cols), figsize=(4 * int(cols), 3 * int(rows)), sharex=True)
-    axes = onp.array(axes).flatten()  # flatten in case it's 2D
-    fig.suptitle("M1 vs M2 Zernike Coefficient Comparison", fontsize=14)
-    for ax, n in zip(axes, common_noll):
-        i_m1 = np.where(m1_noll_model == n)[0][0]
-        i_m2 = np.where(m2_noll_model == n)[0][0]
-        history_m1 = history["m1_aperture.coefficients"][:, i_m1]
-        history_m2 = history["m2_aperture.coefficients"][:, i_m2]
-        true_m1 = true_vals["m1_aperture.coefficients"][i_m1]
-        true_m2 = true_vals["m2_aperture.coefficients"][i_m2]
+        vmin = 1e9 * np.min(np.array([true_vals["m2_total_opd"], history["m2_zernike_opd"][-1]]))
+        vmax = 1e9 * np.max(np.array([true_vals["m2_total_opd"], history["m2_zernike_opd"][-1]]))
 
-        ax.set_title(f"Z{n}")
-        ax.plot(np.arange(n_iter + 1), history_m1, label="M1")
-        ax.plot(np.arange(n_iter + 1), history_m2, label="M2")
-        ax.axhline(true_m1, linestyle="--", color="tab:blue", label="True M1", alpha=0.6)
-        ax.axhline(true_m2, linestyle="--", color="tab:orange", label="True M2", alpha=0.6)
-        ax.axhline(0, linestyle="--", color="k", alpha=0.3)
-        ax.set_ylabel("Amplitude (nm)")
-        ax.legend()
-    # Hide any unused axes
-    for ax in axes[n_plots:]:
-        ax.axis("off")
-    axes[-1].set_xlabel("Iteration")
-    plt.tight_layout()
+        fig = plt.figure(figsize=(20, 10))
+        plt.suptitle("M2 OPD Recovery", fontsize=16)
+        gs = gridspec.GridSpec(2, 3)  # Creates a grid of subplots that I can address
 
-    if save_plots and obs_i < N_saved_plots:
-        plot_name = "M1-M2-ZernikeCoefficient-Comparison"
-        save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
-        plt.savefig(os.path.join(save_path, save_name))
-    if present_plots:
-        plt.show()
-    else:
-        plt.close()
+        ax = fig.add_subplot(gs[0, 0])  # OPD Residual RMS Error
+        plt.title(f"OPD RMS Residual, Final= {residuals['m2_total_opd_rms_nm'][-1]:.3f} nm rms")
+        plt.xlabel("Iteration")
+        plt.ylabel("OPD RMS Error (nm)")
+        plt.plot(np.arange(n_iter + 1), residuals["m2_total_opd_rms_nm"])
+        plt.axhline(0, linestyle="--", color="k", alpha=0.6)
+
+        ax = fig.add_subplot(gs[0, 1:3])  # Z Coefficient Residual Bar Plot
+        plt.title("Recovered Coefficients")
+        plt.xlabel("Noll Index")
+        plt.ylabel("Coefficient Amplitude (nm)")
+        plt.scatter(m2_noll, true_vals["m2_aperture.coefficients"], label="True", zorder=2)
+        plt.scatter(model_initial_params.m2_zernike_noll, initial_vals["m2_aperture.coefficients"], label="Initial", marker='+', zorder=3)
+        plt.scatter(m2_noll, history["m2_aperture.coefficients"][-1, :], label="Recovered", marker='x', zorder=4)
+        plt.bar(m2_noll, residuals["m2_aperture.coefficients"][-1, :], label='Residual', zorder=1)
+        plt.axhline(0, linestyle="--", color="k", alpha=0.6)
+        plt.xticks(m2_noll_ticks)
+        plt.legend(loc="upper left")
+
+        ax = fig.add_subplot(gs[1, 0])  # True Total OPD
+        plt.title(f"True Total OPD: %.3fnm rms" % true_vals["m2_total_opd_rms_nm"])
+        plt.xlabel("X (mm)")
+        im = plt.imshow(1e9 * true_vals["m2_total_opd"] * m2_nanmask, inferno, vmin=vmin, vmax=vmax, extent=pupil_extent_mm)
+        cbar = fig.colorbar(im, cax=merge_cbar(ax))
+        cbar.set_label("nm", labelpad=0)
+
+        ax = fig.add_subplot(gs[1, 1])  # Recovered OPD
+        plt.title(f"Found OPD: %.3fnm rms" % history["m2_zernike_opd_rms_nm"][-1])
+        plt.xlabel("X (mm)")
+        im = plt.imshow(1e9 * history["m2_zernike_opd"][-1, :, :] * m2_nanmask, inferno, vmin=vmin, vmax=vmax,
+                        extent=pupil_extent_mm)
+        cbar = fig.colorbar(im, cax=merge_cbar(ax))
+        cbar.set_label("nm", labelpad=0)
+
+        ax = fig.add_subplot(gs[1, 2])  # Residual OPD
+        plt.title(f"OPD Residual: %.3fnm rms" % residuals["m2_total_opd_rms_nm"][-1])
+        plt.xlabel("X (mm)")
+        im = plt.imshow(1e9 * residuals["m2_total_opd"][-1, :, :] * m2_nanmask, inferno, extent=pupil_extent_mm)
+        cbar = fig.colorbar(im, cax=merge_cbar(ax))
+        cbar.set_label("nm", labelpad=0)
+
+        if save_plots and obs_i < N_saved_obs:
+            plot_name = "M2-OPD-Recovery"
+            save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
+            plt.savefig(os.path.join(save_path, save_name))
+        if present_plots:
+            plt.show()
+        else:
+            plt.close()
+
+
 
 
 
@@ -1050,144 +1008,59 @@ for obs_i in np.arange(N_observations):
     if print2console:
         # Print Results of Optimization
         print("\nAstrometry Retrieval  Results:")
-        print("%d iterations in %.3f sec" % (n_iter, t1_optim-t0_optim))
+        print("Observation %d" % (obs_i + 1))
+        print("%d iterations in %.3f sec" % (n_iter, t1_optim - t0_optim))
         print("Final Loss Value: %.5g" % losses[-1])
-        print("Source X, Y Position Error: %.3f uas, %.3f uas" % (residuals["x_position"][-1]*1e6, residuals["y_position"][-1]*1e6))
-        print("Separation Error: %.3f uas" % (residuals["separation"][-1]*1e6))
-        print("Source Angle Error: %.3f as" % (residuals["position_angle"][-1]*60**2))
-        print("Fractional Flux Error: %.3f ppm A, %.3f ppm B" % (residuals["raw_flux_error_ppm"][-1, 0], residuals["raw_flux_error_ppm"][-1, 1]))
+        print("Source X, Y Position Error: %.3f uas, %.3f uas" % (
+        residuals["x_position"][-1] * 1e6, residuals["y_position"][-1] * 1e6))
+        print("Separation Error: %.3f uas" % (residuals["separation"][-1] * 1e6))
+        print("Source Angle Error: %.3f as" % (residuals["position_angle"][-1] * 60 ** 2))
+        print("Fractional Flux Error: %.3f ppm A, %.3f ppm B" % (
+        residuals["raw_flux_error_ppm"][-1, 0], residuals["raw_flux_error_ppm"][-1, 1]))
         print("Recovered Log Flux: %.3f" % history["log_flux"][-1])
         print("Recovered Contrast: %.3f" % history["contrast"][-1])
         print("Fractional Platescale Error: %.3f ppm" % residuals["platescale_error_ppm"][-1])
         print("Residual M1 Zernike OPD Error: %.3f nm rms" % residuals["m1_zernike_opd_rms_nm"][-1])
-        print("Residual M2 Zernike OPD Error: %.3f nm rms" % residuals["m2_zernike_opd_rms_nm"][-1])
-
-
-
-    # if save_results:
-
-        # List of dicts to save:
-        # model_parms, data_parms
-        # true_vals
-        # initial_vals
-        # history
-        # residuals
-
-        # What would be left?
-        # photon/read noise
-        # "Exposure (s / frame)": exposure_per_frame,
-        # "Coadded Frames": N_frames,
-        # "Optimiser": optimiser_label,
-
+        if "m2_aperture.coefficients" in params:
+            print("Residual M2 Zernike OPD Error: %.3f nm rms" % residuals["m2_zernike_opd_rms_nm"][-1])
 
 
     if save_results:
-        # Construct dicts to save the results
-        final_results = {
-            "Starting RNG Seed": starting_seed,
-            "N Observations": N_observations,
-            "Optimizer Iterations": n_iter,
-            # "Jitter Amplitude (as)": jitter_amplitude,
-            "Input Source Position X (as)": true_vals["x_position"],
-            "Input Source Position Y (as)": true_vals["y_position"],
-            "Input Source Separation (as)": true_vals["separation"],
-            "Input Source Angle (deg)": true_vals["position_angle"],
-            "Input Source Log Flux": true_vals["log_flux"],
-            "Input Source Contrast (A:B)": true_vals["contrast"],
-            "Input Source A Raw Flux": true_vals["raw_fluxes"][0],
-            "Input Source B Raw Flux": true_vals["raw_fluxes"][1],
-            "Input Platescale (as/pixel)": true_vals["psf_pixel_scale"],
-
-            "Input M1 Zernikes (Noll Index)": ", ".join(map(str, m1_noll_data)),
-            "Input M1 Zernike Coefficient RMS Amplitude (nm)": nanrms(initial_m1_coeffs),
-            "Input M1 Zernike Coefficient Amplitudes (nm)": ", ".join(map(str, initial_m1_coeffs)),
-            "Input M1 Zernike OPD RMS Error (nm)": true_vals["m1_zernike_opd_rms_nm"],
-            "Input M1 Calibrated 1/f Amplitude (nm rms)": m1_cal_amp*1e9,
-            "Input M1 Calibrated 1/f Power Law": m1_cal_alpha,
-            "Input M1 Uncalibrated 1/f Amplitude (nm rms)": m1_wfe_amp*1e9,
-            "Input M1 Uncalibrated 1/f Power Law": m1_wfe_alpha,
-
-            "Input M2 Zernikes (Noll Index)": ", ".join(map(str, m2_noll_data)),
-            "Input M2 Zernike Coefficient RMS Amplitude (nm)": nanrms(initial_m2_coeffs),
-            "Input M2 Zernike Coefficient Amplitudes (nm)": ", ".join(map(str, initial_m2_coeffs)),
-            "Input M2 Zernike OPD RMS Error (nm)": true_vals["m2_zernike_opd_rms_nm"],
-            "Input M2 Calibrated 1/f Amplitude (nm rms)": m2_cal_amp * 1e9,
-            "Input M2 Calibrated 1/f Power Law": m2_cal_alpha,
-            "Input M2 Uncalibrated 1/f Amplitude (nm rms)": m2_wfe_amp * 1e9,
-            "Input M2 Uncalibrated 1/f Power Law": m2_wfe_alpha,
-
-            "Photon Noise": add_shot_noise,
-            "Read Noise (e- / frame)": sigma_read,
-            "Exposure (s / frame)": exposure_per_frame,
-            "Coadded Frames": N_frames,
-            "Optimiser": optimiser_label,
-
-            "Initial Source Position X (as)": initial_vals["x_position"],
-            "Initial Source Position Y (as)": initial_vals["y_position"],
-            "Initial Source Separation (as)": initial_vals["separation"],
-            "Initial Source Angle (deg)": initial_vals["position_angle"],
-            "Initial Source Log Flux": initial_vals["log_flux"],
-            "Initial Source Contrast (A:B)": initial_vals["contrast"],
-            "Initial Source A Raw Flux": initial_vals["raw_fluxes"][0],
-            "Initial Source B Raw Flux": initial_vals["raw_fluxes"][1],
-            "Initial Platescale (as/pixel)": initial_vals["psf_pixel_scale"],
-            "Initial M1 Zernike Coefficient Amplitudes (nm)": ", ".join(
-                    map(str, initial_vals["m1_aperture.coefficients"])),
-            "Initial M2 Zernike Coefficient Amplitudes (nm)": ", ".join(
-                    map(str, initial_vals["m2_aperture.coefficients"])),
-
-            "Found Source Position X (as)": history["x_position"][-1],
-            "Found Source Position Y (as)": history["y_position"][-1],
-            "Found Source Separation (as)": history["separation"][-1],
-            "Found Source Angle (deg)": history["position_angle"][-1],
-            "Found Source Log Flux": history["log_flux"][-1],
-            "Found Source Contrast (A:B)": history["contrast"][-1],
-            "Found Source A Raw Flux": history["raw_fluxes"][-1, 0],
-            "Found Source B Raw Flux": history["raw_fluxes"][-1, 1],
-            "Found Platescale (as/pixel)": history["psf_pixel_scale"][-1],
-            "Found M1 Zernikes (Noll Index)": ", ".join(map(str, m1_noll_model)),
-            "Found M1 Zernike Coefficient Amplitudes (nm)": ", ".join(
-                    map(str, history["m1_aperture.coefficients"][-1,:])),
-            "Found M2 Zernikes (Noll Index)": ", ".join(map(str, m1_noll_model)),
-            "Found M2 Zernike Coefficient Amplitudes (nm)": ", ".join(
-                    map(str, history["m2_aperture.coefficients"][-1, :])),
-
-            "Residual Source Position X (uas)": residuals["x_position"][-1] * 1e6,
-            "Residual Source Position Y (uas)": residuals["y_position"][-1] * 1e6,
-            "Residual Source Separation (uas)": residuals["separation"][-1] * 1e6,
-            "Residual Source Angle (as)": residuals["position_angle"][-1] * 60 ** 2,
-            "Residual Source A Flux (ppm)": residuals["raw_flux_error_ppm"][-1, 0],
-            "Residual Source B Flux (ppm)": residuals["raw_flux_error_ppm"][-1, 1],
-            "Residual Platescale (ppm)": residuals["platescale_error_ppm"][-1],
-            "Residual M1 Zernike OPD RMS Error (nm)": residuals["m1_zernike_opd_rms_nm"][-1],
-            "Residual M2 Zernike OPD RMS Error (nm)": residuals["m2_zernike_opd_rms_nm"][-1],
-            "Residual M1 Zernike Coefficient Errors (nm)": ", ".join(
-                    map(str, residuals["m1_aperture.coefficients"][-1, :])),
-            "Residual M2 Zernike Coefficient Errors (nm)": ", ".join(
-                map(str, residuals["m2_aperture.coefficients"][-1, :])),
-
+        # Pack the extra run settings that aren’t in your dicts
+        misc = {
+            "rng_seed": default_params.rng_seed,
+            "N_observations": N_observations,
+            "n_iter": n_iter,
+            "obs_i": obs_i,
+            "add_shot_noise": add_shot_noise,
+            "sigma_read": sigma_read,
+            "exposure_per_frame": exposure_per_frame,
+            "N_frames": N_frames,
+            "optimiser_label": optimiser_label,
+            "LR Scalar": lr,
         }
 
+        # Write one row (auto-detects the next row; creates directories as needed)
+        row_written = write_results_xlsx(
+            save_path, results_savename,
+            true_vals=true_vals,
+            initial_vals=initial_vals,
+            history=history,
+            residuals=residuals,
+            data_params=data_params,
+            model_initial_params=model_initial_params,
+            data=data,
+            misc=misc,
+            sheet_name="Results",
+            overwrite=overwrite_results,
+            coerce_numeric=True,
+            create_dirs=True,
+        )
 
-        # Construct Data Frames
-        final_results_df = pd.DataFrame([final_results])
+        print(f"Observation {obs_i + 1}/{N_observations} saved to {results_savename} (row {row_written}).")
 
-        # Construct Save Name
-        save_name = f"{script_name}_{timestamp}.xlsx"
-
-        if obs_i == 0: # Create a new file for the first simulation
-            final_results_df.to_excel(os.path.join(save_path, save_name), index=False, sheet_name="Results")
-        else: # Append results for subsequent simulations
-            with pd.ExcelWriter(os.path.join(save_path, save_name), engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                final_results_df.to_excel(writer, index=False, header=False, sheet_name="Results", startrow=int(obs_i)+1)
-
-        print(f"Simulation {obs_i+1}/{N_observations} results saved to {save_name}")
-
-
-    t1_simulation = time.time()
-    print("Simulation %d finished in %.3f sec" % (obs_i+1, t1_simulation-t0_simulation))
-
-
+    t1_obs = time.time()
+    print("Observation %d/%d finished in %.3f sec" % (obs_i + 1, N_observations, t1_obs - t0_obs))
 
 t1_script = time.time()
 print("Script finished in %.3f sec" % (t1_script-t0_script))
