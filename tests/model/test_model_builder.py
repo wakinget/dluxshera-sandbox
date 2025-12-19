@@ -49,6 +49,7 @@ def _make_inference_store(cfg):
     return spec, store
 
 
+@pytest.mark.slow
 def test_build_shera_threeplane_model_smoke():
     """
     Smoke test for the (cfg, spec, store) → SheraThreePlane_Model bridge.

@@ -2,10 +2,24 @@
 
 This page is the source of truth for how the test suite is organized, what it exercises, and where the current runtime and duplication pain points are. Future test moves or refactors should update this document.
 
-## Baseline command
-- `PYTHONPATH=src:. pytest -q --durations=25`
+## Standard commands
+- Full: `PYTHONPATH=src:. pytest -q`
+- Fast (skip slow-marked integration paths): `PYTHONPATH=src:. pytest -q -m "not slow"`
+- Timing sample: `PYTHONPATH=src:. pytest -q --durations=25`
   - Last run: 113 passed, 1 skipped in 869.89s (0:14:29).
   - Note: tests is now a package; required test command is `PYTHONPATH=src:. pytest …`.
+
+## Marker policy
+- `slow`: integration-heavy SHERA/Binder runs that dominate the runtime snapshot. Use `-m "not slow"` for a developer-speed pass; the full suite must still include them.
+- Currently marked slow (from the 869.89s baseline timing):
+  - `tests/inference/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke` (270.84s call from 20-step GD loop).
+  - `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` (14.46s setup, 126.46s call) and `::test_fim_theta_shera_wrapper_consistency` (90.75s call).
+  - `tests/inference/test_image_nll_bridge.py::test_run_image_gd_separation_smoke` (119.20s call).
+  - `tests/inference/test_noiseless_truth_stationary.py::test_noiseless_truth_is_stationary_for_gaussian_nll` (43.69s call).
+  - `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` (39.65s call).
+  - `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` (25.62s call).
+  - `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` (20.95s call).
+  - `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` (14.54s setup).
 
 ## Shared fixtures (Task 3)
 - `shera_smoke_cfg` / `shera_smoke_updates`: session fixtures for the standard SHERA testbed config and canonical parameter overrides (shared separation/position defaults plus zeroed Zernike vectors).

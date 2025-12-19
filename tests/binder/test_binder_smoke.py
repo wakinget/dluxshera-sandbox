@@ -1,6 +1,7 @@
 # tests/test_binder_smoke.py
 
 import jax.numpy as jnp
+import pytest
 
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.core.binder import SheraTwoPlaneBinder
@@ -8,6 +9,7 @@ from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
 from tests.conftest import make_forward_store
 
 
+@pytest.mark.slow
 def test_shera_threeplane_binder_smoke():
     cfg = SHERA_TESTBED_CONFIG
     forward_spec, forward_store = make_forward_store(cfg)

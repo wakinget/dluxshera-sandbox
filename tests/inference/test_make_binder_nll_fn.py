@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.optimization import make_binder_nll_fn
@@ -11,6 +12,7 @@ from dluxshera.params.spec import build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore
 
 
+@pytest.mark.slow
 def test_theta0_store_override_keeps_binder_base_alignment():
     jax.config.update("jax_enable_x64", True)
 
