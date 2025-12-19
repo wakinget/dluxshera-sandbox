@@ -1,7 +1,7 @@
 # src/dluxshera/core/binder.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Optional
 
 import jax.numpy as jnp
@@ -65,6 +65,39 @@ class BaseSheraBinder:
         self._graph = None
         if self.use_system_graph:
             self._graph = self._build_graph()
+
+    def __dir__(self):
+        entries = set(super().__dir__())
+        reserved = BINDER_RESERVED_NAMES
+
+        def _maybe_add(name: str):
+            if (
+                isinstance(name, str)
+                and name not in reserved
+                and name.isidentifier()
+                and not name.startswith("__")
+            ):
+                entries.add(name)
+
+        if is_dataclass(self.cfg):
+            for field in fields(self.cfg):
+                _maybe_add(field.name)
+
+        prefixes = set()
+        for key in self.base_forward_store.keys():
+            if "." not in key:
+                continue
+            prefix, _ = key.split(".", 1)
+            prefixes.add(prefix)
+
+        for prefix in prefixes:
+            _maybe_add(prefix)
+
+        for leaf, candidates in self._leaf_index().items():
+            if len(candidates) == 1:
+                _maybe_add(leaf)
+
+        return sorted(entries)
 
     def __getattr__(self, name):
         if name in BINDER_RESERVED_NAMES:
