@@ -7,7 +7,7 @@ This is a living, dev-facing document summarizing the goals, architecture, decis
 - **Sections 1–17:** Current architecture focus areas, gotchas, and open questions.
 - **Section 18:** Merge strategy and V1.0 milestones (active roadmap).
 - **Section 23:** Parking lot / future ideas and backlog.
-- **Historical context:** For narrative history and ADR-style rationale, see `docs/archive/REFACTOR_HISTORY.md` and `docs/archive/ARCHITECTURE_DECISIONS.md`.
+- **Historical context:** For narrative history and ADR-style rationale, see `docs/archive/REFACTOR_HISTORY.md` and `docs/architecture/adr/0001-core-architecture-foundations.md`.
 
 ---
 
@@ -55,7 +55,7 @@ Scoped Transform Registry ──▶ DerivedResolver (system_id-aware) ──▶ 
                   .model(wavelengths, weights)  →  PSF
 ```
 
-For narrative context and the rationale behind these layers, see `docs/archive/ARCHITECTURE_DECISIONS.md`.
+For narrative context and the rationale behind these layers, see `docs/architecture/adr/0001-core-architecture-foundations.md`.
 
 ---
 
@@ -324,7 +324,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ## 18) Changelog of Decisions
 
-See `docs/archive/ARCHITECTURE_DECISIONS.md` for a curated, ADR-style summary of the major choices referenced here.
+See `docs/architecture/adr/0001-core-architecture-foundations.md` for a curated, ADR-style summary of the major choices referenced here.
 
 - Transform registry implemented globally; slated for system-scoped refactor.
 - ParameterStore currently permissive; decision pending to enforce primitives-only by default.
@@ -436,7 +436,7 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 
 This section captures our strategy for (a) deciding when to merge the refactor work into the main dLuxShera repo, and (b) when to consider the refactor “done” and treat the current architecture as V1.0. There are currently no external users of the main repo; migration concerns are therefore purely for my own workflow and notebooks.
 
-- Historical rationale for the refactor lives in `docs/archive/REFACTOR_HISTORY.md` and `docs/archive/ARCHITECTURE_DECISIONS.md`; this section is about the current merge/V1.0 strategy.
+- Historical rationale for the refactor lives in `docs/archive/REFACTOR_HISTORY.md` and `docs/architecture/adr/0001-core-architecture-foundations.md`; this section is about the current merge/V1.0 strategy.
 - V1.0 user-facing docs should describe the current architecture as the default without surfacing “refactor” or “legacy” language.
 
 ---
@@ -695,11 +695,14 @@ Suggested directory layout
 README.md  
 docs/
   modeling_overview.md  
-  architecture/
-    params_and_store.md  
-    binder_and_graph.md  
-    inference_and_loss.md  
-    eigenmodes.md  
+architecture/
+  adr/
+    _template.md
+    0001-core-architecture-foundations.md
+  params_and_store.md  
+  binder_and_graph.md  
+  inference_and_loss.md  
+  eigenmodes.md  
   tutorials/
     canonical_astrometry_demo.md
   dev/
@@ -707,7 +710,6 @@ docs/
     code_structure.md
   archive/
     REFACTOR_HISTORY.md
-    ARCHITECTURE_DECISIONS.md
     LEGACY_APIS_AND_MIGRATION.md
   api/   (optional, future)
 
