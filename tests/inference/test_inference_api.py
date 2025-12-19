@@ -1,9 +1,11 @@
 # tests/test_inference_api.py
 import jax.numpy as np
+import pytest
 
 from dluxshera.inference.inference import run_shera_image_gd_basic
 
 
+@pytest.mark.slow
 def test_run_shera_image_gd_basic_separation_smoke(
     shera_smoke_cfg,
     shera_smoke_inference,

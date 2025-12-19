@@ -2,12 +2,15 @@
 import jax
 import jax.numpy as np
 import numpy as onp
+import pytest
 
 from dluxshera.inference.optimization import (
     make_binder_image_nll_fn,
     fim_theta,
     fim_theta_shera,
 )
+
+pytestmark = pytest.mark.slow
 
 
 def test_fim_theta_shape_and_symmetry(

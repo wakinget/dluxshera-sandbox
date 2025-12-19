@@ -1,6 +1,7 @@
 # tests/test_image_nll_bridge.py
 import jax
 import jax.numpy as np
+import pytest
 
 from dluxshera.inference.optimization import make_image_nll_fn, run_image_gd
 
@@ -62,6 +63,7 @@ def test_make_binder_image_nll_fn_smoke_gaussian(
     assert g0.shape == theta0.shape
 
 
+@pytest.mark.slow
 def test_run_image_gd_separation_smoke(
     shera_smoke_cfg,
     shera_smoke_forward,

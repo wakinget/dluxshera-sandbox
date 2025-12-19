@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import jax.numpy as jnp
+import pytest
 
 from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 from dluxshera.graph.system_graph import build_threeplane_system_graph, build_shera_twoplane_system_graph
@@ -30,6 +31,7 @@ def _make_forward_and_inference_stores(cfg):
     return forward_spec, forward_store, inference_spec, inference_store
 
 
+@pytest.mark.slow
 def test_system_graph_forward_matches_legacy_model():
     cfg = SHERA_TESTBED_CONFIG.replace(n_lambda=1)
     forward_spec, forward_store, inference_spec, inference_store = _make_forward_and_inference_stores(cfg)
