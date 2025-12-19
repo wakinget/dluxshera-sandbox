@@ -210,6 +210,60 @@ Focus areas:
 
 This theme reduces future cognitive load.
 
+### 10. Time-Domain Simulation & Inference  
+**Priority: Low → Medium (Long-Term)**
+
+Enable the dLuxShera framework to **simulate and process time-series data**, spanning a wide range of temporal scales and physical assumptions.
+
+This theme recognizes that many scientifically relevant effects are inherently time-dependent, and that future analyses may require reasoning over sequences of observations rather than single static images.
+
+The emphasis is on *capability and structure*, not on committing to a specific temporal model.
+
+#### Time-Series Simulation
+
+Potential regimes of interest include (non-exhaustive):
+
+- **Short-timescale frames**
+  - Simulation of individual short exposures (e.g. ~50 ms frames)
+  - Aggregation into longer effective observations
+  - Inclusion of effects such as telescope jitter or pointing noise
+  - Exploration of frame-to-frame correlations or independence assumptions
+
+- **Observation-level sequences**
+  - Simulation of full observation blocks (e.g. 30-minute integrations)
+  - Repeated observations over mission-relevant timescales (e.g. years)
+  - Use of simplified statistical models (e.g. Gaussian jitter approximations)
+  - Investigation of how long-term trends impact astrometric recovery
+
+The intent is to support both:
+- high-fidelity simulations when needed, and
+- lightweight approximations when only aggregate behavior matters.
+
+#### Time-Series Processing & Inference
+
+In addition to data generation, the framework should eventually support:
+
+- Inference over time-indexed data
+- Aggregation of likelihoods across frames or epochs
+- Clear handling of shared vs time-varying parameters
+- Distinction between nuisance temporal effects and science parameters
+- Diagnostics for identifying time-correlated biases or drift
+
+This may require:
+- explicit representation of time or epoch indices
+- structured parameter tying across observations
+- new abstractions for batching or grouping data
+
+#### Relationship to Other Themes
+
+This theme naturally interacts with:
+- **System Performance & Sensitivity Studies** (e.g. time-dependent error sources)
+- **Inference & Optimization Robustness** (e.g. scaling inference to many frames)
+- **Performance & Scaling** (e.g. managing large simulated datasets)
+- **Extensibility & Advanced Optical Modeling** (e.g. time-varying optics)
+
+The goal is not immediate implementation, but to ensure that architectural choices made today do not preclude time-domain modeling tomorrow.
+
 ---
 
 ## Relationship to the Working Plan
