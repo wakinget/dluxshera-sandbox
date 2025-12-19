@@ -339,6 +339,63 @@ This theme exists to broaden perspective and reduce blind spots, not to dilute a
 
 ---
 
+## 12. Optimization output, logging, and plotting strategy (decisions)
+
+### Goals
+- Keep optimizer output format stable across parameterizations (primitive vs eigenmodes).
+- Make saving/plotting robust and repeatable without hard-coding domain specifics.
+- Support both single-run debugging and large multi-run / time-series inference campaigns.
+
+### Core concept: Trace vs Signals
+- **Trace**: minimal, parameterization-agnostic data the optimizer directly produces.
+  - Required: `loss[t]`, `theta[t, :]`
+  - Optional (generic diagnostics): `grad_norm[t]`, `step_norm[t]`, `lr[t]`, flags
+- **Signals**: derived, plot-oriented time series computed from Trace (optionally using
+  a decoder/binder/spec and truth values). Signals may include grouped quantities
+  (e.g., x/y on one axis, star A/B flux errors) or vector summaries (e.g., Zernike RMS).
+
+### Run artifact layout (recommended)
+Each run produces a directory containing:
+- `trace.npz`
+  - Arrays: `loss`, `theta`, and optional generic diagnostic channels.
+- `meta.json`
+  - Lightweight metadata: run id, timestamp, git commit hash, environment info,
+    seeds, and theta interpretation metadata (e.g., theta_space, theta_map id/hash,
+    param_spec id/hash).
+- `summary.json`
+  - Tiny aggregation-friendly summary: final loss, convergence metrics, runtime,
+    final parameter norms, and key identifiers.
+
+Optional / diagnostic artifacts (opt-in):
+- `diag_steps.jsonl`
+  - Sparse per-step scalar diagnostics (logged every N steps).
+- `grads.npz`
+  - Gradient arrays if needed for debugging; prefer sparse logging (every N steps)
+    to avoid large files.
+- `signals.npz`
+  - Derived time series used for plotting (e.g., binary_xy_as, flux_error_ppm,
+    zernike_rms_nm).
+
+### Experiment (multi-run / time-series) layout
+An experiment directory contains:
+- `manifest.json` describing the sweep/time-series dataset and global settings.
+- `runs/<run_id>/...` for each run’s artifacts (as above).
+- `aggregate.parquet` (or `.csv`) built by postprocessing `summary.json` across runs.
+
+### Plotting utilities design
+- Plotting functions accept Signals (named arrays + units + optional truth), not raw
+  optimizer internals.
+- Domain-specific signal builders live separately from generic plotting routines,
+  enabling frequent customization without changing the plotting core.
+- Support vector-valued signals with configurable modes (components vs RMS/summary).
+- Support grouped signals on the same axes (e.g., binary x/y, star A/B flux errors).
+
+### Notes
+- Prefer NPZ for dense numeric arrays and JSON/JSONL for metadata and sparse logs.
+- Avoid Excel as a primary result store; use Parquet/CSV aggregates plus per-run JSON.
+
+---
+
 ## Relationship to the Working Plan
 
 - The **Roadmap** answers: *Where is this project headed?*
