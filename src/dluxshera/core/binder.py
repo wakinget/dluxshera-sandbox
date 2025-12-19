@@ -79,6 +79,20 @@ class BaseSheraBinder:
         if has_prefix:
             return self.ns(name)
 
+        leaf_index = self._leaf_index()
+        if name in leaf_index:
+            candidates = leaf_index[name]
+            if len(candidates) == 1:
+                return self.base_forward_store.get(candidates[0])
+
+            candidate_list = ", ".join(sorted(candidates))
+            raise AttributeError(
+                "Ambiguous leaf name {leaf!r} found in store keys: {candidates}. "
+                "Use binder.<prefix>.{leaf} or binder.get(\"<full.key>\")".format(
+                    leaf=name, candidates=candidate_list
+                )
+            )
+
         raise AttributeError(name)
 
     # ------------------------------------------------------------------
