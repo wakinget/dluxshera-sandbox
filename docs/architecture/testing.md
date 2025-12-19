@@ -5,6 +5,7 @@ This page is the source of truth for how the test suite is organized, what it ex
 ## Baseline command
 - `PYTHONPATH=src:. pytest -q --durations=25`
   - Last run: 113 passed, 1 skipped in 763.93s (0:12:43).
+  - Note: tests is now a package; required test command is `PYTHONPATH=src:. pytest …`.
 
 ## Current inventory (grouped by subject)
 
