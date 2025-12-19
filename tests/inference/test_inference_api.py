@@ -28,7 +28,7 @@ def test_run_shera_image_gd_basic_separation_smoke(
         init_overrides=init_overrides,
         noise_model="gaussian",
         learning_rate=1e-1,
-        num_steps=20,
+        num_steps=10,
     )
 
     # Basic sanity: theta_final shape matches number of infer_keys

@@ -3,7 +3,6 @@
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 
@@ -50,7 +49,7 @@ def _make_inference_store(cfg):
 
 
 @pytest.mark.slow
-def test_build_shera_threeplane_model_smoke():
+def test_build_shera_threeplane_model_smoke(shera_smoke_cfg):
     """
     Smoke test for the (cfg, spec, store) → SheraThreePlane_Model bridge.
 
@@ -59,7 +58,7 @@ def test_build_shera_threeplane_model_smoke():
       * a forward pass produces a PSF with the expected shape, and
       * key astrometric parameters are wired through into the source.
     """
-    cfg = SHERA_TESTBED_CONFIG
+    cfg = shera_smoke_cfg
     spec, store = _make_inference_store(cfg)
 
     model = build_shera_threeplane_model(cfg, spec, store)

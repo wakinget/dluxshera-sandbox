@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Dict, Optional
 
 import jax.numpy as jnp
@@ -51,7 +52,15 @@ def inference_store_from_forward(
 
 @pytest.fixture(scope="session")
 def shera_smoke_cfg():
-    return SHERA_TESTBED_CONFIG
+    """Lightweight SHERA config for smoke tests (smaller grids/n_lambda)."""
+
+    return replace(
+        SHERA_TESTBED_CONFIG,
+        pupil_npix=128,
+        psf_npix=128,
+        oversample=2,
+        n_lambda=2,
+    )
 
 
 @pytest.fixture(scope="session")

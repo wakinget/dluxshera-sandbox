@@ -5,13 +5,13 @@ import pytest
 
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.core.binder import SheraTwoPlaneBinder
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
+from dluxshera.optics.config import SheraTwoPlaneConfig
 from tests.conftest import make_forward_store
 
 
 @pytest.mark.slow
-def test_shera_threeplane_binder_smoke():
-    cfg = SHERA_TESTBED_CONFIG
+def test_shera_threeplane_binder_smoke(shera_smoke_cfg):
+    cfg = shera_smoke_cfg
     forward_spec, forward_store = make_forward_store(cfg)
 
     binder = SheraThreePlaneBinder(cfg, forward_spec, forward_store)
