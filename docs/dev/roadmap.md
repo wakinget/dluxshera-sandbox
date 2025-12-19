@@ -266,6 +266,79 @@ The goal is not immediate implementation, but to ensure that architectural choic
 
 ---
 
+### 11. External Model Comparison & Advanced Source Modeling  
+**Priority: Low (Strategic / Exploratory)**
+
+Evaluate and learn from other established physical optics and propagation codebases, and assess how their capabilities might inform or augment dLuxShera.
+
+This theme is mostly exploratory. The goal is not wholesale adoption, but:
+- identifying best-in-class ideas,
+- validating modeling assumptions,
+- and selectively incorporating capabilities where they align with dLuxShera’s goals (e.g. differentiability, composability, inference).
+
+#### External Optical Propagation Libraries
+
+Candidate libraries of interest include (non-exhaustive):
+
+- **PROPER Optical Propagation Library**
+  - Well-established physical optics modeling
+  - Rich library of propagation primitives and examples
+  - Widely used in mission studies and optical design
+
+- **prysm**
+  - Modern Python-based physical optics framework
+  - Strong support for wavefront analysis and PSF modeling
+  - Clear conceptual separation of optics and analysis
+
+- **Lentil**
+  - Lightweight, composable optics modeling
+  - Emphasis on clarity and physical interpretability
+
+Potential evaluation questions:
+- What physical effects are modeled that dLuxShera currently omits?
+- What abstractions are particularly clean or reusable?
+- Which components might be adaptable to JAX / auto-diff?
+- Where does dLuxShera’s architecture offer advantages or limitations by comparison?
+
+Outcomes may include:
+- direct use of external libraries for validation or benchmarking
+- inspiration for new abstractions or APIs
+- selective re-implementation of ideas in a JAX-compatible form
+
+---
+
+#### Advanced Source & Spectral Modeling
+
+Current source modeling is intentionally minimal and specialized (e.g. AlphaCen models from dLuxToliman). Future science or proposal needs may require more sophisticated treatments.
+
+Potential directions include:
+- More realistic stellar spectra
+- Broadband or multi-band source models
+- Spectral mismatch effects between source, optics, and detector
+- Parameterized or data-driven spectral representations
+
+Key questions:
+- When does simplified source modeling break down for astrometric inference?
+- How sensitive are recovered parameters to spectral assumptions?
+- What level of spectral realism is required for proposal-level studies vs detailed analysis?
+
+The intent is to ensure that dLuxShera can:
+- support increased realism when needed,
+- without imposing unnecessary complexity on all use cases.
+
+---
+
+#### Relationship to Core Principles
+
+Any integration or adaptation should respect core dLuxShera principles:
+- compatibility with JAX and automatic differentiation
+- clear separation between model structure and parameters
+- composability with existing inference workflows
+
+This theme exists to broaden perspective and reduce blind spots, not to dilute architectural focus.
+
+---
+
 ## Relationship to the Working Plan
 
 - The **Roadmap** answers: *Where is this project headed?*
