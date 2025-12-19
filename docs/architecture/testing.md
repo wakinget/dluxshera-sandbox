@@ -4,7 +4,7 @@ This page is the source of truth for how the test suite is organized, what it ex
 
 ## Baseline command
 - `PYTHONPATH=src:. pytest -q --durations=25`
-  - Last run: 112 passed, 1 skipped in 763.93s (0:12:43).
+  - Last run: 113 passed, 1 skipped in 763.93s (0:12:43).
 
 ## Current inventory (grouped by subject)
 
@@ -13,6 +13,7 @@ This page is the source of truth for how the test suite is organized, what it ex
 - `tests/test_binder_shared_behaviour.py`: overlay/merge semantics, cfg/store passthrough.
 - `tests/test_binder_namespace.py`: namespace accessors and validation.
 - `tests/test_binder_leaf_access.py`, `tests/test_binder_leaf_index.py`: leaf-path access, indexing helpers, and param path retrieval.
+- `tests/test_binder_dir.py`: testing new `__dir__` for tab completion
 - `tests/test_binder_diagnostics.py`: diagnostics output structure.
 
 ### Parameters, packing, and store mechanics
