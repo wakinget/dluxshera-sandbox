@@ -2,57 +2,27 @@
 import jax
 import jax.numpy as np
 
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
-from dluxshera.core.builder import build_shera_threeplane_model
 from dluxshera.inference.optimization import make_image_nll_fn, run_image_gd
-from tests.conftest import inference_store_from_forward, make_forward_store
 
 
-def _make_store_for_smoke(cfg):
-    updates = {
-        "binary.separation_as": 10.0,
-        "binary.position_angle_deg": 90.0,
-        "binary.x_position_as": 0.0,
-        "binary.y_position_as": 0.0,
-        "binary.contrast": 3.0,
-    }
-
-    n_m1 = len(cfg.primary_noll_indices)
-    n_m2 = len(cfg.secondary_noll_indices)
-    if n_m1 > 0:
-        updates["primary.zernike_coeffs_nm"] = np.zeros(n_m1)
-    if n_m2 > 0:
-        updates["secondary.zernike_coeffs_nm"] = np.zeros(n_m2)
-
-    forward_spec, forward_store = make_forward_store(cfg, updates=updates)
-    inference_spec, inference_store = inference_store_from_forward(forward_store)
-    return forward_spec, forward_store, inference_spec, inference_store
-
-
-def test_make_image_nll_fn_smoke_gaussian():
-    cfg = SHERA_TESTBED_CONFIG
-    forward_spec, forward_store, inference_spec, inference_store = _make_store_for_smoke(cfg)
-
-    # synthetic data from the same model
-    model = build_shera_threeplane_model(cfg, inference_spec, inference_store)
-    data = model.model()
-    var = np.ones_like(data)
-
-    infer_keys = [
-        "binary.separation_as",
-        "binary.x_position_as",
-        "binary.y_position_as",
-    ]
+def test_make_image_nll_fn_smoke_gaussian(
+    shera_smoke_cfg,
+    shera_smoke_inference,
+    shera_smoke_model_data,
+    shera_smoke_infer_keys,
+):
+    inference_spec, inference_store = shera_smoke_inference
+    data, var = shera_smoke_model_data
 
     loss_fn, theta0 = make_image_nll_fn(
-        cfg,
+        shera_smoke_cfg,
         inference_spec,
         inference_store,
-        infer_keys,
+        shera_smoke_infer_keys,
         data,
         var,
         noise_model="gaussian",
-        build_model_fn=build_shera_threeplane_model,
+        build_model_fn=None,
     )
 
     loss0 = loss_fn(theta0)
@@ -63,29 +33,22 @@ def test_make_image_nll_fn_smoke_gaussian():
     assert g0.shape == theta0.shape
 
 
-def test_make_binder_image_nll_fn_smoke_gaussian():
-    cfg = SHERA_TESTBED_CONFIG
-    forward_spec, forward_store, _, _ = _make_store_for_smoke(cfg)
-
-    # Synthetic data from the same config/store, but via the Binder path
-    from dluxshera.core.binder import SheraThreePlaneBinder
-    binder = SheraThreePlaneBinder(cfg, forward_spec, forward_store)
-    data = binder.model()
-    var = np.ones_like(data)
-
-    infer_keys = [
-        "binary.separation_as",
-        "binary.x_position_as",
-        "binary.y_position_as",
-    ]
+def test_make_binder_image_nll_fn_smoke_gaussian(
+    shera_smoke_cfg,
+    shera_smoke_forward,
+    shera_smoke_binder_data,
+    shera_smoke_infer_keys,
+):
+    forward_spec, forward_store = shera_smoke_forward
+    binder, data, var = shera_smoke_binder_data
 
     from dluxshera.inference.optimization import make_binder_image_nll_fn
 
     loss_fn, theta0 = make_binder_image_nll_fn(
-        cfg,
+        shera_smoke_cfg,
         forward_spec,
         forward_store,
-        infer_keys,
+        shera_smoke_infer_keys,
         data,
         var,
         noise_model="gaussian",
@@ -99,14 +62,13 @@ def test_make_binder_image_nll_fn_smoke_gaussian():
     assert g0.shape == theta0.shape
 
 
-def test_run_image_gd_separation_smoke():
-    cfg = SHERA_TESTBED_CONFIG
-    forward_spec, store_true, inference_spec, inference_store = _make_store_for_smoke(cfg)
-
-    # 1) Generate synthetic data from the "truth" store
-    model_true = build_shera_threeplane_model(cfg, inference_spec, inference_store)
-    data = model_true.model()
-    var = np.ones_like(data)
+def test_run_image_gd_separation_smoke(
+    shera_smoke_cfg,
+    shera_smoke_forward,
+    shera_smoke_model_data,
+):
+    forward_spec, store_true = shera_smoke_forward
+    data, var = shera_smoke_model_data
 
     # 2) Start from a slightly wrong separation
     sep_true = store_true.get("binary.separation_as")
@@ -115,7 +77,7 @@ def test_run_image_gd_separation_smoke():
     infer_keys = ["binary.separation_as"]
 
     theta_final, store_final, history = run_image_gd(
-        cfg,
+        shera_smoke_cfg,
         forward_spec,
         store_init,
         infer_keys,

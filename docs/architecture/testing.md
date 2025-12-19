@@ -4,8 +4,26 @@ This page is the source of truth for how the test suite is organized, what it ex
 
 ## Baseline command
 - `PYTHONPATH=src:. pytest -q --durations=25`
-  - Last run: 113 passed, 1 skipped in 763.93s (0:12:43).
+  - Last run: 113 passed, 1 skipped in 869.89s (0:14:29).
   - Note: tests is now a package; required test command is `PYTHONPATH=src:. pytest …`.
+
+## Shared fixtures (Task 3)
+- `shera_smoke_cfg` / `shera_smoke_updates`: session fixtures for the standard SHERA testbed config and canonical parameter overrides (shared separation/position defaults plus zeroed Zernike vectors).
+- `shera_smoke_forward` / `shera_smoke_inference`: session-scoped forward and inference `ParamSpec` + `ParameterStore` pairs built from the shared overrides, with deriveds refreshed once per session.
+- `shera_smoke_binder_data` / `shera_smoke_model_data`: session-scoped synthetic PSF data and variance computed once via the Binder path and the model builder, respectively.
+- `shera_smoke_infer_keys`: reusable tuple of the standard inference keys (`binary.separation_as`, `binary.x_position_as`, `binary.y_position_as`).
+
+Migrated tests now consume these fixtures to avoid rebuilding identical configs/stores and regenerating synthetic PSFs:
+- `tests/inference/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke`
+- `tests/inference/test_image_nll_bridge.py::*`
+- `tests/inference/test_loss_canonical.py::test_loss_canonical_matches_binder_nll_and_is_jittable`
+- `tests/inference/test_fim_theta.py::*`
+
+### Timing snapshot (before ➜ after)
+- `test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke`: 456.79s ➜ 270.84s
+- `test_image_nll_bridge.py::test_run_image_gd_separation_smoke`: 52.34s ➜ 119.20s (call still dominated by 20-step GD loop; setup now amortized via fixtures)
+- `test_fim_theta.py::test_fim_theta_shape_and_symmetry`: 75.74s ➜ 126.46s (per-call dominated; setup cut to a shared session fixture)
+- Overall wall-clock: 763.93s ➜ 869.89s (run-to-run variance dominates; fixture reuse removed per-test setup cost but device throughput was slower in this session).
 
 ## Current inventory (grouped by subject)
 
@@ -68,37 +86,37 @@ This page is the source of truth for how the test suite is organized, what it ex
 
 | Duration (s) | Test |
 | --- | --- |
-| 456.79 | `tests/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke` |
-| 75.74 | `tests/test_fim_theta.py::test_fim_theta_shape_and_symmetry` |
-| 52.34 | `tests/test_image_nll_bridge.py::test_run_image_gd_separation_smoke` |
-| 46.75 | `tests/test_fim_theta.py::test_fim_theta_shera_wrapper_consistency` |
-| 24.44 | `tests/test_loss_canonical.py::test_loss_canonical_matches_binder_nll_and_is_jittable` |
-| 20.90 | `tests/test_inference/test_noiseless_truth_stationary.py::test_noiseless_truth_is_stationary_for_gaussian_nll` |
-| 19.22 | `tests/test_inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` |
-| 14.16 | `tests/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
-| 9.92 | `tests/graph/test_system_graph.py::test_system_graph_forward_matches_legacy_model` |
-| 6.01 | `tests/test_model_builder.py::test_build_shera_threeplane_model_smoke` |
-| 5.92 | `tests/test_demo_canonical_astrometry.py::test_canonical_astrometry_demo_runs` |
-| 4.86 | `tests/test_binder_smoke.py::test_shera_threeplane_binder_smoke` |
-| 4.17 | `tests/test_image_nll_bridge.py::test_make_binder_image_nll_fn_smoke_gaussian` |
-| 2.41 | `tests/test_run_eigen_gd.py::test_eigen_and_pure_theta_share_binder_loss` |
-| 2.13 | `tests/test_run_eigen_gd.py::test_eigen_helper_quadratic_roundtrip_and_descent` |
-| 2.01 | `tests/test_loss_canonical.py::test_make_binder_image_nll_fn_twoplane_smoke` |
-| 1.49 | `tests/test_plotting.py::test_plot_parameter_history_grid` |
-| 1.20 | `tests/test_twoplane_astrometry_demo.py::test_twoplane_astrometry_demo_runs` |
-| 1.20 | `tests/test_run_eigen_gd.py::test_run_shera_image_gd_eigen_smoke` |
-| 1.12 | `tests/test_run_simple_gd.py::test_run_simple_gd_converges_on_quadratic` |
-| 1.06 | `tests/test_optics_builder.py::test_threeplane_optics_cache_miss_on_structural_change` |
-| 0.85 | `tests/test_eigen_theta_map.py::test_eigen_theta_map_whitened_scales_quadratic` |
-| 0.82 | `tests/test_plotting.py::test_plot_psf_comparison_grid` |
-| 0.57 | `tests/test_eigen_theta_map.py::test_eigen_theta_map_roundtrip_unwhitened` |
-| 0.57 | `tests/test_optics_builder.py::test_threeplane_optics_cache_hits` |
+| 270.84 (call) | `tests/inference/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke` |
+| 126.46 (call) | `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` |
+| 119.20 (call) | `tests/inference/test_image_nll_bridge.py::test_run_image_gd_separation_smoke` |
+| 90.75 (call) | `tests/inference/test_fim_theta.py::test_fim_theta_shera_wrapper_consistency` |
+| 43.69 (call) | `tests/inference/test_noiseless_truth_stationary.py::test_noiseless_truth_is_stationary_for_gaussian_nll` |
+| 39.65 (call) | `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` |
+| 25.62 (call) | `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` |
+| 20.95 (call) | `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` |
+| 17.57 (setup) | `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
+| 14.54 (call) | `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` |
+| 14.46 (setup) | `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` |
+| 12.50 (call) | `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
+| 12.23 (call) | `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_demo_runs` |
+| 10.25 (call) | `tests/inference/test_loss_canonical.py::test_loss_canonical_matches_binder_nll_and_is_jittable` |
+| 8.73 (call) | `tests/inference/test_image_nll_bridge.py::test_make_binder_image_nll_fn_smoke_gaussian` |
+| 6.57 (call) | `tests/inference/test_run_eigen_gd.py::test_eigen_helper_quadratic_roundtrip_and_descent` |
+| 4.80 (call) | `tests/inference/test_run_eigen_gd.py::test_eigen_and_pure_theta_share_binder_loss` |
+| 3.15 (call) | `tests/inference/test_run_eigen_gd.py::test_run_shera_image_gd_eigen_smoke` |
+| 2.64 (call) | `tests/plotting/test_plotting.py::test_plot_parameter_history_grid` |
+| 2.48 (call) | `tests/optics/test_optics_builder.py::test_threeplane_optics_cache_miss_on_structural_change` |
+| 2.32 (call) | `tests/inference/test_run_simple_gd.py::test_run_simple_gd_converges_on_quadratic` |
+| 1.98 (call) | `tests/demos/test_twoplane_astrometry_demo.py::test_twoplane_astrometry_demo_runs` |
+| 1.95 (call) | `tests/plotting/test_plotting.py::test_plot_psf_comparison_grid` |
+| 1.82 (call) | `tests/inference/test_eigen_theta_map.py::test_eigen_theta_map_whitened_scales_quadratic` |
+| 1.67 (call) | `tests/inference/test_loss_canonical.py::test_make_binder_image_nll_fn_twoplane_smoke` |
 
 ## Repeated expensive setups
-- SHERA synthetic data generation (`SHERA_TESTBED_CONFIG` + `ParameterStore` + Binder/model `.model()`): repeated in `test_inference_api.py`, `test_image_nll_bridge.py`, `test_loss_canonical.py`, `test_fim_theta.py`, and parts of `tests/graph/test_system_graph.py`. Each re-JITs the same Binder/model build and produces fresh PSFs.
-- 20-step gradient-descent loops (e.g., `run_image_gd`, `run_shera_image_gd_basic`, `run_shera_image_gd_eigen`): appear in `test_inference_api.py`, `test_image_nll_bridge.py`, `test_run_eigen_gd.py`, and `test_run_simple_gd.py`, all starting from similar stores and data.
-- FIM and NLL construction with identical infer key sets (`binary.separation_as`, `binary.x_position_as`, `binary.y_position_as`) across `test_fim_theta.py`, `test_image_nll_bridge.py`, and `test_loss_canonical.py` regenerate the same `make_binder_image_nll_fn`/`make_image_nll_fn` closures.
-- Demo smoke tests re-run SHERA builders in `fast` mode but still trigger Binder/model creation twice (`test_demo_canonical_astrometry.py`, `test_twoplane_astrometry_demo.py`).
+- SHERA synthetic data generation (`SHERA_TESTBED_CONFIG` + `ParameterStore` + Binder/model `.model()`): repeated in `tests/inference/test_inference_api.py`, `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_loss_canonical.py`, `tests/inference/test_fim_theta.py`, and parts of `tests/optics/test_system_graph.py`. Each re-JITs the same Binder/model build and produces fresh PSFs.
+- 20-step gradient-descent loops (e.g., `run_image_gd`, `run_shera_image_gd_basic`, `run_shera_image_gd_eigen`): appear in `tests/inference/test_inference_api.py`, `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_run_eigen_gd.py`, and `tests/inference/test_run_simple_gd.py`, all starting from similar stores and data.
+- FIM and NLL construction with identical infer key sets (`binary.separation_as`, `binary.x_position_as`, `binary.y_position_as`) across `tests/inference/test_fim_theta.py`, `tests/inference/test_image_nll_bridge.py`, and `tests/inference/test_loss_canonical.py` regenerate the same `make_binder_image_nll_fn`/`make_image_nll_fn` closures.
+- Demo smoke tests re-run SHERA builders in `fast` mode but still trigger Binder/model creation twice (`tests/demos/test_demo_canonical_astrometry.py`, `tests/demos/test_twoplane_astrometry_demo.py`).
 
 ## Prioritized consolidation plan
 1) **Centralize SHERA testbed fixtures:** Create `tests/conftest.py` session-scoped fixtures that return `(cfg, forward_spec, forward_store, inference_spec, inference_store, binder/model outputs, synthetic data/var)`. Reuse in inference/FIM/graph tests to avoid repeat builds and JITs of identical configs.
