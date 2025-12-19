@@ -7,14 +7,14 @@ import pathlib
 import sys
 
 # Ensure editable-src imports when running this diagnostic directly.
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
-from tests.helpers import make_forward_store
+from tests.conftest import make_forward_store
 
 
 def _check_instance_of(module_name: str, class_name: str, instance) -> bool:

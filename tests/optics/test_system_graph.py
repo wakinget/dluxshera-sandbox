@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
 from dluxshera.graph.system_graph import build_threeplane_system_graph, build_shera_twoplane_system_graph
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
-from ..helpers import inference_store_from_forward, make_forward_store
+from tests.conftest import inference_store_from_forward, make_forward_store
 
 
 def _make_forward_and_inference_stores(cfg):

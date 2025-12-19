@@ -10,7 +10,7 @@ from dluxshera.inference.optimization import (
     fim_theta_shera,
 )
 from dluxshera.core.binder import SheraThreePlaneBinder
-from .helpers import make_forward_store
+from tests.conftest import make_forward_store
 
 
 def _make_store_for_smoke(cfg):

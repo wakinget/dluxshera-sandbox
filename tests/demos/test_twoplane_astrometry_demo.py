@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def _load_twoplane_main():
-    module_path = Path(__file__).resolve().parents[1] / "examples" / "scripts" / "run_twoplane_astrometry_demo.py"
+    module_path = Path(__file__).resolve().parents[2] / "examples" / "scripts" / "run_twoplane_astrometry_demo.py"
     spec = util.spec_from_file_location("twoplane_demo", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("Unable to load two-plane demo script")
