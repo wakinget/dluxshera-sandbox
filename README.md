@@ -12,7 +12,9 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 
 - Conceptual entry point: [docs/modeling_overview.md](docs/modeling_overview.md)
 - Tutorial: [docs/tutorials/canonical_astrometry_demo.md](docs/tutorials/canonical_astrometry_demo.md) alongside `examples/scripts/run_canonical_astrometry_demo.py`
-- Dev notes and roadmap: [docs/dev/dLuxShera_Working_Plan.md](docs/dev/dLuxShera_Working_Plan.md)
+- [Dev notes](docs/dev/):
+  - [Roadmap](docs/dev/roadmap.md) (longer term goals + ideas)
+  - [Working Plan](docs/dev/working_plan.md) (near term implementation plan)
 
 ## Install
 

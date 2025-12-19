@@ -149,7 +149,7 @@ def _collect_basic_metadata(
     }
 
     # Record basic info about the Working Plan, if present.
-    working_plan = repo_root / "docs" / "dev" / "dLuxShera_Working_Plan.md"
+    working_plan = repo_root / "docs" / "dev" / "working_plan.md"
     if working_plan.exists():
         stat = working_plan.stat()
         meta["working_plan"] = {
