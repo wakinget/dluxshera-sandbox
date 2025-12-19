@@ -759,3 +759,12 @@ This roadmap gives us a structured, navigable documentation ecosystem: a concept
   unique across store keys; ambiguous leaves raise an AttributeError listing
   candidate full keys and suggest using the fully qualified form (no unexpected
   ambiguous leaves beyond the primary/secondary Zernike coefficients).
+- Task 2C completed: Binder __dir__ now surfaces cfg fields, store prefixes, and
+  unambiguous leaf names for smoother tab completion while omitting ambiguous
+  leaves.
+- Completed tasks to date: 1A–2C covering binder.get, StoreNamespace, Binder.ns,
+  cfg/store prefix attribute access, on-the-fly leaf indexing, unambiguous leaf
+  access, and __dir__ completion improvements.
+- New functionality: improved interactive UX via dir(binder), exposing cfg
+  fields, store namespaces, and unique leaves without altering packaging or
+  discovery paths.
