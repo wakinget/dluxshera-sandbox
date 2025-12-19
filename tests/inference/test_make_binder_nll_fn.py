@@ -6,17 +6,16 @@ import pytest
 
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.optimization import make_binder_nll_fn
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.params.packing import pack_params
 from dluxshera.params.spec import build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore
 
 
 @pytest.mark.slow
-def test_theta0_store_override_keeps_binder_base_alignment():
+def test_theta0_store_override_keeps_binder_base_alignment(shera_smoke_cfg):
     jax.config.update("jax_enable_x64", True)
 
-    cfg = SHERA_TESTBED_CONFIG
+    cfg = shera_smoke_cfg
     forward_spec = build_forward_model_spec_from_config(cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec)
     base_store = base_store.refresh_derived(forward_spec)

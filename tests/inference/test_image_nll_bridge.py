@@ -87,7 +87,7 @@ def test_run_image_gd_separation_smoke(
         var,
         noise_model="gaussian",
         learning_rate=1e-1,
-        num_steps=20,
+        num_steps=10,
     )
 
     # Loss should go down

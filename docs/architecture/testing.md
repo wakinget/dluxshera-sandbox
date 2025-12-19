@@ -6,7 +6,7 @@ This page is the source of truth for how the test suite is organized, what it ex
 - Full: `PYTHONPATH=src:. pytest -q`
 - Fast (skip slow-marked integration paths): `PYTHONPATH=src:. pytest -q -m "not slow"`
 - Timing sample: `PYTHONPATH=src:. pytest -q --durations=25`
-  - Last run: 113 passed, 1 skipped in 869.89s (0:14:29).
+  - Last run: 113 passed, 1 skipped in 122.58s (0:02:02).
   - Note: tests is now a package; required test command is `PYTHONPATH=src:. pytest …`.
 
 ## Marker policy
@@ -125,6 +125,44 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 | 1.95 (call) | `tests/plotting/test_plotting.py::test_plot_psf_comparison_grid` |
 | 1.82 (call) | `tests/inference/test_eigen_theta_map.py::test_eigen_theta_map_whitened_scales_quadratic` |
 | 1.67 (call) | `tests/inference/test_loss_canonical.py::test_make_binder_image_nll_fn_twoplane_smoke` |
+
+## Second-pass runtime consolidation (PYTHONPATH=src:. pytest -q --durations=50)
+- Baseline (before this pass): 309.11s wall-clock (113 passed, 1 skipped).
+  - Top offenders:
+    1. `tests/inference/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke` — 82.70s call
+    2. `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` — 48.17s call (plus 5.67s setup)
+    3. `tests/inference/test_image_nll_bridge.py::test_run_image_gd_separation_smoke` — 39.83s call
+    4. `tests/inference/test_fim_theta.py::test_fim_theta_shera_wrapper_consistency` — 33.27s call
+    5. `tests/inference/test_noiseless_truth_stationary.py::test_noiseless_truth_is_stationary_for_gaussian_nll` — 19.36s call
+    6. `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` — 14.22s call
+    7. `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` — 11.16s call
+    8. `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` — 8.80s call
+    9. `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` — 6.93s call
+    10. `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` — 6.85s setup
+- Root causes:
+  - Smoke fixtures reused the full SHERA testbed config (256×256 PSFs, oversample=3, n_lambda=3), so every Binder/model/Hessian compile ran on the largest grid.
+  - Gradient-descent smokes kept 20 steps even though they only assert loss decrease.
+  - Several slow tests rebuilt the high-res config independently instead of reusing the shared session fixture.
+- Changes applied:
+  - Standardized `shera_smoke_cfg` to a lighter-weight SHERA test config (pupil_npix=128, psf_npix=128, oversample=2, n_lambda=2) to keep shapes canonical but cheaper for smokes. Inference fixtures now reuse this for Binder/model/data construction.
+  - Swapped the slowest direct-constant tests to the shared fixture (`test_make_binder_nll_fn.py`, `test_noiseless_truth_stationary.py`, `test_model_builder.py`, `test_binder_smoke.py`, `test_system_graph.py`) to avoid rebuilding the high-res config and to align shapes for JAX cache hits.
+  - Trimmed GD smoke loops from 20→10 steps in `test_inference_api.py` and `test_image_nll_bridge.py`; assertions still require the loss to decrease and the estimate to move toward the truth.
+- After (post-changes): 122.58s wall-clock (113 passed, 1 skipped).
+  - Top offenders now:
+    1. `tests/inference/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke` — 17.93s call
+    2. `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` — 12.53s call
+    3. `tests/inference/test_fim_theta.py::test_fim_theta_shera_wrapper_consistency` — 9.47s call
+    4. `tests/inference/test_image_nll_bridge.py::test_run_image_gd_separation_smoke` — 8.10s call
+    5. `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` — 7.40s call
+    6. `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` — 6.99s call
+    7. `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` — 6.78s setup
+    8. `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` — 6.61s call
+    9. `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_demo_runs` — 4.60s call
+    10. `tests/inference/test_noiseless_truth_stationary.py::test_noiseless_truth_is_stationary_for_gaussian_nll` — 4.40s call
+- Ongoing policy for fast tests:
+  - Prefer the shared `shera_smoke_cfg` and companion fixtures for SHERA smoke coverage; avoid re-instantiating the full-resolution testbed config unless specifically validating high-res numerics (mark those tests `slow`).
+  - Keep smoke GD loops short (≈10 steps) and assert directional improvement (loss decreases, estimate moves toward truth) instead of relying on long optimizer runs.
+  - Align inference/Binder tests on the canonical small shapes to encourage JAX cache hits; when shape variation is required, mark it `slow` and document why.
 
 ## Repeated expensive setups
 - SHERA synthetic data generation (`SHERA_TESTBED_CONFIG` + `ParameterStore` + Binder/model `.model()`): repeated in `tests/inference/test_inference_api.py`, `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_loss_canonical.py`, `tests/inference/test_fim_theta.py`, and parts of `tests/optics/test_system_graph.py`. Each re-JITs the same Binder/model build and produces fresh PSFs.
