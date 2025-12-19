@@ -11,6 +11,6 @@ dLuxShera provides a Fresnel-based optical model and inference stack for Shera/T
 - **Outputs:** inspect recovered parameters, images, and diagnostics via the plotting utilities.
 
 ## Choose your path
-- **Canonical three-plane demo:** Start with `examples/scripts/run_canonical_astrometry_demo.py` and the walkthrough in [docs/tutorials/canonical_astrometry_demo.md](tutorials/canonical_astrometry_demo.md). This exercises the full V1.0 stack on a Shera-like three-plane system.
+- **Canonical three-plane demo:** Start with `examples/scripts/run_canonical_astrometry_demo.py` and the walkthrough in [docs/tutorials/canonical_astrometry_demo.md](canonical_astrometry_demo.md). This exercises the full V1.0 stack on a Shera-like three-plane system.
 - **Canonical two-plane demo (coming soon):** A lighter-weight two-plane variant will mirror the same flow on a simpler optical path while keeping the Binder/SystemGraph, loss, and optimisation pieces identical.
 - **Dig deeper:** See the architecture notes in [docs/architecture/](architecture/) for details on parameter specs/stores, binder/system graph execution, inference helpers, and eigenmodes.
