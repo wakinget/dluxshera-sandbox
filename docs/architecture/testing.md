@@ -10,39 +10,39 @@ This page is the source of truth for how the test suite is organized, what it ex
 ## Current inventory (grouped by subject)
 
 ### Binder construction and accessors
-- `tests/test_binder_smoke.py`: three- and two-plane Binder smoke tests.
-- `tests/test_binder_shared_behaviour.py`: overlay/merge semantics, cfg/store passthrough.
-- `tests/test_binder_namespace.py`: namespace accessors and validation.
-- `tests/test_binder_leaf_access.py`, `tests/test_binder_leaf_index.py`: leaf-path access, indexing helpers, and param path retrieval.
-- `tests/test_binder_dir.py`: testing new `__dir__` for tab completion
-- `tests/test_binder_diagnostics.py`: diagnostics output structure.
+- `tests/binder/test_binder_smoke.py`: three- and two-plane Binder smoke tests.
+- `tests/binder/test_binder_shared_behaviour.py`: overlay/merge semantics, cfg/store passthrough.
+- `tests/binder/test_binder_namespace.py`: namespace accessors and validation.
+- `tests/binder/test_binder_leaf_access.py`, `tests/binder/test_binder_leaf_index.py`: leaf-path access, indexing helpers, and param path retrieval.
+- `tests/binder/test_binder_dir.py`: testing new `__dir__` for tab completion.
+- `tests/binder/test_binder_diagnostics.py`: diagnostics output structure.
 
 ### Parameters, packing, and store mechanics
-- `tests/test_params_spec.py`, `tests/test_params_packing.py`: `ParamSpec` operations, pack/unpack round-trips and validation.
-- `tests/test_params_store.py`, `tests/test_params_transforms.py`, `tests/test_store_namespace.py`: `ParameterStore` CRUD, transforms, and namespaced views.
-- `tests/test_params_packing.py`, `tests/test_params_store.py`: error handling for missing keys, size mismatches, and inference subset shape validation.
-- `tests/test_prior_spec.py`, `tests/test_refresh_derived_workflow.py`: prior spec definitions, derived value refresh workflow.
-- `tests/helpers.py`: helper routines used across inference-heavy tests for building forward and inference stores.
+- `tests/params/test_params_spec.py`, `tests/params/test_params_packing.py`: `ParamSpec` operations, pack/unpack round-trips and validation.
+- `tests/params/test_params_store.py`, `tests/params/test_params_transforms.py`, `tests/params/test_store_namespace.py`: `ParameterStore` CRUD, transforms, and namespaced views.
+- `tests/params/test_params_packing.py`, `tests/params/test_params_store.py`: error handling for missing keys, size mismatches, and inference subset shape validation.
+- `tests/params/test_prior_spec.py`, `tests/params/test_refresh_derived_workflow.py`: prior spec definitions, derived value refresh workflow.
+- Shared helpers live in `tests/conftest.py` (moved from `tests/helpers.py`) for forward/inference store construction.
 
 ### Optics, modeling, and graph
-- `tests/test_optics_config.py`, `tests/test_optics_builder.py`: optics configuration defaults, builder caching/miss/hit behavior.
-- `tests/test_model_builder.py`, `tests/test_modeling_components.py`: model construction smoke tests and component bundle validation.
-- `tests/graph/test_system_graph.py`: system graph outputs vs. Binder parity and output mapping behavior.
-- `tests/test_shera_threeplane_transforms.py`, `tests/test_shera_twoplane_spec.py`: system-specific transform/spec wiring.
-- `tests/test_universe_builder.py`: Alpha Cen source construction round-trip.
+- `tests/optics/test_optics_config.py`, `tests/optics/test_optics_builder.py`: optics configuration defaults, builder caching/miss/hit behavior.
+- `tests/model/test_model_builder.py`, `tests/model/test_modeling_components.py`: model construction smoke tests and component bundle validation.
+- `tests/optics/test_system_graph.py`: system graph outputs vs. Binder parity and output mapping behavior.
+- `tests/optics/test_shera_threeplane_transforms.py`, `tests/optics/test_shera_twoplane_spec.py`: system-specific transform/spec wiring.
+- `tests/model/test_universe_builder.py`: Alpha Cen source construction round-trip.
 
 ### Inference, losses, and optimization
-- `tests/test_image_nll_bridge.py`, `tests/test_loss_canonical.py`, `tests/test_fim_theta.py`, `tests/test_inference_api.py`: end-to-end image NLL/FIM/gradient-descent smokes on SHERA configs.
-- `tests/test_run_eigen_gd.py`, `tests/test_run_simple_gd.py`, `tests/test_eigen_theta_map.py`: Eigenmode helpers, simple GD loops, and eigen map correctness.
-- `tests/test_losses.py`, `tests/test_inference_helpers.py`, `tests/test_inference/test_make_binder_nll_fn.py`, `tests/test_inference/test_noiseless_truth_stationary.py`: loss helpers, inference spec validation, binder NLL construction, and stationary noise checks.
+- `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_loss_canonical.py`, `tests/inference/test_fim_theta.py`, `tests/inference/test_inference_api.py`: end-to-end image NLL/FIM/gradient-descent smokes on SHERA configs.
+- `tests/inference/test_run_eigen_gd.py`, `tests/inference/test_run_simple_gd.py`, `tests/inference/test_eigen_theta_map.py`: Eigenmode helpers, simple GD loops, and eigen map correctness.
+- `tests/inference/test_losses.py`, `tests/inference/test_inference_helpers.py`, `tests/inference/test_make_binder_nll_fn.py`, `tests/inference/test_noiseless_truth_stationary.py`: loss helpers, inference spec validation, binder NLL construction, and stationary noise checks.
 
 ### Demos, plotting, and misc
-- `tests/test_demo_canonical_astrometry.py`, `tests/test_twoplane_astrometry_demo.py`: demo scripts run in `fast` mode and assert outputs/plots.
-- `tests/test_plotting.py`: plotting utilities including grid layout, PSF comparisons, and parameter history plots.
-- `tests/test_generate_context_snapshot.py`: devtools context snapshot generation.
-- `tests/test_imports.py`: package import smoke test.
+- `tests/demos/test_demo_canonical_astrometry.py`, `tests/demos/test_twoplane_astrometry_demo.py`: demo scripts run in `fast` mode and assert outputs/plots.
+- `tests/plotting/test_plotting.py`: plotting utilities including grid layout, PSF comparisons, and parameter history plots.
+- `tests/devtools/test_generate_context_snapshot.py`: devtools context snapshot generation.
+- `tests/devtools/test_imports.py`: package import smoke test.
 
-## Proposed `tests/` taxonomy
+## `tests/` taxonomy
 - `tests/binder/`: Binder behavior, namespaces, diagnostics (`test_binder_*` files).
 - `tests/params/`: specs, packing/unpacking, stores, transforms, priors, derived refresh.
 - `tests/optics/`: optics config, builders, transforms, system graphs.
@@ -51,7 +51,18 @@ This page is the source of truth for how the test suite is organized, what it ex
 - `tests/demos/`: demo script fast-mode checks.
 - `tests/plotting/`: plotting utility coverage.
 - `tests/devtools/`: context snapshot and other tooling smokes.
-- Shared fixtures: promote `tests/helpers.py` (and any future inference fixtures) to `tests/conftest.py` for reuse across inference-heavy files.
+- Shared fixtures/helpers: `tests/conftest.py` centralizes the forward/inference store builders previously in `tests/helpers.py`.
+
+### Path moves applied in Task 2
+- `tests/test_binder_*.py` → `tests/binder/`
+- `tests/test_params_*.py`, `tests/test_prior_spec.py`, `tests/test_refresh_derived_workflow.py`, `tests/test_store_namespace.py` → `tests/params/`
+- `tests/test_optics_*.py`, `tests/test_shera_threeplane_transforms.py`, `tests/test_shera_twoplane_spec.py`, `tests/graph/test_system_graph.py` → `tests/optics/`
+- `tests/test_model_builder.py`, `tests/test_modeling_components.py`, `tests/test_universe_builder.py` → `tests/model/`
+- `tests/test_image_nll_bridge.py`, `tests/test_loss_canonical.py`, `tests/test_losses.py`, `tests/test_fim_theta.py`, `tests/test_inference_api.py`, `tests/test_run_eigen_gd.py`, `tests/test_run_simple_gd.py`, `tests/test_eigen_theta_map.py`, `tests/test_inference/*.py` → `tests/inference/`
+- `tests/test_demo_canonical_astrometry.py`, `tests/test_twoplane_astrometry_demo.py` → `tests/demos/`
+- `tests/test_plotting.py` → `tests/plotting/`
+- `tests/test_generate_context_snapshot.py`, `tests/test_imports.py` → `tests/devtools/`
+- `tests/helpers.py` → `tests/conftest.py` (import sites updated); path calculations in `tests/binder/test_binder_diagnostics.py` and `tests/demos/test_twoplane_astrometry_demo.py` now anchor to the repository root from their new locations.
 
 ## Runtime hotspots (top 25)
 

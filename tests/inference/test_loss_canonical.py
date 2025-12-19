@@ -13,7 +13,7 @@ from dluxshera.inference.optimization import (
     make_binder_image_nll_fn,
     loss_canonical,
 )
-from .helpers import make_forward_store
+from tests.conftest import make_forward_store
 
 
 def _make_minimal_inference_setup(cfg: SheraThreePlaneConfig):

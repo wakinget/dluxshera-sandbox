@@ -5,7 +5,7 @@ import jax.numpy as np
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
 from dluxshera.core.builder import build_shera_threeplane_model
 from dluxshera.inference.optimization import make_image_nll_fn, run_image_gd
-from .helpers import inference_store_from_forward, make_forward_store
+from tests.conftest import inference_store_from_forward, make_forward_store
 
 
 def _make_store_for_smoke(cfg):
