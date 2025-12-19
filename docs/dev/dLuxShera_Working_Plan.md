@@ -755,3 +755,7 @@ This roadmap gives us a structured, navigable documentation ecosystem: a concept
 
 ---
 - Task 1A completed: binder.get implemented and tests added.
+- Task 2B completed: binder leaf-name raising now occurs only when the leaf is
+  unique across store keys; ambiguous leaves raise an AttributeError listing
+  candidate full keys and suggest using the fully qualified form (no unexpected
+  ambiguous leaves beyond the primary/secondary Zernike coefficients).
