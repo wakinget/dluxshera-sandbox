@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence, Optional, Dict, Any, Tuple
 
 import jax
@@ -49,6 +50,10 @@ def run_shera_image_gd_basic(
     noise_model: NoiseModel = "gaussian",
     learning_rate: float = 1e-2,
     num_steps: int = 50,
+    run_dir: Optional[str | Path] = None,
+    runs_dir: Optional[str | Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
 ) -> Tuple[jnp.ndarray, ParameterStore, Dict[str, jnp.ndarray]]:
     """
     Convenience front-end for running image-based gradient descent
@@ -124,6 +129,10 @@ def run_shera_image_gd_basic(
         noise_model=noise_model,
         learning_rate=effective_lr,
         num_steps=num_steps,
+        run_dir=run_dir,
+        runs_dir=runs_dir,
+        run_id=run_id,
+        save_checkpoints=save_checkpoints,
     )
 
     loss_start = float(history["loss"][0])
@@ -144,6 +153,10 @@ def run_shera_image_gd_basic(
             noise_model=noise_model,
             learning_rate=effective_lr * 0.5,
             num_steps=num_steps,
+            run_dir=run_dir,
+            runs_dir=runs_dir,
+            run_id=run_id,
+            save_checkpoints=save_checkpoints,
         )
     else:
         theta_final, store_final, history = run_image_gd(
@@ -156,6 +169,10 @@ def run_shera_image_gd_basic(
             noise_model=noise_model,
             learning_rate=effective_lr * 0.5,
             num_steps=num_steps,
+            run_dir=run_dir,
+            runs_dir=runs_dir,
+            run_id=run_id,
+            save_checkpoints=save_checkpoints,
         )
 
     loss_fn, theta0 = make_binder_image_nll_fn(
@@ -468,5 +485,4 @@ def SheraThreePlane_NumpyroModel(data, model):
         poisson_model = dist.Poisson(
             model.set(parameters, values).model().flatten())
         return npy.sample("psf", poisson_model, obs=data.flatten())
-
 

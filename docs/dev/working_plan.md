@@ -508,15 +508,15 @@ Status: implemented; historical context
 
 ### 26.1 Current state (survey)
 
-- **Optimization + packing surfaces:** θ-space loops live in `src/dluxshera/inference/optimization.py` (e.g., `run_simple_gd`, binder-aware `run_image_gd`, and Fisher helpers). Packing/unpacking utilities live in `src/dluxshera/params/packing.py`; binder NLL builders and theta mapping hooks are in `src/dluxshera/inference/losses.py` and `src/dluxshera/inference/inference.py`. IndexMap export is not implemented yet; packing order is implicit in `ParamSpec.subset(...)`.
+- **Optimization + packing surfaces:** θ-space loops live in `src/dluxshera/inference/optimization.py` (e.g., `run_simple_gd`, binder-aware `run_image_gd`, and Fisher helpers). Packing/unpacking utilities live in `src/dluxshera/params/packing.py`; binder NLL builders and theta mapping hooks are in `src/dluxshera/inference/losses.py` and `src/dluxshera/inference/inference.py`. IndexMap export exists via `run_artifacts.build_index_map(...)`; packing order is aligned with `ParamSpec.subset(...)`.
 - **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/registry.py`; Shera-specific transforms (plate scale, log flux) are in `src/dluxshera/params/shera_threeplane_transforms.py`. There is currently no `raw_fluxes` transform registered.
 - **Plotting:** Refactor-era plotting helpers (PSF and parameter histories) are in `src/dluxshera/plot/plotting.py` with headless-friendly IO (return fig/axes, optional `save_path`). There are no signal builders or panel recipes yet.
-- **Scripts/demos:** Canonical/binder-based runs are in `examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, and `work/scratch/refactored_astrometry_retrieval.py` but currently do not emit run artifacts.
-- **Docs:** Strategy and schema for artifacts/signals/preconditioning live in `docs/architecture/optimization_artifacts_and_plotting.md` (source of truth). Working plan now tracks phased implementation here; no run_artifacts module exists yet.
+- **Scripts/demos:** Canonical/binder-based runs are in `examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, and `work/scratch/refactored_astrometry_retrieval.py`; artifact writing is opt-in and disabled by default.
+- **Docs:** Strategy and schema for artifacts/signals/preconditioning live in `docs/architecture/optimization_artifacts_and_plotting.md` (source of truth). Working plan now tracks phased implementation here; `src/dluxshera/inference/run_artifacts.py` and regression tests cover the core I/O scaffold.
 
 ### 26.2 Phased plan (aligned to architecture doc and decisions)
 
-**Phase A — Run artifact I/O scaffold (module only)**
+**Phase A — Run artifact I/O scaffold (module only) — DONE**
 - Deliverables:
   - Add `src/dluxshera/inference/run_artifacts.py` with functions-first API: `save_run(run_dir, trace, meta, summary, *, signals=None, grads=None, curvature=None, precond=None, checkpoints=None, diag_steps=None)` plus `load_trace`, `load_meta`, `load_summary`, `load_checkpoint(which="best"|"final")`.
   - Helper to build and serialize an IndexMap (ordered entries of `name/start/stop/shape/block`) from a `ParamSpec` subset and reference store/θ for shape validation; store it only in `meta.json`.
@@ -534,7 +534,7 @@ Status: implemented; historical context
 - Dependencies:
   - Uses existing packing utilities for IndexMap; no optimizer changes yet.
 
-**Phase B — Integrate artifact writing into optimization loops**
+**Phase B — Integrate artifact writing into optimization loops — IN PROGRESS**
 - Deliverables:
   - Wrap `run_simple_gd` (and binder helpers `run_image_gd`, `run_shera_image_gd*`, `run_binder_image_nll_fn` flows) with optional artifact emission: create `runs/<run_id>/`, write `trace/meta/summary` at end-of-run, and support opt-in checkpoints (`checkpoint_best.npz`, `checkpoint_final.npz`).
   - Record optimizer/binder/spec identifiers and IndexMap in `meta.json`; keep trace minimal (`loss`, `theta`, optional `grad_norm/step_norm/base_lr/accepted`).

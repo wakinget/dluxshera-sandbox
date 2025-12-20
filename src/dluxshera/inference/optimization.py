@@ -5,6 +5,8 @@ import jax
 import jax.numpy as np
 import jax.scipy.stats as jstats
 import numpy as onp
+from datetime import datetime, timezone
+from pathlib import Path
 from jax import config, grad, linearize, jit, lax
 import dLux as dl
 import dLux.layers as dll
@@ -15,11 +17,12 @@ import zodiax as zdx
 import numpyro.distributions as dist
 import math
 import json
-from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any
+from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .losses import gaussian_image_nll
+from .run_artifacts import save_run, build_index_map
 
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..params.spec import ParamSpec, ParamKey
@@ -604,6 +607,24 @@ def loss_canonical(
     return loss_fn(theta)
 
 
+def _resolve_run_dir(
+    run_dir: Optional[str | Path],
+    runs_dir: Optional[str | Path],
+    run_id: Optional[str],
+) -> tuple[Path, str]:
+    if run_dir is not None:
+        resolved = Path(run_dir)
+        resolved_run_id = run_id or resolved.name
+        return resolved, resolved_run_id
+
+    if runs_dir is None:
+        raise ValueError("Either run_dir or runs_dir must be provided when enabling artifacts.")
+
+    resolved_run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    resolved = Path(runs_dir) / resolved_run_id
+    return resolved, resolved_run_id
+
+
 def run_simple_gd(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
@@ -611,6 +632,13 @@ def run_simple_gd(
     learning_rate: float = 1e-2,
     num_steps: int = 100,
     optimizer: Optional[optax.GradientTransformation] = None,
+    run_dir: Optional[str | Path] = None,
+    runs_dir: Optional[str | Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
+    artifact_meta: Optional[Mapping[str, Any]] = None,
+    artifact_summary: Optional[Mapping[str, Any]] = None,
+    artifact_theta_space: Optional[str] = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
     Minimal gradient-descent loop over a packed parameter vector θ.
@@ -630,6 +658,18 @@ def run_simple_gd(
         Number of gradient steps to take.
     optimizer :
         Optional optax optimizer. If None, `optax.adam(learning_rate)` is used.
+    run_dir / runs_dir / run_id :
+        Optional run directory configuration. If provided, run artifacts
+        (trace/meta/summary, and optional checkpoints) are saved via
+        `save_run(...)`. Default is disabled.
+    save_checkpoints :
+        Whether to emit best/final checkpoints.
+    artifact_meta / artifact_summary :
+        Optional mappings merged into the auto-generated meta/summary payloads
+        when artifacts are enabled.
+    artifact_theta_space :
+        Optional label for the θ space recorded in meta (e.g., "primitive" or
+        "eigen"). Defaults to "primitive".
 
     Returns
     -------
@@ -651,17 +691,109 @@ def run_simple_gd(
         loss, g = jax.value_and_grad(loss_fn)(theta)
         updates, opt_state = optimizer.update(g, opt_state, theta)
         theta = optax.apply_updates(theta, updates)
-        return theta, opt_state, loss
+        grad_norm = np.linalg.norm(g)
+        step_norm = np.linalg.norm(updates)
+        return theta, opt_state, loss, grad_norm, step_norm
 
     losses = []
     theta_history = []
+    grad_norms = []
+    step_norms = []
 
     for _ in range(num_steps):
-        theta, opt_state, loss = _step(theta, opt_state)
+        theta, opt_state, loss, grad_norm, step_norm = _step(theta, opt_state)
         losses.append(loss)
         theta_history.append(theta)
+        grad_norms.append(grad_norm)
+        step_norms.append(step_norm)
 
     history = {"loss": np.stack(losses), "theta": np.stack(theta_history)}
+
+    artifacts_enabled = run_dir is not None or runs_dir is not None
+    if artifacts_enabled:
+        resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        trace: Dict[str, np.ndarray] = {
+            "loss": history["loss"],
+            "theta": history["theta"],
+        }
+        if grad_norms:
+            trace["grad_norm"] = np.stack(grad_norms)
+        if step_norms:
+            trace["step_norm"] = np.stack(step_norms)
+        trace["base_lr"] = np.full((num_steps,), learning_rate)
+
+        loss_array = onp.asarray(trace["loss"])
+        loss_init = float(loss_array[0]) if loss_array.size else None
+        loss_final = float(loss_array[-1]) if loss_array.size else None
+        best_idx = int(onp.nanargmin(loss_array)) if loss_array.size else None
+        loss_best = float(loss_array[best_idx]) if best_idx is not None else None
+
+        base_meta = {
+            "artifact_schema": "dluxshera-run-v0",
+            "run_id": resolved_run_id,
+            "created_at": created_at,
+            "theta": {
+                "dim": int(theta.size),
+                "theta_space": artifact_theta_space or "primitive",
+            },
+            "optimizer": {
+                "name": getattr(optimizer, "__class__", type("opt", (), {})).__name__,
+                "num_steps": num_steps,
+                "base_lr": learning_rate,
+            },
+        }
+
+        if artifact_meta:
+            for key, value in artifact_meta.items():
+                if key == "theta" and isinstance(value, Mapping):
+                    base_meta.setdefault("theta", {}).update(value)
+                else:
+                    base_meta[key] = value
+
+        base_summary = {
+            "status": "ok",
+            "run_id": resolved_run_id,
+            "created_at": created_at,
+            "num_steps_completed": int(loss_array.size),
+            "loss_init": loss_init,
+            "loss_final": loss_final,
+            "loss_best": loss_best,
+            "best_step": best_idx,
+            "has_checkpoint_best": bool(save_checkpoints),
+            "has_checkpoint_final": bool(save_checkpoints),
+            "has_signals": False,
+            "has_precond": False,
+            "has_curvature": False,
+        }
+
+        if artifact_summary:
+            base_summary.update(artifact_summary)
+
+        checkpoints = None
+        if save_checkpoints and best_idx is not None:
+            checkpoints = {
+                "best": {
+                    "theta": trace["theta"][best_idx],
+                    "best_step": best_idx,
+                    "best_loss": loss_best,
+                },
+                "final": {
+                    "theta": trace["theta"][-1],
+                    "final_step": int(loss_array.size - 1),
+                    "final_loss": loss_final,
+                },
+            }
+
+        save_run(
+            resolved_run_dir,
+            trace=trace,
+            meta=base_meta,
+            summary=base_summary,
+            checkpoints=checkpoints,
+        )
+
     return theta, history
 
 
@@ -676,6 +808,10 @@ def run_image_gd(
     noise_model: NoiseModel = "gaussian",
     learning_rate: float = 1e-2,
     num_steps: int = 50,
+    run_dir: Optional[str | Path] = None,
+    runs_dir: Optional[str | Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
 ):
     """
     Run gradient descent in θ-space for image-based NLL using the Shera model.
@@ -694,16 +830,40 @@ def run_image_gd(
         reduce="sum",
     )
 
+    artifacts_enabled = run_dir is not None or runs_dir is not None
+    sub_spec = forward_spec.subset(infer_keys)
+    artifact_meta = None
+    if artifacts_enabled:
+        index_map = build_index_map(sub_spec, store_init, theta=theta0)
+        artifact_meta = {
+            "theta": {
+                "theta_space": "primitive",
+                "index_map": index_map,
+            },
+            "objective": {
+                "name": "binder_image_nll",
+                "noise_model": noise_model,
+            },
+            "spec": {
+                "infer_keys": tuple(infer_keys),
+            },
+        }
+
     # Simple θ-space GD
     theta_final, history = run_simple_gd(
         loss_theta,
         theta0,
         learning_rate=learning_rate,
         num_steps=num_steps,
+        run_dir=run_dir,
+        runs_dir=runs_dir,
+        run_id=run_id,
+        save_checkpoints=save_checkpoints,
+        artifact_meta=artifact_meta,
+        artifact_theta_space="primitive",
     )
 
     # Map final θ back into a ParameterStore
-    sub_spec = forward_spec.subset(infer_keys)
     store_final = store_unpack_params(sub_spec, theta_final, store_init)
 
     return theta_final, store_final, history
@@ -2064,4 +2224,3 @@ def build_basis(eigvecs, eigvals, truncate=None, whiten=False):
         scales = 1.0 / np.sqrt(eigvals[:k] + 1e-12)
         V = V @ np.diag(scales)
     return V
-
