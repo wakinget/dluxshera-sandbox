@@ -141,6 +141,9 @@ This project standardizes a small, stable set of run artifacts to support refact
       curvature.npz
       precond.npz
 
+**Implementation note:** The Phase A I/O scaffold for this layout lives in
+`dluxshera.inference.run_artifacts` (see `save_run` and helpers).
+
 ### `trace.npz` (always saved)
 
 **Required**
