@@ -573,7 +573,7 @@ Key principle: **Trace is minimal and generic**, while `meta.json` contains the 
 
 The primary interface is a small set of functions (not a mandatory new class):
 
-- `save_run(run_dir, trace, meta, summary, *, signals=None, precond=None, curvature=None, checkpoint_best=None, checkpoint_final=None, diag_steps=None, grads=None)`
+- `save_run(run_dir, trace, meta, summary, *, signals=None, grads=None, curvature=None, precond=None, checkpoints=None, diag_steps=None)`
 - `load_trace(run_dir)` → returns trace arrays (at minimum `theta`, `loss`)
 - `load_meta(run_dir)` / `load_summary(run_dir)`
 - `load_checkpoint(run_dir, which="best"|"final")` → returns checkpoint payload (`theta`, `step`, `loss`, etc.)

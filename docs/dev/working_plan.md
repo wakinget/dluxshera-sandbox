@@ -199,10 +199,10 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ ThreePlaneBuilder structural hash + cache/clear helper.  
 - ✅ Binder-first loss wiring (Binder NLL helpers using `gaussian_image_nll`), binder/SystemGraph parity, and binder namespace UX (Task 1A–1E).  
 - ✅ SystemGraph single-node scaffold owned by binders.  
-- ✅ Binder NLL stationary-point regression landed; follow-on scenarios pending (multi-wavelength/multi-PSF).
+- ✅ Binder NLL stationary-point regression landed; follow-on scenarios pending (multi-wavelength/multi-PSF).  
 
 **P0 — Current focus**  
-- ⚠️ **Optimization artifacts & logging**: Implement the run-directory layout from `docs/architecture/optimization_artifacts_and_plotting.md` (e.g., `trace.npz`, `meta.json`, `summary.json`, optional diagnostics), and wire binder-based scripts (`examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, `work/scratch/refactored_astrometry_retrieval.py`) into the trace/artifacts pipeline and plotting helpers.  
+- ✅ **Optimization artifacts & logging**: Phase A scaffold (`run_artifacts.py`) is in place and Phase B wiring now emits required artifacts from `run_simple_gd` and binder-backed `run_image_gd` when opt-in flags are provided. Integration smoke tests cover end-to-end writes and metadata (trace/meta/summary + optional checkpoints).  
 - ⏳ **Optimizer control (learning-rate shaping)**: Extend `run_simple_gd` (or successor) with per-parameter/block learning rates derived from FIM/curvature estimates; ensure compatibility with the logging/artifacts pipeline above.  
 - ⚠️ **Loss regression hardening**: Keep the landed Binder NLL stationary-point regression; add coverage for multi-wavelength / multi-PSF scenarios as new demos land and surface any remaining edge cases.
 
@@ -534,25 +534,25 @@ Status: implemented; historical context
 - Dependencies:
   - Uses existing packing utilities for IndexMap; no optimizer changes yet.
 
-**Phase B — Integrate artifact writing into optimization loops — IN PROGRESS**
+**Phase B — Integrate artifact writing into optimization loops — DONE**
 - Deliverables:
-  - Wrap `run_simple_gd` (and binder helpers `run_image_gd`, `run_shera_image_gd*`, `run_binder_image_nll_fn` flows) with optional artifact emission: create `runs/<run_id>/`, write `trace/meta/summary` at end-of-run, and support opt-in checkpoints (`checkpoint_best.npz`, `checkpoint_final.npz`).
-  - Record optimizer/binder/spec identifiers and IndexMap in `meta.json`; keep trace minimal (`loss`, `theta`, optional `grad_norm/step_norm/base_lr/accepted`).
-  - CLI/demo wiring: add flags/kwargs to canonical + two-plane demos and `work/scratch/refactored_astrometry_retrieval.py` to enable artifact writing without changing default smoke speed.
+  - ✅ Wrap `run_simple_gd` (and binder helpers such as `run_image_gd`) with optional artifact emission: create `runs/<run_id>/`, write `trace/meta/summary` at end-of-run, and support opt-in checkpoints (`checkpoint_best.npz`, `checkpoint_final.npz`).
+  - ✅ Record optimizer/binder/spec identifiers and IndexMap in `meta.json`; keep trace minimal (`loss`, `theta`, optional `grad_norm/step_norm/base_lr/accepted`).
+  - ✅ CLI/demo wiring: opt-in kwargs for canonical/two-plane demos and `work/scratch/refactored_astrometry_retrieval.py` allow artifact writing without slowing default runs.
 - Acceptance criteria:
-  - Tiny smoke optimization produces a run directory with required artifacts and no gradients by default; checkpoints saved when enabled and shapes align with θ.
-  - Summary includes minimal scalars (final loss, step count, elapsed time if available).
-  - Legacy behaviours preserved when artifact writing is disabled.
+  - ✅ Tiny smoke optimization produces a run directory with required artifacts and no gradients by default; checkpoints saved when enabled and shapes align with θ.
+  - ✅ Summary includes minimal scalars (final loss, step count, elapsed time if available).
+  - ✅ Legacy behaviours preserved when artifact writing is disabled.
 - Tests to add/run:
-  - New smoke test (e.g., `tests/inference/test_run_artifacts_integration.py`) running a few GD steps on a quadratic or tiny binder loss and asserting required files/keys exist.
+  - ✅ `tests/inference/test_run_artifacts_integration.py` covers quadratic and binder-backed smoke runs, asserting required files/keys exist.
   - Command: `PYTHONPATH=src pytest tests/inference/test_run_artifacts_integration.py -q`.
 - Docs/touchpoints:
-  - Update `examples/README.md` and relevant doc strings with the new artifact flags.
-  - Add brief notes in `docs/architecture/optimization_artifacts_and_plotting.md` referencing the integration points.
+  - ✅ `docs/architecture/optimization_artifacts_and_plotting.md` references the integration points and schema.
 - Dependencies:
   - Requires Phase A helpers; IndexMap generation must be wired via packing/infer_keys used by the optimizer.
 
 **Phase C — Signals builders + panel recipes (plotting integration)**
+Now that artifact emission (Phase B) is wired, this phase focuses on decoding traces into signals and lightweight plotting/recipes.
 - Deliverables:
   - Add `src/dluxshera/inference/signals.py` (or similar) to build derived time-series signals from trace + decoder/binder + optional truth: x/y astrometry residuals (µas), separation residual (µas), plate-scale error (ppm), raw flux error ppm (requires new transform for `binary.raw_fluxes` via TransformRegistry), zernike residuals (nm) with RMS summarizer.
   - Define lightweight panel/recipe helpers (could live alongside plotting) to group x/y, flux A/B, and summary overlays; keep plotting core generic.
