@@ -34,10 +34,15 @@ def test_binder_introspection_snapshot(capsys):
     base_store = binder.base_forward_store
 
     dataclass_params = getattr(type(binder), "__dataclass_params__", None)
+    dataclass_slots = getattr(dataclass_params, "slots", None)
+    if dataclass_slots is None:
+        # __dataclass_params__ is undocumented and may not track newer flags (slots, etc.)
+        dataclass_slots = hasattr(type(binder), "__slots__")
+
     diagnostics = {
         "is_dataclass": dataclasses.is_dataclass(binder),
         "dataclass_frozen": getattr(dataclass_params, "frozen", None),
-        "dataclass_slots": getattr(dataclass_params, "slots", None),
+        "dataclass_slots": bool(dataclass_slots),
         "has_slots_attr": hasattr(type(binder), "__slots__"),
         "is_eqx_module": _check_instance_of("equinox", "Module", binder),
         "is_zdx_base": _check_instance_of("zodiax", "Base", binder),
