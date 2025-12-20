@@ -503,3 +503,106 @@ Status: implemented; historical context
 - Ergonomic shims (`ModelParams`) and deprecation strategy for legacy APIs.
 - High-level model design / capabilities documentation describing what the Shera-style model does (optical/astrometric forward model, main outputs, supported questions) and its key assumptions/approximations, written for proposal and systems-engineering consumers rather than just implementers.
 - Model–error-budget interface and parameter dependency mapping: lightweight docs/figures that show how model outputs and sensitivities map onto specific error-budget terms, and how primitives vs. derived parameters (ParamSpec → Store → transforms) relate to those terms for traceability.
+
+## 26) Implementation Plan — Optimization Artifacts + Signals + I/O (v0)
+
+### 26.1 Current state (survey)
+
+- **Optimization + packing surfaces:** θ-space loops live in `src/dluxshera/inference/optimization.py` (e.g., `run_simple_gd`, binder-aware `run_image_gd`, and Fisher helpers). Packing/unpacking utilities live in `src/dluxshera/params/packing.py`; binder NLL builders and theta mapping hooks are in `src/dluxshera/inference/losses.py` and `src/dluxshera/inference/inference.py`. IndexMap export is not implemented yet; packing order is implicit in `ParamSpec.subset(...)`.
+- **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/registry.py`; Shera-specific transforms (plate scale, log flux) are in `src/dluxshera/params/shera_threeplane_transforms.py`. There is currently no `raw_fluxes` transform registered.
+- **Plotting:** Refactor-era plotting helpers (PSF and parameter histories) are in `src/dluxshera/plot/plotting.py` with headless-friendly IO (return fig/axes, optional `save_path`). There are no signal builders or panel recipes yet.
+- **Scripts/demos:** Canonical/binder-based runs are in `examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, and `work/scratch/refactored_astrometry_retrieval.py` but currently do not emit run artifacts.
+- **Docs:** Strategy and schema for artifacts/signals/preconditioning live in `docs/architecture/optimization_artifacts_and_plotting.md` (source of truth). Working plan now tracks phased implementation here; no run_artifacts module exists yet.
+
+### 26.2 Phased plan (aligned to architecture doc and decisions)
+
+**Phase A — Run artifact I/O scaffold (module only)**
+- Deliverables:
+  - Add `src/dluxshera/inference/run_artifacts.py` with functions-first API: `save_run(run_dir, trace, meta, summary, *, signals=None, grads=None, curvature=None, precond=None, checkpoints=None, diag_steps=None)` plus `load_trace`, `load_meta`, `load_summary`, `load_checkpoint(which="best"|"final")`.
+  - Helper to build and serialize an IndexMap (ordered entries of `name/start/stop/shape/block`) from a `ParamSpec` subset and reference store/θ for shape validation; store it only in `meta.json`.
+  - Enforce required artifact layout (always write `trace.npz`, `meta.json`, `summary.json`), keep gradients off by default, and allow optional artifacts (signals, diag_steps.jsonl, grads.npz, curvature.npz, precond.npz, checkpoints).
+- Acceptance criteria:
+  - Round-trip save/load for trace/meta/summary works on synthetic data; IndexMap slices align with provided θ dimensionality; optional artifacts are skipped cleanly when not provided.
+  - `signals.npz` remains self-contained (no sidecar metadata) and optional.
+  - No gradient history is emitted unless explicitly passed.
+- Tests to add/run:
+  - New fast unit test (e.g., `tests/inference/test_run_artifacts_io.py`) covering save/load round-trip, IndexMap validation, and optional artifact skipping.
+  - Command: `PYTHONPATH=src pytest tests/inference/test_run_artifacts_io.py -q`.
+- Docs/touchpoints:
+  - Link `docs/architecture/optimization_artifacts_and_plotting.md` to the new module/API.
+  - Update this working plan status after landing.
+- Dependencies:
+  - Uses existing packing utilities for IndexMap; no optimizer changes yet.
+
+**Phase B — Integrate artifact writing into optimization loops**
+- Deliverables:
+  - Wrap `run_simple_gd` (and binder helpers `run_image_gd`, `run_shera_image_gd*`, `run_binder_image_nll_fn` flows) with optional artifact emission: create `runs/<run_id>/`, write `trace/meta/summary` at end-of-run, and support opt-in checkpoints (`checkpoint_best.npz`, `checkpoint_final.npz`).
+  - Record optimizer/binder/spec identifiers and IndexMap in `meta.json`; keep trace minimal (`loss`, `theta`, optional `grad_norm/step_norm/base_lr/accepted`).
+  - CLI/demo wiring: add flags/kwargs to canonical + two-plane demos and `work/scratch/refactored_astrometry_retrieval.py` to enable artifact writing without changing default smoke speed.
+- Acceptance criteria:
+  - Tiny smoke optimization produces a run directory with required artifacts and no gradients by default; checkpoints saved when enabled and shapes align with θ.
+  - Summary includes minimal scalars (final loss, step count, elapsed time if available).
+  - Legacy behaviours preserved when artifact writing is disabled.
+- Tests to add/run:
+  - New smoke test (e.g., `tests/inference/test_run_artifacts_integration.py`) running a few GD steps on a quadratic or tiny binder loss and asserting required files/keys exist.
+  - Command: `PYTHONPATH=src pytest tests/inference/test_run_artifacts_integration.py -q`.
+- Docs/touchpoints:
+  - Update `examples/README.md` and relevant doc strings with the new artifact flags.
+  - Add brief notes in `docs/architecture/optimization_artifacts_and_plotting.md` referencing the integration points.
+- Dependencies:
+  - Requires Phase A helpers; IndexMap generation must be wired via packing/infer_keys used by the optimizer.
+
+**Phase C — Signals builders + panel recipes (plotting integration)**
+- Deliverables:
+  - Add `src/dluxshera/inference/signals.py` (or similar) to build derived time-series signals from trace + decoder/binder + optional truth: x/y astrometry residuals (µas), separation residual (µas), plate-scale error (ppm), raw flux error ppm (requires new transform for `binary.raw_fluxes` via TransformRegistry), zernike residuals (nm) with RMS summarizer.
+  - Define lightweight panel/recipe helpers (could live alongside plotting) to group x/y, flux A/B, and summary overlays; keep plotting core generic.
+  - Allow caching signals to optional `signals.npz` via Phase A API; keep naming/unit conventions self-describing.
+- Acceptance criteria:
+  - Signal builders accept trace + meta (IndexMap) + binder/spec + truth and return named arrays with consistent shapes; optional truth yields absolute tracks without residuals.
+  - Raw fluxes computed via a registered Transform (truth-independent) and used for ppm residuals when truth is supplied.
+  - Panel helpers can render x/y overlay and flux A/B overlay using `plot/plotting.py` primitives.
+- Tests to add/run:
+  - Unit tests for signal shape/content on synthetic trace (no binder) and binder-backed small run with truth; ensure ppm scaling and zernike RMS summaries are correct.
+  - Command: `PYTHONPATH=src pytest tests/inference/test_signals.py -q`.
+- Docs/touchpoints:
+  - Document signal names/units in `docs/architecture/optimization_artifacts_and_plotting.md`.
+  - Update examples to optionally cache signals and produce one illustrative plot (headless-save only).
+- Dependencies:
+  - Relies on Phase A/B artifacts + IndexMap; needs TransformRegistry hook for `binary.raw_fluxes`.
+
+**Phase D — Preconditioning artifacts (lr_vec, curvature)**
+- Deliverables:
+  - Extend optimizer utilities to optionally compute/store per-index lr_vec and curvature/preconditioner vectors; save to `precond.npz` and/or `curvature.npz` (lr_vec in `precond.npz` per decision).
+  - Capture preconditioning config in `meta.json` (method, eps, clipping bounds, refresh cadence) and keep gradients history off by default.
+  - Validate checkpoints include any persisted optimizer state needed for restart.
+- Acceptance criteria:
+  - When enabled, `precond.npz` contains lr_vec (and optional preconditioner) with shape matching θ and aligned with IndexMap; absence when disabled is clean.
+  - `meta.json` records optimizer/preconditioning identity and parameters; summary notes whether preconditioning was active.
+  - Core GD path remains backward-compatible when preconditioning is off.
+- Tests to add/run:
+  - Shape/metadata validation tests (e.g., `tests/inference/test_precond_artifacts.py`) using synthetic curvature vectors; ensure saved arrays reload and align with θ dim.
+  - Command: `PYTHONPATH=src pytest tests/inference/test_precond_artifacts.py -q`.
+- Docs/touchpoints:
+  - Expand `docs/architecture/optimization_artifacts_and_plotting.md` preconditioning section with the concrete file layout and metadata fields.
+  - Note optimizer flag names in examples/working plan.
+- Dependencies:
+  - Builds atop Phase B artifact plumbing; optional hooks from Phase C (signals) not required.
+
+**Phase E — Polish + documentation consistency**
+- Deliverables:
+  - Sweep docs/tutorials/examples to ensure run_artifacts usage, signals caching, and preconditioning flags are documented consistently; add brief troubleshooting notes for missing optional files.
+  - Update `docs/dev/working_plan.md` status per phase completion and record any follow-up tasks.
+- Acceptance criteria:
+  - Architecture docs reference the implemented module paths and schema; examples README shows how to enable/inspect run directories.
+  - No stale references to legacy logging; working plan reflects completed phases vs. upcoming.
+- Tests to add/run:
+  - Rely on existing unit/integration coverage; rerun smoke demo tests if they exercise artifact flags.
+  - Command: `PYTHONPATH=src pytest -q` (or a narrowed subset if runtime becomes heavy).
+- Dependencies:
+  - All prior phases.
+
+### 26.3 Open questions / blockers
+
+- **Run directory identity:** adopt a deterministic `run_id` strategy (timestamp vs. UUID vs. caller-provided) and whether to embed git hash automatically or gate on availability.
+- **Truth availability for signals:** for demos/tests, define how truth is surfaced to signal builders (pass through optimizer API vs. loaded alongside data) to avoid coupling to specific demos.
+- **Checkpoint contents:** decide minimal checkpoint schema (θ only vs. θ + optimizer state) while keeping restart support lightweight for optax-based loops.
