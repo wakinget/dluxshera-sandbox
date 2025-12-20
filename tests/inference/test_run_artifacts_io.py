@@ -50,8 +50,16 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
     signals = {"s1": np.array([0.1, 0.2, 0.3])}
     grads = {"g1": np.array([1.0])}
     checkpoints = {
-        "best": {"theta": np.array([1.0, 2.0])},
-        "final": {"theta": np.array([3.0, 4.0])},
+        "best": {
+            "theta_best": np.array([1.0, 2.0]),
+            "best_step": 1,
+            "best_loss": 0.5,
+        },
+        "final": {
+            "theta_final": np.array([3.0, 4.0]),
+            "final_step": 2,
+            "final_loss": 0.25,
+        },
     }
 
     save_run(
@@ -68,10 +76,14 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
         np.testing.assert_allclose(npz["s1"], signals["s1"])
 
     best = load_checkpoint(run_dir, "best")
-    np.testing.assert_allclose(best["theta"], checkpoints["best"]["theta"])
+    np.testing.assert_allclose(best["theta_best"], checkpoints["best"]["theta_best"])
+    assert best["best_step"] == checkpoints["best"]["best_step"]
+    assert best["best_loss"] == checkpoints["best"]["best_loss"]
 
     final = load_checkpoint(run_dir, "final")
-    np.testing.assert_allclose(final["theta"], checkpoints["final"]["theta"])
+    np.testing.assert_allclose(final["theta_final"], checkpoints["final"]["theta_final"])
+    assert final["final_step"] == checkpoints["final"]["final_step"]
+    assert final["final_loss"] == checkpoints["final"]["final_loss"]
 
 
 def test_build_index_map_matches_pack_params(tmp_path: Path):

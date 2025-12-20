@@ -722,7 +722,7 @@ def run_simple_gd(
             trace["grad_norm"] = np.stack(grad_norms)
         if step_norms:
             trace["step_norm"] = np.stack(step_norms)
-        trace["base_lr"] = np.full((num_steps,), learning_rate)
+        trace["base_lr"] = np.full((len(losses),), learning_rate)
 
         loss_array = onp.asarray(trace["loss"])
         loss_init = float(loss_array[0]) if loss_array.size else None
@@ -761,8 +761,8 @@ def run_simple_gd(
             "loss_final": loss_final,
             "loss_best": loss_best,
             "best_step": best_idx,
-            "has_checkpoint_best": bool(save_checkpoints),
-            "has_checkpoint_final": bool(save_checkpoints),
+            "has_checkpoint_best": False,
+            "has_checkpoint_final": False,
             "has_signals": False,
             "has_precond": False,
             "has_curvature": False,
@@ -775,16 +775,18 @@ def run_simple_gd(
         if save_checkpoints and best_idx is not None:
             checkpoints = {
                 "best": {
-                    "theta": trace["theta"][best_idx],
+                    "theta_best": trace["theta"][best_idx],
                     "best_step": best_idx,
                     "best_loss": loss_best,
                 },
                 "final": {
-                    "theta": trace["theta"][-1],
+                    "theta_final": trace["theta"][-1],
                     "final_step": int(loss_array.size - 1),
                     "final_loss": loss_final,
                 },
             }
+            base_summary["has_checkpoint_best"] = True
+            base_summary["has_checkpoint_final"] = True
 
         save_run(
             resolved_run_dir,
