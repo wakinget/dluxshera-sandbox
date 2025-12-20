@@ -1,12 +1,17 @@
 # dLuxShera Working Plan & Notes (dev-facing)
-_Last updated: 2026-02-18 00:00_
+_Last updated: 2025-12-19_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
+This Working Plan is the near/medium-term map for developers. For the theme-level, longer-horizon roadmap see `docs/architecture/roadmap.md`. For concept-level architecture detail (ParamSpec/Store, Binder/SystemGraph, loss/optimization, eigenmodes), use the `docs/architecture/*.md` set referenced below; this doc points to them rather than duplicating their content.
+
 ## How to use this doc
-- **Sections 1–17:** Current architecture focus areas, gotchas, and open questions.
-- **Section 18:** Merge strategy and V1.0 milestones (active roadmap).
-- **Section 23:** Parking lot / future ideas and backlog.
+- **Sections 1–12:** Current architecture focus areas, gotchas, and open questions (developer-facing summaries with links to canonical architecture docs).
+- **Sections 13–15:** Backward-compatibility notes, references, and binder namespace ergonomics.
+- **Sections 16–18:** Tasks, priorities, and policy analysis (what’s done vs active P0/P1 work).
+- **Sections 19–21:** Changelog and analysis/historical mappings (marked with status lines).
+- **Section 22:** Merge strategy and near-term focus for V1.0.
+- **Sections 23–25:** Documentation housekeeping, implementation follow-through notes, and the parking lot/backlog.
 - **Historical context:** For narrative history and ADR-style rationale, see `docs/archive/REFACTOR_HISTORY.md` and `docs/architecture/adr/0001-core-architecture-foundations.md`.
 
 ---
@@ -29,132 +34,82 @@ This is a living, dev-facing document summarizing the goals, architecture, decis
 
 ## 2) Architecture (High-Level)
 
-**Layers (current vs target)**
-1. **ParamSpec** — declarative schema & metadata (no numbers). ✅ Exists with `ParamField`/`ParamSpec` plus inference/forward builders; primitives and derived fields share the same spec.
-2. **ParameterStore** — immutable values map. ✅ Implemented as frozen mapping + pytree with strict-by-default validation (rejects derived keys unless explicitly allowed) and helpers for refreshing/stripping deriveds.
-3. **DerivedResolver (Scoped Transform Registry)** — computes derived values as pure functions. ⚠️ Registry exists and resolves recursive deps; currently global (not system-id scoped) and limited to three transforms.
-4. **SystemGraph** — executable DAG of nodes. ⚠️ Minimal single-node scaffold exists (`DLuxSystemNode` + `SystemGraph`) wrapping the existing three-plane builder; still single-node/no caching.
-5. **Facade** — `SheraThreePlane_Model` wrapper. ✅ Still primary entry point; internally uses partial refactor helpers.
+The refactor-era architecture cleanly separates **what exists** (ParamSpec), **what values are in play** (ParameterStore), **how deriveds are computed** (DerivedResolver/transform registry), and **how execution is wired** (Binder + SystemGraph). The public model façade for Shera systems remains the binder-based PSF generator; legacy helpers wrap this internally.
 
-ASCII sketch (target)
-```
-ParamSpec  ──(validates)──▶ ParameterStore (primitives)
-     │                               │
-     │                          (inputs)
-     ▼                               ▼
-Scoped Transform Registry ──▶ DerivedResolver (system_id-aware) ──▶ derived dict
-     │                                                             │
-     └─────────────────────────────────────────────────────────────┘
-                                 │
-                                 ▼
-                         SystemGraph.forward()
-                            │       ▲
-        [Builder] ThreePlaneOpticalSystem  [Binder] (set numeric arrays, derived sampling)
-                            │
-                            ▼
-                  .model(wavelengths, weights)  →  PSF
-```
-
-For narrative context and the rationale behind these layers, see `docs/architecture/adr/0001-core-architecture-foundations.md`.
+- **Why this shape:** Legacy flows intertwined parameter definitions, derived computations, and execution; the new layering keeps ParamSpec/Store declarative and Binder/SystemGraph as the sole runtime surface. Derived transforms stay pure and testable.
+- **Current state:** ParamSpec/Store are in daily use with strict-by-default validation; the transform registry is scoped by system_id; Binder/SystemGraph are the supported forward path for both two- and three-plane optics, with SystemGraph still intentionally minimal (single node, caching hooks planned).
+- **Details:** For full diagrams and API notes see `docs/architecture/binder_and_graph.md` (Binder/SystemGraph) and `docs/architecture/inference_and_loss.md` (loss stack, packing/unpacking). Eigenmode-specific context lives in `docs/architecture/eigenmodes.md`. Broader rationale sits in `docs/architecture/adr/0001-core-architecture-foundations.md`.
 
 ---
 
 ## 3) Repository Layout (Actual vs Proposed)
 
+High-level snapshot (illustrative; run `python devtools/print_tree.py` or `python devtools/generate_context_snapshot.py` for the authoritative view):
+
 ```
 dLuxShera/
-├─ pyproject.toml
-├─ README.md
 ├─ docs/
-│  ├─ dev/dLuxShera_Working_Plan.md
-│  └─ archive/
+│  ├─ architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,roadmap.md,...}
+│  ├─ dev/working_plan.md   ← this document
+│  └─ tutorials/{modeling_overview.md,canonical_astrometry_demo.md}
 ├─ src/dluxshera/
-│  ├─ __init__.py
-│  ├─ core/{builder.py, binder.py, modeling.py, universe.py}
-│  ├─ params/{spec.py, store.py, transforms.py, packing.py, shera_threeplane_transforms.py}
-│  ├─ optics/{config.py, builder.py, optical_systems.py}
-│  ├─ inference/{inference.py, optimization.py}
-│  ├─ utils/utils.py
-│  └─ plot/plotting.py
-├─ tests/
-└─ examples/
+│  ├─ core/{binder.py,modeling.py,universe.py}
+│  ├─ graph/system_graph.py
+│  ├─ inference/{losses.py,prior.py,numpyro_bridge.py,optimization.py}
+│  ├─ params/{spec.py,store.py,registry.py,packing.py,transforms.py,shera_threeplane_transforms.py}
+│  ├─ optics/{config.py,builder.py,optical_systems.py}
+│  ├─ plot/plotting.py
+│  └─ utils/utils.py
+├─ examples/scripts/{run_canonical_astrometry_demo.py,run_twoplane_astrometry_demo.py}
+├─ devtools/{print_tree.py,generate_context_snapshot.py}
+└─ tests/
 ```
 
-**Gaps vs proposal:** No `graph/`, `io/`, `viz/`, `docs/` tree; params registry/serialize modules absent; four-plane/variant code not present.
+Use the devtools scripts above for current trees and ParamSpec/transform context snapshots; the ASCII sketch is intentionally non-authoritative.
 
 ---
 
 ## 4) ParamSpec (Schema & Metadata)
 
-- `ParamField`/`ParamSpec` implemented with docstrings, defaults, bounds, dtype/shape, and builders for forward/inference subsets.
-- Forward spec now mirrors the full truth-level binary vocabulary with unit-aware keys (`binary.x_position_as`, `binary.y_position_as`, `binary.separation_as`, `binary.position_angle_deg`, `binary.contrast`) and conditionally includes Zernike coefficient arrays whose lengths are tied to configured Noll indices, defaulting to zero vectors when a basis exists.
-- Derived and primitive fields coexist in single spec; separation by kind is not enforced in store validation.
-- Cross-referencing between docs/tests and spec remains manual.
-- **Include vs exclude helpers:** `ParamSpec.subset(keys)` stays strictly include-only, preserving caller-provided ordering and raising on unknown keys. A complementary `ParamSpec.without(keys)` now drops whole fields by key (including grouped/vector fields such as `primary.zernike_coeffs_nm`) while preserving the original ordering of everything else; it raises on unknown keys for consistency with `subset`. Tests cover no-op, full-drop, complement equivalence, and vector-field removal cases.
-- **Inference views:** `make_inference_subspec` builds an inference ParamSpec view directly from a base spec, optionally gating primary/secondary Zernike requests against the Shera config and an `include_secondary` policy flag. This supports the single-store inference workflow where `forward_store` (or `init_store`) is reused as the base for packing/unpacking rather than constructing a separate `inference_store`.
+ParamSpec declares the parameter vocabulary (metadata only) for Shera systems. Forward specs mirror the truth-level binary astrometry vocabulary and optional bases (e.g., Zernike arrays sized by Noll index config); inference subspecs are views built from the forward spec and keep ordering stable for packing/unpacking.
+
+- **Why:** This isolates schema from values and makes derived vs primitive intent explicit without coupling to runtime data.
+- **Gotchas:** Derived and primitive kinds coexist in one spec; inference views reuse the same underlying definition. `ParamSpec.subset(...)` remains include-only; `ParamSpec.without(...)` complements it for drop-based ergonomics while preserving ordering and strict unknown-key handling.
+
+For details on builders, helper APIs, and inference packing, see `docs/architecture/inference_and_loss.md`.
 
 ---
 
 ## 5) ParameterStore (Values)
 
-- Frozen mapping `{key → value}` registered as JAX pytree; supports `.replace`, iteration, and `.validate` against a `ParamSpec`.
-- Validation is strict by default (rejects derived keys); override/debug mode opt-in via `allow_derived=True`. Helpers `strip_derived`, `refresh_derived`, and `check_consistency` keep derived values fresh or flag stale overrides.
-- Canonical forward-store flow is primitives-only defaults → explicit primitive overrides → `store.refresh_derived(forward_spec)` to populate plate scale / log flux and other deriveds; derived keys are omitted from `from_spec_defaults` by design. `ParamSpec.system_id` (set by the forward builders) feeds through to resolver selection so most call sites no longer need to thread system IDs explicitly.
-- Single-store inference workflow: build an inference subspec from the forward spec and call `validate_inference_base_store(forward_store, subspec)` to fail fast on missing/shape/dtype issues before packing θ vectors. Inference specs/subspecs act as views + ordering + validation; they do not require seeding a dedicated store.
-- Shallow serialization helpers exist (`from_dict`, `from_spec_defaults`, `as_dict`); YAML/JSON IO still planned in the profiles/IO workstream.
-- Shera configs mirror this immutability: they are frozen dataclasses for structural hashing/caching safety and should be tweaked via the new `BaseConfig.replace(**kwargs)` helper (e.g., `SHERA_TESTBED_CONFIG.replace(oversample=4)`).
+ParameterStore is the immutable `{key → value}` holder registered as a JAX pytree. Validation is strict-by-default (reject derived keys unless explicitly allowed); helpers exist to refresh/strip deriveds and check consistency against a spec. Forward flows build primitive-only stores and then refresh deriveds; inference uses subspec views for packing without constructing separate stores.
+
+- **Why:** Freezing values and being explicit about deriveds reduces stale data and keeps θ overlays predictable.
+- **Gotchas:** Overrides of deriveds are possible only with opt-in validation flags; use refresh helpers when primitives change. Config dataclasses follow the same immutability pattern via `.replace(...)`.
+
+See `docs/architecture/inference_and_loss.md` for canonical flows, and `docs/architecture/optimization_artifacts_and_plotting.md` for how stores feed logging/trace artifacts.
 
 ---
 
 ## 6) Transform Registry / DerivedResolver
 
-- Scoped `DerivedResolver` now wraps per-system `TransformRegistry` instances with system-id aware registration and resolution helpers (defaulting to the Shera three-plane system for backward compatibility). Transform modules register lazily via `ensure_registered(system_id)` so user scripts do not need explicit side-effect imports before refreshing deriveds.
-- Three Shera transforms registered under `shera_threeplane`: focal length from focal ratio, plate scale from focal length, and log flux for brightness; analytic/legacy-consistency tests exist (now exercised via a primitives-only forward-store refresh pattern).
-- Future work: expand transform coverage for additional systems (two-plane/four-plane) once those variants land.
+Scoped `DerivedResolver` instances own per-system `TransformRegistry` objects so derived computations stay pure and system-aware. Shera three-plane transforms cover focal length, plate scale, and log flux; two-plane coverage is additive as variants land. Registration is lazy via `ensure_registered(system_id)` so callers do not need explicit side-effect imports.
 
-**Policy on setting deriveds**
-- Current code allows overriding deriveds if validation disabled. Target policy remains: disallow unless explicitly invertible.
+- **Why:** Decouples derived math from call sites and keeps transforms testable.
+- **Gotchas:** Overrides are only for opt-in debug flows; the target stance is primitives-first unless a transform is invertible.
+
+Details and registry diagrams live in `docs/architecture/binder_and_graph.md` (transform registry section) and `docs/architecture/inference_and_loss.md` (derived refresh and loss wiring).
 
 ---
 
 ## 7) Integrating dLux `ThreePlaneOpticalSystem`
 
-- **Builder:** Frozen config dataclass and named point designs exist; builder constructs legacy `SheraThreePlaneSystem`, optionally injects Zernike coefficients from a forward store, and now caches structural builds via `structural_hash_from_config` + `clear_threeplane_optics_cache` (opt-out env flag `DLUXSHERA_THREEPLANE_CACHE_DISABLED`).
-- **Binder (canonical model object):** `SheraThreePlaneBinder` now owns a forward-style `ParamSpec`, a base forward store with deriveds refreshed, and constructs its `SystemGraph` eagerly. `.model(store_delta)` is the sole public entry point; `.forward` has been removed. Bindings are **mostly immutable (Option A)**—use `.with_store(...)` to derive new binders rather than mutating in-place. Binder treats SystemGraph as an internal detail (Binder → Graph → builders) and merges store deltas against the stored forward base.
-  - Option A (implemented): static binder captured in JAX closures; dynamic behaviour comes from `store_delta` / θ overlays. Example usage:
-    ```python
-    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
-    psf = binder.model()
-    psf_delta = binder.model(delta_store)
-    binder2 = binder.with_store(new_store)
-    ```
-  - Option B (documented only): mutable binder updating cfg/base store in-place was rejected due to JIT/static-arg friendliness and legacy immutability expectations.
-- **Graph layer:** `SystemGraph` is now constructed eagerly and owned by Binder when `use_system_graph=True`; execution reuses the optics builder (and its structural-hash cache) and Alpha Cen source inside a lightweight `evaluate(outputs=("psf",))` call. Graph remains single-node but mirrors binder output for smoke/regression tests.
+Shera binders own configs/specs/stores, expose `.model(store_delta)` as the PSF generator, and can run through a minimal SystemGraph (single node today) or a direct call into the optics builder. Binders stay mostly immutable (`.with_store(...)`) to keep JAX friendliness; SystemGraph is eager but intentionally lightweight.
 
-### Loss stack (Binder-centric clarity)
+- **Why:** Keeps execution encapsulated while letting θ overlays be the only source of dynamism. Structural caching lives in the optics builders; graph caching hooks remain future work.
+- **Gotchas:** Derived values must be refreshed before binding; SystemGraph is single-node by design right now.
 
-- **Flow:** `theta` → `ParameterStore` delta (restricted to `infer_keys`) → `binder.model(store_delta)` → PSF image → `gaussian_image_nll(image, data, var)` → scalar loss. This keeps Binder as the sole model API and makes the Gaussian NLL math transparent.
-- **Primitives:** A glass-box `gaussian_image_nll` helper (JAX-friendly, sum/mean/None reductions) now lives in `inference/losses.py` and is used by both the legacy `gaussian_loss` wrapper and Binder-based constructors.
-- **Binder loss constructor:** `make_binder_image_nll_fn` returns `(loss_fn, theta0)` where `loss_fn(theta)` unpacks `theta` into a store delta, evaluates `binder.model(...)`, and applies the chosen noise model. A pre-built binder can be passed in or constructed internally from `(cfg, forward_spec, base_forward_store)`.
-- **Binder-first API (2024-05-30):** New `make_binder_nll_fn` *requires* a Binder and always overlays θ unpacking on `binder.base_forward_store`, preventing mixed cfg/spec/store inputs from silently re-binding theta semantics. Optional `theta0_store` lets callers initialise θ from a different store (e.g., prior samples) without changing the binder reference state. Prefer this over the legacy builder for loss construction.
-- **Demo wiring:** `examples/scripts/run_canonical_astrometry_demo.py` now reads linearly: build the Binder image NLL, then add a Gaussian prior penalty for a MAP objective. Comments spell out the `theta → store → binder.model → image → NLL` path.
-
-### Eigenmode-based optimisation (clarified)
-
-- **Pure-θ vs eigen-θ:** Both optimisation paths now share the same Binder-based image NLL. Pure-θ gradient descent calls the loss directly. Eigen-θ runs define `loss_z(z) = loss_theta(EigenThetaMap.theta_from_z(z))`, so the only difference is a linear change of coordinates (plus optional truncation/whitening).
-- **One-time setup:** `run_shera_image_gd_eigen` builds the Binder loss via `make_binder_image_nll_fn`, computes a θ-space curvature/FIM once at `theta_ref`, constructs `EigenThetaMap` (supports truncation/whitening), and JITs the z-space loss/grad. Per-iteration cost is therefore one Binder-based loss/grad plus cheap linear transforms; Binder/SystemGraph construction and pack/unpack scaffolding stay outside the hot loop.
-- **Documentation/API:** `EigenThetaMap` now carries a detailed docstring (column eigenvectors, whitening meaning, shapes) and exposes `theta_from_z` / `z_from_theta` aliases alongside the legacy names for clarity. It is JAX-friendly (uses `jax.numpy` throughout) and safe inside jitted regions.
-- **Demo story:** The canonical astrometry script comments now state that the eigen run reuses the Binder NLL, explain curvature estimation, and describe whitening (unit-curvature scaling) and truncation (top-k modes) options. Aside from the one-time eigendecomposition, per-step cost should mirror the pure-θ path.
-
-### Prior handling (landscape + new abstraction)
-
-- **Legacy/observed patterns:**
-  - `inference/optimization.py::construct_priors_from_dict` builds NumPyro distributions (Normal/Uniform/LogNormal) directly from a `{param: {mean, sigma, dist}}` mapping; tightly coupled to NumPyro and not used elsewhere in the refactor flow.
-  - The canonical astrometry demo defines a `priors` dict of sigmas keyed by `ParamKey`, manually jitters the truth store with NumPy noise, and hand-computes a quadratic MAP penalty keyed by the same sigmas (supports both scalars and Zernike coefficient vectors). The notebook `examples/notebooks/Shera_Eigen_Inference_Example.ipynb` mirrors this pattern, including NumPyro helper usage and prior-drawn perturbations.
-- **New backend-agnostic layer:** `inference/prior.py` introduces `PriorField` (currently Normal-only mean/sigma) and `PriorSpec` (key→field mapping) with helpers for: (a) `from_sigmas(center_store, sigmas)` to seed priors at reference values, (b) `quadratic_penalty(store, center_store)` for MAP-style sums over `(value-mean)^2/(2*sigma^2)`, and (c) `sample_near(center_store, rng_key)` to jitter an initial store from the priors. These are pure JAX operations with no PPL dependency.
-- **NumPyro bridge stub:** `inference/numpyro_bridge.py` documents the intended adapter surface (`numpyro_priors_from_spec`) but intentionally raises `NotImplementedError` to avoid hard-coding backend logic yet.
-- **Current demo usage:** The canonical demo now builds a `PriorSpec` from the `priors` sigma dict, uses `sample_near(...)` for its initialisation jitter, and wraps the MAP penalty via `quadratic_penalty(...)`, keeping binder/SystemGraph wiring unchanged.
-- **Integration plan:** Future work will thread `PriorSpec` through binder-aware loss constructors (e.g., MAP penalties layered alongside data NLL) and PPL adapters while keeping the core abstraction backend-agnostic and ParamKey-addressable.
+Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `docs/architecture/inference_and_loss.md` and exercised in `docs/tutorials/canonical_astrometry_demo.md`. SystemGraph/Binder intent and design trade-offs live in `docs/architecture/binder_and_graph.md`.
 
 ---
 
@@ -166,9 +121,13 @@ dLuxShera/
 
 ## 9) Docs & examples (Phase 1 shipped)
 
-- Canonical binder/SystemGraph astrometry demo now lives in `examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode gradient descent flows. README/MkDocs pages and additional notebooks remain to be authored.
-  - The demo now showcases the refactor-era plotting helpers: PSF visualisation via `plot_psf_single` / `plot_psf_comparison` and parameter trajectories via `plot_parameter_history_grid`. Plotting utilities follow the IO policy (return fig/axes; caller decides to save/show), and the demo saves figures when a destination directory is provided (keeping smoke tests headless). Future follow-ons could add eigenmode-specific diagnostics (eigenvalue spectra, mode loadings) and prior visualisation once the pattern stabilises.
-- Phase 1 documentation skeleton exists under `docs/`: `docs/modeling_overview.md` (conceptual entry), `docs/tutorials/canonical_astrometry_demo.md` (walkthrough), architecture stubs, and dev notes (this working plan in `docs/dev/dLuxShera_Working_Plan.md`). Next steps include fleshing out architecture details and adding the forthcoming two-plane tutorial.
+- Canonical binder/SystemGraph astrometry demo lives in `examples/scripts/run_canonical_astrometry_demo.py` with both pure-θ and eigenmode GD flows; the two-plane companion is `examples/scripts/run_twoplane_astrometry_demo.py`.
+  - The demo showcases the refactor-era plotting helpers: PSF visualisation via `plot_psf_single` / `plot_psf_comparison` and parameter trajectories via `plot_parameter_history_grid`. Plotting utilities follow the IO policy (return fig/axes; caller decides to save/show) and save figures only when requested to keep tests headless.
+- Current doc stack:
+  - Concept orientation: `docs/tutorials/modeling_overview.md`
+  - Architecture: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,params_and_store.md,optimization_artifacts_and_plotting.md}`
+  - Tutorials: `docs/tutorials/canonical_astrometry_demo.md`
+  - Dev-facing: this plan (`docs/dev/working_plan.md`)
 
 ---
 
@@ -181,7 +140,7 @@ dLuxShera/
 
 ## 11) Gotchas & Decisions
 
-- **Primitives-only store:** Decision still pending; current implementation can accept deriveds when validation is disabled.
+- **Primitives-only store:** Default validation is strict; long-term policy on allowing derived overrides (debug flows) is still pending.
 - **Plate-scale policy:** Whether to always recompute vs allow override is still undecided.
 - **Structural caching:** Three-plane builder now caches structural builds keyed by a deterministic hash and exposes a cache clear helper (env flag available to disable caching).
 - **Scopes:** Per-system scoping added via `DerivedResolver`; ergonomics for additional variants will matter as new systems arrive.
@@ -198,18 +157,13 @@ dLuxShera/
 
 ---
 
-### Binder namespace tasks (Task 1A–1E status)
-
-- Task 1A–1E: Completed (binder.get, StoreNamespace proxy, Binder.ns explicit access, cfg-field attribute raising, store-prefix attribute raising).
-- Supported access patterns so far: `binder.get(...)`, `binder.ns("prefix")`, cfg forwarding such as `binder.psf_npix`, and store prefix raising such as `binder.system.plate_scale_as_per_pix` / `binder.binary.x_position_as`.
-
 ## 13) Notes on Backward Compatibility
 
 ---
 
-## Attribute Access
+### Attribute Access
 
-- **Baseline test status:** `pytest` currently fails during collection with `ModuleNotFoundError: No module named 'dluxshera'` across the suite, so Binder-related tests (`tests/test_binder_smoke.py`, `tests/test_binder_shared_behaviour.py`, graph smoke, and Binder-backed loss/optimization tests) are not running without adding `src/` to `PYTHONPATH` or installing the package.
+- **Baseline test status:** Running `pytest` requires adding `src/` to `PYTHONPATH` (or installing the package) so Binder-related tests (`tests/test_binder_smoke.py`, `tests/test_binder_shared_behaviour.py`, graph smoke, and Binder-backed loss/optimization tests) import `dluxshera` correctly.
 - **Binder mutability/shape:** `SheraThreePlaneBinder` instances are `dataclasses` with `frozen=False` and `slots=False`; they do not present as `equinox.Module` or `zodiax.Base`, so mutation is guarded only by convention rather than framework-level immutability.
 - **Store surface area:** `binder.base_forward_store` is a `ParameterStore` exposing `get/keys/items/values/as_dict/replace/validate_against` and similar mapping semantics.
 - **Derived placement:** With the default forward spec + refreshed forward store (via `tests.helpers.make_forward_store`), derived values such as `system.plate_scale_as_per_pix` are present directly in the base forward store prior to any evaluation.
@@ -226,47 +180,48 @@ dLuxShera/
 
 ---
 
-## 15) Tasks & Priorities (Updated)
+## 15) Binder namespace ergonomics (Task 1A–1E status)
 
-Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
-
-**P0 — Stabilize primitives/derived boundary & binder**
-- ⚠️ **ParamSpec core keys & docs**: Spec exists with metadata; forward spec now includes unit-aware binary astrometry and Noll-index-tied Zernike coeffs with zero defaults; ensure docstrings cross-reference tests/examples once SystemGraph lands.
-- ✅ **ParamSpec subset ergonomics (include vs exclude)**: Confirmed `subset(keys)` remains include-only; added `ParamSpec.without(keys)` complement with ordering preservation and unknown-key errors plus regression tests in `tests/test_params_spec.py`.
-- ✅ **ParameterStore policy**: Primitives-only defaults enforced; canonical flow documented (`from_spec_defaults` → primitive overrides → `refresh_derived`); serialization still to follow.
-- ✅ **Inference parameter packing**: `pack_params`/`unpack_params` with tests.
-- ✅ **Transforms registry + psf_pixel_scale (three-plane)**: Global registry with three transforms and consistency tests.
-- ✅ **ThreePlaneBuilder (structural hash/cache)**: Structural subset documented, deterministic hash added, cache + clear helper in builder with opt-out env flag.
-- ✅ **ThreePlaneBinder (phase/sampling bind)**: Binder is the canonical, mostly immutable model; owns an eager SystemGraph, uses forward-style base stores with deriveds refreshed, and exposes `.model(store_delta)` as the public API.
-- ✅ **Loss function clarity / canonical loss wiring**: Binder-based image NLL helpers now route through `binder.model(store_delta)` with explicit θ→store mappings, reuse the glass-box `gaussian_image_nll` kernel, and surface a clear `(loss_fn, theta0)` API. The astrometry demo mirrors this flow and layers a Gaussian prior for MAP loss.
-- ✅ **DLuxSystemNode / SystemGraph**: Minimal single-node scaffold wraps the three-plane builder; eager construction now lives under Binder ownership (caching/derived resolution hooks still future work).
-
-**P1 — Docs, demos, and scope-aware transforms**
-- ✅ **Scoped DerivedResolver**: System-ID scoping (three-plane/four-plane) and transform coverage expansion.
-- ✅ **Canonical astrometry demo**: Script/notebook generates truth + synthetic data, runs binder/SystemGraph loss with Optax, and now includes a mirrored eigenmode gradient-descent segment using EigenThetaMap.
-- ✅ **Eigenmode parameterization**: FIM/eigen utilities integrated into the inference API with an eigen-space GD helper, demo walkthrough, and regression tests.
-- ⏳ **Docs & examples**: README quickstart, MkDocs pages, notebooks, updated examples using new stack.
-- ⏳ **Profile/IO helpers**: YAML/JSON profiles, serialization, and loading; depends on store policy.
-
-**P2 — Variants & ergonomics**
-- ⏳ **Four-plane variant**: Transforms, builder, resolver selection tests.
-- ⏳ **Ergonomics**: `ModelParams` shim, deprecation warnings, upstream PR prep.
-
-**Next sprint follow-ups**
-- ⚠️ Plate-scale policy decision and SystemGraph follow-ups (caching/multi-node) remain. Extend docs/README coverage and add serialization/profile helpers to support the new demo + eigenmode pathways.
-- ⚠️ Sweep remaining scripts/tests for legacy unit-less astrometry aliases once the canonical unit-aware binary keys have settled.
-
-**Newly noted tasks**
-- ✅ Structural hash/caching for three-plane builder (cache + clear helper landed).
-- ✅ Enforce primitives-only store in production mode (strict validation default, refresh/strip helpers).
-- ⏳ Add serialization (`params/serialize.py`) and transform registry module (`params/registry.py`).
-- ⏳ Extend SystemGraph with caching/derived resolution hooks once resolver is scoped.
-
-- **Future improvements:** integrate a declarative PriorSpec/NumPyro-friendly prior layer into the loss stack, and add alt-noise kernels (e.g., Poisson) following the same glass-box helper pattern.
+- Task 1A–1E: Completed (binder.get, StoreNamespace proxy, Binder.ns explicit access, cfg-field attribute raising, store-prefix attribute raising).
+- Supported access patterns so far: `binder.get(...)`, `binder.ns("prefix")`, cfg forwarding such as `binder.psf_npix`, and store prefix raising such as `binder.system.plate_scale_as_per_pix` / `binder.binary.x_position_as`.
 
 ---
 
-## 16) Recommended Next 3–5 Tasks (to reach end-to-end flow)
+## 16) Tasks & Priorities (Updated)
+
+Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
+
+**Completed to date (highlights)**  
+- ✅ ParamSpec ergonomics (`subset` include-only, `without` for drops) with regression tests.  
+- ✅ ParameterStore strict-by-default validation, derived refresh/strip helpers, and shallow serialization.  
+- ✅ Inference packing/unpacking (θ ↔ store delta) with tests.  
+- ✅ Scoped transform registry + Shera plate-scale/log-flux transforms.  
+- ✅ ThreePlaneBuilder structural hash + cache/clear helper.  
+- ✅ Binder-first loss wiring (Binder NLL helpers using `gaussian_image_nll`), binder/SystemGraph parity, and binder namespace UX (Task 1A–1E).  
+- ✅ SystemGraph single-node scaffold owned by binders.  
+- ✅ Binder NLL stationary-point regression landed; follow-on scenarios pending (multi-wavelength/multi-PSF).
+
+**P0 — Current focus**  
+- ⚠️ **Optimization artifacts & logging**: Implement the run-directory layout from `docs/architecture/optimization_artifacts_and_plotting.md` (e.g., `trace.npz`, `meta.json`, `summary.json`, optional diagnostics), and wire binder-based scripts (`examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, `work/scratch/refactored_astrometry_retrieval.py`) into the trace/artifacts pipeline and plotting helpers.  
+- ⏳ **Optimizer control (learning-rate shaping)**: Extend `run_simple_gd` (or successor) with per-parameter/block learning rates derived from FIM/curvature estimates; ensure compatibility with the logging/artifacts pipeline above.  
+- ⚠️ **Loss regression hardening**: Keep the landed Binder NLL stationary-point regression; add coverage for multi-wavelength / multi-PSF scenarios as new demos land and surface any remaining edge cases.
+
+**P1 — Next up**  
+- ⏳ **Profiles/IO and serialization**: YAML/JSON profiles and richer serialization once primitives-only policy remains stable.  
+- ⏳ **Documentation and example polish**: README quickstart, additional tutorials, and aligning examples/README.md with the new optimization artifact flow.  
+- ⏳ **Expanded transform coverage**: Broaden registry coverage for additional systems (two-/future four-plane) as specs land.
+
+**P2 — Variants & ergonomics**  
+- ⏳ Four-plane variant (specs, transforms, builder, resolver tests).  
+- ⏳ Ergonomic shims (`ModelParams`), deprecation path for legacy APIs, upstream PR prep.
+
+**Near-term hygiene**  
+- ⚠️ Plate-scale policy decision and SystemGraph caching/multi-node hooks remain open.  
+- ⚠️ Sweep remaining scripts/tests for legacy unit-less astrometry aliases once canonical unit-aware keys settle.
+
+---
+
+## 17) Recommended Next 3–5 Tasks (to reach end-to-end flow)
 
 1. **Add SystemGraph + DLuxSystemNode scaffold (P0) — DONE**
    - **Outcome:** Added `graph/` package with `DLuxSystemNode` + `SystemGraph`, tied into binder loss via optional flag, and regression-tested against the legacy three-plane forward path.
@@ -290,13 +245,13 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ---
 
-## 17) ParamSpec + ParameterStore policy (plate_scale/log_flux) — analysis & options
+## 18) ParamSpec + ParameterStore policy (plate_scale/log_flux) — analysis & options
 
 **Current behavior (“split personality”)**
 - `build_inference_spec_basic()` marks `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **primitive knobs** for optimisation.【F:src/dluxshera/params/spec.py†L95-L167】【F:src/dluxshera/params/spec.py†L207-L245】
 - `build_forward_model_spec_from_config()` mirrors geometry/throughput primitives from `SheraThreePlaneConfig` and declares `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **derived** with registered transforms (geometric plate scale and collecting-area × band × throughput flux).【F:src/dluxshera/params/spec.py†L337-L458】
 - The transform registry is **store-wins**: if a key is present in the `ParameterStore`, the transform is skipped; otherwise dependencies are resolved recursively.【F:src/dluxshera/params/registry.py†L117-L186】 Tests exercise this by computing plate scale/log flux from a forward-model store seeded with primitives only.【F:tests/test_shera_threeplane_transforms.py†L1-L71】
-- `ParameterStore.from_spec_defaults()` skips derived fields, so a forward-model store built from defaults contains only primitives unless the caller injects derived values. Validation today checks only key set equality and can allow extras; it does **not** enforce “primitives-only”.【F:src/dluxshera/params/store.py†L72-L167】【F:src/dluxshera/params/store.py†L202-L251】
+- `ParameterStore.from_spec_defaults()` skips derived fields, so a forward-model store built from defaults contains only primitives unless the caller injects derived values. Validation now rejects derived keys by default (unless `allow_derived=True`) and provides `refresh_derived`/`strip_derived` helpers for deterministic recomputation.【F:src/dluxshera/params/store.py†L72-L167】【F:src/dluxshera/params/store.py†L202-L251】
 
 **Practical interactions & risks**
 - Forward-model workflows: build spec → seed store from defaults → run transforms to fill plate scale/log flux; these derived numbers are often copied into an inference store and then treated as primitives. If a caller modifies primitives (e.g., focal lengths) without recomputing, a stale derived could persist because validation allows it and the resolver will return the stored value.
@@ -322,18 +277,19 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 ---
 
-## 18) Changelog of Decisions
+## 19) Changelog of Decisions
 
 See `docs/architecture/adr/0001-core-architecture-foundations.md` for a curated, ADR-style summary of the major choices referenced here.
 
-- Transform registry implemented globally; slated for system-scoped refactor.
-- ParameterStore currently permissive; decision pending to enforce primitives-only by default.
-- Canonical binder-based loss added to inference stack; SystemGraph integration planned.
-- Structural caching not yet started; acknowledged as necessary for performance.
+- Transform registry is now system-scoped (defaulting to Shera three-plane) with lazy registration.  
+- ParameterStore validation is strict-by-default (primitives-first) with opt-in derived overrides and refresh helpers.  
+- Binder-first loss wiring is the canonical inference path; SystemGraph is the default internal executor (single node for now).  
+- ThreePlaneBuilder structural hashing + caching shipped; graph-level caching/derived hooks remain future work.
 
 ---
 
-## 19) Legacy Shera two-plane stack → refactor-era mapping (analysis)
+## 20) Legacy Shera two-plane stack → refactor-era mapping (analysis)
+Status: analysis + historical mapping; two-plane refactor implementation now landed (see follow-ups below). Implementation overview lives alongside the three-plane stack in `docs/architecture/binder_and_graph.md`.
 
 For a concise mapping of legacy APIs to the current architecture, see `docs/archive/LEGACY_APIS_AND_MIGRATION.md`.
 
@@ -372,6 +328,7 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 ---
 
 ## 21) Task 10 — Shared Binder / SystemGraph design options (analysis only)
+Status: analysis-only; shared base implementations now exist (`core/binder.py`, `graph/system_graph.py`) with design intent captured in `docs/architecture/binder_and_graph.md`.
 
 **Scope:** Planning-only comparison of the new SheraThreePlaneBinder/SystemGraph vs SheraTwoPlaneBinder/SystemGraph. No refactor performed; binders remain standalone classes.
 
@@ -432,7 +389,7 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 
 ---
 
-## 18) Merge Strategy and V1.0 Milestones
+## 22) Merge Strategy and V1.0 Milestones
 
 This section captures our strategy for (a) deciding when to merge the refactor work into the main dLuxShera repo, and (b) when to consider the refactor “done” and treat the current architecture as V1.0. There are currently no external users of the main repo; migration concerns are therefore purely for my own workflow and notebooks.
 
@@ -441,7 +398,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 
 ---
 
-### 18.1 Goals
+### 22.1 Goals
 
 - Present a clean, “this is how dLuxShera works” story to future users and collaborators.
 - Avoid user-facing mentions of “refactor” or “legacy” once V1.0 is in place.
@@ -450,7 +407,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 
 ---
 
-### 18.2 Milestone A – Merge Refactor Branch into Main
+### 22.2 Milestone A – Merge Refactor Branch into Main
 
 **Intent:** Switch main dLuxShera over to the new ParamSpec / ParameterStore / Binder / SystemGraph stack as the canonical implementation. This is the point where I personally prefer the new stack for any real Shera work.
 
@@ -477,7 +434,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 
 ---
 
-### 18.3 Milestone B – V1.0 Architecture & Documentation
+### 22.3 Milestone B – V1.0 Architecture & Documentation
 
 **Intent:** Stabilize the architecture and present dLuxShera as if this design has always existed. All user-facing docs should describe the current system as “V1.0” without mentioning “refactor,” “old stack,” or “new stack.”
 
@@ -514,259 +471,35 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 
 ---
 
-### 18.4 Near-Term Focus
+### 22.4 Near-Term Focus
 
-- Finish tightening the **basic doc structure** (initial architecture concept pass done):
-  - Draft or refine the V1.0-style README.
-  - Solidify the canonical three-plane demo doc and script.
-  - Expand concept docs as needed beyond the initial Parameters/Stores, Binders/SystemGraphs, inference, and eigenmodes coverage.
-- Once those are in place and tests remain green, proceed with **Milestone A (merge into main)**.
-- After merge, iterate toward **Milestone B (V1.0)** by:
-  - Polishing the two-plane demo.
-  - Filling in concept docs.
-  - Migrating the Working Plan and dev notes into `docs/dev/`.
+- Deliver the **optimization artifacts/logging pipeline** described in `docs/architecture/optimization_artifacts_and_plotting.md` and wire it into the canonical and two-plane demos plus `work/scratch/refactored_astrometry_retrieval.py`; keep plotting helpers aligned with the run-directory layout.
+- Advance **optimizer control** by adding per-parameter/block learning-rate shaping (FIM/curvature-derived) to the gradient-descent helpers while keeping compatibility with the new artifacts/logging story.
+- Keep the **doc stack coherent**: use this Working Plan as a “map of maps,” point to `docs/architecture/*.md` for details, and ensure README/tutorials stay in sync as the artifacts/logging work lands. Merge readiness (Milestone A) follows once these pieces are stable.
 
-- Implemented `BaseSheraBinder` in `core/binder.py`, with SheraThreePlaneBinder and SheraTwoPlaneBinder now inheriting shared merge/model/with_store semantics while preserving public signatures and system-specific optics/graph hooks.
-- Added `BaseSheraSystemGraph` skeleton in `graph/system_graph.py`, adopted by the three- and two-plane SystemGraphs to centralize store merge + evaluation flow; factories remain unchanged.
-- Binder/graph smoke and regression tests cover both systems plus shared output/merge behaviour; public APIs and numerical paths are unchanged.
+## 23) Documentation roadmap for dLuxShera
+Status: docs housekeeping (dev-facing)
 
-## 23) Binder/SystemGraph shared implementation follow-through
+- Canonical long-range roadmap: `docs/architecture/roadmap.md`. Treat this as the theme-level plan; keep this Working Plan focused on near/medium-term execution and dev notes.
+- Concept/architecture sources of truth: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,params_and_store.md}`. Use these for detailed design rather than duplicating content here.
+- Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md` and `examples/scripts/run_canonical_astrometry_demo.py` / `run_twoplane_astrometry_demo.py` for runnable flows).
+- Dev-facing planning: this file (`docs/dev/working_plan.md`) and any future dev notes under `docs/dev/`. Keep cross-links back to the architecture docs for specifics.
+- Navigation helpers: `devtools/generate_context_snapshot.py` and `devtools/print_tree.py` remain the authoritative way to browse the live tree and ParamSpec/transform snapshots.
 
-- Summary: Base implementations landed for binders and SystemGraphs (see `core/binder.py`, `graph/system_graph.py`, and new tests). Direct binder/graph paths still share detectors and preserve immutability; optics builders remain system-specific.
-- Remaining follow-ups: consider further consolidation if more variants arrive (e.g., four-plane), and revisit caching/derived-resolution hooks once multi-node graphs emerge.
+Near-term doc housekeeping:
+- Keep this Working Plan as a “map of maps” that points to the architecture/tutorial docs and the roadmap, rather than re-explaining them.
+- Ensure architecture docs and tutorials stay the canonical detail; keep this file focused on status, priorities, and where to look next.
 
+## 24) Binder/SystemGraph shared implementation follow-through
+Status: implemented; historical context
 
-## 22) Documentation roadmap for dLuxShera
+- Base implementations landed for binders and SystemGraphs (see `core/binder.py`, `graph/system_graph.py`). Direct binder/graph paths still share detectors and preserve immutability; optics builders remain system-specific.
+- Implementation follow-up: caching and derived-resolution hooks remain future work as SystemGraph grows beyond single-node; see `docs/architecture/binder_and_graph.md` for the design intent and next hooks to add.
 
-This roadmap sketches the documentation “stack” we want for dLuxShera, how the pieces fit together, and where they live in the repo. It’s meant to guide incremental work rather than be implemented all at once.
-
-High-level goals
-----------------
-
-- Provide multiple entry points for different audiences:
-  - New users who just want to run a demo.
-  - Collaborators who need the conceptual model design.
-  - Developers who need to understand ParamSpec/ParameterStore, Binder, SystemGraph, and inference.
-- Separate conceptual model design from implementation details:
-  - Concept docs explain “how the model thinks about the world”.
-  - Architecture/API docs explain “how this is encoded in code”.
-- Keep dev-facing planning material (Working Plan, design notes) clearly separated from user-facing docs, but cross-linked.
-- Make it easy to navigate: each doc points “up” to context and “down” to details.
-
-Proposed doc families
----------------------
-
-We’ll organise docs into a few coherent families:
-
-1. Top-level orientation  
-2. Conceptual model design  
-3. Architecture & system design  
-4. Tutorials & workflows  
-5. Developer & planning docs (including the Working Plan)  
-6. API & reference (later / optional automation)
-
-Each family is described below with suggested filenames and content boundaries.
-
-1) Top-level orientation
-------------------------
-
-Doc: README.md (root)
-
-Audience: Anyone landing on the repo.
-
-Purpose:
-- Briefly answer:
-  - What is dLuxShera?
-  - What problem does it solve (Shera/TOLIMAN astrometric modeling)?
-  - How does it relate to dLux/dLuxToliman and JAX?
-- Provide a “choose your own path” section linking into docs:
-  - Run the canonical astrometry demo
-  - Understand the modeling pipeline
-  - Modify or extend the code
-
-Status: Exists; will be updated once the docs tree is in place.
-
-2) Conceptual model design
---------------------------
-
-Doc: docs/modeling_overview.md (new)
-
-Audience: Model users and colleagues (including non-Python folks) who need the “big picture”.
-
-Purpose:
-- Provide a high-level overview of the modeling pipeline:
-  cfg → forward_spec → forward_store (+derived) → Binder/SystemGraph → PSF → loss(θ) → optimisation → eigenmodes → priors.
-- Explain:
-  - Configs and point designs  
-  - Forward vs inference spaces  
-  - ParameterStore: primitives vs derived  
-  - Binder as the canonical generative model object  
-  - Pure-θ vs eigen-θ optimisation
-  - Where priors fit (MAP or PPL)
-- Include simple diagrams or flow charts.
-
-3) Architecture & system design
--------------------------------
-
-These documents zoom in one level to describe how subsystems work in code.
-
-A. docs/architecture/params_and_store.md  
-   Covers:
-   - ParamField & ParamSpec (defaults, primitive/derived flags, forward vs inference)  
-   - ParameterStore behavior (from_spec_defaults, replace, validation)  
-   - Derived transforms & policy  
-   - subset(keys) vs without(keys)  
-   - Zernike basis handling tied to config
-
-B. docs/architecture/binder_and_graph.md  
-   Covers:
-   - SheraThreePlaneBinder as the primary model object  
-   - SystemGraph as the internal DAG  
-   - Structural hash + optics builder caching  
-   - How binder.model(store_delta) works step-by-step  
-   - Relationship to legacy SheraThreePlane_Model
-
-C. docs/architecture/inference_and_loss.md  
-   Covers:
-   - InferenceSpec + infer_keys  
-   - θ packing/unpacking  
-   - gaussian_image_nll (primitive)  
-   - make_binder_image_nll_fn (Binder bridge)  
-   - MAP losses and PriorSpec  
-   - run_shera_image_gd_basic
-
-D. docs/architecture/eigenmodes.md  
-   Covers:
-   - θ → FIM → EigenThetaMap → z-space  
-   - Whitening/truncation  
-   - How eigen-based optimisation wraps the same Binder-based θ-loss  
-   - Conceptual guarantees and example diagrams
-
-4) Tutorials & workflows
-------------------------
-
-Narrative, step-by-step guides for using the system.
-
-Initial tutorial: docs/tutorials/canonical_astrometry_demo.md  
-- Walk through the canonical demo script:
-  1. Build config, forward spec/store, truth PSF  
-  2. Build inference_spec + infer_keys  
-  3. Create Binder, build NLL  
-  4. Add priors (dict or PriorSpec)  
-  5. Run pure-θ GD  
-  6. Run eigen-θ GD  
-  7. Plot and inspect recovered parameters  
-
-Later tutorials may include:
-- Adding new parameters  
-- Defining new optical variants  
-- Trying different noise models  
-
-5) Developer & planning docs
-----------------------------
-
-These are internal docs for maintainers.
-
-A. Move Working Plan into docs/dev/  
-   - Source of truth for planning and design decisions  
-   - Lives under docs/dev/ to keep root clean  
-   - Cross-linked from architecture docs where appropriate
-
-B. docs/dev/code_structure.md  
-   - Summarises the repo layout  
-   - Links major modules to the relevant architecture docs  
-   - Helps onboarding new developers
-
-C. CONTRIBUTING.md (optional)  
-   - Test instructions  
-   - Coding style  
-   - How to add parameters or system variants  
-
-6) API & reference docs (optional / long-term)
-----------------------------------------------
-
-Potential later addition under docs/api/:
-- Manually curated or auto-generated references for key modules  
-- Not needed immediately; can wait until the architecture stabilises further  
-
-Suggested directory layout
---------------------------
-
-README.md  
-docs/
-  modeling_overview.md  
-architecture/
-  adr/
-    _template.md
-    0001-core-architecture-foundations.md
-  params_and_store.md  
-  binder_and_graph.md  
-  inference_and_loss.md  
-  eigenmodes.md  
-  tutorials/
-    canonical_astrometry_demo.md
-  dev/
-    dLuxShera_Working_Plan.md
-    code_structure.md
-  archive/
-    REFACTOR_HISTORY.md
-    LEGACY_APIS_AND_MIGRATION.md
-  api/   (optional, future)
-
-Implementation phases
----------------------
-
-Phase 1 — Skeleton & migration  
-- Create docs/ tree with empty/skeletal files  
-- Move Working Plan into docs/dev/  
-- Update README.md to link into docs  
-
-Phase 2 — Core conceptual & architecture docs  
-- Fill in modeling_overview.md  
-- Fill in params_and_store.md and binder_and_graph.md  
-- Draft inference_and_loss.md  
-
-Phase 3 — Tutorials & refinements  
-- Write canonical_astrometry_demo.md  
-- Flesh out eigenmodes.md  
-- Add code_structure.md (optional)
-
-Phase 4 — API/reference (future)  
-- Add docs/api/ if desired  
-- Consider Sphinx/mkdocs automation later  
-
-This roadmap gives us a structured, navigable documentation ecosystem: a conceptual top layer, a clear architecture layer, tutorial workflows, and well-isolated dev docs—with the Working Plan now appropriately placed under docs/dev/.
-
-- Devtools context snapshot (devtools/generate_context_snapshot.py) now groups ParamSpecs and transforms by system_id, calling out primitive vs derived keys and transform dependencies in the Markdown summary to keep demos aligned with the active registry.
-
-### 2025-02-16 — Binder NLL stationary-point regression
-
-- Added a focused regression (`tests/test_inference/test_noiseless_truth_stationary.py`) to assert that noiseless data generated from a Binder forward path produces both zero residual and ~zero gradient at the truth point for the Gaussian NLL.
-- Root cause: `make_binder_image_nll_fn` trusted the caller-provided `base_forward_store` even when a Binder instance was supplied, so a mismatched base (with different fixed parameters) led to a forward-model mismatch and non-zero ∇NLL at the truth parameters.
-- Fix: when a Binder is passed in, the loss now reuses the Binder's own `forward_spec` and `base_forward_store` for packing/unpacking, keeping θ semantics aligned with the data-generating forward path. The loss helper can also optionally return a `predict_fn` for diagnostics.
-
----
-
-## 23) Parking Lot
+## 25) Parking Lot
 
 - Two/Four-plane optics variant design and transforms.
 - Extended inference methods (HMC, priors, eigenspace optimization) after core stack stabilizes.
 - Ergonomic shims (`ModelParams`) and deprecation strategy for legacy APIs.
 - High-level model design / capabilities documentation describing what the Shera-style model does (optical/astrometric forward model, main outputs, supported questions) and its key assumptions/approximations, written for proposal and systems-engineering consumers rather than just implementers.
 - Model–error-budget interface and parameter dependency mapping: lightweight docs/figures that show how model outputs and sensitivities map onto specific error-budget terms, and how primitives vs. derived parameters (ParamSpec → Store → transforms) relate to those terms for traceability.
-
----
-- Task 1A completed: binder.get implemented and tests added.
-- Task 2B completed: binder leaf-name raising now occurs only when the leaf is
-  unique across store keys; ambiguous leaves raise an AttributeError listing
-  candidate full keys and suggest using the fully qualified form (no unexpected
-  ambiguous leaves beyond the primary/secondary Zernike coefficients).
-- Task 2C completed: Binder __dir__ now surfaces cfg fields, store prefixes, and
-  unambiguous leaf names for smoother tab completion while omitting ambiguous
-  leaves.
-- Completed tasks to date: 1A–2C covering binder.get, StoreNamespace, Binder.ns,
-  cfg/store prefix attribute access, on-the-fly leaf indexing, unambiguous leaf
-  access, and __dir__ completion improvements.
-- New functionality: improved interactive UX via dir(binder), exposing cfg
-  fields, store namespaces, and unique leaves without altering packaging or
-  discovery paths.
