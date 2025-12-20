@@ -1,5 +1,7 @@
-# dLux with Fresnel utilities
-dLux @ git+https://github.com/wakinget/dLux.git@main
+# Core dependency: dLux from Dylan's fork
+# Pinned to commit d0ab6df843503535c05225b15197233144be3cf1
+# (last commit before ConvergingBeamOpticalSystem refactor)
+dLux @ git+https://github.com/wakinget/dLux.git@d0ab6df843503535c05225b15197233144be3cf1
 
 absl-py==2.1.0
 anyio==4.11.0
