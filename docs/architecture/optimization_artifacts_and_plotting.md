@@ -112,6 +112,105 @@ An experiment directory contains:
 Design principle:
 - Ensemble analysis should depend primarily on `summary.json` and minimal metadata, not heavy diagnostics.
 
+## Optimization run artifacts (v0) — schema + IndexMap
+
+This project standardizes a small, stable set of run artifacts to support refactored optimization, plotting, and later per-parameter / block learning-rate shaping. The guiding principle is to keep the **Trace minimal and generic**, and record interpretation in **metadata** (plus optional derived artifacts).
+
+### Design principles
+
+- **Trace is minimal and parameterization-agnostic**:
+  - Required: `loss[t]` and `theta[t, :]`.
+  - No decoded/physical parameter values in Trace by default.
+- **Interpretation lives in metadata**:
+  - `meta.json` carries all information needed to interpret `theta`, `lr_vec`, curvature/preconditioning outputs, etc.
+- **Diagnostics are opt-in**:
+  - Do not save full gradient histories by default.
+  - Save only small generic scalars in Trace; larger arrays go into optional files.
+
+### Run directory layout (recommended)
+
+    runs/<run_id>/
+      trace.npz              # always
+      meta.json              # always
+      summary.json           # always
+
+      # optional:
+      signals.npz
+      diag_steps.jsonl
+      grads.npz
+      curvature.npz
+      precond.npz
+
+### `trace.npz` (always saved)
+
+**Required**
+- `loss`: shape `(T,)`
+- `theta`: shape `(T, D)`
+
+**Recommended optional (generic)**
+- `grad_norm`: `(T,)` (scalar norm only; no full grad vectors by default)
+- `step_norm`: `(T,)`
+- `base_lr`: `(T,)` (or constant repeated)
+- `accepted`: `(T,)` (reserved for accept/reject methods)
+
+### `meta.json` (always saved)
+
+`meta.json` is the primary, human-readable record of: (a) how to interpret `theta`, and (b) what optimizer/preconditioning configuration produced the trace.
+
+Recommended top-level fields:
+- `artifact_schema`: e.g. `"dluxshera-run-v0"`
+- `run_id`, `created_at` (ISO-8601)
+- `git`: `{commit, dirty}` (recommended)
+- `theta`: details about θ-space and its interpretation (see below)
+- `objective`: objective/loss identity (name + data identifiers)
+- `optimizer`: algorithm identity + step count + schedule
+- `environment`: optional runtime details (jax/jaxlib/platform)
+
+### IndexMap (stored in metadata, not in Trace)
+
+**IndexMap** is the serialized description of the θ layout used by packing/unpacking. It is *not a separate mapping system*; it is the exported, recorded view of the packing order. It exists to make arrays like `theta[t, :]`, `lr_vec[:]`, and curvature/preconditioning vectors interpretable without guessing ordering.
+
+**Key decision (v0):** IndexMap is stored in `meta.json`, not inside `trace.npz`.
+
+IndexMap is represented as an ordered list of packed segments (“entries”), each defining a θ slice and its semantic meaning:
+- `name`: dotted key / leaf identifier (e.g., `"binary.x_position_as"`, `"primary.zernike_coeffs_nm"`)
+- `start`, `stop`: θ slice indices (stop-exclusive)
+- `shape`: original leaf shape (e.g., `[27]`)
+- `block`: optional conceptual grouping label (e.g., `"astrometry"`, `"primary.zernikes"`)
+
+A stable hash (e.g., of ordered `(name, shape)` pairs) may be stored as `layout_hash` to quickly sanity-check trace ↔ decoder/spec compatibility.
+
+    ```json
+    {
+      "theta": {
+        "dim": 123,
+        "theta_space": "primitive|eigen",
+        "theta_map_id": "optional",
+        "theta_map_hash": "optional",
+        "index_map": {
+          "layout_hash": "optional",
+          "entries": [
+            {"name": "binary.x_position_as", "start": 0, "stop": 1, "shape": [1], "block": "astrometry"},
+            {"name": "binary.y_position_as", "start": 1, "stop": 2, "shape": [1], "block": "astrometry"},
+            {"name": "primary.zernike_coeffs_nm", "start": 2, "stop": 29, "shape": [27], "block": "primary.zernikes"}
+          ]
+        }
+      }
+    }
+    ```
+
+Notes:
+- “Blocks” can be as fine as per-parameter leaves (one entry per parameter), but the schema supports coarser groupings later without changing Trace.
+- If numeric grouping is ever needed for fast plotting, a future optional addition is to store a `block_id_by_index` integer vector in an NPZ file; this is not required in v0.
+
+### Optional artifacts (v0)
+
+- `precond.npz`: optional preconditioning outputs (e.g., `lr_vec[D]`, `precond[D]`).
+- `curvature.npz`: optional curvature summaries (e.g., `curv_diag[D]`).
+- `grads.npz`: optional sparse debugging gradients (not default).
+- `diag_steps.jsonl`: optional sparse per-step scalar logs.
+- `signals.npz`: optional cached derived time series for plotting (to be specified next).
+
 ## Learning rates and curvature-based preconditioning (expanded)
 
 This section records the strategy for moving beyond `run_simple_gd` (single global LR) toward a reusable “advanced GD” routine that supports per-parameter learning rates derived from curvature estimates (e.g., diagonal Fisher), while remaining compatible with refactor-era θ-space parameterization (primitive vs eigenmodes, whitened vs un-whitened).
@@ -360,6 +459,203 @@ Metadata should be lightweight but sufficient for reproducibility:
 
 Design principle:
 - Keep metadata schema versioned and evolvable (avoid over-specifying v0).
+
+## Signals strategy (v0) — where they live, and what belongs in Transforms vs Signals
+
+Signals are **plot-oriented, run-context derived time series** computed from optimization outputs (Trace + metadata), typically by decoding `theta[t, :]` into physically meaningful parameters and then applying domain-specific post-processing (residuals, unit scaling, grouping). The core idea is to keep optimization artifacts stable and generic, while allowing diagnostic/plotting needs to evolve without changing the optimizer.
+
+### Separation of concerns
+
+#### TransformRegistry / DerivedResolver (parameter semantics)
+Use registered Transforms for **truth-independent, reusable derived quantities** that belong to the model’s parameter vocabulary. A Transform should be:
+- Deterministic given the Store (and resolver context)
+- Meaningful without access to “true values”
+- Useful as a first-class value (for loss wiring, reporting, diagnostics, or interpretation)
+
+Transforms are *not* for plotting conventions (ppm, µas) or residuals.
+
+**Rule of thumb:** if it’s meaningful on a single inferred state without truth, it’s a Transform candidate.
+
+#### Signals (analysis / plotting products)
+Signals are **run-level diagnostics** derived from Trace and optional truth values. A Signal may:
+- Require truth values (residual/error definitions)
+- Apply unit conversions and presentation scalings (µas, ppm)
+- Group multiple quantities for plotting (panels with multiple overlays)
+- Include vector-valued histories and their summaries (components vs RMS/norm)
+
+Signals are allowed to be opinionated and evolve as diagnostic tastes change.
+
+**Rule of thumb:** if it depends on truth, or is primarily a plotting/unit convention, it belongs in Signals.
+
+### Where Signals are defined
+Signals should be defined in the optimization/plotting layer (not in the parameter/transform layer). A signal builder typically takes:
+- `Trace` (`theta`, `loss`, optional scalar diagnostics)
+- `meta.json` (theta-space interpretation + IndexMap)
+- a decoder (binder/spec/theta-map) to map `theta` → parameter values
+- optional `truth` values for residuals
+
+The output is a set of named numeric arrays (optionally cached as `signals.npz`) plus lightweight signal metadata (names, units, shapes, grouping).
+
+### Conventions adopted for v0
+
+#### X/Y residuals: separate signals, grouped by plot panel
+For binary astrometry, compute residuals and scale to micro-arcseconds as separate Signals:
+- `binary.x_error_uas`: `(T,)`
+- `binary.y_error_uas`: `(T,)`
+
+These are plotted together by defining a plotting “panel recipe” that overlays both signals on the same axis (rather than encoding `(T,2)` as a single signal). This keeps signals composable and metadata simple.
+
+#### Plate scale and other relative errors: Signals (ppm scaling)
+Quantities like plate scale error in ppm are run diagnostics and remain Signals:
+- `system.plate_scale_error_ppm`: `(T,)` computed as `1e6 * (ps_est - ps_true) / ps_true` (equivalently `1e6 * ps_est / ps_true - 1e6`)
+
+#### Raw fluxes: Transform for values; Signals for errors
+Flux-related products are split into:
+- Transform: `binary.raw_fluxes` (truth-independent)
+  - computed deterministically from inferred primitives (e.g., `log_flux_total` and contrast) using the source model’s conversion logic
+  - stored/available as a first-class derived quantity for any downstream use
+- Signal: `binary.raw_flux_error_ppm` (truth-dependent)
+  - computed from time series of `binary.raw_fluxes[t, :]` relative to truth and scaled to ppm:
+    `1e6 * (raw_fluxes_est - raw_fluxes_true) / raw_fluxes_true`
+
+This keeps “values” in parameter semantics and “errors/scalings” in Signals.
+
+#### Zernikes and eigenmodes
+- Zernike residuals in nm are Signals (truth-dependent) but typically require no additional unit scaling beyond subtraction.
+- Vector-valued signals should support plotting modes:
+  - “components” (plot each coefficient), and
+  - “summary” (e.g., RMS/norm time series)
+- For eigenmode runs, eigenmode residuals can be plotted in eigen space, but the preferred diagnostic path is typically:
+  - map eigen θ back to primitive parameter space, then compute the standard Signals above (x/y/separation/plate scale/fluxes/zernikes).
+
+(Next: define an introductory standard library of Signals + plotting panel recipes, and decide naming/unit conventions for saved `signals.npz`.)
+
+## Run I/O strategy (v0) — artifact saving/loading API and minimal schemas
+
+This project’s primary workflow is to run an optimization and immediately inspect plots and summaries. A secondary (but important) workflow is to occasionally **reload an optimized point** in a separate script to perform deeper diagnostics (e.g., gradient/FIM analysis around the best-fit parameters). The v0 I/O strategy prioritizes a **small number of stable artifacts** and a **simple, functions-first API**, with optional convenience wrappers only if/when they reduce repeated boilerplate.
+
+### Location in codebase
+
+Implement the run I/O utilities in:
+
+    dluxshera/inference/run_artifacts.py
+
+Plotting and analysis code should import I/O helpers from this module (not vice-versa), so artifact layout and loading logic remains centralized.
+
+---
+
+## Artifacts recap (v0)
+
+A run directory contains the always-saved core artifacts plus optional diagnostics and caches:
+
+    runs/<run_id>/
+      trace.npz              # always
+      meta.json              # always
+      summary.json           # always
+
+      # optional:
+      checkpoint_best.npz
+      checkpoint_final.npz
+      signals.npz
+      diag_steps.jsonl
+      precond.npz
+      curvature.npz
+      grads.npz
+
+Key principle: **Trace is minimal and generic**, while `meta.json` contains the information needed to interpret `theta` (including IndexMap). Signals and diagnostics are optional.
+
+---
+
+## Functions-first I/O API (v0)
+
+The primary interface is a small set of functions (not a mandatory new class):
+
+- `save_run(run_dir, trace, meta, summary, *, signals=None, precond=None, curvature=None, checkpoint_best=None, checkpoint_final=None, diag_steps=None, grads=None)`
+- `load_trace(run_dir)` → returns trace arrays (at minimum `theta`, `loss`)
+- `load_meta(run_dir)` / `load_summary(run_dir)`
+- `load_checkpoint(run_dir, which="best"|"final")` → returns checkpoint payload (`theta`, `step`, `loss`, etc.)
+
+This supports the most common workflow (inspect results immediately) while enabling the diagnostic workflow (reload best-fit state later).
+
+### Checkpoints: enabling gradient/FIM analysis workflows
+
+To support “load the optimized point later and analyze gradients,” v0 adds optional checkpoints:
+
+- `checkpoint_best.npz`: best step `theta_best`, `best_step`, `best_loss` (and any minimal extras)
+- `checkpoint_final.npz`: final step `theta_final`, `final_step`, `final_loss`
+
+These allow downstream scripts to rehydrate the best/final θ state without re-running the optimizer and without requiring large trace loads.
+
+---
+
+## Minimal content expectations (v0)
+
+### `meta.json` (interpretation + reproducibility)
+
+`meta.json` should answer: **“How do I interpret θ?”** The goal is not perfect reproducibility on day one, but enough structure to decode past runs without guessing.
+
+Minimum recommended fields (v0):
+- `artifact_schema`: `"dluxshera-run-v0"`
+- `run_id`, `created_at` (ISO-8601)
+- `git`: `{commit, dirty}` (recommended)
+- `theta`:
+  - `dim`
+  - `theta_space`: `"primitive"` or `"eigen"`
+  - `theta_map_hash` (recommended if `theta_space == "eigen"`)
+  - `index_map.entries` (IndexMap slices: `name/start/stop/shape/block`)
+- `optimizer`:
+  - `name`, `num_steps`, `base_lr`
+  - optional `preconditioning` block if enabled (method, eps, lr_clip, refresh cadence)
+- `objective`: basic identity (e.g., loss name, optional data identifiers)
+
+Everything beyond this can remain optional/iterative during early implementation.
+
+### `summary.json` (quick scanning and sweep aggregation)
+
+`summary.json` should answer: **“What happened?”** It is intended for sweep tables and quick triage without loading large arrays.
+
+Minimum recommended fields (v0):
+- identity: `run_id`, `created_at`, `git.commit`
+- `status`: `"ok"` or `"failed"` (and optional `message`)
+- step counts: `num_steps_completed`
+- loss summary: `loss_init`, `loss_final`, `loss_best`, `best_step`
+- runtime: `runtime_total_s` (approximate is acceptable)
+- artifact presence flags:
+  - `has_signals`, `has_precond`, `has_curvature`, `has_checkpoint_best`, `has_checkpoint_final`
+
+This schema may evolve, but these fields provide a stable baseline for run indexing and comparison.
+
+---
+
+## Signals caching: one file, self-contained
+
+Signals are optional derived time series used mainly for plotting. If saved, `signals.npz` should be **self-contained** (no separate `signals_meta.json` file).
+
+Preferred v0 approach:
+- Store numeric arrays keyed by fully-qualified signal names that encode unit conventions in the name, e.g.:
+  - `binary.x_error_uas`
+  - `system.plate_scale_error_ppm`
+  - `primary.zernike_error_nm`
+
+This keeps the signals cache lightweight and easy to manage. A strong invalidation story is not required in v0; the decoding context is expected to be clear from run metadata and signal naming.
+
+(Optionally, a future enhancement is embedding a single JSON string key inside `signals.npz` for richer signal metadata without creating additional files.)
+
+---
+
+## Optional convenience wrapper (future)
+
+A thin `RunArtifacts` helper may be introduced later if it reduces repeated boilerplate across scripts. If added, it must remain lightweight and non-invasive (a directory handle with lazy-loading helpers), and the functions-first API should remain the canonical interface.
+
+Avoid early “smart” behavior in v0:
+- automatic binder reconstruction
+- invalidation/caching frameworks
+- run databases
+
+The objective is to keep the system understandable while still making common workflows easy.
+
+---
+
 
 ## Open questions / decisions to revisit
 - Exact metadata schema v0 (which keys, how much provenance)
