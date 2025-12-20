@@ -275,6 +275,10 @@ def run_gradient_descent(
     binder: SheraThreePlaneBinder,
     infer_keys: Sequence[ParamKey],
     fast: bool,
+    run_dir: Optional[Path] = None,
+    runs_dir: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
 ) -> tuple[ParameterStore, Mapping[str, np.ndarray], np.ndarray, np.ndarray]:
     if fast:
         theta_history = [np.array(theta0)]
@@ -287,6 +291,10 @@ def run_gradient_descent(
         theta0,
         learning_rate=1e-2,
         num_steps=120,
+        run_dir=run_dir,
+        runs_dir=runs_dir,
+        run_id=run_id,
+        save_checkpoints=save_checkpoints,
     )
     final_store = store_unpack_params(sub_spec, theta_final, init_store)
 
@@ -432,6 +440,10 @@ def main(
     save_plots: bool = False,
     add_noise: bool = False,
     save_plots_dir: Optional[Path] = None,
+    run_dir: Optional[Path] = None,
+    runs_dir: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
 ) -> DemoData:
     if fast:
         jax.config.update("jax_disable_jit", True)
@@ -517,6 +529,10 @@ def main(
         binder=binder,
         infer_keys=infer_keys,
         fast=fast,
+        run_dir=run_dir,
+        runs_dir=runs_dir,
+        run_id=run_id,
+        save_checkpoints=save_checkpoints,
     )
 
     print("Step 7: Summarising recovered parameters and plotting (optional)...")
