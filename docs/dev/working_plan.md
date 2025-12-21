@@ -595,6 +595,7 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
 - Deliverables:
   - Sweep docs/tutorials/examples to ensure run_artifacts usage, signals caching, and preconditioning flags are documented consistently; add brief troubleshooting notes for missing optional files.
   - Update `docs/dev/working_plan.md` status per phase completion and record any follow-up tasks.
+  - ✅ Added sweep summary CSV tooling (`dluxshera.inference.sweeps`, `examples/scripts/summarize_runs.py`) and checkpoint gradient diagnostics (`dluxshera.inference.diagnostics`, `examples/scripts/analyze_checkpoint_gradients.py`).
 - Acceptance criteria:
   - Architecture docs reference the implemented module paths and schema; examples README shows how to enable/inspect run directories.
   - No stale references to legacy logging; working plan reflects completed phases vs. upcoming.
