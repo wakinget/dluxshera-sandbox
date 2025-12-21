@@ -509,8 +509,8 @@ Status: implemented; historical context
 ### 26.1 Current state (survey)
 
 - **Optimization + packing surfaces:** θ-space loops live in `src/dluxshera/inference/optimization.py` (e.g., `run_simple_gd`, binder-aware `run_image_gd`, and Fisher helpers). Packing/unpacking utilities live in `src/dluxshera/params/packing.py`; binder NLL builders and theta mapping hooks are in `src/dluxshera/inference/losses.py` and `src/dluxshera/inference/inference.py`. IndexMap export exists via `run_artifacts.build_index_map(...)`; packing order is aligned with `ParamSpec.subset(...)`.
-- **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/registry.py`; Shera-specific transforms (plate scale, log flux) are in `src/dluxshera/params/shera_threeplane_transforms.py`. There is currently no `raw_fluxes` transform registered.
-- **Plotting:** Refactor-era plotting helpers (PSF and parameter histories) are in `src/dluxshera/plot/plotting.py` with headless-friendly IO (return fig/axes, optional `save_path`). There are no signal builders or panel recipes yet.
+- **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/registry.py`; Shera-specific transforms (plate scale, log flux, raw fluxes) are in `src/dluxshera/params/shera_threeplane_transforms.py`.
+- **Plotting:** Refactor-era plotting helpers (PSF and parameter histories) are in `src/dluxshera/plot/plotting.py` with headless-friendly IO (return fig/axes, optional `save_path`). Signal builders and panel recipes for intro diagnostics live in `src/dluxshera/inference/{signals.py,plotting.py}` and feed optional run artifacts/plots.
 - **Scripts/demos:** Canonical/binder-based runs are in `examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, and `work/scratch/refactored_astrometry_retrieval.py`; artifact writing is opt-in and disabled by default.
 - **Docs:** Strategy and schema for artifacts/signals/preconditioning live in `docs/architecture/optimization_artifacts_and_plotting.md` (source of truth). Working plan now tracks phased implementation here; `src/dluxshera/inference/run_artifacts.py` and regression tests cover the core I/O scaffold.
 
@@ -554,19 +554,21 @@ Status: implemented; historical context
 **Phase C — Signals builders + panel recipes (plotting integration)**
 Now that artifact emission (Phase B) is wired, this phase focuses on decoding traces into signals and lightweight plotting/recipes.
 - Deliverables:
-  - Add `src/dluxshera/inference/signals.py` (or similar) to build derived time-series signals from trace + decoder/binder + optional truth: x/y astrometry residuals (µas), separation residual (µas), plate-scale error (ppm), raw flux error ppm (requires new transform for `binary.raw_fluxes` via TransformRegistry), zernike residuals (nm) with RMS summarizer.
-  - Define lightweight panel/recipe helpers (could live alongside plotting) to group x/y, flux A/B, and summary overlays; keep plotting core generic.
-  - Allow caching signals to optional `signals.npz` via Phase A API; keep naming/unit conventions self-describing.
+  - Add `src/dluxshera/inference/signals.py` to build derived time-series signals from trace + decoder/binder + optional truth: x/y astrometry residuals (µas), separation residual (µas), plate-scale error (ppm), raw flux error ppm (via new `binary.raw_fluxes` transform), zernike residuals (nm) with RMS summariser. Truth-absent cases fill NaNs but keep shapes stable.
+  - Add `src/dluxshera/inference/plotting.py` to provide intro panel recipes (astrometry overlay, separation, plate scale, raw flux A/B overlay, zernike RMS + optional components) saved under `<run_dir>/plots/` headlessly.
+  - Allow caching signals to optional `signals.npz` via Phase A API (binder-backed runner wiring), and optionally emit plots alongside other artifacts.
 - Acceptance criteria:
-  - Signal builders accept trace + meta (IndexMap) + binder/spec + truth and return named arrays with consistent shapes; optional truth yields absolute tracks without residuals.
+  - Signal builders accept trace + meta (IndexMap) + binder/spec + truth and return named arrays with consistent shapes; optional truth fills NaNs without shape churn.
   - Raw fluxes computed via a registered Transform (truth-independent) and used for ppm residuals when truth is supplied.
-  - Panel helpers can render x/y overlay and flux A/B overlay using `plot/plotting.py` primitives.
+  - Panel helpers can render x/y overlay and flux A/B overlay headlessly and write deterministic PNGs.
+  - Binder-backed runner can opt-in to writing `signals.npz` and plots when artifacts are enabled.
 - Tests to add/run:
-  - Unit tests for signal shape/content on synthetic trace (no binder) and binder-backed small run with truth; ensure ppm scaling and zernike RMS summaries are correct.
-  - Command: `PYTHONPATH=src pytest tests/inference/test_signals.py -q`.
+  - Unit tests for signal shape/content on synthetic trace (no binder) plus raw_flux transform correctness; ensure ppm scaling and zernike RMS summaries are correct.
+  - Smoke plot test that writes PNGs headlessly.
+  - Command: `PYTHONPATH=src pytest -q tests/inference/test_signals.py tests/inference/test_plotting_smoke.py`.
 - Docs/touchpoints:
-  - Document signal names/units in `docs/architecture/optimization_artifacts_and_plotting.md`.
-  - Update examples to optionally cache signals and produce one illustrative plot (headless-save only).
+  - Document signal names/units in `docs/architecture/optimization_artifacts_and_plotting.md` and mark status as Phase A/B implemented.
+  - Update examples/runners to optionally cache signals and produce plots (headless-save only).
 - Dependencies:
   - Relies on Phase A/B artifacts + IndexMap; needs TransformRegistry hook for `binary.raw_fluxes`.
 

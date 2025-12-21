@@ -811,6 +811,26 @@ def build_forward_model_spec_from_config(
                 "treated as a primitive knob."
             ),
         ),
+        ParamField(
+            key="binary.raw_fluxes",
+            group="binary",
+            kind="derived",
+            units="photons",
+            dtype=float,
+            shape=(2,),
+            default=None,
+            bounds=(0.0, None),
+            transform="binary_raw_fluxes",
+            depends_on=(
+                "binary.log_flux_total",
+                "binary.contrast",
+            ),
+            doc=(
+                "Raw integrated fluxes for the binary components (photons for "
+                "stars A and B). Derived from total log flux and contrast using "
+                "the AlphaCen source convention."
+            ),
+        ),
     ]
 
     if cfg.primary_noll_indices:

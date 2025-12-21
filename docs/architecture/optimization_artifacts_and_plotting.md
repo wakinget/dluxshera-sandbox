@@ -1,6 +1,6 @@
 # Optimization artifacts, logging, and plotting strategy (v0)
 
-Status: Draft (strategy-level; implementation details intentionally deferred)
+Status: Phase A/B implemented; Phase C/D pending
 
 ## Goals
 
