@@ -1,6 +1,6 @@
 # Optimization artifacts, logging, and plotting strategy (v0)
 
-Status: Phase A/B implemented; Phase C/D pending
+Status: Phase A/B implemented; Phase C implemented; Phase D in progress
 
 ## Goals
 
@@ -111,6 +111,11 @@ An experiment directory contains:
 
 Design principle:
 - Ensemble analysis should depend primarily on `summary.json` and minimal metadata, not heavy diagnostics.
+
+### Status snapshot (v0)
+- Phase A/B: implemented. Trace/meta/summary are always written, with opt-in optional artifacts.
+- Phase C: implemented. `signals.npz` remains self-contained (no sidecar metadata) and plotting recipes live in `src/dluxshera/inference/{signals.py,plotting.py}`.
+- Phase D: in progress. A deterministic diagonal preconditioner (`ema_grad2` at θ₀) produces `lr_vec` and `curv_diag` saved to `precond.npz` / `curvature.npz` when enabled; metadata is recorded under `meta["optimizer"]["preconditioning"]`.
 
 ## Optimization run artifacts (v0) — schema + IndexMap
 
@@ -322,6 +327,13 @@ Optional enhancements (not required initially but worth recording):
 - Blending: combine multiple curvature estimates:
   - curv = α * curv_hutch + (1-α) * curv_ema
 - Refresh cadence: recompute Hutchinson curvature every K steps and smooth with EMA.
+
+### Current v0 implementation (Phase D)
+- Method: `ema_grad2` evaluated once at θ₀ (compute grad(θ₀), square for `curv_diag`).
+- Preconditioner: `precond = 1 / sqrt(curv_diag + eps)`; `lr_vec = base_lr * precond` with optional clipping.
+- Artifacts: when enabled in binder-backed GD, `precond.npz` stores `lr_vec` and `precond`; `curvature.npz` stores `curv_diag`.
+- Metadata: `meta["optimizer"]["preconditioning"]` records the configuration (method, eps, lr_clip, curv_floor, refresh cadence, rng seed, base_lr).
+- Alignment: vectors are validated against θ dimension and IndexMap (last `stop` must equal `theta_dim`).
 
 ### Relationship to Optax optimizers (SGD / RMSProp / Adam)
 - optax.sgd with a single LR corresponds to a uniform lr_vec.

@@ -551,7 +551,7 @@ Status: implemented; historical context
 - Dependencies:
   - Requires Phase A helpers; IndexMap generation must be wired via packing/infer_keys used by the optimizer.
 
-**Phase C — Signals builders + panel recipes (plotting integration)**
+**Phase C — Signals builders + panel recipes (plotting integration) — DONE**
 Now that artifact emission (Phase B) is wired, this phase focuses on decoding traces into signals and lightweight plotting/recipes.
 - Deliverables:
   - Add `src/dluxshera/inference/signals.py` to build derived time-series signals from trace + decoder/binder + optional truth: x/y astrometry residuals (µas), separation residual (µas), plate-scale error (ppm), raw flux error ppm (via new `binary.raw_fluxes` transform), zernike residuals (nm) with RMS summariser. Truth-absent cases fill NaNs but keep shapes stable.
@@ -572,7 +572,7 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
 - Dependencies:
   - Relies on Phase A/B artifacts + IndexMap; needs TransformRegistry hook for `binary.raw_fluxes`.
 
-**Phase D — Preconditioning artifacts (lr_vec, curvature)**
+**Phase D — Preconditioning artifacts (lr_vec, curvature) — IN PROGRESS**
 - Deliverables:
   - Extend optimizer utilities to optionally compute/store per-index lr_vec and curvature/preconditioner vectors; save to `precond.npz` and/or `curvature.npz` (lr_vec in `precond.npz` per decision).
   - Capture preconditioning config in `meta.json` (method, eps, clipping bounds, refresh cadence) and keep gradients history off by default.
@@ -581,6 +581,7 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
   - When enabled, `precond.npz` contains lr_vec (and optional preconditioner) with shape matching θ and aligned with IndexMap; absence when disabled is clean.
   - `meta.json` records optimizer/preconditioning identity and parameters; summary notes whether preconditioning was active.
   - Core GD path remains backward-compatible when preconditioning is off.
+- Status: v0 path uses `ema_grad2` at θ₀ to derive `curv_diag`, `precond`, and `lr_vec`; artifacts are emitted via `precond.npz` / `curvature.npz` with metadata recorded under `optimizer.preconditioning`. Covered by `tests/inference/test_precond_artifacts.py`.
 - Tests to add/run:
   - Shape/metadata validation tests (e.g., `tests/inference/test_precond_artifacts.py`) using synthetic curvature vectors; ensure saved arrays reload and align with θ dim.
   - Command: `PYTHONPATH=src pytest tests/inference/test_precond_artifacts.py -q`.
