@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from .losses import gaussian_image_nll
 from .run_artifacts import save_run, build_index_map
+from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..params.spec import ParamSpec, ParamKey
@@ -639,6 +640,8 @@ def run_simple_gd(
     artifact_meta: Optional[Mapping[str, Any]] = None,
     artifact_summary: Optional[Mapping[str, Any]] = None,
     artifact_theta_space: Optional[str] = None,
+    artifact_curvature: Optional[Mapping[str, np.ndarray]] = None,
+    artifact_precond: Optional[Mapping[str, np.ndarray]] = None,
     return_artifacts: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
@@ -754,6 +757,8 @@ def run_simple_gd(
             for key, value in artifact_meta.items():
                 if key == "theta" and isinstance(value, Mapping):
                     base_meta.setdefault("theta", {}).update(value)
+                elif key == "optimizer" and isinstance(value, Mapping):
+                    base_meta.setdefault("optimizer", {}).update(value)
                 else:
                     base_meta[key] = value
 
@@ -793,6 +798,11 @@ def run_simple_gd(
             base_summary["has_checkpoint_best"] = True
             base_summary["has_checkpoint_final"] = True
 
+        if artifact_curvature is not None:
+            base_summary["has_curvature"] = True
+        if artifact_precond is not None:
+            base_summary["has_precond"] = True
+
         artifact_payload = {
             "run_dir": resolved_run_dir,
             "run_id": resolved_run_id,
@@ -800,6 +810,8 @@ def run_simple_gd(
             "meta": base_meta,
             "summary": base_summary,
             "checkpoints": checkpoints,
+            "curvature": artifact_curvature,
+            "precond": artifact_precond,
         }
 
         save_run(
@@ -808,6 +820,8 @@ def run_simple_gd(
             meta=base_meta,
             summary=base_summary,
             checkpoints=checkpoints,
+            curvature=artifact_curvature,
+            precond=artifact_precond,
         )
 
     if return_artifacts:
@@ -835,6 +849,8 @@ def run_image_gd(
     save_plots: bool = False,
     signals_truth: Optional[Mapping[str, Any]] = None,
     signals_decoder=None,
+    enable_precond: bool = False,
+    precond_cfg: Optional[Mapping[str, Any]] = None,
 ):
     """
     Run gradient descent in θ-space for image-based NLL using the Shera model.
@@ -853,6 +869,10 @@ def run_image_gd(
         Optional decoder override passed to :func:`build_signals`. Defaults to
         unpacking θ on top of ``store_init`` and refreshing derived parameters
         with the provided ``forward_spec``.
+    enable_precond / precond_cfg :
+        When enabled, compute a per-parameter learning-rate vector and related
+        diagonal curvature summaries at the start of the run and save them to
+        ``precond.npz`` / ``curvature.npz`` via the artifact writer.
     """
     # Build canonical Binder-based loss and θ0
     loss_theta, theta0 = make_binder_image_nll_fn(
@@ -869,6 +889,12 @@ def run_image_gd(
     artifacts_enabled = run_dir is not None or runs_dir is not None
     sub_spec = forward_spec.subset(infer_keys)
     artifact_meta = None
+    precond_enabled = enable_precond or precond_cfg is not None
+
+    if precond_enabled and not artifacts_enabled:
+        raise ValueError("enable_precond=True requires run_dir or runs_dir for artifact saving.")
+
+    index_map = None
     if artifacts_enabled:
         index_map = build_index_map(sub_spec, store_init, theta=theta0)
         artifact_meta = {
@@ -885,8 +911,35 @@ def run_image_gd(
             },
         }
 
+    artifact_curvature = None
+    artifact_precond = None
+    precond_meta = None
+    if precond_enabled:
+        cfg_dict = dict(precond_cfg) if precond_cfg is not None else {}
+        cfg_dict.setdefault("base_lr", learning_rate)
+        method_cfg = PreconditioningConfig(**cfg_dict)
+        precond_outputs = compute_precond_vectors(
+            loss_fn=loss_theta,
+            theta0=theta0,
+            method_cfg=method_cfg,
+            index_map=index_map,
+        )
+
+        artifact_curvature = {"curv_diag": precond_outputs["curv_diag"]}
+        artifact_precond = {
+            "lr_vec": precond_outputs["lr_vec"],
+            "precond": precond_outputs["precond"],
+        }
+        precond_meta = precond_outputs["config"]
+
+        if artifact_meta is None:
+            artifact_meta = {}
+        artifact_meta.setdefault("optimizer", {})
+        artifact_meta["optimizer"]["preconditioning"] = precond_meta
+
     # Simple θ-space GD
     signals_enabled = artifacts_enabled and (save_signals or save_plots)
+    needs_artifact_payload = signals_enabled or precond_enabled
 
     gd_result = run_simple_gd(
         loss_theta,
@@ -899,10 +952,12 @@ def run_image_gd(
         save_checkpoints=save_checkpoints,
         artifact_meta=artifact_meta,
         artifact_theta_space="primitive",
-        return_artifacts=signals_enabled,
+        artifact_curvature=artifact_curvature,
+        artifact_precond=artifact_precond,
+        return_artifacts=needs_artifact_payload,
     )
     theta_final, history = gd_result[:2]
-    artifact_payload = gd_result[2] if signals_enabled else None
+    artifact_payload = gd_result[2] if needs_artifact_payload else None
 
     if signals_enabled and artifact_payload is not None:
         from .plotting import plot_signals_panels
@@ -948,6 +1003,8 @@ def run_image_gd(
                 summary=summary,
                 checkpoints=artifact_payload["checkpoints"],
                 signals=signals if save_signals else None,
+                curvature=artifact_payload.get("curvature"),
+                precond=artifact_payload.get("precond"),
             )
 
     # Map final θ back into a ParameterStore
