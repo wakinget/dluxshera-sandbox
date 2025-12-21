@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+import numpy as np
+
 from .transforms import DEFAULT_SYSTEM_ID, register_transform
 from .spec import ParamKey
 
@@ -133,3 +135,35 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
 
     log_flux = math.log10(total_flux)
     return log_flux
+
+
+# ---------------------------------------------------------------------------
+# Raw fluxes: binary.raw_fluxes
+# ---------------------------------------------------------------------------
+
+@register_transform(
+    "binary.raw_fluxes",
+    depends_on=(
+        "binary.log_flux_total",
+        "binary.contrast",
+    ),
+    system_id=DEFAULT_SYSTEM_ID,
+)
+def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
+    """
+    Compute raw fluxes for the binary pair (photons for star A and B).
+
+    This mirrors the AlphaCen source model:
+
+        total_flux = 10 ** log_flux_total
+        flux_A = total_flux * contrast / (1 + contrast)
+        flux_B = total_flux / (1 + contrast)
+    """
+    log_flux = float(ctx["binary.log_flux_total"])
+    contrast = float(ctx["binary.contrast"])
+
+    total_flux = 10.0 ** log_flux
+    flux_B = total_flux / (1.0 + contrast)
+    flux_A = contrast * flux_B
+
+    return np.asarray([flux_A, flux_B])

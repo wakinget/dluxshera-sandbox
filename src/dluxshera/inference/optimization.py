@@ -639,7 +639,8 @@ def run_simple_gd(
     artifact_meta: Optional[Mapping[str, Any]] = None,
     artifact_summary: Optional[Mapping[str, Any]] = None,
     artifact_theta_space: Optional[str] = None,
-) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    return_artifacts: bool = False,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Minimal gradient-descent loop over a packed parameter vector θ.
 
@@ -670,6 +671,9 @@ def run_simple_gd(
     artifact_theta_space :
         Optional label for the θ space recorded in meta (e.g., "primitive" or
         "eigen"). Defaults to "primitive".
+    return_artifacts :
+        When True, return a third element containing the saved trace/meta/summary
+        payload (or ``None`` if artifacts are disabled).
 
     Returns
     -------
@@ -710,6 +714,7 @@ def run_simple_gd(
     history = {"loss": np.stack(losses), "theta": np.stack(theta_history)}
 
     artifacts_enabled = run_dir is not None or runs_dir is not None
+    artifact_payload = None
     if artifacts_enabled:
         resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
         created_at = datetime.now(timezone.utc).isoformat()
@@ -788,6 +793,15 @@ def run_simple_gd(
             base_summary["has_checkpoint_best"] = True
             base_summary["has_checkpoint_final"] = True
 
+        artifact_payload = {
+            "run_dir": resolved_run_dir,
+            "run_id": resolved_run_id,
+            "trace": trace,
+            "meta": base_meta,
+            "summary": base_summary,
+            "checkpoints": checkpoints,
+        }
+
         save_run(
             resolved_run_dir,
             trace=trace,
@@ -795,6 +809,9 @@ def run_simple_gd(
             summary=base_summary,
             checkpoints=checkpoints,
         )
+
+    if return_artifacts:
+        return theta, history, artifact_payload
 
     return theta, history
 
@@ -814,11 +831,28 @@ def run_image_gd(
     runs_dir: Optional[str | Path] = None,
     run_id: Optional[str] = None,
     save_checkpoints: bool = False,
+    save_signals: bool = False,
+    save_plots: bool = False,
+    signals_truth: Optional[Mapping[str, Any]] = None,
+    signals_decoder=None,
 ):
     """
     Run gradient descent in θ-space for image-based NLL using the Shera model.
 
     Now uses SheraThreePlaneBinder + `make_binder_image_nll_fn` under the hood.
+
+    Parameters
+    ----------
+    save_signals / save_plots :
+        When artifacts are enabled, compute intro Signals and optionally write
+        ``signals.npz`` plus plots under ``<run_dir>/plots``.
+    signals_truth :
+        Optional mapping of truth values forwarded to :func:`build_signals` for
+        residual computation.
+    signals_decoder :
+        Optional decoder override passed to :func:`build_signals`. Defaults to
+        unpacking θ on top of ``store_init`` and refreshing derived parameters
+        with the provided ``forward_spec``.
     """
     # Build canonical Binder-based loss and θ0
     loss_theta, theta0 = make_binder_image_nll_fn(
@@ -852,7 +886,9 @@ def run_image_gd(
         }
 
     # Simple θ-space GD
-    theta_final, history = run_simple_gd(
+    signals_enabled = artifacts_enabled and (save_signals or save_plots)
+
+    gd_result = run_simple_gd(
         loss_theta,
         theta0,
         learning_rate=learning_rate,
@@ -863,7 +899,56 @@ def run_image_gd(
         save_checkpoints=save_checkpoints,
         artifact_meta=artifact_meta,
         artifact_theta_space="primitive",
+        return_artifacts=signals_enabled,
     )
+    theta_final, history = gd_result[:2]
+    artifact_payload = gd_result[2] if signals_enabled else None
+
+    if signals_enabled and artifact_payload is not None:
+        from .plotting import plot_signals_panels
+        from .signals import build_signals
+
+        sub_spec = forward_spec.subset(infer_keys)
+
+        if signals_decoder is not None:
+            decoder_fn = signals_decoder
+        else:
+            def decoder_fn(theta_vec):
+                store_theta = store_unpack_params(sub_spec, theta_vec, store_init)
+                return store_theta.refresh_derived(forward_spec)
+
+        signals = build_signals(
+            artifact_payload["trace"],
+            artifact_payload["meta"],
+            decoder=decoder_fn,
+            truth=signals_truth,
+            signal_set="intro",
+        )
+
+        plots: list[Path] = []
+        if save_plots:
+            plots = plot_signals_panels(
+                signals,
+                artifact_payload["run_dir"],
+                panel_set="intro",
+                title_prefix=artifact_payload.get("run_id"),
+            )
+
+        summary = artifact_payload["summary"]
+        if save_signals:
+            summary["has_signals"] = True
+        if save_plots:
+            summary["has_plots"] = bool(plots)
+
+        if save_signals or save_plots:
+            save_run(
+                artifact_payload["run_dir"],
+                trace=artifact_payload["trace"],
+                meta=artifact_payload["meta"],
+                summary=summary,
+                checkpoints=artifact_payload["checkpoints"],
+                signals=signals if save_signals else None,
+            )
 
     # Map final θ back into a ParameterStore
     store_final = store_unpack_params(sub_spec, theta_final, store_init)
