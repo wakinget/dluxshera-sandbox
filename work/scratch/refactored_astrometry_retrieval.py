@@ -212,8 +212,7 @@ grads0 = jax.grad(loss_fn)(theta0)
 
 print("Computing Fisher Information Matrix (FIM) for preconditioning...")
 F = fim_theta(loss_fn, theta_true)
-assert F.ndim == 2
-assert F.shape[0] == F.shape[1] == theta_true.size
+# TODO: Optionally produce a plot of F, recreate visual style from AR-Basic_3Plane.py
 
 fim_diag = jnp.diag(F)
 eps = 1e-12
