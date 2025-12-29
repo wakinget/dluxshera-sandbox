@@ -137,3 +137,35 @@ def test_run_image_gd_writes_index_map_metadata(tmp_path: Path):
     summary = load_summary(run_dir)
     assert summary["status"] == "ok"
     assert summary["num_steps_completed"] == 3
+
+
+def test_run_simple_gd_in_memory_artifacts(tmp_path: Path):
+    theta0 = np.array([0.5, -1.0], dtype=float)
+
+    def loss_fn(theta: np.ndarray) -> np.ndarray:
+        return np.sum(theta**2)
+
+    assert list(tmp_path.iterdir()) == []
+
+    theta_final, history, artifacts = run_simple_gd(
+        loss_fn,
+        theta0,
+        learning_rate=0.2,
+        num_steps=4,
+        run_dir=None,
+        runs_dir=None,
+        return_artifacts=True,
+    )
+
+    assert theta_final.shape == theta0.shape
+    assert history["loss"].shape == (4,)
+    assert history["theta"].shape == (4, 2)
+
+    assert artifacts is not None
+    assert artifacts["run_dir"] is None
+    assert artifacts["meta"]["theta"]["dim"] == 2
+    assert artifacts["summary"]["num_steps_completed"] == 4
+    assert artifacts["trace"]["loss"].shape == (4,)
+    assert artifacts["trace"]["theta"].shape == (4, 2)
+
+    assert list(tmp_path.iterdir()) == []

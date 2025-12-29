@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-from dluxshera.inference.optimization import run_simple_gd
+from dluxshera.inference.optimization import _gd_loop, run_simple_gd
 
 
 def test_run_simple_gd_converges_on_quadratic():
@@ -28,3 +28,19 @@ def test_run_simple_gd_converges_on_quadratic():
     err = jnp.linalg.norm(theta_final - theta_true)
     assert err < init_err
     assert err < 1e-1
+
+
+def test_gd_loop_trace_shapes():
+    theta_true = jnp.array([2.0, -1.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([0.0, 0.0])
+    theta_final, trace = _gd_loop(loss_fn, theta0, learning_rate=0.2, num_steps=5)
+
+    assert theta_final.shape == theta0.shape
+    assert trace["theta"].shape == (6, 2)
+    assert trace["loss"].shape == (6,)
+    assert trace["grad_norm"].shape == (5,)
+    assert trace["step_norm"].shape == (5,)
