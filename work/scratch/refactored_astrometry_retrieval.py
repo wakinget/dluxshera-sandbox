@@ -38,7 +38,7 @@ from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.inference.optimization import make_binder_nll_fn, run_simple_gd, fim_theta, fim_theta_shera
+from dluxshera.inference.optimization import make_binder_nll_fn, run_image_gd, fim_theta
 from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 from dluxshera.params.packing import pack_params, unpack_params
 
@@ -210,18 +210,38 @@ loss0 = loss_fn(theta0)
 grads_true = jax.grad(loss_fn)(theta_true)
 grads0 = jax.grad(loss_fn)(theta0)
 
-print("Running gradient descent optimization...")
+print("Computing Fisher Information Matrix (FIM) for preconditioning...")
+F = fim_theta(loss_fn, theta_true)
+assert F.ndim == 2
+assert F.shape[0] == F.shape[1] == theta_true.size
+
+fim_diag = jnp.diag(F)
+eps = 1e-12
+curv_vec = jnp.where(fim_diag > 0, fim_diag, eps)
+
+base_lr = 1e-1
+lr_vec = base_lr / jnp.sqrt(curv_vec + eps)
+
+print("FIM diag: min={:.3e}, max={:.3e}".format(float(jnp.min(curv_vec)), float(jnp.max(curv_vec))))
+print("LR vec : min={:.3e}, max={:.3e}".format(float(jnp.min(lr_vec)), float(jnp.max(lr_vec))))
+
+print("Running FIM-preconditioned gradient descent...")
 # Now run the gradient descent optimization
 n_iter = 200
-theta_final, history = run_simple_gd(
-    loss_fn=loss_fn, # nll_loss_fn, or map_loss_fn
-    theta0=theta0,
-    learning_rate=1e-1,
+theta_final, final_store, history = run_image_gd(
+    cfg=cfg,
+    forward_spec=forward_spec,
+    store_init=init_store,
+    infer_keys=infer_keys,
+    data=data,
+    var=data_var,
+    noise_model="gaussian",
+    learning_rate=base_lr,
+    lr_vec=lr_vec,
     num_steps=n_iter,
 )
 
 # Collect GD outputs
-final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 final_psf = binder.model(final_store)
 
 ##################
@@ -278,7 +298,7 @@ def _print_vector(key: str, true_val, init_val, final_val, *, prec=8):
         )
 
 print("\n==============================")
-print("Gradient Descent Summary")
+print("FIM-preconditioned Gradient Descent Summary")
 print("==============================")
 print(f"n_iter = {n_iter}")
 print(f"loss(true theta) = {_fmt_scalar(loss_true)}")
