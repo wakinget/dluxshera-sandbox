@@ -840,6 +840,7 @@ def run_image_gd(
     *,
     noise_model: NoiseModel = "gaussian",
     learning_rate: float = 1e-2,
+    lr_vec: Optional[np.ndarray] = None,
     num_steps: int = 50,
     run_dir: Optional[str | Path] = None,
     runs_dir: Optional[str | Path] = None,
@@ -873,6 +874,9 @@ def run_image_gd(
         When enabled, compute a per-parameter learning-rate vector and related
         diagonal curvature summaries at the start of the run and save them to
         ``precond.npz`` / ``curvature.npz`` via the artifact writer.
+    lr_vec :
+        Optional per-parameter learning-rate vector for θ-space updates. When
+        provided, the optimizer uses element-wise SGD with this vector.
     """
     # Build canonical Binder-based loss and θ0
     loss_theta, theta0 = make_binder_image_nll_fn(
@@ -941,10 +945,16 @@ def run_image_gd(
     signals_enabled = artifacts_enabled and (save_signals or save_plots)
     needs_artifact_payload = signals_enabled or precond_enabled
 
+    optimizer = None
+    if lr_vec is not None:
+        lr_vec = np.asarray(lr_vec)
+        optimizer = optax.sgd(learning_rate=lr_vec)
+
     gd_result = run_simple_gd(
         loss_theta,
         theta0,
         learning_rate=learning_rate,
+        optimizer=optimizer,
         num_steps=num_steps,
         run_dir=run_dir,
         runs_dir=runs_dir,
