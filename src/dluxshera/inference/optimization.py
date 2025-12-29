@@ -64,6 +64,8 @@ __all__ = [
 
     # simple θ–space optimizer
     "run_simple_gd",
+    "run_gd_with_artifacts",
+    "run_shera_gd",
     "run_image_gd",
 
     # θ-space eigen reparameterisation
@@ -626,6 +628,68 @@ def _resolve_run_dir(
     return resolved, resolved_run_id
 
 
+def _gd_loop(
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta0: np.ndarray,
+    *,
+    learning_rate: float = 1e-2,
+    num_steps: int = 100,
+    optimizer: Optional[optax.GradientTransformation] = None,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """
+    Pure θ-space gradient-descent loop (no artifacts, no I/O).
+
+    Returns
+    -------
+    theta_final :
+        Final θ after updates.
+    trace :
+        Dict with minimal trace arrays. Includes:
+          - "theta": (num_steps + 1, D)
+          - "loss": (num_steps + 1,)
+          - "grad_norm": (num_steps,)
+          - "step_norm": (num_steps,)
+    """
+    theta = np.asarray(theta0)
+
+    use_sgd = optimizer is None
+    if not use_sgd:
+        opt_state = optimizer.init(theta)
+
+    losses = []
+    theta_history = [theta]
+    grad_norms = []
+    step_norms = []
+
+    for _ in range(num_steps):
+        loss, g = jax.value_and_grad(loss_fn)(theta)
+        losses.append(loss)
+
+        if use_sgd:
+            updates = -learning_rate * g
+            theta = theta + updates
+        else:
+            updates, opt_state = optimizer.update(g, opt_state, theta)
+            theta = optax.apply_updates(theta, updates)
+
+        grad_norms.append(np.linalg.norm(g))
+        step_norms.append(np.linalg.norm(updates))
+        theta_history.append(theta)
+
+    losses.append(loss_fn(theta))
+
+    trace = {
+        "loss": np.stack(losses),
+        "theta": np.stack(theta_history),
+    }
+    if grad_norms:
+        trace["grad_norm"] = np.stack(grad_norms)
+    if step_norms:
+        trace["step_norm"] = np.stack(step_norms)
+
+    return theta, trace
+
+
 def run_simple_gd(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
@@ -686,123 +750,111 @@ def run_simple_gd(
         Dict of simple diagnostics:
           - "loss": 1D array of loss values at each step.
     """
-    theta = np.asarray(theta0)
-
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
+    theta, full_trace = _gd_loop(
+        loss_fn,
+        theta0,
+        learning_rate=learning_rate,
+        num_steps=num_steps,
+        optimizer=optimizer,
+    )
 
-    opt_state = optimizer.init(theta)
+    history = {
+        "loss": full_trace["loss"][:-1],
+        "theta": full_trace["theta"][1:],
+    }
 
-    @jax.jit
-    def _step(theta, opt_state):
-        loss, g = jax.value_and_grad(loss_fn)(theta)
-        updates, opt_state = optimizer.update(g, opt_state, theta)
-        theta = optax.apply_updates(theta, updates)
-        grad_norm = np.linalg.norm(g)
-        step_norm = np.linalg.norm(updates)
-        return theta, opt_state, loss, grad_norm, step_norm
-
-    losses = []
-    theta_history = []
-    grad_norms = []
-    step_norms = []
-
-    for _ in range(num_steps):
-        theta, opt_state, loss, grad_norm, step_norm = _step(theta, opt_state)
-        losses.append(loss)
-        theta_history.append(theta)
-        grad_norms.append(grad_norm)
-        step_norms.append(step_norm)
-
-    history = {"loss": np.stack(losses), "theta": np.stack(theta_history)}
+    trace: Dict[str, np.ndarray] = {
+        "loss": history["loss"],
+        "theta": history["theta"],
+    }
+    if "grad_norm" in full_trace:
+        trace["grad_norm"] = full_trace["grad_norm"]
+    if "step_norm" in full_trace:
+        trace["step_norm"] = full_trace["step_norm"]
+    trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
 
     artifacts_enabled = run_dir is not None or runs_dir is not None
-    artifact_payload = None
+    resolved_run_dir = None
+    resolved_run_id = run_id or "in-memory"
     if artifacts_enabled:
         resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
-        created_at = datetime.now(timezone.utc).isoformat()
+    created_at = datetime.now(timezone.utc).isoformat()
 
-        trace: Dict[str, np.ndarray] = {
-            "loss": history["loss"],
-            "theta": history["theta"],
-        }
-        if grad_norms:
-            trace["grad_norm"] = np.stack(grad_norms)
-        if step_norms:
-            trace["step_norm"] = np.stack(step_norms)
-        trace["base_lr"] = np.full((len(losses),), learning_rate)
+    loss_array = onp.asarray(trace["loss"])
+    loss_init = float(loss_array[0]) if loss_array.size else None
+    loss_final = float(loss_array[-1]) if loss_array.size else None
+    best_idx = int(onp.nanargmin(loss_array)) if loss_array.size else None
+    loss_best = float(loss_array[best_idx]) if best_idx is not None else None
 
-        loss_array = onp.asarray(trace["loss"])
-        loss_init = float(loss_array[0]) if loss_array.size else None
-        loss_final = float(loss_array[-1]) if loss_array.size else None
-        best_idx = int(onp.nanargmin(loss_array)) if loss_array.size else None
-        loss_best = float(loss_array[best_idx]) if best_idx is not None else None
+    base_meta = {
+        "artifact_schema": "dluxshera-run-v0",
+        "run_id": resolved_run_id,
+        "created_at": created_at,
+        "theta": {
+            "dim": int(theta.size),
+            "theta_space": artifact_theta_space or "primitive",
+        },
+        "optimizer": {
+            "name": getattr(optimizer, "__class__", type("opt", (), {})).__name__,
+            "num_steps": num_steps,
+            "base_lr": learning_rate,
+        },
+    }
 
-        base_meta = {
-            "artifact_schema": "dluxshera-run-v0",
-            "run_id": resolved_run_id,
-            "created_at": created_at,
-            "theta": {
-                "dim": int(theta.size),
-                "theta_space": artifact_theta_space or "primitive",
+    if artifact_meta:
+        for key, value in artifact_meta.items():
+            if key == "theta" and isinstance(value, Mapping):
+                base_meta.setdefault("theta", {}).update(value)
+            elif key == "optimizer" and isinstance(value, Mapping):
+                base_meta.setdefault("optimizer", {}).update(value)
+            else:
+                base_meta[key] = value
+
+    base_summary = {
+        "status": "ok",
+        "run_id": resolved_run_id,
+        "created_at": created_at,
+        "num_steps_completed": int(loss_array.size),
+        "loss_init": loss_init,
+        "loss_final": loss_final,
+        "loss_best": loss_best,
+        "best_step": best_idx,
+        "has_checkpoint_best": False,
+        "has_checkpoint_final": False,
+        "has_signals": False,
+        "has_precond": False,
+        "has_curvature": False,
+    }
+
+    if artifact_summary:
+        base_summary.update(artifact_summary)
+
+    checkpoints = None
+    if save_checkpoints and best_idx is not None:
+        checkpoints = {
+            "best": {
+                "theta_best": trace["theta"][best_idx],
+                "best_step": best_idx,
+                "best_loss": loss_best,
             },
-            "optimizer": {
-                "name": getattr(optimizer, "__class__", type("opt", (), {})).__name__,
-                "num_steps": num_steps,
-                "base_lr": learning_rate,
+            "final": {
+                "theta_final": trace["theta"][-1],
+                "final_step": int(loss_array.size - 1),
+                "final_loss": loss_final,
             },
         }
+        base_summary["has_checkpoint_best"] = True
+        base_summary["has_checkpoint_final"] = True
 
-        if artifact_meta:
-            for key, value in artifact_meta.items():
-                if key == "theta" and isinstance(value, Mapping):
-                    base_meta.setdefault("theta", {}).update(value)
-                elif key == "optimizer" and isinstance(value, Mapping):
-                    base_meta.setdefault("optimizer", {}).update(value)
-                else:
-                    base_meta[key] = value
+    if artifact_curvature is not None:
+        base_summary["has_curvature"] = True
+    if artifact_precond is not None:
+        base_summary["has_precond"] = True
 
-        base_summary = {
-            "status": "ok",
-            "run_id": resolved_run_id,
-            "created_at": created_at,
-            "num_steps_completed": int(loss_array.size),
-            "loss_init": loss_init,
-            "loss_final": loss_final,
-            "loss_best": loss_best,
-            "best_step": best_idx,
-            "has_checkpoint_best": False,
-            "has_checkpoint_final": False,
-            "has_signals": False,
-            "has_precond": False,
-            "has_curvature": False,
-        }
-
-        if artifact_summary:
-            base_summary.update(artifact_summary)
-
-        checkpoints = None
-        if save_checkpoints and best_idx is not None:
-            checkpoints = {
-                "best": {
-                    "theta_best": trace["theta"][best_idx],
-                    "best_step": best_idx,
-                    "best_loss": loss_best,
-                },
-                "final": {
-                    "theta_final": trace["theta"][-1],
-                    "final_step": int(loss_array.size - 1),
-                    "final_loss": loss_final,
-                },
-            }
-            base_summary["has_checkpoint_best"] = True
-            base_summary["has_checkpoint_final"] = True
-
-        if artifact_curvature is not None:
-            base_summary["has_curvature"] = True
-        if artifact_precond is not None:
-            base_summary["has_precond"] = True
-
+    artifact_payload = None
+    if return_artifacts or artifacts_enabled:
         artifact_payload = {
             "run_dir": resolved_run_dir,
             "run_id": resolved_run_id,
@@ -814,6 +866,7 @@ def run_simple_gd(
             "precond": artifact_precond,
         }
 
+    if artifacts_enabled:
         save_run(
             resolved_run_dir,
             trace=trace,
@@ -828,6 +881,210 @@ def run_simple_gd(
         return theta, history, artifact_payload
 
     return theta, history
+
+
+def run_gd_with_artifacts(
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta0: np.ndarray,
+    *,
+    learning_rate: float = 1e-2,
+    num_steps: int = 100,
+    optimizer: Optional[optax.GradientTransformation] = None,
+    index_map: Optional[Mapping[str, Any]] = None,
+    run_dir: Optional[str | Path] = None,
+    runs_dir: Optional[str | Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
+    theta_space: str = "primitive",
+    curvature: Optional[np.ndarray] = None,
+    precond: Optional[Mapping[str, np.ndarray]] = None,
+    extra_meta: Optional[Mapping[str, Any]] = None,
+    extra_summary: Optional[Mapping[str, Any]] = None,
+    return_artifacts: bool = True,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
+    """
+    Gradient-descent wrapper that assembles canonical artifacts (optional I/O).
+    """
+    theta, full_trace = _gd_loop(
+        loss_fn,
+        theta0,
+        learning_rate=learning_rate,
+        num_steps=num_steps,
+        optimizer=optimizer,
+    )
+
+    history = {
+        "loss": full_trace["loss"][:-1],
+        "theta": full_trace["theta"][1:],
+    }
+
+    trace: Dict[str, np.ndarray] = {
+        "loss": history["loss"],
+        "theta": history["theta"],
+    }
+    if "grad_norm" in full_trace:
+        trace["grad_norm"] = full_trace["grad_norm"]
+    if "step_norm" in full_trace:
+        trace["step_norm"] = full_trace["step_norm"]
+    trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
+
+    artifacts_enabled = run_dir is not None or runs_dir is not None
+    resolved_run_dir = None
+    resolved_run_id = run_id or "in-memory"
+    if artifacts_enabled:
+        resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    base_meta: Dict[str, Any] = {
+        "artifact_schema": "dluxshera-run-v0",
+        "run_id": resolved_run_id,
+        "created_at": created_at,
+        "theta": {
+            "dim": int(theta.size),
+            "theta_space": theta_space,
+        },
+        "optimizer": {
+            "kind": "sgd" if optimizer is None else "optax",
+            "learning_rate": learning_rate,
+            "num_steps": num_steps,
+        },
+    }
+    if index_map is not None:
+        base_meta["theta"]["index_map"] = index_map
+
+    if extra_meta:
+        for key, value in extra_meta.items():
+            if key == "theta" and isinstance(value, Mapping):
+                base_meta.setdefault("theta", {}).update(value)
+            elif key == "optimizer" and isinstance(value, Mapping):
+                base_meta.setdefault("optimizer", {}).update(value)
+            else:
+                base_meta[key] = value
+
+    loss_array = onp.asarray(trace["loss"])
+    loss_init = float(loss_array[0]) if loss_array.size else None
+    loss_final = float(loss_array[-1]) if loss_array.size else None
+    best_idx = int(onp.nanargmin(loss_array)) if loss_array.size else None
+    loss_best = float(loss_array[best_idx]) if best_idx is not None else None
+
+    base_summary: Dict[str, Any] = {
+        "status": "ok",
+        "run_id": resolved_run_id,
+        "created_at": created_at,
+        "num_steps_completed": int(loss_array.size),
+        "loss_init": loss_init,
+        "loss_final": loss_final,
+        "loss_best": loss_best,
+        "best_step": best_idx,
+        "has_checkpoint_best": False,
+        "has_checkpoint_final": False,
+        "has_signals": False,
+        "has_precond": precond is not None,
+        "has_curvature": curvature is not None,
+    }
+
+    if extra_summary:
+        base_summary.update(extra_summary)
+
+    checkpoints = None
+    if save_checkpoints and best_idx is not None:
+        checkpoints = {
+            "best": {
+                "theta_best": trace["theta"][best_idx],
+                "best_step": best_idx,
+                "best_loss": loss_best,
+            },
+            "final": {
+                "theta_final": trace["theta"][-1],
+                "final_step": int(loss_array.size - 1),
+                "final_loss": loss_final,
+            },
+        }
+        base_summary["has_checkpoint_best"] = True
+        base_summary["has_checkpoint_final"] = True
+
+    artifact_curvature = None
+    if curvature is not None:
+        artifact_curvature = {"curv_diag": curvature}
+
+    artifact_precond = None
+    if precond is not None:
+        artifact_precond = dict(precond)
+
+    artifact_payload = None
+    if return_artifacts or artifacts_enabled:
+        artifact_payload = {
+            "run_dir": resolved_run_dir,
+            "run_id": resolved_run_id,
+            "trace": trace,
+            "meta": base_meta,
+            "summary": base_summary,
+            "checkpoints": checkpoints,
+            "curvature": artifact_curvature,
+            "precond": artifact_precond,
+        }
+
+    if artifacts_enabled:
+        save_run(
+            resolved_run_dir,
+            trace=trace,
+            meta=base_meta,
+            summary=base_summary,
+            checkpoints=checkpoints,
+            curvature=artifact_curvature,
+            precond=artifact_precond,
+        )
+
+    if return_artifacts:
+        return theta, history, artifact_payload
+
+    return theta, history
+
+
+def run_shera_gd(
+    *,
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta0: np.ndarray,
+    index_map: Optional[Mapping[str, Any]] = None,
+    learning_rate: float = 1e-2,
+    lr_vec: Optional[np.ndarray] = None,
+    num_steps: int = 100,
+    run_dir: Optional[str | Path] = None,
+    runs_dir: Optional[str | Path] = None,
+    run_id: Optional[str] = None,
+    save_checkpoints: bool = False,
+    theta_space: str = "primitive",
+    curvature: Optional[np.ndarray] = None,
+    precond: Optional[Mapping[str, np.ndarray]] = None,
+    extra_meta: Optional[Mapping[str, Any]] = None,
+    extra_summary: Optional[Mapping[str, Any]] = None,
+    return_artifacts: bool = True,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
+    """
+    Shera-specific front end for θ-space GD that delegates to run_gd_with_artifacts.
+    """
+    optimizer = None
+    if lr_vec is not None:
+        optimizer = optax.sgd(learning_rate=np.asarray(lr_vec))
+
+    return run_gd_with_artifacts(
+        loss_fn,
+        theta0,
+        learning_rate=learning_rate,
+        num_steps=num_steps,
+        optimizer=optimizer,
+        index_map=index_map,
+        run_dir=run_dir,
+        runs_dir=runs_dir,
+        run_id=run_id,
+        save_checkpoints=save_checkpoints,
+        theta_space=theta_space,
+        curvature=curvature,
+        precond=precond,
+        extra_meta=extra_meta,
+        extra_summary=extra_summary,
+        return_artifacts=return_artifacts,
+    )
 
 
 def run_image_gd(

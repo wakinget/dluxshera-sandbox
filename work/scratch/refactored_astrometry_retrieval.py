@@ -38,7 +38,8 @@ from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.inference.optimization import make_binder_nll_fn, run_image_gd, fim_theta
+from dluxshera.inference.optimization import make_binder_nll_fn, run_shera_gd, fim_theta
+from dluxshera.inference.run_artifacts import build_index_map
 from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 from dluxshera.params.packing import pack_params, unpack_params
 
@@ -189,6 +190,7 @@ nll_loss_fn, theta0 = make_binder_nll_fn(
     theta0_store=init_store,
 )
 # nll_loss_fn(theta) gives the negative log-likelihood loss for a given input theta vector
+index_map = build_index_map(inference_subspec, init_store, theta=theta0)
 
 def map_loss_fn(theta: np.ndarray) -> np.ndarray:
     store_theta = store_unpack_params(inference_subspec, theta, init_store)
@@ -227,18 +229,22 @@ print("LR vec : min={:.3e}, max={:.3e}".format(float(jnp.min(lr_vec)), float(jnp
 print("Running FIM-preconditioned gradient descent...")
 # Now run the gradient descent optimization
 n_iter = 200
-theta_final, final_store, history = run_image_gd(
-    cfg=cfg,
-    forward_spec=forward_spec,
-    store_init=init_store,
-    infer_keys=infer_keys,
-    data=data,
-    var=data_var,
-    noise_model="gaussian",
+theta_final, history, _artifacts = run_shera_gd(
+    loss_fn=loss_fn,
+    theta0=theta0,
     learning_rate=base_lr,
     lr_vec=lr_vec,
     num_steps=n_iter,
+    index_map=index_map,
+    run_dir=None,
+    runs_dir=None,
+    return_artifacts=True,
+    theta_space="primitive",
+    curvature=curv_vec,
+    precond={"lr_vec": lr_vec},
 )
+
+final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 
 # Collect GD outputs
 final_psf = binder.model(final_store)
