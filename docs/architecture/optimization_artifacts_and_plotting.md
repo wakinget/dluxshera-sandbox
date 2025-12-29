@@ -219,7 +219,7 @@ Notes:
 - `diag_steps.jsonl`: optional sparse per-step scalar logs.
 - `signals.npz`: optional cached derived time series for plotting (to be specified next).
 
-## Learning rates and curvature-based preconditioning (expanded)
+## Learning rates and curvature-based preconditioning
 
 This section records the strategy for moving beyond `run_simple_gd` (single global LR) toward a reusable “advanced GD” routine that supports per-parameter learning rates derived from curvature estimates (e.g., diagonal Fisher), while remaining compatible with refactor-era θ-space parameterization (primitive vs eigenmodes, whitened vs un-whitened).
 
@@ -251,6 +251,8 @@ This is deliberately compatible with:
 - eigenmode θ (mode amplitudes),
 - any future θ-map, as long as we can map “indices” to “meaning” for metadata/diagnostics.
 
+Note: In v0, θ-space preconditioning is implemented by passing lr_vec directly to optax.sgd inside run_image_gd. This yields elementwise updates θ_{t+1} = θ_t − lr_vec ⊙ g_t regardless of the underlying parameterization (primitive vs eigen).
+
 ### Blocks: an optional organizational layer (not a limitation)
 We may optionally define “blocks” of θ indices (slices or index lists) that correspond to conceptual parameter families:
 - astrometry (x/y, separation/PA, platescale)
@@ -266,8 +268,12 @@ Blocks are not required to compute lr_vec (we can compute per-index LRs directly
 
 Blocks are tightly related to packing/unpacking and θ-mapping: the θ layout is defined there, so those utilities are the natural place to generate an IndexMap used by the optimizer and stored in metadata.
 
+Block semantics (e.g., ‘all primary Zernikes share one LR’) are implemented by using the IndexMap (ParamSpec subset + packing order) to construct a piecewise-constant lr_vec. We do not currently rely on optax.multi_transform in θ-space; instead, each block’s LR is baked into the vector.
+
 ### Curvature sources for learning-rate construction
 We aim to derive lr_vec from a curvature proxy. We explicitly distinguish “what the optimizer needs” (a nonnegative vector of curvature magnitudes) from “what we call it” (Fisher, Hessian, Gauss–Newton, empirical Fisher).
+
+When using FIM-based preconditioning, we compute the FIM via fim_theta(loss_fn, theta_ref), where loss_fn is the same θ-space loss used during optimization. This avoids misalignment between the FIM and the actual objective.
 
 Candidate curvature definitions (diagonal-only preferred):
 

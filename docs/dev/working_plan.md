@@ -204,6 +204,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 **P0 — Current focus**  
 - ✅ **Optimization artifacts & logging**: Phase A scaffold (`run_artifacts.py`) is in place and Phase B wiring now emits required artifacts from `run_simple_gd` and binder-backed `run_image_gd` when opt-in flags are provided. Integration smoke tests cover end-to-end writes and metadata (trace/meta/summary + optional checkpoints).  
 - ⏳ **Optimizer control (learning-rate shaping)**: Extend `run_simple_gd` (or successor) with per-parameter/block learning rates derived from FIM/curvature estimates; ensure compatibility with the logging/artifacts pipeline above.  
+  - TODO: Integrate FIM-based preconditioning into `PreconditioningConfig` (e.g., `method='fim_diag'`) so that the same configuration both computes and uses the preconditioner, instead of computing an external `lr_vec` in the script.
 - ⚠️ **Loss regression hardening**: Keep the landed Binder NLL stationary-point regression; add coverage for multi-wavelength / multi-PSF scenarios as new demos land and surface any remaining edge cases.
 
 **P1 — Next up**  
@@ -475,6 +476,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 
 - Deliver the **optimization artifacts/logging pipeline** described in `docs/architecture/optimization_artifacts_and_plotting.md` and wire it into the canonical and two-plane demos plus `work/scratch/refactored_astrometry_retrieval.py`; keep plotting helpers aligned with the run-directory layout.
 - Advance **optimizer control** by adding per-parameter/block learning-rate shaping (FIM/curvature-derived) to the gradient-descent helpers while keeping compatibility with the new artifacts/logging story.
+  - Decision: for the refactor path, blocks are implemented via θ-space `lr_vec` and IndexMap rather than `optax.multi_transform` over the ParamStore tree.
 - Keep the **doc stack coherent**: use this Working Plan as a “map of maps,” point to `docs/architecture/*.md` for details, and ensure README/tutorials stay in sync as the artifacts/logging work lands. Merge readiness (Milestone A) follows once these pieces are stable.
 
 ## 23) Documentation roadmap for dLuxShera
@@ -581,7 +583,9 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
   - When enabled, `precond.npz` contains lr_vec (and optional preconditioner) with shape matching θ and aligned with IndexMap; absence when disabled is clean.
   - `meta.json` records optimizer/preconditioning identity and parameters; summary notes whether preconditioning was active.
   - Core GD path remains backward-compatible when preconditioning is off.
-- Status: v0 path uses `ema_grad2` at θ₀ to derive `curv_diag`, `precond`, and `lr_vec`; artifacts are emitted via `precond.npz` / `curvature.npz` with metadata recorded under `optimizer.preconditioning`. Covered by `tests/inference/test_precond_artifacts.py`.
+- Status: 
+  - v0 path uses `ema_grad2` at θ₀ to derive `curv_diag`, `precond`, and `lr_vec`; artifacts are emitted via `precond.npz` / `curvature.npz` with metadata recorded under `optimizer.preconditioning`. Covered by `tests/inference/test_precond_artifacts.py`.
+  - v0 implementation now includes a concrete FIM → diag(FIM) → `lr_vec` path, exercised in `work/scratch/refactored_astrometry_retrieval.py` via `fim_theta(loss_fn, theta_true)` and `run_image_gd(..., lr_vec=...)`. This uses θ-space vector LRs rather than the legacy tree-based `lr_model`.
 - Tests to add/run:
   - Shape/metadata validation tests (e.g., `tests/inference/test_precond_artifacts.py`) using synthetic curvature vectors; ensure saved arrays reload and align with θ dim.
   - Command: `PYTHONPATH=src pytest tests/inference/test_precond_artifacts.py -q`.
