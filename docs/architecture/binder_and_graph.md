@@ -60,5 +60,84 @@ As of the current refactor:
 ## SystemGraphs
 Under the hood, a `SystemGraph` represents the computation as a directed acyclic graph. Nodes correspond to optical elements, intermediate wavefronts or images, and detector steps; edges capture data flow between them. The Binder manages this graph so that typical users do not need to manipulate it directly, but the structure is available for advanced workflows such as inspecting intermediate values or enabling caching.
 
-## How they fit together
+### How they fit together
 ParamSpecs and ParameterStores define what can change. The Binder is the object you call to run the model, taking care of parameter bookkeeping and model evaluation. The SystemGraph is the wiring the Binder orchestrates to generate outputs. Canonical demos interact with the Binder interface and treat the SystemGraph as an implementation detail unless deeper introspection is needed.
+
+## Builders and caching (where structure is decided)
+
+This project uses “builders” as *pure factories* that turn:
+- config (structural knobs),
+- ParamSpec (schema), and
+- ParameterStore (values; typically primitives-only + refreshed deriveds)
+
+into *runtime objects* used to evaluate the forward model.
+
+### What is built where
+
+- Optics builders (`src/dluxshera/optics/builder.py`)
+  - Build the dLux optical system (“optics stack”) used by the telescope forward model.
+  - Own the **structural hash + caching** policy for optics construction.
+  - Key idea: optics are expensive to build; coefficients/parameters are cheap to update.
+
+- Universe/source builders (`src/dluxshera/core/universe.py`)
+  - Build astrophysical sources (e.g., Alpha Cen) from the effective store.
+
+- Binder / SystemGraph (`src/dluxshera/core/binder.py`, `src/dluxshera/graph/system_graph.py`)
+  - Binder is the public entry point: `.model(store_delta)` merges an overlay store and evaluates.
+  - SystemGraph is an internal executor (currently a minimal single-node graph) that evaluates
+    “cfg/spec/store → optics/source/detector → telescope.model”.
+
+### Structural vs non-structural parameters
+
+We distinguish two categories of values:
+
+1) Structural values (affect shapes / sampling / object topology)
+   - Changing these requires rebuilding the optics *structure*.
+   - These values must be included in the structural hash used for caching.
+
+2) Non-structural values (affect coefficients only)
+   - Changing these should reuse the existing optics structure.
+   - Examples: Zernike coefficients, small OPD perturbations, flux parameters, etc.
+
+The structural subset is documented alongside each optics config in `src/dluxshera/optics/config.py`.
+
+### Where “effective store” matters
+
+Many runs treat some values as primitive knobs during inference that may override truth defaults
+via `store_delta`. When a value is structural (e.g., pixel scale / plate scale for certain optics),
+the optics builder must source it from the **effective store** (base + delta) so the cached optics
+reflects the current knob values.
+
+### Caching boundaries (current)
+
+- Optics caching lives in the optics builders (structural hash → cached optics structure).
+- SystemGraph caching / multi-node / derived enforcement are intentionally future work:
+  the graph is currently eager and minimal, and relies on callers to provide stores with
+  derived values refreshed.
+
+(If/when graph-level caching is added, it should reuse the optics structural hash contract rather
+than inventing a parallel notion of “structure”.)
+
+### Relationship diagram
+
+```
+    cfg + forward_spec + base_forward_store
+                 |
+                 v
+              Binder
+        (merge store_delta)
+                 |
+                 v
+          effective store
+        /        |        \
+       v         v         v
+   optics      source    detector
+ (cached)      (build)   (build/reuse)
+       \         |         /
+        \        |        /
+                 v
+             dl.Telescope
+                 |
+                 v
+              telescope.model()
+```
