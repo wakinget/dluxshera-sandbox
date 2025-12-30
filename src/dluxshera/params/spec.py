@@ -758,7 +758,7 @@ def build_forward_model_spec_from_config(
                 "Computed from the primary and secondary focal lengths and their "
                 "axial separation via\n\n"
                 "    1 / f_eff = 1 / f1 + 1 / f2 - sep / (f1 * f2)\n\n"
-                "This matches the relation used in SheraThreePlaneSystem and is used "
+                "This matches the relation used in SheraThreePlaneOptics and is used "
                 "to derive the geometric plate scale at the detector."
             ),
         ),

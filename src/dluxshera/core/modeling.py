@@ -10,7 +10,7 @@ from ..optics.config import SheraThreePlaneConfig
 from ..optics.builder import build_shera_threeplane_optics
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
-from ..optics.optical_systems import SheraThreePlaneSystem
+from ..optics.optical_systems import SheraThreePlaneOptics
 from .universe import build_alpha_cen_source
 
 
@@ -20,7 +20,7 @@ import dLux.layers as dll
 import dLux.utils as dlu
 import jax.numpy as np
 import jax.random as jr
-from ..optics.optical_systems import SheraThreePlaneSystem, JNEXTOpticalSystem
+from ..optics.optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
 from ..inference.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
 from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
 from ..utils.utils import nanrms
@@ -79,7 +79,7 @@ def SheraThreePlane_ForwardModel(params, return_model=False, mask=_UNSET):
         mask = DEFAULT_DP_PATH
 
     # Initialize the optical system given input params
-    model_optics = SheraThreePlaneSystem(
+    model_optics = SheraThreePlaneOptics(
         wf_npixels = params.get("pupil_npix"),
         psf_npixels = params.get("psf_npix"),
         oversample = 3,
@@ -179,7 +179,7 @@ class SheraThreePlane_Model(dl.Telescope):
         """
         if mask is _UNSET:
             mask = DEFAULT_DP_PATH
-        optics = SheraThreePlaneSystem(
+        optics = SheraThreePlaneOptics(
             wf_npixels = params.get("pupil_npix"),
             psf_npixels = params.get("psf_npix"),
             oversample = 1,
@@ -420,7 +420,7 @@ class SheraTwoPlane_Model(dl.Telescope):
         Initialize the optical system.
         """
 
-        optics = JNEXTOpticalSystem(
+        optics = SheraTwoPlaneOptics(
             wf_npixels = params.get("pupil_npix"),
             psf_npixels = params.get("psf_npix"),
             oversample = 1,
@@ -578,7 +578,7 @@ class SheraThreePlaneComponents:
     spec: ParamSpec
     store: ParameterStore
 
-    optics: SheraThreePlaneSystem
+    optics: SheraThreePlaneOptics
     source: dlT.AlphaCen
 
 
@@ -619,7 +619,7 @@ def build_shera_threeplane_components(
     -------
     SheraThreePlaneComponents
         A dataclass bundling together `cfg`, `spec`, `store`, the
-        `SheraThreePlaneSystem` optics object, and the `AlphaCen` source
+        `SheraThreePlaneOptics` optics object, and the `AlphaCen` source
         object.
     """
     # Ensure the store is consistent with the spec before using it.

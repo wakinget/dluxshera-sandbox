@@ -5,7 +5,7 @@ import dLuxToliman as dlT
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG
-from dluxshera.optics.optical_systems import SheraThreePlaneSystem
+from dluxshera.optics.optical_systems import SheraThreePlaneOptics
 from dluxshera.core.modeling import (
     SheraThreePlaneComponents,
     build_shera_threeplane_components,
@@ -21,7 +21,7 @@ def test_build_shera_threeplane_components_smoke():
 
     # Basic type sanity
     assert isinstance(components, SheraThreePlaneComponents)
-    assert isinstance(components.optics, SheraThreePlaneSystem)
+    assert isinstance(components.optics, SheraThreePlaneOptics)
     assert isinstance(components.source, dlT.AlphaCen)
 
     # The bundle should preserve the exact cfg/spec/store passed in

@@ -5,6 +5,7 @@ from .config import (
     SHERA_TESTBED_CONFIG,
     SHERA_FLIGHT_CONFIG,
 )
+from .optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
 
 __all__ = [
     "BaseConfig",
@@ -12,4 +13,6 @@ __all__ = [
     "SheraTwoPlaneConfig",
     "SHERA_TESTBED_CONFIG",
     "SHERA_FLIGHT_CONFIG",
+    "SheraThreePlaneOptics",
+    "SheraTwoPlaneOptics",
 ]
