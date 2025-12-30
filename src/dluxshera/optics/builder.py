@@ -19,12 +19,12 @@ from ..params.spec import ParamSpec
 try:
     # Legacy three-plane optics implementation, now living in the
     # refactored package under dluxshera.optics.optical_systems.
-    from .optical_systems import SheraThreePlaneSystem, SheraTwoPlaneOptics
+    from .optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
 except ImportError as e:  # pragma: no cover - hard failure, not a logic branch
     raise ImportError(
-        "SheraThreePlaneSystem could not be imported from "
+        "SheraThreePlaneOptics could not be imported from "
         "dluxshera.optics.optical_systems. Make sure "
-        "optical_systems.py defines SheraThreePlaneSystem and is "
+        "optical_systems.py defines SheraThreePlaneOptics and is "
         "installed/importable as part of dluxshera."
     ) from e
 
@@ -33,7 +33,7 @@ except ImportError as e:  # pragma: no cover - hard failure, not a logic branch
 # Structural hash / cache helpers
 # -----------------------------------------------------------------------------
 
-_THREEPLANE_CACHE: dict[str, SheraThreePlaneSystem] = {}
+_THREEPLANE_CACHE: dict[str, SheraThreePlaneOptics] = {}
 _TWOPLANE_CACHE: dict[str, SheraTwoPlaneOptics] = {}
 _CACHE_DISABLED_ENV = "DLUXSHERA_THREEPLANE_CACHE_DISABLED"
 _TWOPLANE_CACHE_DISABLED_ENV = "DLUXSHERA_TWOPLANE_CACHE_DISABLED"
@@ -156,17 +156,44 @@ def _load_diffractive_pupil_mask(cfg: SheraTwoPlaneConfig) -> dll.AberratedLayer
     return dll.AberratedLayer(jnp.asarray(mask_array))
 
 
+def _construct_threeplane_optics(cfg: SheraThreePlaneConfig) -> SheraThreePlaneOptics:
+    """Construct the base three-plane optics from structural configuration."""
+
+    return SheraThreePlaneOptics(
+        wf_npixels=cfg.pupil_npix,
+        psf_npixels=cfg.psf_npix,
+        oversample=cfg.oversample,
+        detector_pixel_pitch=cfg.pixel_pitch_m,
+        mask=cfg.diffractive_pupil_path,
+        m1_noll_ind=tuple(cfg.primary_noll_indices)
+        if cfg.primary_noll_indices
+        else None,
+        m2_noll_ind=tuple(cfg.secondary_noll_indices)
+        if cfg.secondary_noll_indices
+        else None,
+        p1_diameter=cfg.m1_diameter_m,
+        p2_diameter=cfg.m2_diameter_m,
+        m1_focal_length=cfg.m1_focal_length_m,
+        m2_focal_length=cfg.m2_focal_length_m,
+        plane_separation=cfg.m1_m2_separation_m,
+        n_struts=cfg.n_struts,
+        strut_width=cfg.strut_width_m,
+        strut_rotation_deg=cfg.strut_rotation_deg,
+        dp_design_wavel=cfg.dp_design_wavelength_m,
+    )
+
+
 
 def build_shera_threeplane_optics(
     cfg: SheraThreePlaneConfig,
     store: Optional[ParameterStore] = None,
     spec: Optional[ParamSpec] = None,
-) -> SheraThreePlaneSystem:
+) -> SheraThreePlaneOptics:
     """
     Construct the legacy Shera three-plane optical system from a
     SheraThreePlaneConfig and (optionally) a ParameterStore.
 
-    This is a compatibility wrapper around SheraThreePlaneSystem that:
+    This is a compatibility wrapper around SheraThreePlaneOptics that:
       - translates from the new config schema (meters, degrees, tuples, etc.)
         into the argument conventions used by the existing optics class, and
       - optionally injects Zernike coefficients from a ParameterStore.
@@ -197,8 +224,8 @@ def build_shera_threeplane_optics(
       the cached geometry so the cache remains reusable across coefficient
       updates.
     - `pixel_pitch_m` is stored and passed in meters, matching the
-      SheraThreePlaneSystem convention.
-    - SheraThreePlaneSystem has been updated to accept strut_rotation in
+      SheraThreePlaneOptics convention.
+    - SheraThreePlaneOptics has been updated to accept strut_rotation in
       degrees, so we may pass it directly from the config.
     - Primary and secondary Zernike bases are selected via the Noll index
       tuples in the config. If no secondary indices are provided, the
@@ -263,28 +290,7 @@ def build_shera_threeplane_optics(
         base_optics = _THREEPLANE_CACHE.get(struct_hash)
 
     if base_optics is None:
-        base_optics = SheraThreePlaneSystem(
-            wf_npixels=cfg.pupil_npix,
-            psf_npixels=cfg.psf_npix,
-            oversample=cfg.oversample,
-            detector_pixel_pitch=cfg.pixel_pitch_m,
-            mask=cfg.diffractive_pupil_path,
-            m1_noll_ind=tuple(cfg.primary_noll_indices)
-            if cfg.primary_noll_indices
-            else None,
-            m2_noll_ind=tuple(cfg.secondary_noll_indices)
-            if cfg.secondary_noll_indices
-            else None,
-            p1_diameter=cfg.m1_diameter_m,
-            p2_diameter=cfg.m2_diameter_m,
-            m1_focal_length=cfg.m1_focal_length_m,
-            m2_focal_length=cfg.m2_focal_length_m,
-            plane_separation=cfg.m1_m2_separation_m,
-            n_struts=cfg.n_struts,
-            strut_width=cfg.strut_width_m,
-            strut_rotation_deg=cfg.strut_rotation_deg,
-            dp_design_wavel=cfg.dp_design_wavelength_m,
-        )
+        base_optics = _construct_threeplane_optics(cfg)
         if not cache_disabled:
             _THREEPLANE_CACHE[struct_hash] = base_optics
 

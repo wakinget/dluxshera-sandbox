@@ -78,7 +78,7 @@ def test_system_focal_length_matches_analytic():
     # Value from the transform registry
     f_eff = TRANSFORMS.compute("system.focal_length_m", store)
 
-    # Analytic reference using the same relation as SheraThreePlaneSystem
+    # Analytic reference using the same relation as SheraThreePlaneOptics
     f1 = cfg.m1_focal_length_m
     f2 = cfg.m2_focal_length_m
     sep = cfg.m1_m2_separation_m
@@ -92,7 +92,7 @@ def test_system_focal_length_matches_analytic():
 def test_plate_scale_matches_legacy_optics():
     """
     Check that system.plate_scale_as_per_pix from the transform matches
-    the PSF pixel scale computed by SheraThreePlaneSystem.
+    the PSF pixel scale computed by SheraThreePlaneOptics.
     """
     cfg = SHERA_TESTBED_CONFIG
     _, store = _build_forward_model_store(cfg)

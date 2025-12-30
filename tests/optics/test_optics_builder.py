@@ -25,7 +25,7 @@ def test_build_shera_threeplane_optics_smoke():
     assert optics.wf_npixels == cfg.pupil_npix
     assert optics.psf_npixels == cfg.psf_npix
 
-    # You can add more checks if SheraThreePlaneSystem exposes them, e.g.:
+    # You can add more checks if SheraThreePlaneOptics exposes them, e.g.:
     # assert optics.m1_diameter == cfg.m1_diameter_m
 
 
