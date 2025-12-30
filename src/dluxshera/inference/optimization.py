@@ -640,23 +640,56 @@ def _gd_loop(
     show_progress: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
-    Pure θ-space gradient-descent loop (no artifacts, no I/O).
+    Run a pure in-memory gradient-descent loop in θ-space.
+
+    This is the lowest-level optimizer helper in the refactor-era stack. It
+    operates only on a packed parameter vector ``theta`` and a scalar loss
+    function, producing a minimal trace without touching disk. It is intended
+    for unit tests, toy quadratics, and algorithmic experiments where artifact
+    bookkeeping is not needed.
+
+    The loop computes gradients with JAX autodiff and applies optax updates.
+    It is agnostic to Shera-specific metadata, index maps, or artifact schemas.
 
     Parameters
     ----------
+    loss_fn :
+        Callable with signature ``loss_fn(theta) -> scalar``. The function must
+        be JAX-differentiable with respect to ``theta``.
+    theta0 :
+        Initial parameter vector of shape ``(D,)`` (or any array-like that
+        broadcasts to that shape).
+    learning_rate :
+        Step size used when ``optimizer`` is ``None``.
+    num_steps :
+        Number of gradient updates to perform.
     optimizer :
-        Optional optax optimizer. If None, `optax.sgd(learning_rate)` is used.
+        Optional optax ``GradientTransformation``. If ``None``, a plain
+        ``optax.sgd(learning_rate)`` update is used.
+    show_progress :
+        If ``True``, wraps the loop in a ``tqdm`` progress bar.
 
     Returns
     -------
     theta_final :
-        Final θ after updates.
+        Final parameter vector after ``num_steps`` updates, shape ``(D,)``.
     trace :
-        Dict with minimal trace arrays. Includes:
-          - "theta": (num_steps + 1, D)
-          - "loss": (num_steps + 1,)
-          - "grad_norm": (num_steps,)
-          - "step_norm": (num_steps,)
+        Dictionary of minimal trace arrays:
+
+        - ``"theta"``: stacked θ history, shape ``(num_steps + 1, D)`` (includes
+          the initial ``theta0`` and the final iterate).
+        - ``"loss"``: loss values at each recorded θ, shape
+          ``(num_steps + 1,)``.
+        - ``"grad_norm"``: gradient L2 norms per update, shape
+          ``(num_steps,)`` (present when updates are computed).
+        - ``"step_norm"``: update L2 norms per update, shape
+          ``(num_steps,)`` (present when updates are computed).
+
+    See Also
+    --------
+    run_simple_gd : Minimal wrapper around this loop with optional artifacts.
+    run_gd_with_artifacts : Canonical artifact-producing wrapper.
+    run_shera_gd : Shera-specific front end built on ``run_gd_with_artifacts``.
     """
     theta = np.asarray(theta0)
 
@@ -717,27 +750,34 @@ def run_simple_gd(
     return_artifacts: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
-    Minimal gradient-descent loop over a packed parameter vector θ.
+    Run a minimal θ-space gradient-descent loop with optional run artifacts.
+
+    This is a lightweight front end that delegates the numerical optimization
+    to :func:`_gd_loop` and optionally writes the standard trace/meta/summary
+    artifacts described in ``docs/architecture/optimization_artifacts_and_plotting.md``.
+    It is model-agnostic: the only inputs are a packed θ vector and a scalar
+    loss function.
 
     Parameters
     ----------
     loss_fn :
-        Callable taking a 1D JAX array `theta` and returning a scalar loss.
-        In our Shera use-case this will typically be the closure produced by
-        `make_image_nll_fn(...)`.
+        Callable taking a 1D JAX array ``theta`` and returning a scalar loss.
+        For Shera use cases, this is typically the closure returned by
+        :func:`make_image_nll_fn`.
     theta0 :
-        Initial 1D parameter vector.
+        Initial packed parameter vector of shape ``(D,)``.
     learning_rate :
-        Step size for the default Adam optimizer (ignored if `optimizer`
-        is provided).
+        Step size for the default Adam optimizer (ignored if ``optimizer`` is
+        provided).
     num_steps :
         Number of gradient steps to take.
     optimizer :
-        Optional optax optimizer. If None, `optax.adam(learning_rate)` is used.
+        Optional optax optimizer. If ``None``, ``optax.adam(learning_rate)``
+        is used.
     run_dir / runs_dir / run_id :
         Optional run directory configuration. If provided, run artifacts
         (trace/meta/summary, and optional checkpoints) are saved via
-        `save_run(...)`. Default is disabled.
+        :func:`dluxshera.inference.run_artifacts.save_run`. Default is disabled.
     save_checkpoints :
         Whether to emit best/final checkpoints.
     artifact_meta / artifact_summary :
@@ -746,9 +786,18 @@ def run_simple_gd(
     artifact_theta_space :
         Optional label for the θ space recorded in meta (e.g., "primitive" or
         "eigen"). Defaults to "primitive".
+    artifact_curvature :
+        Optional mapping containing curvature vectors (typically
+        ``{"curv_diag": array}``) to be saved in ``curvature.npz`` when
+        artifacts are enabled.
+    artifact_precond :
+        Optional mapping containing preconditioning vectors (e.g.,
+        ``{"lr_vec": ..., "precond": ...}``) to be saved in ``precond.npz``.
     return_artifacts :
-        When True, return a third element containing the saved trace/meta/summary
-        payload (or ``None`` if artifacts are disabled).
+        When ``True``, return a third element containing an in-memory artifact
+        payload (or ``None`` if artifacts are explicitly disabled). When
+        ``run_dir``/``runs_dir`` are not provided, this payload is assembled
+        without writing to disk.
 
     Returns
     -------
@@ -756,7 +805,22 @@ def run_simple_gd(
         Final parameter vector after `num_steps` updates.
     history :
         Dict of simple diagnostics:
-          - "loss": 1D array of loss values at each step.
+
+        - ``"loss"``: array of shape ``(num_steps,)`` with per-step losses.
+        - ``"theta"``: array of shape ``(num_steps, D)`` with per-step θ values.
+    artifacts :
+        Only returned when ``return_artifacts`` is ``True``. Contains the same
+        payload structure as :func:`run_gd_with_artifacts` (trace/meta/summary
+        plus optional checkpoints/preconditioning data), or ``None`` when
+        artifacts are disabled.
+
+    See Also
+    --------
+    _gd_loop : Low-level, I/O-free gradient-descent loop.
+    run_gd_with_artifacts : Canonical artifact-producing wrapper.
+    run_shera_gd : Shera-specific front end with optional per-parameter LRs.
+    dluxshera.inference.run_artifacts.save_run : Artifact writer.
+    docs/architecture/optimization_artifacts_and_plotting.md : Artifact schema.
     """
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
@@ -844,7 +908,80 @@ def run_gd_with_artifacts(
     show_progress: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
-    Gradient-descent wrapper that assembles canonical artifacts (optional I/O).
+    Run θ-space gradient descent and assemble canonical optimization artifacts.
+
+    This is the canonical wrapper around :func:`_gd_loop`. It builds the
+    standardized trace/meta/summary structures described in
+    ``docs/architecture/optimization_artifacts_and_plotting.md`` and optionally
+    persists them via :func:`dluxshera.inference.run_artifacts.save_run`. It
+    remains model-agnostic: all metadata needed to interpret θ (such as an
+    IndexMap) is passed explicitly.
+
+    Parameters
+    ----------
+    loss_fn :
+        Callable with signature ``loss_fn(theta) -> scalar``. Must be
+        JAX-differentiable with respect to ``theta``.
+    theta0 :
+        Initial packed parameter vector of shape ``(D,)``.
+    learning_rate :
+        Base learning rate used when ``optimizer`` is ``None``.
+    num_steps :
+        Number of gradient updates to perform.
+    optimizer :
+        Optional optax optimizer. If ``None``, ``optax.sgd(learning_rate)`` is
+        used.
+    index_map :
+        Optional IndexMap describing how θ indices map to parameter names and
+        blocks. When provided it is stored under ``meta["theta"]["index_map"]``;
+        see :func:`dluxshera.inference.run_artifacts.build_index_map`.
+    run_dir / runs_dir / run_id :
+        Optional run directory configuration. If provided, artifacts are saved
+        to disk via :func:`dluxshera.inference.run_artifacts.save_run`. When not
+        provided, artifacts can still be assembled in-memory if
+        ``return_artifacts`` is ``True``.
+    save_checkpoints :
+        Whether to save best/final checkpoints as ``checkpoint_*.npz``.
+    theta_space :
+        Label describing the θ parameterization (e.g., ``"primitive"``,
+        ``"eigen"``) stored in metadata.
+    curvature :
+        Optional curvature vector of shape ``(D,)`` (e.g., diagonal Fisher or
+        Hessian proxy). Saved as ``curvature.npz`` under ``{"curv_diag": ...}``.
+    precond :
+        Optional mapping of preconditioning vectors (e.g., ``{"lr_vec": ...,
+        "precond": ...}``) saved as ``precond.npz``.
+    extra_meta :
+        Extra metadata to merge into ``meta.json``. Keys ``"theta"`` and
+        ``"optimizer"`` are merged into their respective sub-dicts.
+    extra_summary :
+        Extra fields merged into ``summary.json``.
+    return_artifacts :
+        If ``True``, return a third element with the assembled artifact payload.
+    show_progress :
+        If ``True``, show a ``tqdm`` progress bar during optimization.
+
+    Returns
+    -------
+    theta_final :
+        Final parameter vector, shape ``(D,)``.
+    history :
+        Dict containing per-step ``"loss"`` and ``"theta"`` arrays with shapes
+        ``(num_steps,)`` and ``(num_steps, D)`` respectively.
+    artifacts :
+        Only returned when ``return_artifacts`` is ``True``. The payload is a
+        dictionary with keys ``run_dir``, ``run_id``, ``trace``, ``meta``,
+        ``summary``, ``checkpoints``, ``curvature``, and ``precond``. This
+        mirrors the files written by the artifact system.
+
+    See Also
+    --------
+    _gd_loop : Low-level, I/O-free gradient-descent loop.
+    run_simple_gd : Minimal wrapper with optional artifacts.
+    run_shera_gd : Shera-specific front end with per-parameter LR support.
+    dluxshera.inference.run_artifacts.save_run : Artifact writer.
+    docs/architecture/optimization_artifacts_and_plotting.md : Artifact schema.
+    docs/architecture/inference_and_loss.md : Inference/loss pipeline context.
     """
     theta, full_trace = _gd_loop(
         loss_fn,
@@ -1005,7 +1142,69 @@ def run_shera_gd(
     show_progress: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
-    Shera-specific front end for θ-space GD that delegates to run_gd_with_artifacts.
+    Shera-specific front end for θ-space gradient descent.
+
+    This helper wraps :func:`run_gd_with_artifacts` and adds Shera conventions
+    such as optional per-parameter learning-rate vectors and index-map metadata.
+    It is the preferred entry point for Shera θ-space optimization when
+    artifact logging or Shera-specific metadata is desired.
+
+    Parameters
+    ----------
+    loss_fn :
+        Callable with signature ``loss_fn(theta) -> scalar``.
+    theta0 :
+        Initial packed parameter vector of shape ``(D,)``.
+    index_map :
+        Optional IndexMap describing θ layout, typically created by
+        :func:`dluxshera.inference.run_artifacts.build_index_map` from a Shera
+        inference spec.
+    learning_rate :
+        Base learning rate used when ``lr_vec`` is not supplied.
+    lr_vec :
+        Optional per-parameter learning-rate vector of shape ``(D,)``. When
+        provided, an element-wise ``optax.sgd(learning_rate=lr_vec)`` optimizer
+        is used, yielding updates ``theta_{t+1} = theta_t - lr_vec ⊙ grad``.
+        The ``learning_rate`` scalar is still recorded in metadata.
+    num_steps :
+        Number of gradient updates to perform.
+    run_dir / runs_dir / run_id :
+        Optional run directory configuration for artifact output.
+    save_checkpoints :
+        Whether to save best/final checkpoints.
+    theta_space :
+        Label describing the θ parameterization (e.g., ``"primitive"``,
+        ``"eigen"``) stored in metadata.
+    curvature :
+        Optional curvature vector (e.g., diagonal Fisher proxy) saved in
+        ``curvature.npz`` when artifacts are enabled.
+    precond :
+        Optional mapping of preconditioning vectors saved in ``precond.npz``.
+    extra_meta / extra_summary :
+        Optional metadata merged into the saved ``meta.json`` / ``summary.json``
+        (useful for Shera-specific run identifiers or config IDs).
+    return_artifacts :
+        If ``True``, return the assembled artifact payload in-memory.
+    show_progress :
+        If ``True``, show a ``tqdm`` progress bar during optimization.
+
+    Returns
+    -------
+    theta_final :
+        Final parameter vector, shape ``(D,)``.
+    history :
+        Per-step diagnostics containing ``"loss"`` and ``"theta"`` arrays.
+    artifacts :
+        Only returned when ``return_artifacts`` is ``True``. See
+        :func:`run_gd_with_artifacts` for payload structure.
+
+    See Also
+    --------
+    run_gd_with_artifacts : Canonical artifact-producing GD wrapper.
+    run_simple_gd : Minimal wrapper without Shera-specific metadata.
+    _gd_loop : Pure in-memory GD loop.
+    docs/architecture/optimization_artifacts_and_plotting.md : Artifact schema.
+    docs/architecture/inference_and_loss.md : Shera inference context.
     """
     optimizer = None
     if lr_vec is not None:
