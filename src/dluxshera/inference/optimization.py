@@ -5,7 +5,7 @@ import jax
 import jax.numpy as np
 import jax.scipy.stats as jstats
 import numpy as onp
-import importlib
+from tqdm import tqdm
 from datetime import datetime, timezone
 from pathlib import Path
 from jax import config, grad, linearize, jit, lax
@@ -670,8 +670,7 @@ def _gd_loop(
 
     iterator = range(num_steps)
     if show_progress:
-        if importlib.util.find_spec("tqdm") is not None:
-            iterator = importlib.import_module("tqdm").tqdm(iterator)
+        iterator = tqdm(iterator)
 
     for _ in iterator:
         loss, g = jax.value_and_grad(loss_fn)(theta)
