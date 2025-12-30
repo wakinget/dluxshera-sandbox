@@ -6,7 +6,7 @@ import pytest
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 
-from dluxshera.core.builder import build_shera_threeplane_model
+from dluxshera.optics.builder import build_legacy_shera_threeplane_model
 from dluxshera.core.modeling import SheraThreePlane_Model
 
 
@@ -61,7 +61,7 @@ def test_build_shera_threeplane_model_smoke(shera_smoke_cfg):
     cfg = shera_smoke_cfg
     spec, store = _make_inference_store(cfg)
 
-    model = build_shera_threeplane_model(cfg, spec, store)
+    model = build_legacy_shera_threeplane_model(cfg, spec, store)
 
     # Basic type check
     assert isinstance(model, SheraThreePlane_Model)

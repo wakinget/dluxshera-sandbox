@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional
 from ..optics.config import SheraThreePlaneConfig
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
-from ..core.builder import build_shera_threeplane_model
+from ..optics.builder import build_legacy_shera_threeplane_model
 
 
 ModelBuilder = Callable[[SheraThreePlaneConfig, ParamSpec, ParameterStore], Any]
@@ -32,7 +32,7 @@ class DLuxSystemNode:
     cfg: SheraThreePlaneConfig
     inference_spec: ParamSpec
     base_store: ParameterStore
-    build_model_fn: ModelBuilder = build_shera_threeplane_model
+    build_model_fn: ModelBuilder = build_legacy_shera_threeplane_model
 
     def __post_init__(self) -> None:
         # Validate and freeze the base store against the provided spec so we

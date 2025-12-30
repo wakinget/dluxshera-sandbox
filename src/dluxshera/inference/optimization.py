@@ -351,8 +351,8 @@ def make_image_nll_fn(
 
     # Lazily resolve the model-building function to avoid circular imports
     if build_model_fn is None:
-        from ..core.builder import build_shera_threeplane_model
-        build_model_fn = build_shera_threeplane_model
+        from ..optics.builder import build_legacy_shera_threeplane_model
+        build_model_fn = build_legacy_shera_threeplane_model
 
     data = np.asarray(data)
     var = np.asarray(var)
