@@ -1,6 +1,7 @@
 # src/dluxshera/inference/optimization.py
 from __future__ import annotations
 
+import importlib
 import jax
 import jax.numpy as np
 import jax.scipy.stats as jstats
@@ -759,130 +760,62 @@ def run_simple_gd(
     """
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
-    theta, full_trace = _gd_loop(
-        loss_fn,
-        theta0,
+
+    artifacts_requested = (
+        run_dir is not None
+        or runs_dir is not None
+        or save_checkpoints
+        or artifact_meta is not None
+        or artifact_summary is not None
+        or artifact_curvature is not None
+        or artifact_precond is not None
+        or return_artifacts
+    )
+
+    if not artifacts_requested:
+        theta, full_trace = _gd_loop(
+            loss_fn,
+            theta0,
+            learning_rate=learning_rate,
+            num_steps=num_steps,
+            optimizer=optimizer,
+        )
+
+        history = {
+            "loss": full_trace["loss"][:-1],
+            "theta": full_trace["theta"][1:],
+        }
+
+        if return_artifacts:
+            return theta, history, None
+
+        return theta, history
+
+    curvature_array = None
+    if artifact_curvature is not None:
+        curvature_array = artifact_curvature.get("curv_diag")
+
+    precond_mapping = artifact_precond
+
+    theta, history, artifact_payload = run_gd_with_artifacts(
+        loss_fn=loss_fn,
+        theta0=theta0,
         learning_rate=learning_rate,
         num_steps=num_steps,
         optimizer=optimizer,
+        index_map=None,
+        run_dir=run_dir,
+        runs_dir=runs_dir,
+        run_id=run_id,
+        save_checkpoints=save_checkpoints,
+        theta_space=artifact_theta_space or "primitive",
+        curvature=curvature_array,
+        precond=precond_mapping,
+        extra_meta=artifact_meta,
+        extra_summary=artifact_summary,
+        return_artifacts=True,
+        show_progress=True,
     )
-
-    history = {
-        "loss": full_trace["loss"][:-1],
-        "theta": full_trace["theta"][1:],
-    }
-
-    trace: Dict[str, np.ndarray] = {
-        "loss": history["loss"],
-        "theta": history["theta"],
-    }
-    if "grad_norm" in full_trace:
-        trace["grad_norm"] = full_trace["grad_norm"]
-    if "step_norm" in full_trace:
-        trace["step_norm"] = full_trace["step_norm"]
-    trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
-
-    artifacts_enabled = run_dir is not None or runs_dir is not None
-    resolved_run_dir = None
-    resolved_run_id = run_id or "in-memory"
-    if artifacts_enabled:
-        resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    loss_array = onp.asarray(trace["loss"])
-    loss_init = float(loss_array[0]) if loss_array.size else None
-    loss_final = float(loss_array[-1]) if loss_array.size else None
-    best_idx = int(onp.nanargmin(loss_array)) if loss_array.size else None
-    loss_best = float(loss_array[best_idx]) if best_idx is not None else None
-
-    base_meta = {
-        "artifact_schema": "dluxshera-run-v0",
-        "run_id": resolved_run_id,
-        "created_at": created_at,
-        "theta": {
-            "dim": int(theta.size),
-            "theta_space": artifact_theta_space or "primitive",
-        },
-        "optimizer": {
-            "name": getattr(optimizer, "__class__", type("opt", (), {})).__name__,
-            "num_steps": num_steps,
-            "base_lr": learning_rate,
-        },
-    }
-
-    if artifact_meta:
-        for key, value in artifact_meta.items():
-            if key == "theta" and isinstance(value, Mapping):
-                base_meta.setdefault("theta", {}).update(value)
-            elif key == "optimizer" and isinstance(value, Mapping):
-                base_meta.setdefault("optimizer", {}).update(value)
-            else:
-                base_meta[key] = value
-
-    base_summary = {
-        "status": "ok",
-        "run_id": resolved_run_id,
-        "created_at": created_at,
-        "num_steps_completed": int(loss_array.size),
-        "loss_init": loss_init,
-        "loss_final": loss_final,
-        "loss_best": loss_best,
-        "best_step": best_idx,
-        "has_checkpoint_best": False,
-        "has_checkpoint_final": False,
-        "has_signals": False,
-        "has_precond": False,
-        "has_curvature": False,
-    }
-
-    if artifact_summary:
-        base_summary.update(artifact_summary)
-
-    checkpoints = None
-    if save_checkpoints and best_idx is not None:
-        checkpoints = {
-            "best": {
-                "theta_best": trace["theta"][best_idx],
-                "best_step": best_idx,
-                "best_loss": loss_best,
-            },
-            "final": {
-                "theta_final": trace["theta"][-1],
-                "final_step": int(loss_array.size - 1),
-                "final_loss": loss_final,
-            },
-        }
-        base_summary["has_checkpoint_best"] = True
-        base_summary["has_checkpoint_final"] = True
-
-    if artifact_curvature is not None:
-        base_summary["has_curvature"] = True
-    if artifact_precond is not None:
-        base_summary["has_precond"] = True
-
-    artifact_payload = None
-    if return_artifacts or artifacts_enabled:
-        artifact_payload = {
-            "run_dir": resolved_run_dir,
-            "run_id": resolved_run_id,
-            "trace": trace,
-            "meta": base_meta,
-            "summary": base_summary,
-            "checkpoints": checkpoints,
-            "curvature": artifact_curvature,
-            "precond": artifact_precond,
-        }
-
-    if artifacts_enabled:
-        save_run(
-            resolved_run_dir,
-            trace=trace,
-            meta=base_meta,
-            summary=base_summary,
-            checkpoints=checkpoints,
-            curvature=artifact_curvature,
-            precond=artifact_precond,
-        )
 
     if return_artifacts:
         return theta, history, artifact_payload
