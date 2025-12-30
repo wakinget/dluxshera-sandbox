@@ -237,6 +237,7 @@ def make_inference_subspec(
 
     infer_keys_list = list(infer_keys)
 
+    # Optional validation if cfg is provided
     if cfg is not None:
         if not cfg.primary_noll_indices and "primary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
