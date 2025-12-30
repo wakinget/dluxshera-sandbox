@@ -102,3 +102,27 @@ def test_gd_loop_runs_without_tqdm(monkeypatch):
     assert theta_final.shape == theta0.shape
     assert trace["theta"].shape == (4, 2)
     assert trace["loss"].shape == (4,)
+
+
+def test_run_simple_gd_without_artifacts_does_not_save(monkeypatch):
+    theta_true = jnp.array([1.0, -2.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    def fail_save_run(*_args, **_kwargs):
+        raise AssertionError("save_run should not be called when artifacts are disabled.")
+
+    monkeypatch.setattr("dluxshera.inference.optimization.save_run", fail_save_run)
+
+    theta0 = jnp.array([0.0, 0.0])
+    theta_final, history = run_simple_gd(
+        loss_fn,
+        theta0,
+        learning_rate=0.1,
+        num_steps=4,
+    )
+
+    assert theta_final.shape == theta0.shape
+    assert history["loss"].shape == (4,)
+    assert history["theta"].shape == (4, 2)
