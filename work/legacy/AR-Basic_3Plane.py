@@ -597,6 +597,15 @@ for obs_i in np.arange(N_observations):
 
     # lr_model must match model_params PyTree type/structure
     lr_model = get_lr_from_curvature(np.diag(fim), model_params, order=params)
+    diag = np.diag(fim)
+    lr_vec = 1.0 / (np.asarray(diag) + 1e-12)
+    print("\nLegacy FIM diagonal and implied learning rates (aligned with fim_labels):")
+    print(f"{'label':60s}  {'curv(diag(FIM))':>16s}  {'lr=1/(curv+eps)':>16s}")
+    for lab, curv, lr in zip(fim_labels, diag, lr_vec):
+        # Defensive formatting in case of weird values
+        curv_f = float(curv)
+        lr_f = float(lr)
+        print(f"{lab:60s}  {curv_f:16.6e}  {lr_f:16.6e}")
 
     def _loss_with_params(params_dict, m, d, v):
         mp = model_params.set("params", params_dict)
