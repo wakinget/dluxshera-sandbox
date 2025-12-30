@@ -32,7 +32,7 @@ from dluxshera.params.spec import (
     ParamKey,
     ParamSpec,
     build_forward_model_spec_from_config,
-    make_inference_subspec,
+    make_inference_subspec, build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
@@ -93,6 +93,7 @@ cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
 
 # Create Parameter Specs from the config
 forward_spec = build_forward_model_spec_from_config(cfg)
+inference_spec = build_inference_spec_basic(cfg)
 
 # Create forward Parameter Store from the specs
 forward_truth_store = ParameterStore.from_spec_defaults(forward_spec)
@@ -104,7 +105,7 @@ forward_truth_store = forward_truth_store.replace(
         "binary.position_angle_deg": 90.0,
         "binary.x_position_as": 0.0,
         "binary.y_position_as": 0.0,
-        "imaging.exposure_time_s": 1.0,
+        "imaging.exposure_time_s": 1800.0,
     }
 )
 
@@ -152,7 +153,7 @@ infer_keys = (
     "primary.zernike_coeffs_nm",
     # "secondary.zernike_coeffs_nm", # Remove secondary Zernike's for stability
 )
-inference_subspec = make_inference_subspec(base_spec=forward_spec, infer_keys=infer_keys, cfg=cfg)
+inference_subspec = make_inference_subspec(base_spec=inference_spec, infer_keys=infer_keys, cfg=cfg)
 
 # Set up prior knowledge
 priors = {
@@ -217,30 +218,47 @@ F = fim_theta(loss_fn, theta_true)
 # TODO: Optionally produce a plot of F, recreate visual style from AR-Basic_3Plane.py
 
 fim_diag = jnp.diag(F)
-eps = 1e-12
-curv_vec = jnp.where(fim_diag > 0, fim_diag, eps)
+lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
 
-base_lr = 1e-1
-lr_vec = base_lr / jnp.sqrt(curv_vec + eps)
-
-print("FIM diag: min={:.3e}, max={:.3e}".format(float(jnp.min(curv_vec)), float(jnp.max(curv_vec))))
+print("FIM diag: min={:.3e}, max={:.3e}".format(float(jnp.min(fim_diag)), float(jnp.max(fim_diag))))
 print("LR vec : min={:.3e}, max={:.3e}".format(float(jnp.min(lr_vec)), float(jnp.max(lr_vec))))
+
+print("\nRefactored FIM diagonal and learning rates (via index_map):")
+for entry in index_map["entries"]:
+    name  = entry["name"]
+    start = entry["start"]
+    stop  = entry["stop"]
+    shape = entry.get("shape", ())
+
+    n = stop - start
+
+    if n == 1:
+        print(
+            f"  {name:40s} : "
+            f"curv={fim_diag[start]:.3e}  lr={lr_vec[start]:.3e}"
+        )
+    else:
+        print(f"  {name:40s} : shape={shape}")
+        for i, (c, l) in enumerate(zip(fim_diag[start:stop], lr_vec[start:stop])):
+            print(
+                f"    {name}[{i:02d}] : "
+                f"curv={c:.3e}  lr={l:.3e}"
+            )
+
 
 print("Running FIM-preconditioned gradient descent...")
 # Now run the gradient descent optimization
-n_iter = 200
+n_iter = 100
 theta_final, history, _artifacts = run_shera_gd(
     loss_fn=loss_fn,
     theta0=theta0,
-    learning_rate=base_lr,
+    index_map=index_map,
     lr_vec=lr_vec,
     num_steps=n_iter,
-    index_map=index_map,
-    run_dir=None,
-    runs_dir=None,
+    runs_dir=DEFAULT_RESULTS_DIR,
     return_artifacts=True,
     theta_space="primitive",
-    curvature=curv_vec,
+    curvature=fim_diag,
     precond={"lr_vec": lr_vec},
 )
 
