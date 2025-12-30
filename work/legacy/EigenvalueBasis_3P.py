@@ -70,7 +70,7 @@ print(f"Starting Simulation: {script_name} - {timestamp}")
 
 # Plotting/Saving Settings
 save_plots = True # True / False
-N_saved_obs = 5
+N_saved_plots = 5
 present_plots = False # True / False
 print2console = True
 # plot_FIM = True
@@ -707,7 +707,7 @@ for obs_i in range(N_observations):
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("Photons")
     plt.tight_layout()
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         obs_digits = len(str(N_observations))
         plot_name = "DataInput"
         save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i+1:0{obs_digits}d}.png"
@@ -1007,7 +1007,7 @@ for obs_i in range(N_observations):
 
 
     # Compare Data to Original Model - These PSFs should be identical
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Original_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -1020,7 +1020,7 @@ for obs_i in range(N_observations):
         )
 
     # Compare Data to Initial Model - Shows the initial result of the optimization
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Initial_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -1033,7 +1033,7 @@ for obs_i in range(N_observations):
         )
 
     # Compare Data to Recovered Model - Shows the final result of the optimization
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Recovered_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -1046,7 +1046,7 @@ for obs_i in range(N_observations):
         )
 
     # Plot loss history
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         fig, axes = plt.subplots(1, 2, figsize=(9, 4))
         axes = axes.flatten()
 
@@ -1144,7 +1144,7 @@ for obs_i in range(N_observations):
     fig.suptitle("Parameter Optimization", fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.95], h_pad=2.0)
 
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Recovered_Parameters_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plt.savefig(os.path.join(save_path, save_name))
     if present_plots:
@@ -1273,7 +1273,7 @@ for obs_i in range(N_observations):
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("nm", labelpad=0)
 
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         plot_name = "M1-OPD-Recovery"
         save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plt.savefig(os.path.join(save_path, save_name))
@@ -1337,7 +1337,7 @@ for obs_i in range(N_observations):
         cbar = fig.colorbar(im, cax=merge_cbar(ax))
         cbar.set_label("nm", labelpad=0)
 
-        if save_plots and obs_i < N_saved_obs:
+        if save_plots and obs_i < N_saved_plots:
             plot_name = "M2-OPD-Recovery"
             save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
             plt.savefig(os.path.join(save_path, save_name))

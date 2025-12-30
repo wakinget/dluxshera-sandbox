@@ -97,7 +97,7 @@ print(f"Starting Simulation: {script_name} - {timestamp}")
 
 # Plotting/Saving Settings
 save_plots = True
-N_saved_obs = 5
+N_saved_plots = 5 # Limit the number of plots that are saved, the first N plots will be saved
 present_plots = False
 print2console = True
 save_FIM = False
@@ -172,9 +172,9 @@ model_initial_params = ModelParams({
     "wavelength": 550.,
     "n_wavelengths": 3,
     # Astrometry Settings
-    "x_position": 0,
-    "y_position": 0,
-    "separation": 10,
+    "x_position": 0.0,
+    "y_position": 0.0,
+    "separation": 10.0,
     "position_angle": 90.0,
     "contrast": 0.3,
     # "log_flux": 6.78,
@@ -242,8 +242,6 @@ optimisers = {
     # "m2_aperture.coefficients": opt,
 }
 params = list(optimisers.keys())
-# Paths into the model object; dots are meaningful within the model tree.
-param_paths = params
 
 
 ######################
@@ -343,7 +341,6 @@ if present_plots:
     plt.show()
 else:
     plt.close()
-
 if save_FIM:
     # Save the FIM as a .mat file
     save_name = f"{script_name}_FIM_Data_{timestamp}.mat"
@@ -351,6 +348,7 @@ if save_FIM:
         'FIM': onp.asarray(fim, dtype=onp.float64),  # NumPy 2D array
         'param_names': onp.array(fim_labels, dtype=object)  # List of parameter names (str)
     })
+
 
 # Record true values
 true_vals = {param: data_model.get(param) for param in params}
@@ -366,7 +364,7 @@ true_vals["m2_total_opd_rms_nm"] = 1e9 * nanrms(true_vals["m2_total_opd"][m2_mas
 
 
 # Take the value and gradient transformation of the loss function for the model object
-val_grad_fn = zdx.filter_value_and_grad(param_paths)(loss_fn)
+val_grad_fn = zdx.filter_value_and_grad(params)(loss_fn)
 
 
 # Compute CRLB in pure parameter space
@@ -524,7 +522,7 @@ for obs_i in np.arange(N_observations):
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("Photons")
     plt.tight_layout()
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         obs_digits = len(str(N_observations))
         plot_name = "DataInput"
         save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i+1:0{obs_digits}d}.png"
@@ -533,7 +531,6 @@ for obs_i in np.arange(N_observations):
         plt.show()
     else:
         plt.close()
-
 
 
     # Draw perturbations from priors
@@ -598,7 +595,7 @@ for obs_i in np.arange(N_observations):
         parameters=params,  # external names you’re optimizing
     )
 
-    # lr_model must match model_params’ PyTree type/structure
+    # lr_model must match model_params PyTree type/structure
     lr_model = get_lr_from_curvature(np.diag(fim), model_params, order=params)
 
     def _loss_with_params(params_dict, m, d, v):
@@ -697,7 +694,6 @@ for obs_i in np.arange(N_observations):
             history["m2_aperture.coefficients"] = aligned
 
 
-
     ### Compute residuals for each parameter
     residuals = {}
     for param in history.keys():
@@ -722,7 +718,7 @@ for obs_i in np.arange(N_observations):
 
 
     # Compare Data to Original Model - These PSFs should be identical
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Original_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -735,7 +731,7 @@ for obs_i in np.arange(N_observations):
         )
 
     # Compare Data to Initial Model - Shows the initial result of the optimization
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Initial_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -748,7 +744,7 @@ for obs_i in np.arange(N_observations):
         )
 
     # Compare Data to Recovered Model - Shows the final result of the optimization
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Recovered_PSF_Comparison_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plot_psf_comparison(
             data=data,
@@ -762,7 +758,7 @@ for obs_i in np.arange(N_observations):
 
 
     # Plot loss history
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         fig, axes = plt.subplots(1, 2, figsize=(9, 4))
         axes = axes.flatten()
 
@@ -861,7 +857,7 @@ for obs_i in np.arange(N_observations):
     fig.suptitle("Parameter Optimization", fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.95], h_pad=2.0)
 
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         save_name = f"{script_name}_Recovered_Parameters_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plt.savefig(os.path.join(save_path, save_name))
     if present_plots:
@@ -926,7 +922,7 @@ for obs_i in np.arange(N_observations):
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("nm", labelpad=0)
 
-    if save_plots and obs_i < N_saved_obs:
+    if save_plots and obs_i < N_saved_plots:
         plot_name = "M1-OPD-Recovery"
         save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
         plt.savefig(os.path.join(save_path, save_name))
@@ -993,7 +989,7 @@ for obs_i in np.arange(N_observations):
         cbar = fig.colorbar(im, cax=merge_cbar(ax))
         cbar.set_label("nm", labelpad=0)
 
-        if save_plots and obs_i < N_saved_obs:
+        if save_plots and obs_i < N_saved_plots:
             plot_name = "M2-OPD-Recovery"
             save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i + 1:0{obs_digits}d}.png"
             plt.savefig(os.path.join(save_path, save_name))

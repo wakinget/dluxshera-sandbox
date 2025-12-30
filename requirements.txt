@@ -18,6 +18,7 @@ astropy>=5.0
 # Plotting / progress
 matplotlib>=3.9
 tqdm>=4.67
+pandas>=1.5
 
 # Inference / JAX helpers
 numpyro==0.18.0

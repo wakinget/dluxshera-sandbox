@@ -60,7 +60,7 @@ print(f"Starting Simulation: {script_name} - {timestamp}")
 
 # Plotting/Saving Settings
 save_plots = True # True / False
-N_saved_obs = 5
+N_saved_plots = 5
 present_plots = False # True / False
 print2console = True
 # plot_FIM = True
@@ -532,7 +532,7 @@ for obs_i in range(N_observations):
     # cbar = fig.colorbar(im, cax=merge_cbar(ax))
     # cbar.set_label("Photons")
     # plt.tight_layout()
-    # if save_plots and obs_i < N_saved_obs:
+    # if save_plots and obs_i < N_saved_plots:
     #     obs_digits = len(str(N_observations))
     #     plot_name = "DataInput"
     #     save_name = f"{script_name}_{plot_name}_{timestamp}_Obs{obs_i+1:0{obs_digits}d}.png"
