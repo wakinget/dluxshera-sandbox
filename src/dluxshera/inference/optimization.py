@@ -5,6 +5,7 @@ import jax
 import jax.numpy as np
 import jax.scipy.stats as jstats
 import numpy as onp
+import importlib
 from datetime import datetime, timezone
 from pathlib import Path
 from jax import config, grad, linearize, jit, lax
@@ -635,6 +636,7 @@ def _gd_loop(
     learning_rate: float = 1e-2,
     num_steps: int = 100,
     optimizer: Optional[optax.GradientTransformation] = None,
+    show_progress: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
     Pure θ-space gradient-descent loop (no artifacts, no I/O).
@@ -661,7 +663,12 @@ def _gd_loop(
     grad_norms = []
     step_norms = []
 
-    for _ in range(num_steps):
+    iterator = range(num_steps)
+    if show_progress:
+        if importlib.util.find_spec("tqdm") is not None:
+            iterator = importlib.import_module("tqdm").tqdm(iterator)
+
+    for _ in iterator:
         loss, g = jax.value_and_grad(loss_fn)(theta)
         losses.append(loss)
 
@@ -901,6 +908,7 @@ def run_gd_with_artifacts(
     extra_meta: Optional[Mapping[str, Any]] = None,
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
+    show_progress: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Gradient-descent wrapper that assembles canonical artifacts (optional I/O).
@@ -911,6 +919,7 @@ def run_gd_with_artifacts(
         learning_rate=learning_rate,
         num_steps=num_steps,
         optimizer=optimizer,
+        show_progress=show_progress,
     )
 
     history = {
@@ -1059,6 +1068,7 @@ def run_shera_gd(
     extra_meta: Optional[Mapping[str, Any]] = None,
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
+    show_progress: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Shera-specific front end for θ-space GD that delegates to run_gd_with_artifacts.
@@ -1084,6 +1094,7 @@ def run_shera_gd(
         extra_meta=extra_meta,
         extra_summary=extra_summary,
         return_artifacts=return_artifacts,
+        show_progress=show_progress,
     )
 
 

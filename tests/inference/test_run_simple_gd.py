@@ -44,3 +44,28 @@ def test_gd_loop_trace_shapes():
     assert trace["loss"].shape == (6,)
     assert trace["grad_norm"].shape == (5,)
     assert trace["step_norm"].shape == (5,)
+
+
+def test_gd_loop_runs_without_tqdm(monkeypatch):
+    theta_true = jnp.array([1.0, -2.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    monkeypatch.setattr(
+        "dluxshera.inference.optimization.importlib.util.find_spec",
+        lambda name: None,
+    )
+
+    theta0 = jnp.array([0.0, 0.0])
+    theta_final, trace = _gd_loop(
+        loss_fn,
+        theta0,
+        learning_rate=0.1,
+        num_steps=3,
+        show_progress=True,
+    )
+
+    assert theta_final.shape == theta0.shape
+    assert trace["theta"].shape == (4, 2)
+    assert trace["loss"].shape == (4,)
