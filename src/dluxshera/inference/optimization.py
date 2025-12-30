@@ -936,10 +936,25 @@ def run_gd_with_artifacts(
         blocks. When provided it is stored under ``meta["theta"]["index_map"]``;
         see :func:`dluxshera.inference.run_artifacts.build_index_map`.
     run_dir / runs_dir / run_id :
-        Optional run directory configuration. If provided, artifacts are saved
-        to disk via :func:`dluxshera.inference.run_artifacts.save_run`. When not
-        provided, artifacts can still be assembled in-memory if
-        ``return_artifacts`` is ``True``.
+        Optional run directory configuration controlling how artifacts are
+        written to disk.
+
+        If ``run_dir`` is provided, it is treated as the exact directory for
+        this run and all artifacts (trace, meta, summary, checkpoints, etc.)
+        are written directly into that directory.
+
+        If ``runs_dir`` is provided, it is treated as a parent "runs root".
+        A per-run subdirectory is created under ``runs_dir``, using
+        ``run_id`` if supplied or an auto-generated identifier otherwise,
+        and artifacts are written into that subdirectory.
+
+        If neither ``run_dir`` nor ``runs_dir`` is provided, no files are
+        written to disk; artifacts are still assembled in memory and returned
+        via the function’s return value when ``return_artifacts`` is ``True``.
+
+        In typical usage, pass a concrete ``run_dir`` for a single ad-hoc run,
+        or pass ``runs_dir`` (plus an optional ``run_id``) when running many
+        experiments into a common root directory.
     save_checkpoints :
         Whether to save best/final checkpoints as ``checkpoint_*.npz``.
     theta_space :
