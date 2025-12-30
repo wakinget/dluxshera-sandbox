@@ -13,8 +13,7 @@ MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 __all__ = [
     "TolimanOpticalSystem",
     "SheraTwoPlaneOptics",
-    "SheraThreePlaneSystem",
-    "JNEXTOpticalSystem",
+    "SheraThreePlaneOptics",
 ]
 
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
@@ -175,7 +174,7 @@ class TolimanOpticalSystem(AngularOpticalSystem()):
         wf += self.pupil
         return wf
 
-class JNEXTOpticalSystem(AngularOpticalSystem()):
+class SheraTwoPlaneOptics(AngularOpticalSystem()):
     def __init__(
         self,
         wf_npixels: int = 256,
@@ -194,7 +193,8 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         dp_design_wavel: float = 550e-9,
     ):
         """
-        A pre-built dLux optics layer of the JNEXT optical system. Note TolimanOptics uses units of arcseconds.
+        A pre-built dLux optics layer of the Shera two-plane optical system.
+        Note TolimanOptics uses units of arcseconds.
 
         Parameters
         ----------
@@ -317,21 +317,6 @@ class JNEXTOpticalSystem(AngularOpticalSystem()):
         wf += self.pupil
         return wf
 
-
-class SheraTwoPlaneOptics(JNEXTOpticalSystem):
-    """
-    Refactor-era two-plane optical system used by Shera astrometry models.
-
-    This class is a light wrapper around the legacy :class:`JNEXTOpticalSystem`
-    implementation. It exposes the same Toliman-inspired pupil → focal plane
-    propagation used in two-plane Shera experiments while providing a
-    Shera-branded entry point for newer builders and binders. No additional
-    aberration terms (e.g., 1/f WFE) are introduced here; the behaviour is
-    intentionally identical to the legacy implementation.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
 class TolimanSpikes(TolimanOpticalSystem):
     """
@@ -545,7 +530,7 @@ class TolimanSpikes(TolimanOpticalSystem):
         # Return
         return central_psfs.sum(0), spikes.sum(0)
 
-class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
+class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
     m1_noll_ind: Array = None
     m2_noll_ind: Array = None
 
@@ -878,4 +863,3 @@ class SheraThreePlaneSystem(ThreePlaneOpticalSystem()):
 #         wf = wf.normalise()
 #         wf += self.mask
 #         return wf
-
