@@ -1,4 +1,6 @@
 import jax.numpy as jnp
+import optax
+
 from dluxshera.inference.optimization import _gd_loop, run_simple_gd
 
 
@@ -44,6 +46,37 @@ def test_gd_loop_trace_shapes():
     assert trace["loss"].shape == (6,)
     assert trace["grad_norm"].shape == (5,)
     assert trace["step_norm"].shape == (5,)
+
+
+def test_gd_loop_default_optimizer_decreases_loss():
+    theta_true = jnp.array([1.0, -1.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([2.0, 3.0])
+    _, trace = _gd_loop(loss_fn, theta0, learning_rate=0.1, num_steps=10)
+
+    assert float(trace["loss"][-1]) < float(trace["loss"][0])
+
+
+def test_gd_loop_custom_optimizer_decreases_loss():
+    theta_true = jnp.array([0.5, -1.5])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([2.0, 1.0])
+    optimizer = optax.sgd(learning_rate=0.2)
+    _, trace = _gd_loop(
+        loss_fn,
+        theta0,
+        learning_rate=0.1,
+        num_steps=10,
+        optimizer=optimizer,
+    )
+
+    assert float(trace["loss"][-1]) < float(trace["loss"][0])
 
 
 def test_gd_loop_runs_without_tqdm(monkeypatch):

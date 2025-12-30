@@ -641,6 +641,11 @@ def _gd_loop(
     """
     Pure θ-space gradient-descent loop (no artifacts, no I/O).
 
+    Parameters
+    ----------
+    optimizer :
+        Optional optax optimizer. If None, `optax.sgd(learning_rate)` is used.
+
     Returns
     -------
     theta_final :
@@ -654,9 +659,9 @@ def _gd_loop(
     """
     theta = np.asarray(theta0)
 
-    use_sgd = optimizer is None
-    if not use_sgd:
-        opt_state = optimizer.init(theta)
+    if optimizer is None:
+        optimizer = optax.sgd(learning_rate=learning_rate)
+    opt_state = optimizer.init(theta)
 
     losses = []
     theta_history = [theta]
@@ -672,12 +677,8 @@ def _gd_loop(
         loss, g = jax.value_and_grad(loss_fn)(theta)
         losses.append(loss)
 
-        if use_sgd:
-            updates = -learning_rate * g
-            theta = theta + updates
-        else:
-            updates, opt_state = optimizer.update(g, opt_state, theta)
-            theta = optax.apply_updates(theta, updates)
+        updates, opt_state = optimizer.update(g, opt_state, params=theta)
+        theta = optax.apply_updates(theta, updates)
 
         grad_norms.append(np.linalg.norm(g))
         step_norms.append(np.linalg.norm(updates))
@@ -953,7 +954,8 @@ def run_gd_with_artifacts(
             "theta_space": theta_space,
         },
         "optimizer": {
-            "kind": "sgd" if optimizer is None else "optax",
+            "kind": "optax",
+            "name": "sgd" if optimizer is None else type(optimizer).__name__,
             "learning_rate": learning_rate,
             "num_steps": num_steps,
         },
