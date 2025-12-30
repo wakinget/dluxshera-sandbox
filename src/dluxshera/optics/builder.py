@@ -247,6 +247,7 @@ def build_shera_threeplane_optics(
     # --- Zernike coefficients from the ParameterStore (optional) -------
     m1_coefficients = None
     m2_coefficients = None
+    plate_scale_override = None
 
     if store is not None:
         # Optionally validate that the store keys are consistent with the spec.
@@ -255,6 +256,10 @@ def build_shera_threeplane_optics(
         # binders.
         if spec is not None:
             store = store.validate_against(spec, allow_derived=True)
+
+        plate_scale_override = store.get(
+            "system.plate_scale_as_per_pix", default=None
+        )
 
         # Expected lengths based on the config's Noll index tuples.
         n_m1 = len(cfg.primary_noll_indices) if cfg.primary_noll_indices else 0
@@ -312,6 +317,9 @@ def build_shera_threeplane_optics(
         m2_aperture = getattr(optics, "m2_aperture")
         if hasattr(m2_aperture, "coefficients"):
             optics = optics.set("p2_layers.m2_aperture.coefficients", m2_coefficients)
+
+    if plate_scale_override is not None:
+        optics = optics.set("psf_pixel_scale", jnp.asarray(plate_scale_override))
 
     return optics
 
