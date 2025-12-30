@@ -156,34 +156,6 @@ def _load_diffractive_pupil_mask(cfg: SheraTwoPlaneConfig) -> dll.AberratedLayer
     return dll.AberratedLayer(jnp.asarray(mask_array))
 
 
-def _construct_threeplane_optics(cfg: SheraThreePlaneConfig) -> SheraThreePlaneOptics:
-    """Construct the base three-plane optics from structural configuration."""
-
-    return SheraThreePlaneOptics(
-        wf_npixels=cfg.pupil_npix,
-        psf_npixels=cfg.psf_npix,
-        oversample=cfg.oversample,
-        detector_pixel_pitch=cfg.pixel_pitch_m,
-        mask=cfg.diffractive_pupil_path,
-        m1_noll_ind=tuple(cfg.primary_noll_indices)
-        if cfg.primary_noll_indices
-        else None,
-        m2_noll_ind=tuple(cfg.secondary_noll_indices)
-        if cfg.secondary_noll_indices
-        else None,
-        p1_diameter=cfg.m1_diameter_m,
-        p2_diameter=cfg.m2_diameter_m,
-        m1_focal_length=cfg.m1_focal_length_m,
-        m2_focal_length=cfg.m2_focal_length_m,
-        plane_separation=cfg.m1_m2_separation_m,
-        n_struts=cfg.n_struts,
-        strut_width=cfg.strut_width_m,
-        strut_rotation_deg=cfg.strut_rotation_deg,
-        dp_design_wavel=cfg.dp_design_wavelength_m,
-    )
-
-
-
 def build_shera_threeplane_optics(
     cfg: SheraThreePlaneConfig,
     store: Optional[ParameterStore] = None,
@@ -290,7 +262,28 @@ def build_shera_threeplane_optics(
         base_optics = _THREEPLANE_CACHE.get(struct_hash)
 
     if base_optics is None:
-        base_optics = _construct_threeplane_optics(cfg)
+        base_optics = SheraThreePlaneOptics(
+            wf_npixels=cfg.pupil_npix,
+            psf_npixels=cfg.psf_npix,
+            oversample=cfg.oversample,
+            detector_pixel_pitch=cfg.pixel_pitch_m,
+            mask=cfg.diffractive_pupil_path,
+            m1_noll_ind=tuple(cfg.primary_noll_indices)
+            if cfg.primary_noll_indices
+            else None,
+            m2_noll_ind=tuple(cfg.secondary_noll_indices)
+            if cfg.secondary_noll_indices
+            else None,
+            p1_diameter=cfg.m1_diameter_m,
+            p2_diameter=cfg.m2_diameter_m,
+            m1_focal_length=cfg.m1_focal_length_m,
+            m2_focal_length=cfg.m2_focal_length_m,
+            plane_separation=cfg.m1_m2_separation_m,
+            n_struts=cfg.n_struts,
+            strut_width=cfg.strut_width_m,
+            strut_rotation_deg=cfg.strut_rotation_deg,
+            dp_design_wavel=cfg.dp_design_wavelength_m,
+        )
         if not cache_disabled:
             _THREEPLANE_CACHE[struct_hash] = base_optics
 

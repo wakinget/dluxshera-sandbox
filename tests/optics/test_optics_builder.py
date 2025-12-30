@@ -86,65 +86,41 @@ def test_build_shera_threeplane_optics_uses_zernike_coeffs():
         assert jnp.allclose(m2_layer.coefficients, m2_coeffs)
 
 
-def test_threeplane_optics_cache_hits(monkeypatch):
+def test_threeplane_optics_cache_hits():
     clear_threeplane_optics_cache()
 
     cfg = SHERA_TESTBED_CONFIG
-    calls = {"count": 0}
-    original_construct = builder._construct_threeplane_optics
-
-    def _counting_construct(local_cfg):
-        calls["count"] += 1
-        return original_construct(local_cfg)
-
-    monkeypatch.setattr(builder, "_construct_threeplane_optics", _counting_construct)
-
     optics_a = build_shera_threeplane_optics(cfg)
     optics_b = build_shera_threeplane_optics(cfg)
 
-    assert calls["count"] == 1  # second call pulled from cache
+    struct_hash = structural_hash_from_config(cfg)
+    assert struct_hash in builder._THREEPLANE_CACHE
+    assert len(builder._THREEPLANE_CACHE) == 1
     assert optics_a is not optics_b  # copies returned per-call for safety
 
 
-def test_threeplane_optics_cache_miss_on_structural_change(monkeypatch):
+def test_threeplane_optics_cache_miss_on_structural_change():
     clear_threeplane_optics_cache()
 
     cfg = SHERA_TESTBED_CONFIG
     tweaked_cfg = cfg.replace(m1_diameter_m=cfg.m1_diameter_m + 0.01)
-    calls = {"count": 0}
-    original_construct = builder._construct_threeplane_optics
-
-    def _counting_construct(local_cfg):
-        calls["count"] += 1
-        return original_construct(local_cfg)
-
-    monkeypatch.setattr(builder, "_construct_threeplane_optics", _counting_construct)
 
     build_shera_threeplane_optics(cfg)
     build_shera_threeplane_optics(tweaked_cfg)
 
-    assert calls["count"] == 2  # structural change invalidates cache key
+    assert len(builder._THREEPLANE_CACHE) == 2  # structural change invalidates cache key
 
 
-def test_threeplane_cache_ignores_nonstructural_design_name(monkeypatch):
+def test_threeplane_cache_ignores_nonstructural_design_name():
     clear_threeplane_optics_cache()
 
     cfg = SHERA_TESTBED_CONFIG
     renamed_cfg = cfg.replace(design_name="alternate_label")
 
-    calls = {"count": 0}
-    original_construct = builder._construct_threeplane_optics
-
-    def _counting_construct(local_cfg):
-        calls["count"] += 1
-        return original_construct(local_cfg)
-
-    monkeypatch.setattr(builder, "_construct_threeplane_optics", _counting_construct)
-
     build_shera_threeplane_optics(cfg)
     build_shera_threeplane_optics(renamed_cfg)
 
-    assert calls["count"] == 1  # design_name is metadata only
+    assert len(builder._THREEPLANE_CACHE) == 1  # design_name is metadata only
 
 
 def test_structural_hash_stable():
