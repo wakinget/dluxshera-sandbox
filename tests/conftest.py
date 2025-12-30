@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import pytest
 
 from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.core.builder import build_shera_threeplane_model
+from dluxshera.optics.builder import build_legacy_shera_threeplane_model
 from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraThreePlaneConfig, SheraTwoPlaneConfig
 from dluxshera.params.spec import (
     ParamSpec,
@@ -115,7 +115,11 @@ def shera_smoke_binder_data(shera_smoke_cfg, shera_smoke_forward):
 @pytest.fixture(scope="session")
 def shera_smoke_model_data(shera_smoke_cfg, shera_smoke_inference):
     inference_spec, inference_store = shera_smoke_inference
-    model = build_shera_threeplane_model(shera_smoke_cfg, inference_spec, inference_store)
+    model = build_legacy_shera_threeplane_model(
+        shera_smoke_cfg,
+        inference_spec,
+        inference_store,
+    )
     data = model.model()
     var = jnp.ones_like(data)
     return data, var
