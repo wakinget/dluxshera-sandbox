@@ -28,7 +28,8 @@ class PriorField:
     Parameters
     ----------
     dist:
-        Distribution family identifier. Currently only "Normal" is supported.
+        Distribution family identifier. Supports "Normal", "Uniform", and
+        "LogNormal".
     mean:
         Location parameter; shape-compatible with the associated parameter.
     sigma:
@@ -40,8 +41,10 @@ class PriorField:
     sigma: ArrayLike | jnp.ndarray = 1.0
 
     def _assert_supported(self) -> None:
-        if self.dist != "Normal":
-            raise ValueError(f"Unsupported distribution '{self.dist}'. Only 'Normal' is implemented.")
+        if self.dist not in {"Normal", "Uniform", "LogNormal"}:
+            raise ValueError(
+                f"Unsupported distribution '{self.dist}'. Only 'Normal', 'Uniform', and 'LogNormal' are implemented."
+            )
 
 
 @dataclass(frozen=True)
@@ -70,7 +73,7 @@ class PriorSpec:
         sigmas:
             Mapping of parameter keys to scalar or array sigma values.
         dist:
-            Distribution family identifier (only "Normal" is supported for now).
+            Distribution family identifier ("Normal", "Uniform", or "LogNormal").
         """
 
         fields: MutableMapping[ParamKey, PriorField] = {}
@@ -96,7 +99,7 @@ class PriorSpec:
             dictionaries or ``(sigma, dist)`` tuples. The distribution defaults
             to ``dist`` when omitted.
         dist:
-            Default distribution family identifier (only "Normal" is supported).
+            Default distribution family identifier ("Normal", "Uniform", or "LogNormal").
         """
 
         fields: MutableMapping[ParamKey, PriorField] = {}
@@ -132,6 +135,7 @@ class PriorSpec:
         Notes
         -----
         - Uses `(value - mean)^2 / (2 * sigma^2)` and sums over all elements.
+          The interpretation of ``sigma`` depends on the distribution family.
         - ``center_store`` overrides the per-field mean when provided. This keeps
           the operation tied to an external reference (e.g., truth store) while
           allowing `PriorField.mean` to serve as a stored default.
@@ -163,6 +167,11 @@ class PriorSpec:
             field._assert_supported()
             mean = jnp.asarray(center_store.get(key) if center_store is not None else field.mean)
             sigma = jnp.asarray(field.sigma)
-            noise = jax.random.normal(subkey, shape=mean.shape)
-            updates[key] = mean + sigma * noise
+            if field.dist == "Normal":
+                noise = jax.random.normal(subkey, shape=mean.shape)
+                updates[key] = mean + sigma * noise
+            elif field.dist == "Uniform":
+                updates[key] = jax.random.uniform(subkey, shape=mean.shape, minval=mean - sigma, maxval=mean + sigma)
+            else:
+                updates[key] = jax.random.lognormal(subkey, shape=mean.shape, mean=jnp.log(mean), stddev=sigma)
         return center_store.replace(updates)
