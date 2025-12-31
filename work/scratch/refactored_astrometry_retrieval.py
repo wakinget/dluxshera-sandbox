@@ -156,22 +156,24 @@ infer_keys = (
 inference_subspec = make_inference_subspec(base_spec=inference_spec, infer_keys=infer_keys, cfg=cfg)
 
 # Set up prior knowledge
-priors = {
-    "binary.separation_as": 1e-6,
-    "binary.position_angle_deg": 1e-3,
-    "binary.x_position_as": 1e-6,
-    "binary.y_position_as": 1e-6,
-    "binary.log_flux_total": 1e-6,
-    "binary.contrast": 1e-6,
-    "system.plate_scale_as_per_pix": 1e-6,
-    "primary.zernike_coeffs_nm": np.full_like(
-        forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2
-    ),
-    "secondary.zernike_coeffs_nm": np.full_like(
-        forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2
-    ),
+prior_info = {
+    "binary.separation_as": {"sigma": 1e-6, "dist": "Normal"},
+    "binary.position_angle_deg": {"sigma": 1e-3, "dist": "Uniform"},
+    "binary.x_position_as": {"sigma": 1e-6, "dist": "Normal"},
+    "binary.y_position_as": {"sigma": 1e-6, "dist": "Normal"},
+    "binary.log_flux_total": {"sigma": 1e-6, "dist": "LogNormal"},
+    "binary.contrast": {"sigma": 1e-6, "dist": "LogNormal"},
+    "system.plate_scale_as_per_pix": {"sigma": 1e-6, "dist": "LogNormal"},
+    "primary.zernike_coeffs_nm": {
+        "sigma": np.full_like(forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2),
+        "dist": "Normal",
+    },
+    "secondary.zernike_coeffs_nm": {
+        "sigma": np.full_like(forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2),
+        "dist": "Normal",
+    },
 }
-prior_spec = PriorSpec.from_sigmas(forward_truth_store, priors)
+prior_spec = PriorSpec.from_info(forward_truth_store, prior_info)
 
 print("Drawing starting point from priors...")
 # Draw an initial point for the model from the priors
