@@ -142,7 +142,7 @@ data_initial_params = ModelParams({
     "y_position": 0.0,
     "separation": 10,
     "position_angle": 90.0,
-    "contrast": 0.3,
+    "contrast": 3.0,
     # "log_flux": 6.78,
     "pixel_size": 6.5e-6,
 
@@ -176,7 +176,7 @@ model_initial_params = ModelParams({
     "y_position": 0.0,
     "separation": 10.0,
     "position_angle": 90.0,
-    "contrast": 0.3,
+    "contrast": 3.0,
     # "log_flux": 6.78,
     "pixel_size": 6.5e-6,
 
