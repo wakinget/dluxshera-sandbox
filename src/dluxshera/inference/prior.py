@@ -18,6 +18,7 @@ from ..params.spec import ParamKey
 from ..params.store import ParameterStore
 
 ArrayLike = jnp.ndarray | float | int
+PriorInfo = Mapping[str, ArrayLike | str] | tuple[ArrayLike, str] | tuple[ArrayLike]
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,44 @@ class PriorSpec:
         fields: MutableMapping[ParamKey, PriorField] = {}
         for key, sigma in sigmas.items():
             fields[key] = PriorField(dist=dist, mean=center_store.get(key), sigma=sigma)
+        return cls(fields=dict(fields))
+
+    @classmethod
+    def from_info(
+        cls,
+        center_store: ParameterStore,
+        info: Mapping[ParamKey, PriorInfo],
+        dist: str = "Normal",
+    ) -> "PriorSpec":
+        """Build a :class:`PriorSpec` from per-key prior info and a reference store.
+
+        Parameters
+        ----------
+        center_store:
+            Store providing the mean value for each parameter.
+        info:
+            Mapping of parameter keys to either ``{"sigma": ..., "dist": ...}``
+            dictionaries or ``(sigma, dist)`` tuples. The distribution defaults
+            to ``dist`` when omitted.
+        dist:
+            Default distribution family identifier (only "Normal" is supported).
+        """
+
+        fields: MutableMapping[ParamKey, PriorField] = {}
+        for key, entry in info.items():
+            if isinstance(entry, tuple):
+                if not entry:
+                    raise ValueError("Prior tuple entries must include at least a sigma value.")
+                sigma = entry[0]
+                entry_dist = entry[1] if len(entry) > 1 else dist
+            elif isinstance(entry, Mapping):
+                if "sigma" not in entry:
+                    raise ValueError("Prior mapping entries must include a 'sigma' value.")
+                sigma = entry["sigma"]
+                entry_dist = entry.get("dist", dist)
+            else:
+                raise TypeError("Prior info entries must be mappings or tuples.")
+            fields[key] = PriorField(dist=str(entry_dist), mean=center_store.get(key), sigma=sigma)
         return cls(fields=dict(fields))
 
     def _select_keys(self, keys: Optional[Iterable[ParamKey]]) -> tuple[ParamKey, ...]:
