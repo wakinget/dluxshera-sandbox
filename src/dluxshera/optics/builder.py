@@ -67,20 +67,18 @@ def _structural_subset(cfg: SheraThreePlaneConfig) -> dict:
     }
 
 
-def _twoplane_structural_subset(
-    cfg: SheraTwoPlaneConfig, plate_scale_as_per_pix: Optional[float]
-) -> dict:
+def _twoplane_structural_subset(cfg: SheraTwoPlaneConfig) -> dict:
     """Extract structural fields for the two-plane optics.
 
     Parameters
     ----------
     cfg
         Two-plane configuration describing the fixed geometry and sampling.
-    plate_scale_as_per_pix
-        Effective plate scale (arcsec / pixel) drawn from the effective
-        ParameterStore. This is treated as structural for the two-plane system
-        because it directly sets the PSF sampling used by
-        :class:`SheraTwoPlaneOptics`.
+
+    Notes
+    -----
+    Plate scale is intentionally excluded so it can be updated at runtime via
+    the ParameterStore without invalidating the cached optics geometry.
     """
 
     return {
@@ -95,9 +93,6 @@ def _twoplane_structural_subset(
         "n_struts": int(cfg.n_struts),
         "strut_width_m": float(cfg.strut_width_m),
         "strut_rotation_deg": float(cfg.strut_rotation_deg),
-        "plate_scale_as_per_pix": None
-        if plate_scale_as_per_pix is None
-        else float(plate_scale_as_per_pix),
         "primary_noll_indices": tuple(int(i) for i in cfg.primary_noll_indices),
         "diffractive_pupil_path": None
         if cfg.diffractive_pupil_path is None
@@ -122,12 +117,17 @@ def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def structural_hash_for_twoplane(
-    cfg: SheraTwoPlaneConfig, *, plate_scale_as_per_pix: Optional[float] = None
-) -> str:
-    """Deterministic structural hash for the two-plane optics stack."""
+def structural_hash_for_twoplane(cfg: SheraTwoPlaneConfig) -> str:
+    """Return a deterministic structural hash for the two-plane optics stack.
 
-    payload = _twoplane_structural_subset(cfg, plate_scale_as_per_pix)
+    Notes
+    -----
+    This hash includes only geometry, sampling, and diffractive pupil settings
+    from ``cfg``. Runtime knobs (plate scale, Zernike coefficients) are applied
+    after cached optics are materialized and are excluded from the hash.
+    """
+
+    payload = _twoplane_structural_subset(cfg)
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -315,30 +315,38 @@ def build_shera_twoplane_optics(
     spec: Optional[ParamSpec] = None,
 ) -> SheraTwoPlaneOptics:
     """
-    Construct the Shera two-plane optical system using structural caching.
+    Construct the Shera two-plane optical system with runtime overrides.
 
-    Structural parameters come from ``cfg`` and the effective plate scale (pulled
-    from the provided ``store`` when available). Zernike coefficients for the
-    primary mirror are treated as non-structural and applied to a copy of the
-    cached optics instance.
+    Parameters
+    ----------
+    cfg
+        Structural configuration for the two-plane optics (geometry, grids,
+        diffractive pupil settings, Zernike basis selection).
+    store
+        Optional ParameterStore providing runtime overrides such as plate
+        scale or Zernike coefficients. When provided, the store is validated
+        against ``spec`` before its values are consumed.
+    spec
+        Optional ParamSpec used to validate the store keys.
 
     Notes
     -----
-    - Structural fields for caching include the config geometry, sampling,
-      diffractive pupil settings, and the effective plate scale drawn from the
-      store (see ``structural_hash_for_twoplane``).
-    - Zernike coefficients and any other parameter-store values are treated as
-      non-structural and applied after the cached optics are materialized.
+    - The cached structural geometry is keyed only on ``cfg`` fields (see
+      ``structural_hash_for_twoplane``). Plate scale is applied as a runtime
+      update on the returned optics instance.
+    - Zernike coefficients are treated as non-structural and applied after
+      caching to keep the base optics reusable across inference updates.
     """
 
     plate_scale = cfg.plate_scale_as_per_pix
+    plate_scale_override = plate_scale
     m1_coefficients = None
 
     if store is not None:
         if spec is not None:
             store = store.validate_against(spec, allow_derived=True)
 
-        plate_scale = store.get(
+        plate_scale_override = store.get(
             "system.plate_scale_as_per_pix", default=cfg.plate_scale_as_per_pix
         )
 
@@ -358,7 +366,7 @@ def build_shera_twoplane_optics(
         "true",
         "yes",
     }
-    struct_hash = structural_hash_for_twoplane(cfg, plate_scale_as_per_pix=plate_scale)
+    struct_hash = structural_hash_for_twoplane(cfg)
 
     base_optics = None
     if not cache_disabled:
@@ -393,6 +401,9 @@ def build_shera_twoplane_optics(
         # with the tuple name "aperture". Preserve the cached structure by
         # functional update.
         optics = optics.set("layers.aperture.coefficients", m1_coefficients)
+
+    if plate_scale_override is not None:
+        optics = optics.set("psf_pixel_scale", jnp.asarray(plate_scale_override))
 
     return optics
 
