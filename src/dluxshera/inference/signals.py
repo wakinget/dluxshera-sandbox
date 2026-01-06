@@ -122,6 +122,10 @@ def build_signals(
     ps_est = stack_decoded("system.plate_scale_as_per_pix")
     raw_flux_est = stack_decoded("binary.raw_fluxes")
     zern_est = stack_decoded("primary.zernike_coeffs_nm")
+    try:
+        sec_zern_est = stack_decoded("secondary.zernike_coeffs_nm")
+    except KeyError:
+        sec_zern_est = None
 
     x_true = _broadcast_truth(truth, "binary.x_position_as", x_est.shape)
     y_true = _broadcast_truth(truth, "binary.y_position_as", y_est.shape)
@@ -155,6 +159,20 @@ def build_signals(
         zern_rms = np.sqrt(sum_sq / counts)
     zern_rms = np.where(counts > 0, zern_rms, np.nan)
     signals["primary.zernike_rms_nm"] = zern_rms
+
+    if sec_zern_est is not None:
+        sec_zern_true = _broadcast_truth(
+            truth, "secondary.zernike_coeffs_nm", sec_zern_est.shape
+        )
+        sec_zern_error = _residual(sec_zern_est, sec_zern_true)
+        signals["secondary.zernike_error_nm"] = sec_zern_error
+        sec_mask = np.isfinite(sec_zern_error)
+        sec_sum_sq = np.nansum(np.square(sec_zern_error), axis=-1)
+        sec_counts = np.sum(sec_mask, axis=-1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            sec_rms = np.sqrt(sec_sum_sq / sec_counts)
+        sec_rms = np.where(sec_counts > 0, sec_rms, np.nan)
+        signals["secondary.zernike_rms_nm"] = sec_rms
 
     return signals
 
