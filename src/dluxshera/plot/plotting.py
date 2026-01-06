@@ -345,20 +345,7 @@ def plot_signals_panels(
         )
         saved.append(path)
 
-    # Panel 5: Primary Zernike RMS
-    if include_zernike_rms and "primary.zernike_rms_nm" in signals:
-        path = plots_dir / "m1_zernike_rms_nm.png"
-        _plot_lines(
-            x,
-            [signals["primary.zernike_rms_nm"]],
-            ["Zernike RMS"],
-            title("M1 Zernike RMS (nm)"),
-            "RMS Error (nm)",
-            path,
-        )
-        saved.append(path)
-
-    # Panel 6: Optional component residuals
+    # Panel 5: Primary Zernike component residuals
     if "primary.zernike_error_nm" in signals:
         zerr = signals["primary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
@@ -375,20 +362,20 @@ def plot_signals_panels(
             )
             saved.append(path)
 
-    # Panel 7: Secondary Zernike RMS
-    if include_zernike_rms and "secondary.zernike_rms_nm" in signals:
-        path = plots_dir / "m2_zernike_rms_nm.png"
+    # Panel 6: (Optional) Primary Zernike RMS error
+    if include_zernike_rms and "primary.zernike_rms_nm" in signals:
+        path = plots_dir / "m1_zernike_rms_nm.png"
         _plot_lines(
             x,
-            [signals["secondary.zernike_rms_nm"]],
+            [signals["primary.zernike_rms_nm"]],
             ["Zernike RMS"],
-            title("M2 Zernike RMS (nm)"),
+            title("M1 Zernike RMS (nm)"),
             "RMS Error (nm)",
             path,
         )
         saved.append(path)
 
-    # Panel 8: Optional component residuals
+    # Panel 7: Secondary Zernike component residuals
     if "secondary.zernike_error_nm" in signals:
         zerr = signals["secondary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
@@ -404,6 +391,19 @@ def plot_signals_panels(
                 path,
             )
             saved.append(path)
+
+    # Panel 8: (Optional) Secondary Zernike RMS error
+    if include_zernike_rms and "secondary.zernike_rms_nm" in signals:
+        path = plots_dir / "m2_zernike_rms_nm.png"
+        _plot_lines(
+            x,
+            [signals["secondary.zernike_rms_nm"]],
+            ["Zernike RMS"],
+            title("M2 Zernike RMS (nm)"),
+            "RMS Error (nm)",
+            path,
+        )
+        saved.append(path)
 
     return saved
 
