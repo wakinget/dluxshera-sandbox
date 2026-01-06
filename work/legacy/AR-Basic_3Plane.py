@@ -200,15 +200,15 @@ else:
     # Set up priors, specifies distribution type, and sigma
     # The optimized model will be initially perturbed according to these priors
     prior_info = {
-        'x_position': (1e-2, "Normal"),               # as
-        'y_position': (1e-2, "Normal"),               # as
-        'separation': (1e-4, "Normal"),               # as
+        'x_position': (1e-6, "Normal"),               # as
+        'y_position': (1e-6, "Normal"),               # as
+        'separation': (1e-6, "Normal"),               # as
         'position_angle': (1e-3, "Uniform"),          # deg
-        'log_flux': (1e-3, "LogNormal"),              # log10(flux)
-        'contrast': (1e-3, "LogNormal"),              # ratio (unitless)
-        'psf_pixel_scale': (1e-3, "LogNormal"),       # as/pix
-        'm1_aperture.coefficients': (5, "Normal"), # nm
-        'm2_aperture.coefficients': (5, "Normal")  # nm
+        'log_flux': (1e-6, "LogNormal"),              # log10(flux)
+        'contrast': (1e-6, "LogNormal"),              # ratio (unitless)
+        'psf_pixel_scale': (1e-6, "LogNormal"),       # as/pix
+        'm1_aperture.coefficients': (1e-2, "Normal"), # nm
+        'm2_aperture.coefficients': (1e-2, "Normal")  # nm
     }
 
 if save_params:
