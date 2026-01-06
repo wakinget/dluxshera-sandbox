@@ -342,15 +342,15 @@ def plot_signals_panels(
         )
         saved.append(path)
 
-    # Panel 5: Zernike RMS
+    # Panel 5: Primary Zernike RMS
     if "primary.zernike_rms_nm" in signals:
-        path = plots_dir / "zernike_rms_nm.png"
+        path = plots_dir / "m1_zernike_rms_nm.png"
         _plot_lines(
             x,
             [signals["primary.zernike_rms_nm"]],
             ["Zernike RMS"],
-            title("Zernike RMS (nm)"),
-            "RMS (nm)",
+            title("M1 Zernike RMS (nm)"),
+            "RMS Error (nm)",
             path,
         )
         saved.append(path)
@@ -361,12 +361,42 @@ def plot_signals_panels(
         if zerr.ndim == 2 and zerr.shape[1] > 0:
             ys = [zerr[:, i] for i in range(zerr.shape[1])]
             labels = [f"M1 Z{i + 4}" for i in range(zerr.shape[1])]
-            path = plots_dir / "zernike_components_nm.png"
+            path = plots_dir / "m1_zernike_components_nm.png"
             _plot_lines(
                 x,
                 ys,
                 labels,
-                title("Zernike component residuals (nm)"),
+                title("M1 Zernike component residuals (nm)"),
+                "Residual (nm)",
+                path,
+            )
+            saved.append(path)
+
+    # Panel 7: Secondary Zernike RMS
+    if "secondary.zernike_rms_nm" in signals:
+        path = plots_dir / "m2_zernike_rms_nm.png"
+        _plot_lines(
+            x,
+            [signals["secondary.zernike_rms_nm"]],
+            ["Zernike RMS"],
+            title("M2 Zernike RMS (nm)"),
+            "RMS Error (nm)",
+            path,
+        )
+        saved.append(path)
+
+    # Panel 8: Optional component residuals
+    if "secondary.zernike_error_nm" in signals:
+        zerr = signals["secondary.zernike_error_nm"]
+        if zerr.ndim == 2 and zerr.shape[1] > 0:
+            ys = [zerr[:, i] for i in range(zerr.shape[1])]
+            labels = [f"M2 Z{i + 4}" for i in range(zerr.shape[1])]
+            path = plots_dir / "m2_zernike_components_nm.png"
+            _plot_lines(
+                x,
+                ys,
+                labels,
+                title("M2 Zernike component residuals (nm)"),
                 "Residual (nm)",
                 path,
             )
