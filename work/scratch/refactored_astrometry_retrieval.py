@@ -38,9 +38,15 @@ from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import get_resolver
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.inference.optimization import make_binder_nll_fn, run_shera_gd, fim_theta
+from dluxshera.inference.optimization import (
+    generate_fim_labels_refactor,
+    make_binder_nll_fn,
+    run_shera_gd,
+    fim_theta,
+)
 from dluxshera.inference.run_artifacts import build_index_map
 from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
+from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params
 
 # Plotting
@@ -272,89 +278,41 @@ final_psf = binder.model(final_store)
 ##################
 # Print a Summary
 ##################
-def _as_np(x):
-    return np.asarray(x)
-
-def _fmt_scalar(x, *, prec=8):
-    try:
-        return f"{float(x):.{prec}g}"
-    except Exception:
-        return str(x)
-
-def _is_scalar(arr: np.ndarray) -> bool:
-    arr = np.asarray(arr)
-    return arr.ndim == 0 or arr.size == 1
-
-def _iter_labels_for_key(key: str, n: int):
-    # Special-case Zernike coeff labels if we can
-    if key == "primary.zernike_coeffs_nm":
-        nolls = getattr(cfg, "primary_noll_indices", None)
-        if nolls is not None and len(nolls) == n:
-            return [f"Z{int(z)}" for z in nolls]
-    if key == "secondary.zernike_coeffs_nm":
-        nolls = getattr(cfg, "secondary_noll_indices", None)
-        if nolls is not None and len(nolls) == n:
-            return [f"Z{int(z)}" for z in nolls]
-
-    # Generic fallback: index labels
-    return [str(i) for i in range(n)]
-
-def _print_vector(key: str, true_val, init_val, final_val, *, prec=8):
-    t = np.ravel(_as_np(true_val))
-    i = np.ravel(_as_np(init_val))
-    f = np.ravel(_as_np(final_val))
-
-    if t.size != i.size or t.size != f.size:
-        print(f"    [WARN] size mismatch: true={t.size}, init={i.size}, final={f.size}")
-        n = min(t.size, i.size, f.size)
-        t, i, f = t[:n], i[:n], f[:n]
-
-    labels = _iter_labels_for_key(key, t.size)
-
-    # Print one line per element
-    for idx, lab, tv, iv, fv in zip(range(t.size), labels, t, i, f):
-        dt_i = float(iv - tv)
-        dt_f = float(fv - tv)
-        print(
-            f"    [{idx:>3}] {lab:>4} : "
-            f"true={_fmt_scalar(tv, prec=prec)}  "
-            f"init={_fmt_scalar(iv, prec=prec)}  (Δ={_fmt_scalar(dt_i, prec=prec)})  "
-            f"final={_fmt_scalar(fv, prec=prec)} (Δ={_fmt_scalar(dt_f, prec=prec)})"
-        )
+labels_flat = generate_fim_labels_refactor(
+    infer_keys,
+    cfg=cfg,
+    store=init_store,
+)
+labels_by_key = {}
+label_index = 0
+for key in infer_keys:
+    value = np.asarray(init_store.get(key))
+    size = 1 if value.ndim == 0 or value.size == 1 else int(value.size)
+    key_labels = labels_flat[label_index:label_index + size] if label_index < len(labels_flat) else []
+    if size == 1:
+        labels_by_key[key] = key_labels[0] if key_labels else key
+    else:
+        labels_by_key[key] = key_labels
+    label_index += size
 
 print("\n==============================")
 print("FIM-preconditioned Gradient Descent Summary")
 print("==============================")
 print(f"n_iter = {n_iter}")
-print(f"loss(true theta) = {_fmt_scalar(loss_true)}")
-print(f"loss(init theta0) = {_fmt_scalar(loss0)}")
-print(f"loss(final theta)       = {_fmt_scalar(loss_fn(theta_final))}")
+print(f"loss(true theta) = {loss_true:.8g}")
+print(f"loss(init theta0) = {loss0:.8g}")
+print(f"loss(final theta)       = {float(loss_fn(theta_final)):.8g}")
 print("")
 
-for k in infer_keys:
-    true_val = forward_truth_store.get(k)
-    init_val = init_store.get(k)
-    final_val = final_store.get(k)
-
-    t = _as_np(true_val)
-    i = _as_np(init_val)
-    f = _as_np(final_val)
-
-    print(f"- {k}")
-    if _is_scalar(t) and _is_scalar(i) and _is_scalar(f):
-        # Scalar print
-        tv = t.reshape(()) if t.size == 1 else t
-        iv = i.reshape(()) if i.size == 1 else i
-        fv = f.reshape(()) if f.size == 1 else f
-        print(f"    true : {_fmt_scalar(tv)}")
-        print(f"    init : {_fmt_scalar(iv)}  (Δ={_fmt_scalar(float(iv - tv))})")
-        print(f"    final: {_fmt_scalar(fv)}  (Δ={_fmt_scalar(float(fv - tv))})")
-    else:
-        # Full vector print (flattened)
-        print(f"    shape true/init/final: {t.shape} / {i.shape} / {f.shape}")
-        _print_vector(k, t, i, f)
-
-    print("")
+summary_true = {k: forward_truth_store.get(k) for k in infer_keys}
+summary_init = {k: init_store.get(k) for k in infer_keys}
+summary_final = {k: final_store.get(k) for k in infer_keys}
+print_optimization_summary(
+    summary_true,
+    summary_init,
+    summary_final,
+    labels=labels_by_key,
+)
 
 
 ##################
