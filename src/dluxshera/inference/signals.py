@@ -118,6 +118,7 @@ def build_signals(
     x_est = stack_decoded("binary.x_position_as")
     y_est = stack_decoded("binary.y_position_as")
     sep_est = stack_decoded("binary.separation_as")
+    pa_est = stack_decoded("binary.position_angle_deg")
     ps_est = stack_decoded("system.plate_scale_as_per_pix")
     raw_flux_est = stack_decoded("binary.raw_fluxes")
     zern_est = stack_decoded("primary.zernike_coeffs_nm")
@@ -125,6 +126,7 @@ def build_signals(
     x_true = _broadcast_truth(truth, "binary.x_position_as", x_est.shape)
     y_true = _broadcast_truth(truth, "binary.y_position_as", y_est.shape)
     sep_true = _broadcast_truth(truth, "binary.separation_as", sep_est.shape)
+    pa_true = _broadcast_truth(truth, "binary.position_angle_deg", pa_est.shape)
     ps_true = _broadcast_truth(truth, "system.plate_scale_as_per_pix", ps_est.shape)
     raw_flux_true = _broadcast_truth(truth, "binary.raw_fluxes", raw_flux_est.shape)
     zern_true = _broadcast_truth(truth, "primary.zernike_coeffs_nm", zern_est.shape)
@@ -132,6 +134,9 @@ def build_signals(
     signals["binary.x_error_uas"] = 1e6 * _residual(x_est, x_true).reshape((T,))
     signals["binary.y_error_uas"] = 1e6 * _residual(y_est, y_true).reshape((T,))
     signals["binary.separation_error_uas"] = 1e6 * _residual(sep_est, sep_true).reshape((T,))
+    signals["binary.position_angle_error_as"] = (
+        3600 * _residual(pa_est, pa_true).reshape((T,))
+    )
 
     ps_residual = _residual(ps_est, ps_true)
     if ps_true is None:
