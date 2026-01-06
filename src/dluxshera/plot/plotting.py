@@ -359,9 +359,8 @@ def plot_signals_panels(
     if "primary.zernike_error_nm" in signals:
         zerr = signals["primary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
-            k = min(zerr.shape[1], 6)
-            ys = [zerr[:, i] for i in range(k)]
-            labels = [f"Z{i}" for i in range(k)]
+            ys = [zerr[:, i] for i in range(zerr.shape[1])]
+            labels = [f"M1 Z{i + 4}" for i in range(zerr.shape[1])]
             path = plots_dir / "zernike_components_nm.png"
             _plot_lines(
                 x,
