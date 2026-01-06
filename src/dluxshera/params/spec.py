@@ -704,7 +704,7 @@ def build_forward_model_spec_from_config(
             units=None,
             dtype=float,
             shape=None,
-            default=3,
+            default=3.0,
             bounds=(0.0, None),
             doc=(
                 "Flux ratio of the binary system, defined as Primary:Secondary "
