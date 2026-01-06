@@ -6,24 +6,57 @@ forcing a dependency at import time.
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Iterable, Optional
+
+import jax
 
 from .prior import PriorSpec
-from ..params.spec import ParamKey, ParamSpec
+from ..params.spec import ParamKey
 
 
-def numpyro_priors_from_spec(prior_spec: PriorSpec, inference_spec: ParamSpec) -> Dict[ParamKey, object]:
+def numpyro_priors_from_spec(
+    prior_spec: PriorSpec,
+    keys: Optional[Iterable[ParamKey]] = None,
+) -> Dict[ParamKey, object]:
     """Convert a :class:`PriorSpec` into a NumPyro-compatible prior mapping.
 
     Notes
     -----
     - NumPyro is intentionally not imported here to avoid hard dependencies in
       the base inference stack.
-    - This function is a placeholder for future integration work; callers should
-      expect ``NotImplementedError`` until the NumPyro bridge is fleshed out.
     """
+    import jax.numpy as jnp
+    import numpyro.distributions as dist
 
-    raise NotImplementedError(
-        "NumPyro adapter is not yet implemented. This stub documents the intended "
-        "conversion point from PriorSpec to backend distributions."
-    )
+    selected_keys = tuple(prior_spec.fields.keys()) if keys is None else tuple(keys)
+    priors: Dict[ParamKey, object] = {}
+    for key in selected_keys:
+        field = prior_spec.fields[key]
+        field._assert_supported()
+        mean = jnp.asarray(field.mean)
+        sigma = jnp.asarray(field.sigma)
+        if field.dist == "Normal":
+            priors[key] = dist.Normal(loc=mean, scale=sigma)
+        elif field.dist == "Uniform":
+            priors[key] = dist.Uniform(low=mean - sigma, high=mean + sigma)
+        else:
+            priors[key] = dist.LogNormal(loc=jnp.log(mean), scale=sigma)
+    return priors
+
+
+def sample_priors_from_spec(
+    prior_spec: PriorSpec,
+    rng_key,
+    keys: Optional[Iterable[ParamKey]] = None,
+) -> Dict[ParamKey, object]:
+    """Sample NumPyro priors defined by a :class:`PriorSpec`.
+
+    Returns
+    -------
+    dict
+        Mapping of parameter keys to sampled values.
+    """
+    priors = numpyro_priors_from_spec(prior_spec, keys=keys)
+    selected_keys = tuple(priors.keys())
+    subkeys = jax.random.split(rng_key, len(selected_keys)) if selected_keys else ()
+    return {key: priors[key].sample(subkey) for key, subkey in zip(selected_keys, subkeys)}
