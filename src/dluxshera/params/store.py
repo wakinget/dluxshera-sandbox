@@ -51,6 +51,7 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optio
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .spec import ParamSpec, ParamKey
 
@@ -289,14 +290,18 @@ class ParameterStore:
             allow_missing: bool = False,
             allow_extra: bool = False,
             allow_derived: bool = False,
+            require_derived: bool = False,
+            check_dtype: bool = False,
+            check_shape: bool = False,
     ) -> "ParameterStore":
         """
         Validate that this store is consistent with a given ParamSpec.
 
-        By default this checks only that the set of keys in the store and the
-        spec match exactly and that no derived keys from the spec are present
-        in the store (strict mode). Type/shape/bounds validation can be layered
-        on later once we have concrete use cases.
+        By default this checks that the store and spec have consistent keys,
+        requiring all non-derived keys from the spec and rejecting derived
+        keys unless explicitly allowed. Derived keys are not required by
+        default. Optional dtype/shape validation can be enabled to catch
+        mismatches early.
 
         Parameters
         ----------
@@ -313,13 +318,32 @@ class ParameterStore:
             spec are considered invalid when present in the store. Set to
             True to enable override/debug flows where derived values are
             intentionally injected and should be accepted.
+        require_derived:
+            If True, require that all derived keys declared in the spec are
+            present in the store. This is enforced regardless of
+            ``allow_missing``. Requires ``allow_derived=True``.
+        check_dtype:
+            If True, validate dtype *kind* (float/int/bool/complex) for keys
+            present in both the store and spec when the spec declares a
+            dtype. Float32/float64 differences are tolerated.
+        check_shape:
+            If True, validate exact shape agreement for keys present in both
+            the store and spec. ``field.shape is None`` requires a scalar
+            shape ``()``; otherwise the stored value must match the specified
+            shape exactly. No broadcasting is applied.
+
+        Notes
+        -----
+        This method checks key consistency and optionally dtype/shape
+        agreement. It does not validate bounds or units.
 
         Raises
         ------
         ValueError
             If the store contains unknown keys (when allow_extra is False),
             contains derived keys while allow_derived is False, or is missing
-            required keys (when allow_missing is False).
+            required keys (when allow_missing is False). If require_derived is
+            True, missing derived keys are always considered an error.
 
         Returns
         -------
@@ -328,11 +352,26 @@ class ParameterStore:
         """
         spec_keys = set(spec.keys())
         derived_keys = {k for k, f in spec.items() if f.kind == "derived"}
+        required_keys = spec_keys - derived_keys
         store_keys = set(self.keys())
 
         extra_keys = store_keys - spec_keys
-        missing_keys = spec_keys - store_keys
+        missing_required = required_keys - store_keys
         present_derived = store_keys & derived_keys
+
+        if require_derived and not allow_derived:
+            raise ValueError(
+                "ParameterStore.validate_against: require_derived=True is "
+                "incompatible with allow_derived=False."
+            )
+
+        if require_derived:
+            missing_derived = derived_keys - store_keys
+            if missing_derived:
+                raise ValueError(
+                    "ParameterStore is missing derived keys required by spec: "
+                    f"{sorted(missing_derived)}"
+                )
 
         if present_derived and not allow_derived:
             raise ValueError(
@@ -346,11 +385,73 @@ class ParameterStore:
                 f"{sorted(extra_keys)}"
             )
 
-        if not allow_missing and missing_keys:
+        if not allow_missing and missing_required:
             raise ValueError(
                 f"ParameterStore is missing keys required by spec: "
-                f"{sorted(missing_keys)}"
+                f"{sorted(missing_required)}"
             )
+
+        if check_dtype or check_shape:
+            for key, field in spec.items():
+                if key not in store_keys:
+                    continue
+                value = self._values[key]
+                if value is None:
+                    continue
+                arr = jnp.asarray(value)
+
+                if check_dtype and field.dtype is not None:
+                    expected_kind: Optional[str]
+                    if field.dtype is float:
+                        expected_kind = "float"
+                    elif field.dtype is int:
+                        expected_kind = "int"
+                    elif field.dtype is bool:
+                        expected_kind = "bool"
+                    elif field.dtype is complex:
+                        expected_kind = "complex"
+                    else:
+                        try:
+                            dtype = np.dtype(field.dtype)
+                        except TypeError:
+                            expected_kind = None
+                        else:
+                            if np.issubdtype(dtype, np.floating):
+                                expected_kind = "float"
+                            elif np.issubdtype(dtype, np.integer):
+                                expected_kind = "int"
+                            elif np.issubdtype(dtype, np.bool_):
+                                expected_kind = "bool"
+                            elif np.issubdtype(dtype, np.complexfloating):
+                                expected_kind = "complex"
+                            else:
+                                expected_kind = None
+
+                    if expected_kind is not None:
+                        dtype_ok = False
+                        if expected_kind == "float":
+                            dtype_ok = np.issubdtype(arr.dtype, np.floating)
+                        elif expected_kind == "int":
+                            dtype_ok = np.issubdtype(arr.dtype, np.integer)
+                        elif expected_kind == "bool":
+                            dtype_ok = np.issubdtype(arr.dtype, np.bool_)
+                        elif expected_kind == "complex":
+                            dtype_ok = np.issubdtype(arr.dtype, np.complexfloating)
+
+                        if not dtype_ok:
+                            raise ValueError(
+                                "ParameterStore dtype mismatch for "
+                                f"'{key}': expected {expected_kind}-like, "
+                                f"got {arr.dtype}"
+                            )
+
+                if check_shape:
+                    expected_shape = () if field.shape is None else tuple(field.shape)
+                    if arr.shape != expected_shape:
+                        raise ValueError(
+                            "ParameterStore shape mismatch for "
+                            f"'{key}': expected {expected_shape}, got {arr.shape}"
+                        )
 
         return self
 
