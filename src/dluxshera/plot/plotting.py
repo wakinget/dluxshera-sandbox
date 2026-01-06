@@ -296,6 +296,19 @@ def plot_signals_panels(
         )
         saved.append(path)
 
+    # Panel 2b: Position angle residual
+    if "binary.position_angle_error_as" in signals:
+        path = plots_dir / "position_angle_residual_as.png"
+        _plot_lines(
+            x,
+            [signals["binary.position_angle_error_as"]],
+            ["ΔPA"],
+            title("Position angle residual (arcsec)"),
+            "Residual (arcsec)",
+            path,
+        )
+        saved.append(path)
+
     # Panel 3: Plate scale
     if "system.plate_scale_error_ppm" in signals:
         path = plots_dir / "plate_scale_error_ppm.png"
