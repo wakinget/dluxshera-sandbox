@@ -78,7 +78,7 @@ def test_parameter_store_validate_against_inference_spec_basic():
     spec = build_inference_spec_basic()
 
     # Build a store with matching keys. We don't care about actual values here,
-    # since validate_against() currently checks only the key set.
+    # since validate_against() checks key sets by default.
     values = {}
 
     for key in spec.keys():
@@ -171,6 +171,70 @@ def test_validate_against_rejects_derived_by_default():
     # Explicit override/debug mode accepts derived keys
     store.validate_against(spec, allow_derived=True)
 
+
+def test_validate_against_missing_derived_is_ok_by_default():
+    spec = _make_primitive_derived_spec()
+    store = ParameterStore.from_dict({"a": 1.0, "b": 2.0})
+
+    store.validate_against(spec)
+
+
+def test_validate_against_require_derived():
+    spec = _make_primitive_derived_spec()
+    store = ParameterStore.from_dict({"a": 1.0, "b": 2.0})
+
+    with pytest.raises(ValueError):
+        store.validate_against(spec, require_derived=True, allow_derived=True)
+
+    store_with_derived = store.replace({"sum": 3.0})
+    store_with_derived.validate_against(spec, require_derived=True, allow_derived=True)
+
+    with pytest.raises(ValueError):
+        store_with_derived.validate_against(spec, require_derived=True, allow_derived=False)
+
+
+def _make_dtype_shape_spec() -> ParamSpec:
+    return ParamSpec(
+        [
+            ParamField(
+                key="floaty",
+                group="g",
+                kind="primitive",
+                dtype=float,
+                shape=None,
+                default=1.0,
+            ),
+            ParamField(
+                key="vector",
+                group="g",
+                kind="primitive",
+                dtype=float,
+                shape=(2,),
+                default=jnp.zeros(2),
+            ),
+        ]
+    )
+
+
+def test_validate_against_dtype_check():
+    spec = _make_dtype_shape_spec()
+    store = ParameterStore.from_dict({"floaty": 1, "vector": jnp.zeros(2)})
+
+    with pytest.raises(ValueError):
+        store.validate_against(spec, check_dtype=True)
+
+    store_float32 = ParameterStore.from_dict(
+        {"floaty": jnp.array(1.0, dtype=jnp.float32), "vector": jnp.zeros(2)}
+    )
+    store_float32.validate_against(spec, check_dtype=True)
+
+
+def test_validate_against_shape_check():
+    spec = _make_dtype_shape_spec()
+    store = ParameterStore.from_dict({"floaty": jnp.zeros(2), "vector": jnp.zeros(2)})
+
+    with pytest.raises(ValueError):
+        store.validate_against(spec, check_shape=True)
 
 def test_strip_derived_and_refresh_derived():
     spec = _make_primitive_derived_spec()
