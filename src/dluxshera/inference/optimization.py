@@ -1483,6 +1483,15 @@ def generate_fim_labels_refactor(
         * Other vectors use ``"{key}[{i}]"`` based on the inferred length.
     """
     spec = None
+    translations = {
+        "system.plate_scale_as_per_pix": "Plate Scale",
+        "binary.contrast": "Contrast",
+        "binary.log_flux_total": "Log Flux",
+        "binary.x_position_as": "Binary X",
+        "binary.y_position_as": "Binary Y",
+        "binary.separation_as": "Binary Separation",
+        "binary.position_angle_deg": "Position Angle",
+    }
 
     def _vector_length(key: ParamKey) -> int | None:
         if store is not None and key in store:
@@ -1516,6 +1525,9 @@ def generate_fim_labels_refactor(
     labels: list[str] = []
     for key in infer_keys:
         length = _vector_length(key)
+        if key in translations and (length is None or length == 1):
+            labels.append(translations[key])
+            continue
         if length is None:
             labels.append(key)
             continue
