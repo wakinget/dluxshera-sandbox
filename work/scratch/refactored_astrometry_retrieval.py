@@ -46,7 +46,8 @@ from dluxshera.inference.optimization import (
     fim_theta,
 )
 from dluxshera.inference.run_artifacts import build_index_map
-from dluxshera.plot.plotting import plot_fim, plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
+from dluxshera.inference.signals import build_signals
+from dluxshera.plot.plotting import plot_fim, plot_parameter_history, plot_psf_comparison, plot_signals_panels
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params
 
@@ -275,6 +276,7 @@ theta_final, history, _artifacts = run_shera_gd(
     curvature=fim_diag,
     precond={"lr_vec": lr_vec},
 )
+# history already carries the theta trace used by build_signals; _artifacts is only for on-disk logging.
 
 final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 
@@ -363,8 +365,20 @@ fig.tight_layout()
 fig.savefig(DEFAULT_RESULTS_DIR / "loss_history.png", dpi=300)
 plt.close()
 
-# Plot parameter histories
-# plot_parameter_history_grid()
+signals = build_signals(
+    history,
+    meta={},
+    decoder=lambda theta: store_unpack_params(inference_subspec, theta, init_store),
+    truth=forward_truth_store,
+    signal_set="intro",
+)
+plot_signals_panels(
+    signals,
+    DEFAULT_RESULTS_DIR,
+    panel_set="intro",
+    title_prefix="Refactored astrometry retrieval",
+    include_zernike_rms=False,
+)
 
 
 print("Finished!")
