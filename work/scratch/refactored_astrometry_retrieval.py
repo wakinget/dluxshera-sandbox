@@ -45,7 +45,7 @@ from dluxshera.inference.optimization import (
     fim_theta,
 )
 from dluxshera.inference.run_artifacts import build_index_map
-from dluxshera.plot.plotting import plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
+from dluxshera.plot.plotting import plot_fim, plot_parameter_history, plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params
 
@@ -200,6 +200,11 @@ nll_loss_fn, theta0 = make_binder_nll_fn(
 )
 # nll_loss_fn(theta) gives the negative log-likelihood loss for a given input theta vector
 index_map = build_index_map(inference_subspec, init_store, theta=theta0)
+fim_labels = generate_fim_labels_refactor(
+    infer_keys,
+    cfg=cfg,
+    store=init_store,
+)
 
 def map_loss_fn(theta: np.ndarray) -> np.ndarray:
     store_theta = store_unpack_params(inference_subspec, theta, init_store)
@@ -223,7 +228,7 @@ grads0 = jax.grad(loss_fn)(theta0)
 
 print("Computing Fisher Information Matrix (FIM) for preconditioning...")
 F = fim_theta(loss_fn, theta_true)
-# TODO: Optionally produce a plot of F, recreate visual style from AR-Basic_3Plane.py
+plot_fim(F, fim_labels, save_path=DEFAULT_RESULTS_DIR / "fim.png", show=False, close=True)
 
 fim_diag = jnp.diag(F)
 lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
@@ -278,17 +283,12 @@ final_psf = binder.model(final_store)
 ##################
 # Print a Summary
 ##################
-labels_flat = generate_fim_labels_refactor(
-    infer_keys,
-    cfg=cfg,
-    store=init_store,
-)
 labels_by_key = {}
 label_index = 0
 for key in infer_keys:
     value = np.asarray(init_store.get(key))
     size = 1 if value.ndim == 0 or value.size == 1 else int(value.size)
-    key_labels = labels_flat[label_index:label_index + size] if label_index < len(labels_flat) else []
+    key_labels = fim_labels[label_index:label_index + size] if label_index < len(fim_labels) else []
     if size == 1:
         labels_by_key[key] = key_labels[0] if key_labels else key
     else:
