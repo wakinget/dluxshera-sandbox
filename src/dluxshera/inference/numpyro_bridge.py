@@ -44,7 +44,7 @@ def numpyro_priors_from_spec(
     return priors
 
 
-def sample_priors_from_spec(
+def sample_numpyro_priors_from_spec(
     prior_spec: PriorSpec,
     rng_key,
     keys: Optional[Iterable[ParamKey]] = None,
