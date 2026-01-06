@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dluxshera.inference.plotting import plot_signals_panels
+from dluxshera.plot.plotting import plot_signals_panels
 
 
 def test_plot_signals_panels_creates_pngs(tmp_path: Path):
