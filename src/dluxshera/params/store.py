@@ -46,6 +46,7 @@ store JAX-friendly and mostly immutable.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Tuple
 
 import jax
@@ -130,29 +131,62 @@ class ParameterStore:
     @classmethod
     def from_spec_defaults(cls, spec: ParamSpec) -> "ParameterStore":
         """
-        Construct a ParameterStore from the default values in a ParamSpec.
+        Construct a primitives-only ParameterStore from ParamSpec defaults.
 
-        Each ParamField's `default` attribute is used as the initial value
-        for that key. Fields whose default is None are included with value
-        None; it is the responsibility of the caller or model builder to
-        replace these with concrete values before using the store in a
-        forward model.
+        Each ParamField's ``default`` is used as the initial value for that
+        key. Derived fields are intentionally omitted so the resulting store
+        contains only primitive parameters; derived values can be populated
+        explicitly via :func:`refresh_derived` after primitives are set.
 
-        Derived parameters declared in the spec are intentionally *omitted*;
-        they can be populated explicitly via :func:`refresh_derived` once
-        truth-level primitives have been set. This keeps the default store
-        "primitives-only" and avoids accidental reliance on stale derived
-        values.
+        Defaults are canonicalized when metadata is available:
 
-        This does not perform any validation beyond copying defaults. Use
-        `store.validate_against(spec)` if you want to check key consistency.
+        - If a field declares a ``dtype``, defaults are coerced via
+          ``jnp.asarray(..., dtype=field.dtype)``.
+        - If a field declares a ``shape``, defaults are normalized to that
+          shape, including broadcasting scalar defaults to vector shapes.
+        - ``None`` defaults are preserved as ``None``.
+
+        No bounds or unit validation is performed here. Use
+        ``store.validate_against(spec)`` to check key consistency, and any
+        higher-level validation utilities for bounds or units.
+
+        Notes:
+            This method prioritizes predictable dtypes/shapes for downstream
+            JAX workflows, avoiding subtle dtype drift from Python literals.
         """
+        def _canonicalize_default(key: ParamKey, field) -> Any:
+            value = field.default
+            if value is None:
+                return None
+
+            if field.dtype is None:
+                return value
+
+            arr = jnp.asarray(value, dtype=field.dtype)
+
+            if field.shape is None:
+                return arr.reshape(())
+
+            expected_shape = tuple(field.shape)
+            if arr.shape == expected_shape:
+                return arr
+            if arr.shape == ():
+                return jnp.broadcast_to(arr, expected_shape)
+
+            expected_size = math.prod(expected_shape)
+            if arr.size == expected_size:
+                return arr.reshape(expected_shape)
+
+            raise ValueError(
+                f"from_spec_defaults: default for '{key}' has shape {arr.shape} "
+                f"(size {arr.size}), expected shape {expected_shape}."
+            )
+
         values: Dict[ParamKey, Any] = {}
         for key, field in spec.items():
-            # Skip derived parameters
             if field.kind == "derived":
                 continue
-            values[key] = field.default
+            values[key] = _canonicalize_default(key, field)
         return cls(values)
 
     def refresh_derived(
