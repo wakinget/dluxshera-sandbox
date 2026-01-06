@@ -40,6 +40,7 @@ from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
     generate_fim_labels_refactor,
+    map_labels_to_keys,
     make_binder_nll_fn,
     run_shera_gd,
     fim_theta,
@@ -283,17 +284,11 @@ final_psf = binder.model(final_store)
 ##################
 # Print a Summary
 ##################
-labels_by_key = {}
-label_index = 0
-for key in infer_keys:
-    value = np.asarray(init_store.get(key))
-    size = 1 if value.ndim == 0 or value.size == 1 else int(value.size)
-    key_labels = fim_labels[label_index:label_index + size] if label_index < len(fim_labels) else []
-    if size == 1:
-        labels_by_key[key] = key_labels[0] if key_labels else key
-    else:
-        labels_by_key[key] = key_labels
-    label_index += size
+labels_by_key = map_labels_to_keys(
+    infer_keys,
+    fim_labels,
+    index_map=index_map,
+)
 
 print("\n==============================")
 print("FIM-preconditioned Gradient Descent Summary")

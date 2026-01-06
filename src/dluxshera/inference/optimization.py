@@ -79,6 +79,7 @@ __all__ = [
     # reparameterisation utils
     "generate_fim_labels",
     "generate_fim_labels_refactor",
+    "map_labels_to_keys",
     "pack_params",
     "unpack_params",
     "build_basis",
@@ -1533,6 +1534,86 @@ def generate_fim_labels_refactor(
         labels.extend([f"{key}[{i}]" for i in range(length)])
 
     return labels
+
+
+def map_labels_to_keys(
+    infer_keys: Sequence[ParamKey],
+    flat_labels: Sequence[str],
+    *,
+    store: ParameterStore | None = None,
+    index_map: Mapping[str, object] | None = None,
+) -> dict[str, str | list[str]]:
+    """
+    Map flat labels back onto their parameter keys for printing utilities.
+
+    Parameters
+    ----------
+    infer_keys :
+        Ordered parameter keys that define the packed θ vector.
+    flat_labels :
+        Flat list of labels aligned with the packed θ vector.
+    store :
+        ParameterStore used to infer per-key sizes when ``index_map`` is not
+        supplied or lacks a key.
+    index_map :
+        Optional index map with ``entries`` containing ``name``, ``start``, and
+        ``stop`` values to slice ``flat_labels``.
+
+    Returns
+    -------
+    labels_by_key :
+        Mapping suitable for ``print_optimization_summary(..., labels=...)``.
+    """
+    if store is None and index_map is None:
+        raise ValueError("map_labels_to_keys requires either store or index_map.")
+
+    entry_lookup: dict[str, Mapping[str, object]] = {}
+    if index_map is not None:
+        entries = index_map.get("entries", [])
+        if isinstance(entries, Sequence):
+            entry_lookup = {
+                entry.get("name"): entry
+                for entry in entries
+                if isinstance(entry, Mapping) and "name" in entry
+            }
+
+    labels_by_key: dict[str, str | list[str]] = {}
+    label_index = 0
+
+    for key in infer_keys:
+        size: int
+        key_labels: list[str]
+        entry = entry_lookup.get(key) if entry_lookup else None
+
+        if entry is not None and "start" in entry and "stop" in entry:
+            start = int(entry["start"])
+            stop = int(entry["stop"])
+            size = max(stop - start, 0)
+            key_labels = list(flat_labels[start:stop])
+        else:
+            if store is not None and key in store:
+                value = store.get(key)
+                if value is None:
+                    size = 1
+                else:
+                    arr = onp.asarray(value)
+                    size = 1 if arr.ndim == 0 or arr.size == 1 else int(arr.size)
+            else:
+                size = 1
+
+            key_labels = (
+                list(flat_labels[label_index:label_index + size])
+                if label_index < len(flat_labels)
+                else []
+            )
+            label_index += size
+
+        if size == 1:
+            labels_by_key[key] = key_labels[0] if key_labels else key
+        else:
+            labels_by_key[key] = key_labels
+
+    return labels_by_key
 
 
 def fim_theta(
