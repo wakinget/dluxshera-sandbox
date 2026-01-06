@@ -38,6 +38,39 @@ _TWOPLANE_CACHE: dict[str, SheraTwoPlaneOptics] = {}
 _CACHE_DISABLED_ENV = "DLUXSHERA_THREEPLANE_CACHE_DISABLED"
 _TWOPLANE_CACHE_DISABLED_ENV = "DLUXSHERA_TWOPLANE_CACHE_DISABLED"
 
+# Runtime bindings apply post-cache overrides onto cached optics objects.
+# They exist because structural caching keys off the config only, so any
+# parameter baked into the cached optics (Zernike coefficients, plate scale,
+# etc.) must be reapplied from the ParameterStore after cache lookup.
+# Include only cached-optics knobs here (values that live inside the optics
+# object). Do not include source/noise/detector parameters; those are consumed
+# elsewhere and are not part of the cached optics state. When adding new
+# bindings, use full optics.set paths and ensure the path is stable in the
+# optics implementation so missing paths fail loudly.
+THREEPLANE_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = (
+    ("primary.zernike_coeffs_nm", "p1_layers.m1_aperture.coefficients"),
+    ("secondary.zernike_coeffs_nm", "p2_layers.m2_aperture.coefficients"),
+    ("system.plate_scale_as_per_pix", "psf_pixel_scale"),
+)
+TWOPLANE_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = (
+    ("primary.zernike_coeffs_nm", "layers.aperture.coefficients"),
+    ("system.plate_scale_as_per_pix", "psf_pixel_scale"),
+)
+
+
+def apply_runtime_bindings(optics, store, bindings):
+    """Apply runtime ParameterStore overrides onto a cached optics object."""
+
+    if store is None:
+        return optics
+
+    for store_key, set_path in bindings:
+        val = store.get(store_key, default=None)
+        if val is None:
+            continue
+        optics = optics.set(set_path, jnp.asarray(val))
+    return optics
+
 
 def _structural_subset(cfg: SheraThreePlaneConfig) -> dict:
     """Extract the structural subset of ``cfg`` as plain Python types."""
@@ -208,11 +241,6 @@ def build_shera_threeplane_optics(
       the structural hash and are applied to a copy of the cached structure.
     """
 
-    # --- Zernike coefficients from the ParameterStore (optional) -------
-    m1_coefficients = None
-    m2_coefficients = None
-    plate_scale_override = None
-
     if store is not None:
         # Optionally validate that the store keys are consistent with the spec.
         # Forward-model stores may legitimately contain derived values, so we
@@ -220,38 +248,6 @@ def build_shera_threeplane_optics(
         # binders.
         if spec is not None:
             store = store.validate_against(spec, allow_derived=True)
-
-        plate_scale_override = store.get(
-            "system.plate_scale_as_per_pix", default=None
-        )
-
-        # Expected lengths based on the config's Noll index tuples.
-        n_m1 = len(cfg.primary_noll_indices) if cfg.primary_noll_indices else 0
-        n_m2 = len(cfg.secondary_noll_indices) if cfg.secondary_noll_indices else 0
-
-        # Primary mirror coefficients
-        if n_m1 > 0:
-            coeffs = store.get("primary.zernike_coeffs_nm", default=None)
-            if coeffs is not None:
-                coeffs = jnp.asarray(coeffs)
-                if coeffs.shape[0] != n_m1:
-                    raise ValueError(
-                        f"primary.zernike_coeffs_nm length {coeffs.shape[0]} does not "
-                        f"match number of primary_noll_indices {n_m1}."
-                    )
-                m1_coefficients = coeffs
-
-        # Secondary mirror coefficients
-        if n_m2 > 0:
-            coeffs = store.get("secondary.zernike_coeffs_nm", default=None)
-            if coeffs is not None:
-                coeffs = jnp.asarray(coeffs)
-                if coeffs.shape[0] != n_m2:
-                    raise ValueError(
-                        f"secondary.zernike_coeffs_nm length {coeffs.shape[0]} does not "
-                        f"match number of secondary_noll_indices {n_m2}."
-                    )
-                m2_coefficients = coeffs
 
     # --- Construct or reuse the optics ---------------------------------
     cache_disabled = os.getenv(_CACHE_DISABLED_ENV, "").lower() in {"1", "true", "yes"}
@@ -292,19 +288,7 @@ def build_shera_threeplane_optics(
     # re-running the heavy constructor.
     optics = base_optics.set("wf_npixels", base_optics.wf_npixels)
 
-    # Apply Zernike coefficients without mutating the cached structure
-    if m1_coefficients is not None and hasattr(optics, "m1_aperture"):
-        m1_aperture = getattr(optics, "m1_aperture")
-        if hasattr(m1_aperture, "coefficients"):
-            optics = optics.set("p1_layers.m1_aperture.coefficients", m1_coefficients)
-
-    if m2_coefficients is not None and hasattr(optics, "m2_aperture"):
-        m2_aperture = getattr(optics, "m2_aperture")
-        if hasattr(m2_aperture, "coefficients"):
-            optics = optics.set("p2_layers.m2_aperture.coefficients", m2_coefficients)
-
-    if plate_scale_override is not None:
-        optics = optics.set("psf_pixel_scale", jnp.asarray(plate_scale_override))
+    optics = apply_runtime_bindings(optics, store, THREEPLANE_RUNTIME_BINDINGS)
 
     return optics
 
@@ -339,27 +323,9 @@ def build_shera_twoplane_optics(
     """
 
     plate_scale = cfg.plate_scale_as_per_pix
-    plate_scale_override = plate_scale
-    m1_coefficients = None
-
     if store is not None:
         if spec is not None:
             store = store.validate_against(spec, allow_derived=True)
-
-        plate_scale_override = store.get(
-            "system.plate_scale_as_per_pix", default=cfg.plate_scale_as_per_pix
-        )
-
-        n_m1 = len(cfg.primary_noll_indices) if cfg.primary_noll_indices else 0
-        if n_m1 > 0:
-            coeffs = store.get("primary.zernike_coeffs_nm", default=None)
-            if coeffs is not None:
-                coeffs = jnp.asarray(coeffs)
-                if coeffs.shape[0] != n_m1:
-                    raise ValueError(
-                        "primary.zernike_coeffs_nm length does not match configured basis"
-                    )
-                m1_coefficients = coeffs
 
     cache_disabled = os.getenv(_TWOPLANE_CACHE_DISABLED_ENV, "").lower() in {
         "1",
@@ -396,14 +362,7 @@ def build_shera_twoplane_optics(
 
     optics = base_optics.set("wf_npixels", base_optics.wf_npixels)
 
-    if m1_coefficients is not None:
-        # For the two-plane system the primary aperture lives under `layers`
-        # with the tuple name "aperture". Preserve the cached structure by
-        # functional update.
-        optics = optics.set("layers.aperture.coefficients", m1_coefficients)
-
-    if plate_scale_override is not None:
-        optics = optics.set("psf_pixel_scale", jnp.asarray(plate_scale_override))
+    optics = apply_runtime_bindings(optics, store, TWOPLANE_RUNTIME_BINDINGS)
 
     return optics
 
