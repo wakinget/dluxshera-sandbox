@@ -168,10 +168,20 @@ class PriorSpec:
             mean = jnp.asarray(center_store.get(key) if center_store is not None else field.mean)
             sigma = jnp.asarray(field.sigma)
             if field.dist == "Normal":
-                noise = jax.random.normal(subkey, shape=mean.shape)
+                noise = jax.random.normal(subkey, shape=mean.shape, dtype=mean.dtype)
                 updates[key] = mean + sigma * noise
             elif field.dist == "Uniform":
-                updates[key] = jax.random.uniform(subkey, shape=mean.shape, minval=mean - sigma, maxval=mean + sigma)
-            else:
-                updates[key] = jax.random.lognormal(subkey, shape=mean.shape, mean=jnp.log(mean), stddev=sigma)
+                updates[key] = jax.random.uniform(subkey, shape=mean.shape, dtype=mean.dtype, minval=mean - sigma, maxval=mean + sigma)
+            elif field.dist == "LogNormal":
+                updates[key] = mean * jax.random.lognormal(subkey, sigma=sigma, shape=mean.shape, dtype=mean.dtype)
+                # NOTE: Lognormal sampling — sigma is the std dev in *log-space*.
+                # This matches NumPyro's LogNormal(loc, scale) with:
+                #   JAX:     mean * jax.random.lognormal(key, sigma)
+                #   NumPyro: dist.LogNormal(loc=np.log(mean), scale=sigma)
+                # In this parameterization, `mean` is the *median* of the distribution.
+            else: # Raise unrecognized distribution types
+                raise ValueError(
+                    f"Unsupported prior distribution '{field.dist}' for parameter '{key}'. "
+                    "Supported distributions are: 'Normal', 'Uniform', 'LogNormal'."
+                )
         return center_store.replace(updates)
