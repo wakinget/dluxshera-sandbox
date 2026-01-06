@@ -264,7 +264,7 @@ for entry in index_map["entries"]:
 print("Running FIM-preconditioned gradient descent...")
 # Now run the gradient descent optimization
 n_iter = 100
-theta_final, history, _artifacts = run_shera_gd(
+theta_final, trace, _artifacts = run_shera_gd(
     loss_fn=loss_fn,
     theta0=theta0,
     index_map=index_map,
@@ -276,7 +276,8 @@ theta_final, history, _artifacts = run_shera_gd(
     curvature=fim_diag,
     precond={"lr_vec": lr_vec},
 )
-# history already carries the theta trace used by build_signals; _artifacts is only for on-disk logging.
+# trace carries the theta + loss trace used by build_signals
+# _artifacts is meant for on-disk logging.
 
 final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 
@@ -339,7 +340,7 @@ plot_psf_comparison(
 )
 
 # Plot the loss history
-losses = np.asarray(history["loss"])
+losses = np.asarray(trace["loss"])
 fig, axes = plt.subplots(1, 2, figsize=(9, 4))
 axes = axes.flatten()
 # Left: Full loss history
@@ -365,8 +366,11 @@ fig.tight_layout()
 fig.savefig(DEFAULT_RESULTS_DIR / "loss_history.png", dpi=300)
 plt.close()
 
+# Build the signals and plot parameter residuals
+# build_signals computes 'signals' from the trace.
+# Signals represent residual errors, sometimes scaled to specific units like uas or ppm
 signals = build_signals(
-    history,
+    trace,
     meta={},
     decoder=lambda theta: store_unpack_params(inference_subspec, theta, init_store),
     truth=forward_truth_store,
