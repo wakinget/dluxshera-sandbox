@@ -77,7 +77,11 @@ __all__ = [
     "loglikelihood", "loss_fn", "step_fn",
 
     # reparameterisation utils
-    "generate_fim_labels", "pack_params", "unpack_params", "build_basis",
+    "generate_fim_labels",
+    "generate_fim_labels_refactor",
+    "pack_params",
+    "unpack_params",
+    "build_basis",
 
     # priors
     "construct_priors_from_dict",
@@ -1445,6 +1449,92 @@ def run_image_gd(
 # θ-space Fisher Information utilities (Binder-based)
 # -------------------------------------------------------------------------
 
+def generate_fim_labels_refactor(
+    infer_keys: Sequence[ParamKey],
+    *,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | None,
+    store: ParameterStore | None = None,
+) -> list[str]:
+    """
+    Generate human-readable θ-labels for refactor-era FIM utilities.
+
+    Parameters
+    ----------
+    infer_keys :
+        Ordered parameter keys that define the packed θ vector.
+    cfg :
+        Shera config used to resolve Zernike Noll indices for
+        ``primary.zernike_coeffs_nm`` and ``secondary.zernike_coeffs_nm``.
+    store :
+        Optional ParameterStore providing concrete values. When present, this
+        is used to infer vector lengths. If absent (or missing a key), the
+        helper attempts to fall back to any available ParamSpec shape derived
+        from ``cfg``.
+
+    Notes
+    -----
+    - Scalar parameters are labeled with their key as-is.
+    - Vector parameters are expanded:
+        * ``primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
+          ``cfg.primary_noll_indices``.
+        * ``secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
+          ``cfg.secondary_noll_indices``.
+        * Other vectors use ``"{key}[{i}]"`` based on the inferred length.
+    """
+    spec = None
+
+    def _vector_length(key: ParamKey) -> int | None:
+        if store is not None and key in store:
+            value = store.get(key)
+            if value is not None:
+                arr = np.asarray(value)
+                if arr.ndim > 0:
+                    return int(arr.size)
+        if cfg is None:
+            return None
+        nonlocal spec
+        if spec is None:
+            from ..params.spec import (
+                build_forward_model_spec_from_config,
+                build_shera_twoplane_forward_spec_from_config,
+            )
+
+            if isinstance(cfg, SheraThreePlaneConfig):
+                spec = build_forward_model_spec_from_config(cfg)
+            elif isinstance(cfg, SheraTwoPlaneConfig):
+                spec = build_shera_twoplane_forward_spec_from_config(cfg)
+        if spec is not None and key in spec:
+            field = spec.get(key)
+            if field.shape:
+                size = 1
+                for dim in field.shape:
+                    size *= int(dim)
+                return size
+        return None
+
+    labels: list[str] = []
+    for key in infer_keys:
+        length = _vector_length(key)
+        if length is None:
+            labels.append(key)
+            continue
+
+        if key == "primary.zernike_coeffs_nm":
+            nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
+            if nolls:
+                labels.extend([f"M1 Z{n}" for n in nolls])
+                continue
+        if key == "secondary.zernike_coeffs_nm":
+            nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
+            if nolls:
+                labels.extend([f"M2 Z{n}" for n in nolls])
+                continue
+
+        labels.extend([f"{key}[{i}]" for i in range(length)])
+
+    return labels
+
+
 def fim_theta(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta_ref: np.ndarray,
@@ -1488,7 +1578,8 @@ def fim_theta_shera(
     *,
     noise_model: NoiseModel = "gaussian",
     reduce: Literal["sum", "mean"] = "sum",
-) -> Tuple[np.ndarray, np.ndarray]:
+    return_labels: bool = False,
+) -> Tuple[np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, list[str]]:
     """
     Convenience helper: build a Binder-based θ-space NLL for Shera and
     compute its Fisher Information Matrix at the corresponding θ₀.
@@ -1513,6 +1604,10 @@ def fim_theta_shera(
     reduce :
         Reduction inside the NLL (passed through to the image kernels).
 
+    return_labels :
+        If True, also return a list of human-readable labels aligned with the
+        packed θ vector.
+
     Returns
     -------
     F : jnp.ndarray
@@ -1520,6 +1615,8 @@ def fim_theta_shera(
     theta0 : jnp.ndarray
         The θ vector at which the FIM was evaluated (the same θ₀
         returned by `make_binder_image_nll_fn`).
+    labels : list[str]
+        Optional labels aligned with θ (returned when ``return_labels=True``).
     """
     # Reuse the canonical Binder-based NLL closure
     loss_fn, theta0 = make_binder_image_nll_fn(
@@ -1534,6 +1631,13 @@ def fim_theta_shera(
     )
 
     F = fim_theta(loss_fn, theta0)
+    if return_labels:
+        labels = generate_fim_labels_refactor(
+            infer_keys,
+            cfg=cfg,
+            store=base_forward_store,
+        )
+        return F, theta0, labels
     return F, theta0
 
 
