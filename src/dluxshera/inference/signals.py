@@ -42,9 +42,15 @@ def _lookup(decoded: DecodedMapping, key: str) -> np.ndarray:
 def _broadcast_truth(truth: Optional[Mapping[str, object]], key: str, shape) -> Optional[np.ndarray]:
     if truth is None:
         return None
-    if key not in truth:
-        return None
-    value = np.asarray(truth[key])
+    if isinstance(truth, ParameterStore):
+        try:
+            value = np.asarray(truth.get(key))
+        except KeyError:
+            return None
+    else:
+        if key not in truth:
+            return None
+        value = np.asarray(truth[key])
     try:
         return np.broadcast_to(value, shape)
     except ValueError:
