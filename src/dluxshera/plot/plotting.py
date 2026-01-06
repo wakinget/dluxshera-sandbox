@@ -239,6 +239,7 @@ def plot_signals_panels(
     *,
     panel_set: str = "intro",
     title_prefix: Optional[str] = None,
+    include_zernike_rms: bool = False,
 ) -> PanelPaths:
     """
     Render standard diagnostic panels from Signals.
@@ -253,6 +254,8 @@ def plot_signals_panels(
         Panel recipe. Only ``"intro"`` is supported.
     title_prefix:
         Optional prefix applied to each panel title.
+    include_zernike_rms:
+        Whether to include M1/M2 Zernike RMS panels (default False).
 
     Returns
     -------
@@ -343,7 +346,7 @@ def plot_signals_panels(
         saved.append(path)
 
     # Panel 5: Primary Zernike RMS
-    if "primary.zernike_rms_nm" in signals:
+    if include_zernike_rms and "primary.zernike_rms_nm" in signals:
         path = plots_dir / "m1_zernike_rms_nm.png"
         _plot_lines(
             x,
@@ -373,7 +376,7 @@ def plot_signals_panels(
             saved.append(path)
 
     # Panel 7: Secondary Zernike RMS
-    if "secondary.zernike_rms_nm" in signals:
+    if include_zernike_rms and "secondary.zernike_rms_nm" in signals:
         path = plots_dir / "m2_zernike_rms_nm.png"
         _plot_lines(
             x,
