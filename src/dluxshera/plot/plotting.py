@@ -26,6 +26,18 @@ from dluxshera.utils.utils import get_param_scale_and_unit
 
 ArrayLike = Union[onp.ndarray, np.ndarray]
 
+__all__ = [
+    "merge_cbar",
+    "plot_parameter_history",
+    "plot_parameter_history_grid",
+    "plot_psf_single",
+    "plot_psf_comparison",
+    "plot_opd_surface",
+    "choose_subplot_grid",
+    "plot_parameter_sweeps",
+    "plot_fim",
+]
+
 
 def _normalise_histories(
     names: Optional[Union[str, Sequence[str]]],
@@ -560,6 +572,96 @@ def choose_subplot_grid(n):
         cols = int(np.ceil(np.sqrt(n)))
         rows = int(np.ceil(n / cols))
         return rows, cols
+
+
+def plot_fim(
+    fim: np.ndarray,
+    labels: Sequence[str],
+    log_scale: bool = True,
+    vmin=None,
+    vmax=None,
+    cmap: str = "viridis",
+    figsize=(6, 5),
+    eps: float = 1e-20,
+    ax=None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """
+    Plot a Fisher Information Matrix (FIM) heatmap.
+
+    Parameters
+    ----------
+    fim : ndarray
+        Fisher information matrix to plot.
+    labels : sequence[str]
+        Labels for the matrix axes.
+    log_scale : bool
+        Whether to apply the legacy log-scaling (log10(abs(fim) + eps)).
+    vmin, vmax : float or None
+        Optional explicit color scaling for imshow.
+    cmap : str
+        Colormap for the heatmap.
+    figsize : tuple
+        Figure size when creating a new figure.
+    eps : float
+        Small value added before log scaling to avoid log(0).
+    ax : matplotlib.axes.Axes | None
+        Optional target axes.
+    save_path : str | Path | None
+        If provided, save the figure to this path.
+    show : bool
+        Whether to display the figure via ``plt.show()``.
+    close : bool
+        Close the figure when ``show`` is ``False``.
+
+    Returns
+    -------
+    fig, ax
+        Matplotlib figure and axes containing the plot.
+    """
+
+    fim_array = onp.array(fim)
+    if log_scale:
+        data = onp.log10(onp.abs(fim_array) + eps)
+        cbar_label = r"$\log_{10}(|\mathrm{FIM}| + \epsilon)$"
+    else:
+        data = fim_array
+        cbar_label = "FIM"
+
+    if vmin is None:
+        vmin = onp.nanmin(data)
+    if vmax is None:
+        vmax = onp.nanmax(data)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+
+    tick_positions = onp.arange(len(labels))
+    ax.set_xticks(tick_positions)
+    ax.set_yticks(tick_positions)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+
+    cax = merge_cbar(ax)
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label(cbar_label)
+
+    fig.tight_layout()
+
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, ax
 
 
 
