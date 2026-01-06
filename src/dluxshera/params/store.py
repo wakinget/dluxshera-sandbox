@@ -157,12 +157,15 @@ class ParameterStore:
         """
         def _canonicalize_default(key: ParamKey, field) -> Any:
             value = field.default
+            # Respect None values
             if value is None:
                 return None
 
+            # return value as-is if no dtype
             if field.dtype is None:
                 return value
 
+            # coerce to correct dtype
             arr = jnp.asarray(value, dtype=field.dtype)
 
             if field.shape is None:
