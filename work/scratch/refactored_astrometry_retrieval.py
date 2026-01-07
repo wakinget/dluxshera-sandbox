@@ -348,7 +348,7 @@ axes = axes.flatten()
 plot_parameter_history(
     names=("Loss",),
     histories=(losses,),
-    true_vals=(float(loss0),),
+    true_vals=(float(loss_true),),
     ax=axes[0],
     title="Optimization Loss History",
     show=False,
@@ -359,10 +359,10 @@ axes[1].plot(np.arange(n_iter - 10, n_iter) + 1, losses[-10:])
 axes[1].set_title(f"Last 10 Iterations, Final= {losses[-1]:.3f}")
 axes[1].set_xlabel("Iteration")
 axes[1].set_ylabel("Loss")
-axes[1].axhline(loss0, linestyle="--", color="k", alpha=0.6, label="True Loss")
-final_delta = np.abs(losses[-1] - loss0)
+axes[1].axhline(loss_true, linestyle="--", color="k", alpha=0.6, label="True Loss")
+final_delta = np.abs(losses[-1] - loss_true)
 if final_delta != 0:
-    axes[1].set_ylim(loss0-3*final_delta, loss0+3*final_delta)
+    axes[1].set_ylim(loss_true-3*final_delta, loss_true+3*final_delta)
 fig.tight_layout()
 fig.savefig(DEFAULT_RESULTS_DIR / "loss_history.png", dpi=300)
 plt.close()
