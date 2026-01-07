@@ -268,6 +268,7 @@ theta_final, trace, _artifacts = run_shera_gd(
     loss_fn=loss_fn,
     theta0=theta0,
     index_map=index_map,
+    learning_rate=1.0,
     lr_vec=lr_vec,
     num_steps=n_iter,
     runs_dir=DEFAULT_RESULTS_DIR,
