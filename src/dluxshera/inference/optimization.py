@@ -1180,12 +1180,16 @@ def run_shera_gd(
         :func:`dluxshera.inference.run_artifacts.build_index_map` from a Shera
         inference spec.
     learning_rate :
-        Base learning rate used when ``lr_vec`` is not supplied.
+        Base learning rate used when ``lr_vec`` is not supplied. When
+        ``lr_vec`` is provided, this scalar additionally scales the per-parameter
+        vector before it is passed to the optimizer.
     lr_vec :
         Optional per-parameter learning-rate vector of shape ``(D,)``. When
         provided, an element-wise ``optax.sgd(learning_rate=lr_vec)`` optimizer
-        is used, yielding updates ``theta_{t+1} = theta_t - lr_vec ⊙ grad``.
-        The ``learning_rate`` scalar is still recorded in metadata.
+        is used, yielding updates ``theta_{t+1} = theta_t - (learning_rate *
+        lr_vec) ⊙ grad``. The ``learning_rate`` scalar is still recorded in
+        metadata, and artifacts should store the raw ``lr_vec`` while the base
+        scalar captures the global scaling.
     num_steps :
         Number of gradient updates to perform.
     run_dir / runs_dir / run_id :
@@ -1228,7 +1232,9 @@ def run_shera_gd(
     """
     optimizer = None
     if lr_vec is not None:
-        optimizer = optax.sgd(learning_rate=np.asarray(lr_vec))
+        scaled_lr_vec = learning_rate * np.asarray(lr_vec)
+        # Keep lr_vec artifacts unscaled; the base learning rate applies on top.
+        optimizer = optax.sgd(learning_rate=scaled_lr_vec)
 
     return run_gd_with_artifacts(
         loss_fn,
