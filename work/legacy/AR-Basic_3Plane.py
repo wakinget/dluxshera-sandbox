@@ -45,6 +45,7 @@ from dluxshera.utils.utils import (
 # Plotting helpers
 from dluxshera.plot.plotting import (
     merge_cbar,
+    plot_psf_single,
     plot_psf_comparison,
     plot_parameter_history,
     choose_subplot_grid,
@@ -226,7 +227,10 @@ if save_params:
 
 # Optimization Settings
 n_iter = 100
-lr = 1.0
+lr = 0.5
+# Careful with the lr here, this applies on top of the
+# per-parameter FIM/Curvature based learning rates defined below
+# If lr = 1.0, I have seen the optimization diverge
 opt = optax.sgd(lr)
 optimiser_label = "optax.sgd"
 # Define the parameters to solve for
@@ -275,16 +279,6 @@ if save_params:
     data_saved_params.to_json(os.path.join(save_path, save_name))
 
 
-fig = plt.figure(figsize=(5, 5))
-ax = plt.axes()
-plt.title("Data PSF")
-plt.xlabel("X (as)")
-psf_extent_as = model.psf_npixels * model.psf_pixel_scale / 2 * np.array([-1, 1, -1, 1])
-im = ax.imshow(data_psf, extent=psf_extent_as)
-cbar = fig.colorbar(im, cax=merge_cbar(ax))
-cbar.set_label("Photons")
-plt.tight_layout()
-plt.show(block=False)
 
 # Calculate priors centered on current values
 prior_info = {
@@ -308,6 +302,21 @@ pupil_extent_mm = model.diameter * 1e3 / 2 * np.array([-1, 1, -1, 1])
 m2_extent_mm = model.p2_diameter * 1e3 / 2 * np.array([-1, 1, -1, 1])
 psf_extent_as = model.psf_npixels * model.psf_pixel_scale / 2 * np.array([-1, 1, -1, 1])
 
+# Make a plot of the Data PSF
+if save_plots:
+    plot_name = "DataPSF"
+    save_name = f"{script_name}_{plot_name}_{timestamp}.png"
+    plot_psf_single(
+        psf=data_psf,
+        extent=psf_extent_as,
+        title="Data PSF",
+        cmap=inferno,
+        normalise=False,
+        stretch="sqrt",
+        cbar_label="Photons",
+        save_path=os.path.join(save_path, save_name),
+        show=present_plots,
+    )
 
 # === Calculate the Fisher Information Matrix ===
 print("\nCalculating Fisher Information Matrix...")
@@ -641,9 +650,11 @@ for obs_i in np.arange(N_observations):
         lambda a, b: a + np.sum(b ** 2), g0, 0.0)) ** 0.5)
 
     # Record additional optimization histories
-    true_loss, true_grads = loss_value_fn(model_params, data_model, data, var)
+    print("Calculating true loss...")
+    true_loss, true_grads = loss_value_fn(model_params.params, data_model, data, var)
+    print("Calculating final loss...")
     # final_loss, _ = val_grad_fn(models_out[-1], data, var) # Different execution path gave a slightly different Loss value
-    final_loss, _ = loss_value_fn(model_params, obs_model, data, var)
+    final_loss, _ = loss_value_fn(model_params.params, obs_model, data, var)
     losses.append(final_loss)
     history["raw_fluxes"] = [m.raw_fluxes for m in models_out]
     history["m1_zernike_opd"] = [m.m1_aperture.eval_basis() for m in models_out]
