@@ -42,6 +42,7 @@ __all__ = [
     "plot_parameter_sweeps",
     "plot_fim",
     "plot_signals_panels",
+    "plot_signals_grid",
 ]
 
 
@@ -89,18 +90,143 @@ def _ensure_plots_dir(out_dir: Path) -> Path:
     return plots_dir
 
 
-def _plot_lines(x, ys, labels, title: str, ylabel: str, save_path: Path) -> None:
-    fig, ax = plt.subplots()
+def _plot_lines_on_ax(
+    ax,
+    x,
+    ys,
+    labels,
+    title: str,
+    ylabel: str,
+) -> None:
     for y, label in zip(ys, labels):
         ax.plot(x, y, label=label)
+    ax.axhline(0, linestyle="--", color="k", alpha=0.6)
     ax.set_title(title)
     ax.set_xlabel("Step")
     ax.set_ylabel(ylabel)
     if labels:
         ax.legend()
+
+
+def _plot_lines(x, ys, labels, title: str, ylabel: str, save_path: Path) -> None:
+    fig, ax = plt.subplots()
+    _plot_lines_on_ax(ax, x, ys, labels, title, ylabel)
     fig.tight_layout()
     fig.savefig(save_path, dpi=200)
     plt.close(fig)
+
+
+def _iter_signal_panels(
+    signals: Mapping[str, ArrayLike],
+    x,
+    *,
+    title_prefix: Optional[str] = None,
+    include_zernike_rms: bool = False,
+):
+    def title(base: str) -> str:
+        return f"{title_prefix} — {base}" if title_prefix else base
+
+    astrometry = [
+        ("binary.x_error_uas", "Δx"),
+        ("binary.y_error_uas", "Δy"),
+    ]
+    if all(key in signals for key, _ in astrometry):
+        ys = [signals[key] for key, _ in astrometry]
+        labels = [label for _, label in astrometry]
+        yield {
+            "title": title("Astrometry residuals (µas)"),
+            "ylabel": "Residual (µas)",
+            "ys": ys,
+            "labels": labels,
+            "filename": "astrometry_residuals_uas.png",
+        }
+
+    if "binary.separation_error_uas" in signals:
+        yield {
+            "title": title("Separation residual (µas)"),
+            "ylabel": "Residual (µas)",
+            "ys": [signals["binary.separation_error_uas"]],
+            "labels": ["Δρ"],
+            "filename": "separation_residual_uas.png",
+        }
+
+    if "binary.position_angle_error_as" in signals:
+        yield {
+            "title": title("Position angle residual (arcsec)"),
+            "ylabel": "Residual (arcsec)",
+            "ys": [signals["binary.position_angle_error_as"]],
+            "labels": ["ΔPA"],
+            "filename": "position_angle_residual_as.png",
+        }
+
+    if "system.plate_scale_error_ppm" in signals:
+        yield {
+            "title": title("Plate scale error (ppm)"),
+            "ylabel": "Error (ppm)",
+            "ys": [signals["system.plate_scale_error_ppm"]],
+            "labels": ["Plate scale"],
+            "filename": "plate_scale_error_ppm.png",
+        }
+
+    if "binary.raw_flux_error_ppm" in signals:
+        flux_err = signals["binary.raw_flux_error_ppm"]
+        if flux_err.ndim == 2 and flux_err.shape[1] >= 2:
+            ys = [flux_err[:, 0], flux_err[:, 1]]
+            labels = ["Star A", "Star B"]
+        else:
+            ys = [flux_err]
+            labels = ["Raw flux"]
+        yield {
+            "title": title("Raw flux error (ppm)"),
+            "ylabel": "Error (ppm)",
+            "ys": ys,
+            "labels": labels,
+            "filename": "raw_flux_error_ppm.png",
+        }
+
+    if "primary.zernike_error_nm" in signals:
+        zerr = signals["primary.zernike_error_nm"]
+        if zerr.ndim == 2 and zerr.shape[1] > 0:
+            ys = [zerr[:, i] for i in range(zerr.shape[1])]
+            labels = [f"M1 Z{i + 4}" for i in range(zerr.shape[1])]
+            yield {
+                "title": title("M1 Zernike component residuals (nm)"),
+                "ylabel": "Residual (nm)",
+                "ys": ys,
+                "labels": labels,
+                "filename": "m1_zernike_components_nm.png",
+            }
+
+    if include_zernike_rms and "primary.zernike_rms_nm" in signals:
+        yield {
+            "title": title("M1 Zernike RMS (nm)"),
+            "ylabel": "RMS Error (nm)",
+            "ys": [signals["primary.zernike_rms_nm"]],
+            "labels": ["Zernike RMS"],
+            "filename": "m1_zernike_rms_nm.png",
+        }
+
+    if "secondary.zernike_error_nm" in signals:
+        zerr = signals["secondary.zernike_error_nm"]
+        if zerr.ndim == 2 and zerr.shape[1] > 0:
+            ys = [zerr[:, i] for i in range(zerr.shape[1])]
+            labels = [f"M2 Z{i + 4}" for i in range(zerr.shape[1])]
+            yield {
+                "title": title("M2 Zernike component residuals (nm)"),
+                "ylabel": "Residual (nm)",
+                "ys": ys,
+                "labels": labels,
+                "filename": "m2_zernike_components_nm.png",
+            }
+
+    if include_zernike_rms and "secondary.zernike_rms_nm" in signals:
+        yield {
+            "title": title("M2 Zernike RMS (nm)"),
+            "ylabel": "RMS Error (nm)",
+            "ys": [signals["secondary.zernike_rms_nm"]],
+            "labels": ["Zernike RMS"],
+            "filename": "m2_zernike_rms_nm.png",
+        }
 
 
 def merge_cbar(ax):
@@ -268,144 +394,105 @@ def plot_signals_panels(
 
     plots_dir = _ensure_plots_dir(Path(out_dir))
     x = onp.arange(next(iter(signals.values())).shape[0])
-
-    def title(base: str) -> str:
-        return f"{title_prefix} — {base}" if title_prefix else base
-
     saved: PanelPaths = []
 
-    # Panel 1: Astrometry residuals
-    astrometry = [
-        ("binary.x_error_uas", "Δx"),
-        ("binary.y_error_uas", "Δy"),
-    ]
-    if all(key in signals for key, _ in astrometry):
-        ys = [signals[key] for key, _ in astrometry]
-        labels = [label for _, label in astrometry]
-        path = plots_dir / "astrometry_residuals_uas.png"
-        _plot_lines(x, ys, labels, title("Astrometry residuals (µas)"), "Residual (µas)", path)
-        saved.append(path)
-
-    # Panel 2: Separation
-    if "binary.separation_error_uas" in signals:
-        path = plots_dir / "separation_residual_uas.png"
-        _plot_lines(
-            x,
-            [signals["binary.separation_error_uas"]],
-            ["Δρ"],
-            title("Separation residual (µas)"),
-            "Residual (µas)",
-            path,
-        )
-        saved.append(path)
-
-    # Panel 2b: Position angle residual
-    if "binary.position_angle_error_as" in signals:
-        path = plots_dir / "position_angle_residual_as.png"
-        _plot_lines(
-            x,
-            [signals["binary.position_angle_error_as"]],
-            ["ΔPA"],
-            title("Position angle residual (arcsec)"),
-            "Residual (arcsec)",
-            path,
-        )
-        saved.append(path)
-
-    # Panel 3: Plate scale
-    if "system.plate_scale_error_ppm" in signals:
-        path = plots_dir / "plate_scale_error_ppm.png"
-        _plot_lines(
-            x,
-            [signals["system.plate_scale_error_ppm"]],
-            ["Plate scale"],
-            title("Plate scale error (ppm)"),
-            "Error (ppm)",
-            path,
-        )
-        saved.append(path)
-
-    # Panel 4: Raw flux error
-    if "binary.raw_flux_error_ppm" in signals:
-        flux_err = signals["binary.raw_flux_error_ppm"]
-        if flux_err.ndim == 2 and flux_err.shape[1] >= 2:
-            ys = [flux_err[:, 0], flux_err[:, 1]]
-            labels = ["Star A", "Star B"]
-        else:
-            ys = [flux_err]
-            labels = ["Raw flux"]
-        path = plots_dir / "raw_flux_error_ppm.png"
-        _plot_lines(
-            x,
-            ys,
-            labels,
-            title("Raw flux error (ppm)"),
-            "Error (ppm)",
-            path,
-        )
-        saved.append(path)
-
-    # Panel 5: Primary Zernike component residuals
-    if "primary.zernike_error_nm" in signals:
-        zerr = signals["primary.zernike_error_nm"]
-        if zerr.ndim == 2 and zerr.shape[1] > 0:
-            ys = [zerr[:, i] for i in range(zerr.shape[1])]
-            labels = [f"M1 Z{i + 4}" for i in range(zerr.shape[1])]
-            path = plots_dir / "m1_zernike_components_nm.png"
-            _plot_lines(
-                x,
-                ys,
-                labels,
-                title("M1 Zernike component residuals (nm)"),
-                "Residual (nm)",
-                path,
-            )
-            saved.append(path)
-
-    # Panel 6: (Optional) Primary Zernike RMS error
-    if include_zernike_rms and "primary.zernike_rms_nm" in signals:
-        path = plots_dir / "m1_zernike_rms_nm.png"
-        _plot_lines(
-            x,
-            [signals["primary.zernike_rms_nm"]],
-            ["Zernike RMS"],
-            title("M1 Zernike RMS (nm)"),
-            "RMS Error (nm)",
-            path,
-        )
-        saved.append(path)
-
-    # Panel 7: Secondary Zernike component residuals
-    if "secondary.zernike_error_nm" in signals:
-        zerr = signals["secondary.zernike_error_nm"]
-        if zerr.ndim == 2 and zerr.shape[1] > 0:
-            ys = [zerr[:, i] for i in range(zerr.shape[1])]
-            labels = [f"M2 Z{i + 4}" for i in range(zerr.shape[1])]
-            path = plots_dir / "m2_zernike_components_nm.png"
-            _plot_lines(
-                x,
-                ys,
-                labels,
-                title("M2 Zernike component residuals (nm)"),
-                "Residual (nm)",
-                path,
-            )
-            saved.append(path)
-
-    # Panel 8: (Optional) Secondary Zernike RMS error
-    if include_zernike_rms and "secondary.zernike_rms_nm" in signals:
-        path = plots_dir / "m2_zernike_rms_nm.png"
-        _plot_lines(
-            x,
-            [signals["secondary.zernike_rms_nm"]],
-            ["Zernike RMS"],
-            title("M2 Zernike RMS (nm)"),
-            "RMS Error (nm)",
-            path,
-        )
+    for panel in _iter_signal_panels(
+        signals,
+        x,
+        title_prefix=title_prefix,
+        include_zernike_rms=include_zernike_rms,
+    ):
+        path = plots_dir / panel["filename"]
+        _plot_lines(x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"], path)
         saved.append(path)
 
     return saved
+
+
+def plot_signals_grid(
+    signals: Mapping[str, ArrayLike],
+    out_dir: Path,
+    *,
+    panel_set: str = "intro",
+    title_prefix: Optional[str] = None,
+    include_zernike_rms: bool = False,
+    figsize: Optional[Tuple[float, float]] = None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """
+    Render standard diagnostic panels into a grid of subplots.
+
+    Parameters
+    ----------
+    signals:
+        Mapping from signal names to numpy arrays.
+    out_dir:
+        Run directory; plots are written to ``out_dir / 'plots'`` when
+        ``save_path`` is not supplied.
+    panel_set:
+        Panel recipe. Only ``"intro"`` is supported.
+    title_prefix:
+        Optional prefix applied to each panel title.
+    include_zernike_rms:
+        Whether to include M1/M2 Zernike RMS panels (default False).
+    figsize:
+        Optional explicit figure size.
+    save_path:
+        If provided, save the figure to this path.
+    show:
+        Whether to call ``plt.show()`` at the end.
+    close:
+        Close the figure when ``show`` is ``False`` to avoid leaked figures.
+
+    Returns
+    -------
+    fig, axes
+        Matplotlib figure and axes array containing the grid.
+    """
+
+    if panel_set != "intro":
+        raise ValueError(f"Unsupported panel_set {panel_set!r} (expected 'intro').")
+
+    x = onp.arange(next(iter(signals.values())).shape[0])
+    panels = list(
+        _iter_signal_panels(
+            signals,
+            x,
+            title_prefix=title_prefix,
+            include_zernike_rms=include_zernike_rms,
+        )
+    )
+    if not panels:
+        raise ValueError("No panels available for the provided signals mapping.")
+
+    rows, cols = choose_subplot_grid(len(panels))
+    if figsize is None:
+        figsize = (5 * cols, 3.5 * rows)
+    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
+    axes_flat = axes.flatten()
+
+    for ax, panel in zip(axes_flat, panels):
+        _plot_lines_on_ax(ax, x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"])
+
+    for ax in axes_flat[len(panels):]:
+        fig.delaxes(ax)
+
+    fig.tight_layout()
+
+    if save_path is None:
+        plots_dir = _ensure_plots_dir(Path(out_dir))
+        save_path = plots_dir / "signals_grid.png"
+
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, axes
 
 
 def plot_parameter_history_grid(
