@@ -1146,7 +1146,7 @@ def run_shera_gd(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
     index_map: Optional[Mapping[str, Any]] = None,
-    learning_rate: float = 1e-2,
+    learning_rate: float = 0.5,
     lr_vec: Optional[np.ndarray] = None,
     num_steps: int = 100,
     run_dir: Optional[str | Path] = None,
