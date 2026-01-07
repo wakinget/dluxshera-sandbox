@@ -865,7 +865,7 @@ def plot_fim(
     vmin=None,
     vmax=None,
     cmap: str = "viridis",
-    figsize=(6, 5),
+    figsize=(8, 6),
     eps: float = 1e-20,
     ax=None,
     save_path: Optional[Union[str, Path]] = None,
