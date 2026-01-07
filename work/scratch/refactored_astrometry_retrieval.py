@@ -382,7 +382,11 @@ plt.close()
 signals = build_signals(
     trace,
     meta={},
-    decoder=lambda theta: store_unpack_params(inference_subspec, theta, init_store),
+    decoder=lambda theta: store_unpack_params(
+        inference_subspec,
+        theta,
+        init_store,
+    ).refresh_derived(inference_spec),
     truth=forward_truth_store,
     signal_set="intro",
 )
