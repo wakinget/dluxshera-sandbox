@@ -15,7 +15,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
+import numpy as onp
 
 # Plotting
 import matplotlib as mpl
@@ -218,11 +218,6 @@ if save_params:
 n_iter = 100
 lr = 0.5
 
-
-# Legacy aliasing to mirror original script expectations
-onp = np
-np = jnp
-
 # Define the parameters to solve for
 optimisers = {
     "separation": None,
@@ -275,13 +270,13 @@ priors = construct_priors_from_dict(prior_info)
 
 # Examine the Model
 m1_mask = model.m1_aperture.transmission
-m1_nanmask = np.where(m1_mask, m1_mask, np.nan)
+m1_nanmask = jnp.where(m1_mask, m1_mask, jnp.nan)
 m2_mask = model.m2_aperture.transmission
-m2_nanmask = np.where(m2_mask, m2_mask, np.nan)
+m2_nanmask = jnp.where(m2_mask, m2_mask, jnp.nan)
 model_psf = model.model()
-pupil_extent_mm = model.diameter * 1e3 / 2 * np.array([-1, 1, -1, 1])
-m2_extent_mm = model.p2_diameter * 1e3 / 2 * np.array([-1, 1, -1, 1])
-psf_extent_as = model.psf_npixels * model.psf_pixel_scale / 2 * np.array([-1, 1, -1, 1])
+pupil_extent_mm = model.diameter * 1e3 / 2 * jnp.array([-1, 1, -1, 1])
+m2_extent_mm = model.p2_diameter * 1e3 / 2 * jnp.array([-1, 1, -1, 1])
+psf_extent_as = model.psf_npixels * model.psf_pixel_scale / 2 * jnp.array([-1, 1, -1, 1])
 
 # Make a plot of the Data PSF
 if save_plots:
@@ -316,10 +311,6 @@ legacy_psf = onp.asarray(model_psf)
 legacy_data_psf = onp.asarray(data_psf)
 legacy_fim = onp.asarray(fim)
 legacy_labels = fim_labels
-
-
-# Restore numpy alias for refactor block
-np = onp
 
 
 ##########################
@@ -381,8 +372,8 @@ data = binder.model()
 # Optionally add noise to the data
 if add_noise:
     rng_key, split_key = jr.split(rng_key)
-    if np.min(data) > 100:  # Use Gaussian Approximation
-        data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
+    if onp.min(data) > 100:  # Use Gaussian Approximation
+        data = onp.sqrt(data) * jr.normal(split_key, data.shape) + data
     else:  # Add Poisson shot noise
         data = jr.poisson(split_key, data)
 
@@ -419,11 +410,11 @@ prior_info = {
     "binary.contrast": {"sigma": 1e-6, "dist": "LogNormal"},
     "system.plate_scale_as_per_pix": {"sigma": 1e-6, "dist": "LogNormal"},
     "primary.zernike_coeffs_nm": {
-        "sigma": np.full_like(forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2),
+        "sigma": onp.full_like(forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2),
         "dist": "Normal",
     },
     "secondary.zernike_coeffs_nm": {
-        "sigma": np.full_like(forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2),
+        "sigma": onp.full_like(forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2),
         "dist": "Normal",
     },
 }
@@ -463,10 +454,10 @@ theta_true = pack_params(inference_subspec, forward_truth_store)
 print("Computing Fisher Information Matrix (FIM) for preconditioning...")
 F = fim_theta(loss_fn_refactor, theta_true)
 
-refactor_psf = np.asarray(data)
-refactor_fim = np.asarray(F)
+refactor_psf = onp.asarray(data)
+refactor_fim = onp.asarray(F)
 refactor_labels = fim_labels
-refactor_theta_true = np.asarray(theta_true)
+refactor_theta_true = onp.asarray(theta_true)
 refactor_index_map = index_map
 
 
@@ -485,16 +476,16 @@ print(f"Legacy PSF min/max/sum/peak: {legacy_psf.min():.6g} / {legacy_psf.max():
 print(f"Refactor PSF min/max/sum/peak: {refactor_psf.min():.6g} / {refactor_psf.max():.6g} / {refactor_psf.sum():.6g} / {refactor_psf.max():.6g}")
 
 abs_diff = legacy_psf - refactor_psf
-ref_norm = np.linalg.norm(refactor_psf)
-rel_l2 = np.linalg.norm(abs_diff) / ref_norm if ref_norm != 0 else np.nan
-max_abs = np.max(np.abs(abs_diff))
-max_rel = np.max(np.abs(abs_diff) / np.maximum(np.abs(refactor_psf), 1e-12))
+ref_norm = onp.linalg.norm(refactor_psf)
+rel_l2 = onp.linalg.norm(abs_diff) / ref_norm if ref_norm != 0 else onp.nan
+max_abs = onp.max(onp.abs(abs_diff))
+max_rel = onp.max(onp.abs(abs_diff) / onp.maximum(onp.abs(refactor_psf), 1e-12))
 
 print(f"PSF rel L2 diff: {rel_l2:.6g}")
 print(f"PSF max abs diff: {max_abs:.6g}")
 print(f"PSF max rel diff: {max_rel:.6g}")
 
-np.savez(
+onp.savez(
     comparison_dir / "psf_comparison.npz",
     psf_legacy=legacy_psf,
     psf_refactor=refactor_psf,
@@ -525,12 +516,12 @@ plt.close(fig)
 
 
 print("\n==== FIM comparison ====")
-np.savez(
+onp.savez(
     comparison_dir / "fim_comparison.npz",
     fim_legacy=legacy_fim,
-    labels_legacy=np.array(legacy_labels, dtype=object),
+    labels_legacy=onp.array(legacy_labels, dtype=object),
     fim_refactor=refactor_fim,
-    labels_refactor=np.array(refactor_labels, dtype=object),
+    labels_refactor=onp.array(refactor_labels, dtype=object),
 )
 
 legacy_label_to_index = {label: idx for idx, label in enumerate(legacy_labels)}
@@ -555,11 +546,11 @@ for legacy_key, refactor_key in mapped_pairs:
         ri = refactor_label_to_index[refactor_key]
         legacy_val = legacy_fim[li, li]
         refactor_val = refactor_fim[ri, ri]
-        ratio = refactor_val / legacy_val if legacy_val != 0 else np.nan
+        ratio = refactor_val / legacy_val if legacy_val != 0 else onp.nan
         matched_rows.append((legacy_key, legacy_val, refactor_val, ratio))
         ratios.append(ratio)
     else:
-        matched_rows.append((f"{legacy_key} -> {refactor_key}", np.nan, np.nan, np.nan))
+        matched_rows.append((f"{legacy_key} -> {refactor_key}", onp.nan, onp.nan, onp.nan))
 
 # Map Zernike coefficients by index
 legacy_zernike_labels = [label for label in legacy_labels if "m1_aperture.coefficients[" in label]
@@ -579,7 +570,7 @@ for legacy_label, refactor_label in zip(legacy_zernike_labels_sorted, refactor_z
     ri = refactor_label_to_index[refactor_label]
     legacy_val = legacy_fim[li, li]
     refactor_val = refactor_fim[ri, ri]
-    ratio = refactor_val / legacy_val if legacy_val != 0 else np.nan
+    ratio = refactor_val / legacy_val if legacy_val != 0 else onp.nan
     matched_rows.append((legacy_label, legacy_val, refactor_val, ratio))
     ratios.append(ratio)
 
@@ -587,14 +578,14 @@ print("name | legacy_diag | refactor_diag | ratio(ref/legacy)")
 for name, legacy_val, refactor_val, ratio in matched_rows:
     print(f"{name} | {legacy_val:.6g} | {refactor_val:.6g} | {ratio:.6g}")
 
-ratios = np.array([r for r in ratios if np.isfinite(r)])
+ratios = onp.array([r for r in ratios if onp.isfinite(r)])
 if ratios.size > 0:
     print(
         "FIM diag ratio stats: mean={:.6g}, median={:.6g}, p10={:.6g}, p90={:.6g}".format(
-            np.mean(ratios),
-            np.median(ratios),
-            np.percentile(ratios, 10),
-            np.percentile(ratios, 90),
+            onp.mean(ratios),
+            onp.median(ratios),
+            onp.percentile(ratios, 10),
+            onp.percentile(ratios, 90),
         )
     )
 else:
