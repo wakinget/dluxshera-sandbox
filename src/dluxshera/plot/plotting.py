@@ -363,7 +363,6 @@ def plot_signals_panels(
     signals: Mapping[str, ArrayLike],
     out_dir: Path,
     *,
-    panel_set: str = "intro",
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
 ) -> PanelPaths:
@@ -376,8 +375,6 @@ def plot_signals_panels(
         Mapping from signal names to numpy arrays.
     out_dir:
         Run directory; plots are written to ``out_dir / 'plots'``.
-    panel_set:
-        Panel recipe. Only ``"intro"`` is supported.
     title_prefix:
         Optional prefix applied to each panel title.
     include_zernike_rms:
@@ -389,8 +386,6 @@ def plot_signals_panels(
         Paths to saved PNG files.
     """
 
-    if panel_set != "intro":
-        raise ValueError(f"Unsupported panel_set {panel_set!r} (expected 'intro').")
 
     plots_dir = _ensure_plots_dir(Path(out_dir))
     x = onp.arange(next(iter(signals.values())).shape[0])
@@ -413,7 +408,6 @@ def plot_signals_grid(
     signals: Mapping[str, ArrayLike],
     out_dir: Path,
     *,
-    panel_set: str = "intro",
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
     figsize: Optional[Tuple[float, float]] = None,
@@ -431,8 +425,6 @@ def plot_signals_grid(
     out_dir:
         Run directory; plots are written to ``out_dir / 'plots'`` when
         ``save_path`` is not supplied.
-    panel_set:
-        Panel recipe. Only ``"intro"`` is supported.
     title_prefix:
         Optional prefix applied to each panel title.
     include_zernike_rms:
@@ -452,8 +444,6 @@ def plot_signals_grid(
         Matplotlib figure and axes array containing the grid.
     """
 
-    if panel_set != "intro":
-        raise ValueError(f"Unsupported panel_set {panel_set!r} (expected 'intro').")
 
     x = onp.arange(next(iter(signals.values())).shape[0])
     panels = list(

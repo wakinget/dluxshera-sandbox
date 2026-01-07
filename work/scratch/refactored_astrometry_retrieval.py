@@ -389,14 +389,12 @@ signals = build_signals(
 # plot_signals_panels(
 #     signals,
 #     DEFAULT_RESULTS_DIR,
-#     panel_set="intro",
 #     title_prefix="Refactored astrometry retrieval",
 #     include_zernike_rms=False,
 # )
 plot_signals_grid(
     signals,
     DEFAULT_RESULTS_DIR,
-    panel_set="intro",
     include_zernike_rms=False,
     figsize=(15, 10),
     show=False,
