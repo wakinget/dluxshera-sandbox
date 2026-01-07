@@ -47,7 +47,13 @@ from dluxshera.inference.optimization import (
 )
 from dluxshera.inference.run_artifacts import build_index_map
 from dluxshera.inference.signals import build_signals
-from dluxshera.plot.plotting import plot_fim, plot_parameter_history, plot_psf_comparison, plot_signals_panels
+from dluxshera.plot.plotting import (
+    plot_fim,
+    plot_parameter_history,
+    plot_psf_comparison,
+    plot_signals_panels,
+    plot_signals_grid,
+)
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params
 
@@ -87,6 +93,9 @@ add_noise = False
 ##########################
 print("Starting Simulation...")
 print("Creating Config, Spec, Store, and Binder...")
+
+# Start simulation timer
+t0_script = time.time()
 
 rng_key = jr.PRNGKey(rng_seed)
 
@@ -377,13 +386,21 @@ signals = build_signals(
     truth=forward_truth_store,
     signal_set="intro",
 )
-plot_signals_panels(
+# plot_signals_panels(
+#     signals,
+#     DEFAULT_RESULTS_DIR,
+#     panel_set="intro",
+#     title_prefix="Refactored astrometry retrieval",
+#     include_zernike_rms=False,
+# )
+plot_signals_grid(
     signals,
     DEFAULT_RESULTS_DIR,
     panel_set="intro",
-    title_prefix="Refactored astrometry retrieval",
     include_zernike_rms=False,
+    figsize=(15, 10),
+    show=False,
 )
 
-
-print("Finished!")
+t1_script = time.time()
+print("Script finished in %.3f sec" % (t1_script-t0_script))
