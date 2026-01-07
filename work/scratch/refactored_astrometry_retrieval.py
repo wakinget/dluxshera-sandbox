@@ -159,6 +159,7 @@ data_var = data
 ######################
 print("Configuring Inference...")
 # Choose inference keys
+# Only these keys will be optimized
 infer_keys = (
     "binary.separation_as",
     "binary.position_angle_deg",
@@ -239,7 +240,8 @@ grads0 = jax.grad(loss_fn)(theta0)
 
 print("Computing Fisher Information Matrix (FIM) for preconditioning...")
 F = fim_theta(loss_fn, theta_true)
-plot_fim(F, fim_labels, save_path=DEFAULT_RESULTS_DIR / "fim.png", show=False, close=True)
+plot_fim(F, fim_labels, save_path=DEFAULT_RESULTS_DIR / "fim.png",
+         vmin=4, vmax=14, show=False)
 
 fim_diag = jnp.diag(F)
 lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
@@ -273,7 +275,7 @@ for entry in index_map["entries"]:
 print("Running FIM-preconditioned gradient descent...")
 # Now run the gradient descent optimization
 n_iter = 100
-theta_final, trace, _artifacts = run_shera_gd(
+theta_final, trace = run_shera_gd(
     loss_fn=loss_fn,
     theta0=theta0,
     index_map=index_map,
@@ -281,7 +283,7 @@ theta_final, trace, _artifacts = run_shera_gd(
     lr_vec=lr_vec,
     num_steps=n_iter,
     runs_dir=DEFAULT_RESULTS_DIR,
-    return_artifacts=True,
+    return_artifacts=False,
     theta_space="primitive",
     curvature=fim_diag,
     precond={"lr_vec": lr_vec},
