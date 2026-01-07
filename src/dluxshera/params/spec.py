@@ -370,6 +370,26 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
                 "(A:B). A ratio > 1 indicates the primary is brighter."
             ),
         ),
+        ParamField(
+            key="binary.raw_fluxes",
+            group="binary",
+            kind="derived",
+            units="photons",
+            dtype=float,
+            shape=(2,),
+            default=None,
+            bounds=(0.0, None),
+            transform="binary_raw_fluxes",
+            depends_on=(
+                "binary.log_flux_total",
+                "binary.contrast",
+            ),
+            doc=(
+                "Raw integrated fluxes for the binary components (photons for "
+                "stars A and B). Derived from binary.log_flux_total and "
+                "binary.contrast using the AlphaCen source convention."
+            ),
+        ),
 
         # ----------------------
         # System geometry
