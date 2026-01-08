@@ -570,7 +570,20 @@ onp.savez(
 )
 
 legacy_label_to_index = {label: idx for idx, label in enumerate(legacy_labels)}
-refactor_label_to_index = {label: idx for idx, label in enumerate(refactor_labels)}
+refactor_index_map = build_index_map(inference_subspec, forward_truth_store, theta=theta_true)
+refactor_key_to_entry = {entry["name"]: entry for entry in refactor_index_map["entries"]}
+
+
+def refactor_diag_index(key: str, offset: int = 0) -> int | None:
+    entry = refactor_key_to_entry.get(key)
+    if entry is None:
+        return None
+    start = entry["start"]
+    stop = entry["stop"]
+    idx = start + offset
+    if idx >= stop:
+        return None
+    return idx
 
 mapped_pairs = [
     ("separation", "binary.separation_as"),
@@ -586,9 +599,10 @@ matched_rows = []
 ratios = []
 
 for legacy_key, refactor_key in mapped_pairs:
-    if legacy_key in legacy_label_to_index and refactor_key in refactor_label_to_index:
+    refactor_index = refactor_diag_index(refactor_key)
+    if legacy_key in legacy_label_to_index and refactor_index is not None:
         li = legacy_label_to_index[legacy_key]
-        ri = refactor_label_to_index[refactor_key]
+        ri = refactor_index
         legacy_val = legacy_fim[li, li]
         refactor_val = refactor_fim[ri, ri]
         ratio = refactor_val / legacy_val if legacy_val != 0 else onp.nan
@@ -599,24 +613,33 @@ for legacy_key, refactor_key in mapped_pairs:
 
 # Map Zernike coefficients by index
 legacy_zernike_labels = [label for label in legacy_labels if "m1_aperture.coefficients[" in label]
-refactor_zernike_labels = [label for label in refactor_labels if "primary.zernike_coeffs_nm[" in label]
 
 legacy_zernike_labels_sorted = sorted(
     legacy_zernike_labels,
     key=lambda x: int(x.split("[")[-1].split("]")[0]),
 )
-refactor_zernike_labels_sorted = sorted(
-    refactor_zernike_labels,
-    key=lambda x: int(x.split("[")[-1].split("]")[0]),
-)
+refactor_zernike_entry = refactor_key_to_entry.get("primary.zernike_coeffs_nm")
+refactor_zernike_start = None
+refactor_zernike_stop = None
+if refactor_zernike_entry is not None:
+    refactor_zernike_start = refactor_zernike_entry["start"]
+    refactor_zernike_stop = refactor_zernike_entry["stop"]
 
-for legacy_label, refactor_label in zip(legacy_zernike_labels_sorted, refactor_zernike_labels_sorted):
+for legacy_label in legacy_zernike_labels_sorted:
     li = legacy_label_to_index[legacy_label]
-    ri = refactor_label_to_index[refactor_label]
+    element_index = int(legacy_label.split("[")[-1].split("]")[0])
+    if refactor_zernike_start is None or refactor_zernike_stop is None:
+        matched_rows.append((legacy_label, onp.nan, onp.nan, onp.nan))
+        continue
+    ri = refactor_diag_index("primary.zernike_coeffs_nm", offset=element_index)
+    if ri is None or ri >= refactor_zernike_stop:
+        matched_rows.append((legacy_label, onp.nan, onp.nan, onp.nan))
+        continue
     legacy_val = legacy_fim[li, li]
     refactor_val = refactor_fim[ri, ri]
     ratio = refactor_val / legacy_val if legacy_val != 0 else onp.nan
-    matched_rows.append((legacy_label, legacy_val, refactor_val, ratio))
+    refactor_name = f"primary.zernike_coeffs_nm[{element_index}]"
+    matched_rows.append((f"{legacy_label} -> {refactor_name}", legacy_val, refactor_val, ratio))
     ratios.append(ratio)
 
 print("name | legacy_diag | refactor_diag | ratio(ref/legacy)")
@@ -641,4 +664,3 @@ print(f"PSF rel L2 diff: {rel_l2:.6g}")
 print(f"PSF max abs diff: {max_abs:.6g}")
 print("FIM diag ratio stats: see above")
 print(f"Results written to: {comparison_dir}")
-
