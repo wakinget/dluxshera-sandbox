@@ -450,7 +450,7 @@ optics = build_shera_threeplane_optics(
     store=binder.base_forward_store,
     spec=binder.forward_spec,
 )
-source = build_alpha_cen_source(binder.base_forward_store, n_wavels=binder.cfg.n_lambda)
+source = build_alpha_cen_source(binder.base_forward_store, cfg=binder.cfg)
 
 print("\n" + "=" * 100)
 print("LEGACY vs REFACTOR parameter snapshot")
