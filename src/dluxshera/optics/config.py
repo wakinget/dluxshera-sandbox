@@ -348,7 +348,7 @@ SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     # --- grids & sampling ---
     pupil_npix=256,
     psf_npix=256,
-    oversample=3,
+    oversample=1,
     wavelength_m=550e-9,
     bandwidth_m=110e-9,
     n_lambda=3,
@@ -383,7 +383,7 @@ SHERA_FLIGHT_CONFIG = SheraThreePlaneConfig(
     # --- grids & sampling ---
     pupil_npix=256,
     psf_npix=256,
-    oversample=3,
+    oversample=1,
     wavelength_m=550e-9,
     bandwidth_m=41e-9,
     n_lambda=3,
