@@ -299,7 +299,7 @@ class SheraThreePlaneBinder(BaseSheraBinder):
         optics = build_shera_threeplane_optics(
             self.cfg, store=eff_store, spec=self.forward_spec
         )
-        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
+        source = build_alpha_cen_source(eff_store, cfg=self.cfg)
         telescope = dl.Telescope(
             source=source,
             optics=optics,
@@ -356,7 +356,7 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         optics = build_shera_twoplane_optics(
             self.cfg, store=eff_store, spec=self.forward_spec
         )
-        source = build_alpha_cen_source(eff_store, n_wavels=self.cfg.n_lambda)
+        source = build_alpha_cen_source(eff_store, cfg=self.cfg)
         telescope = dl.Telescope(
             source=source,
             optics=optics,
