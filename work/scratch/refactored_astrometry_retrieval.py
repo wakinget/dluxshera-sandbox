@@ -169,7 +169,7 @@ infer_keys = (
     "binary.contrast",
     "system.plate_scale_as_per_pix",
     "primary.zernike_coeffs_nm",
-    # "secondary.zernike_coeffs_nm", # Remove secondary Zernike's for stability
+    "secondary.zernike_coeffs_nm", # Remove secondary Zernike's for stability
 )
 inference_subspec = make_inference_subspec(base_spec=inference_spec, infer_keys=infer_keys, cfg=cfg)
 
@@ -275,11 +275,12 @@ for entry in index_map["entries"]:
 print("Running FIM-preconditioned gradient descent...")
 # Now run the gradient descent optimization
 n_iter = 100
+base_lr = 0.5
 theta_final, trace = run_shera_gd(
     loss_fn=loss_fn,
     theta0=theta0,
     index_map=index_map,
-    learning_rate=0.5,
+    learning_rate=base_lr,
     lr_vec=lr_vec,
     num_steps=n_iter,
     runs_dir=DEFAULT_RESULTS_DIR,
