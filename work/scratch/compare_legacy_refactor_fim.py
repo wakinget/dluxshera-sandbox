@@ -87,21 +87,11 @@ timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 print(f"Starting Simulation: {script_name} - {timestamp}")
 
 # Plotting/Saving Settings
-save_plots = True
+save_plots = False
 N_saved_plots = 5  # Limit the number of plots that are saved, the first N plots will be saved
 present_plots = False
 print2console = True
 save_FIM = False
-
-save_results = True
-results_savename = f"{script_name}_{timestamp}.xlsx"
-overwrite_results = False
-
-# Provide filenames here if you want to load in previously saved settings
-data_param_filename = None
-model_param_filename = None
-prior_info_filename = None
-save_params = True
 
 
 # Observation Settings
@@ -183,41 +173,6 @@ model_initial_params = ModelParams(
     }
 )
 
-if prior_info_filename is not None:
-    # Load prior_info from json file
-    prior_info = load_prior_info(os.path.join(save_path, prior_info_filename))
-else:
-    # Set up priors, specifies distribution type, and sigma
-    # The optimized model will be initially perturbed according to these priors
-    prior_info = {
-        "x_position": (1e-6, "Normal"),  # as
-        "y_position": (1e-6, "Normal"),  # as
-        "separation": (1e-6, "Normal"),  # as
-        "position_angle": (1e-3, "Uniform"),  # deg
-        "log_flux": (1e-6, "LogNormal"),  # log10(flux)
-        "contrast": (1e-6, "LogNormal"),  # ratio (unitless)
-        "psf_pixel_scale": (1e-6, "LogNormal"),  # as/pix
-        "m1_aperture.coefficients": (1e-2, "Normal"),  # nm
-        "m2_aperture.coefficients": (1e-2, "Normal"),  # nm
-    }
-
-if save_params:
-    # Save parameters to a file, so we can load them later
-    # Save data_params
-    save_name = f"{script_name}_DataParams_{timestamp}.json"
-    data_initial_params.to_json(os.path.join(save_path, save_name))
-    # Save initial_model_params
-    save_name = f"{script_name}_ModelParams_{timestamp}.json"
-    model_initial_params.to_json(os.path.join(save_path, save_name))
-    # Save prior_info
-    save_name = f"{script_name}_PriorInfo_{timestamp}.json"
-    save_prior_info(prior_info, os.path.join(save_path, save_name))
-    # prior_info_loaded = load_prior_info("priors.json")
-
-# Optimization Settings
-n_iter = 100
-lr = 0.5
-
 # Define the parameters to solve for
 optimisers = {
     "separation": None,
@@ -242,8 +197,6 @@ t0_simulation = time.time()
 rng_key = jr.PRNGKey(default_params.rng_seed)
 path_map = default_params.get_param_path_map()
 inv_path_map = {v: k for k, v in path_map.items()}
-row_counter = 1
-obs_digits = len(str(N_observations))
 
 # Create the Data model
 data_params = data_initial_params.inject(default_params)
@@ -255,18 +208,6 @@ model = SheraThreePlane_Model(initial_model_params)
 
 # Model the Data PSF
 data_psf = data_model.model()
-if save_params:
-    data_saved_params = data_model.extract_params()
-    save_name = f"{script_name}_DataParams_{timestamp}.json"
-    data_saved_params.to_json(os.path.join(save_path, save_name))
-
-
-# Calculate priors centered on current values
-prior_info = {
-    k: {"mean": model.get(k if k not in path_map else path_map[k]), "sigma": v[0], "dist": v[1]}
-    for k, v in prior_info.items()
-}
-priors = construct_priors_from_dict(prior_info)
 
 # Examine the Model
 m1_mask = model.m1_aperture.transmission
@@ -280,7 +221,7 @@ psf_extent_as = model.psf_npixels * model.psf_pixel_scale / 2 * jnp.array([-1, 1
 
 # Make a plot of the Data PSF
 if save_plots:
-    plot_name = "DataPSF"
+    plot_name = "LegacyDataPSF"
     save_name = f"{script_name}_{plot_name}_{timestamp}.png"
     plot_psf_single(
         psf=data_psf,
@@ -321,11 +262,7 @@ print("Creating Config, Spec, Store, and Binder...")
 
 # Start simulation timer
 t0_script_refactor = time.time()
-
 rng_seed = 42
-add_noise = False
-
-rng_key = jr.PRNGKey(rng_seed)
 
 # Start with a pre-defined config
 cfg = SHERA_TESTBED_CONFIG
@@ -342,17 +279,6 @@ inference_spec = build_inference_spec_basic(cfg)
 # Create forward Parameter Store from the specs
 forward_truth_store = ParameterStore.from_spec_defaults(forward_spec)
 
-# Update any desired parameters - This defines the Truth value for the Data
-forward_truth_store = forward_truth_store.replace(
-    {
-        "binary.separation_as": 10.0,
-        "binary.position_angle_deg": 90.0,
-        "binary.x_position_as": 0.0,
-        "binary.y_position_as": 0.0,
-        "imaging.exposure_time_s": 1800.0,
-    }
-)
-
 # Compute derived parameters
 forward_truth_store = forward_truth_store.refresh_derived(forward_spec)
 
@@ -368,14 +294,6 @@ print("Generating synthetic data...")
 
 # Generate the true Data PSF
 data = binder.model()
-
-# Optionally add noise to the data
-if add_noise:
-    rng_key, split_key = jr.split(rng_key)
-    if onp.min(data) > 100:  # Use Gaussian Approximation
-        data = onp.sqrt(data) * jr.normal(split_key, data.shape) + data
-    else:  # Add Poisson shot noise
-        data = jr.poisson(split_key, data)
 
 # Assume image variance is given by shot noise
 data_var = data
@@ -400,32 +318,6 @@ infer_keys = (
 )
 inference_subspec = make_inference_subspec(base_spec=inference_spec, infer_keys=infer_keys, cfg=cfg)
 
-# Set up prior knowledge
-prior_info = {
-    "binary.separation_as": {"sigma": 1e-6, "dist": "Normal"},
-    "binary.position_angle_deg": {"sigma": 1e-3, "dist": "Uniform"},
-    "binary.x_position_as": {"sigma": 1e-6, "dist": "Normal"},
-    "binary.y_position_as": {"sigma": 1e-6, "dist": "Normal"},
-    "binary.log_flux_total": {"sigma": 1e-6, "dist": "LogNormal"},
-    "binary.contrast": {"sigma": 1e-6, "dist": "LogNormal"},
-    "system.plate_scale_as_per_pix": {"sigma": 1e-6, "dist": "LogNormal"},
-    "primary.zernike_coeffs_nm": {
-        "sigma": onp.full_like(forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2),
-        "dist": "Normal",
-    },
-    "secondary.zernike_coeffs_nm": {
-        "sigma": onp.full_like(forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2),
-        "dist": "Normal",
-    },
-}
-prior_spec = PriorSpec.from_info(forward_truth_store, prior_info)
-
-print("Drawing starting point from priors...")
-# Draw an initial point for the model from the priors
-rng_key, split_key = jr.split(rng_key)
-init_store = prior_spec.sample_near(forward_truth_store, rng_key=split_key, keys=infer_keys)
-init_psf = binder.model(init_store)
-
 print("Building the loss function...")
 # Build the Loss function
 nll_loss_fn, theta0 = make_binder_nll_fn(
@@ -435,14 +327,12 @@ nll_loss_fn, theta0 = make_binder_nll_fn(
     var=data_var,
     noise_model="gaussian",
     reduce="sum",
-    theta0_store=init_store,
 )
 # nll_loss_fn(theta) gives the negative log-likelihood loss for a given input theta vector
-index_map = build_index_map(inference_subspec, init_store, theta=theta0)
 fim_labels = generate_fim_labels_refactor(
     infer_keys,
     cfg=cfg,
-    store=init_store,
+    store=forward_truth_store,
 )
 
 # Choose which loss function to use
@@ -458,7 +348,6 @@ refactor_psf = onp.asarray(data)
 refactor_fim = onp.asarray(F)
 refactor_labels = fim_labels
 refactor_theta_true = onp.asarray(theta_true)
-refactor_index_map = index_map
 
 
 ######################
