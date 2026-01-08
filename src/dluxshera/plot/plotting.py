@@ -585,7 +585,8 @@ def plot_psf_single(
     normalise : bool
         If True, normalise the PSF by its maximum value.
     stretch : {"linear", "sqrt", "log"}
-        Intensity stretch applied before plotting.
+        Intensity stretch applied before plotting.\n
+        Supported: "linear", "sqrt", "log"\n
         "sqrt" is often nice for PSF visualisation.
     vmin, vmax : float or None
         Optional explicit limits for imshow. If None, determined from the
