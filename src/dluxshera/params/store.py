@@ -545,7 +545,29 @@ def _refresh_derived_internal(
     values = primitive_store.as_dict()
     if include_derived:
         for key in sorted(_derived_keys(spec)):
-            values[key] = resolver.compute(key, primitive_store, system_id=system_id)
+            value = resolver.compute(key, primitive_store, system_id=system_id)
+            field = spec.get(key)
+            if value is not None and field.dtype is not None:
+                arr = jnp.asarray(value, dtype=field.dtype)
+                if field.shape is None:
+                    value = arr.reshape(())
+                else:
+                    expected_shape = tuple(field.shape)
+                    if arr.shape == expected_shape:
+                        value = arr
+                    elif arr.shape == ():
+                        value = jnp.broadcast_to(arr, expected_shape)
+                    else:
+                        expected_size = math.prod(expected_shape)
+                        if arr.size == expected_size:
+                            value = arr.reshape(expected_shape)
+                        else:
+                            raise ValueError(
+                                f"_refresh_derived_internal: derived value for '{key}' "
+                                f"has shape {arr.shape} (size {arr.size}), expected "
+                                f"shape {expected_shape}."
+                            )
+            values[key] = value
     return ParameterStore.from_dict(values)
 
 
