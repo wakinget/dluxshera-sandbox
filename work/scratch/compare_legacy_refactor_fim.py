@@ -48,6 +48,8 @@ from dluxshera.params.spec import (
 )
 from dluxshera.params.store import ParameterStore
 from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.optics.builder import build_shera_threeplane_optics
+from dluxshera.core.universe import build_alpha_cen_source
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
     generate_fim_labels_refactor,
@@ -248,8 +250,9 @@ print("FIM shape:", fim.shape)
 # === Plot the Fisher Information Matrix ===
 fim_labels = generate_fim_labels(params, initial_model_params)
 
-legacy_psf = onp.asarray(model_psf)
+legacy_model_psf = onp.asarray(model_psf)
 legacy_data_psf = onp.asarray(data_psf)
+legacy_psf = legacy_data_psf
 legacy_fim = onp.asarray(fim)
 legacy_labels = fim_labels
 
@@ -262,7 +265,7 @@ print("Creating Config, Spec, Store, and Binder...")
 
 # Start simulation timer
 t0_script_refactor = time.time()
-rng_seed = 42
+rng_seed = 0
 
 # Start with a pre-defined config
 cfg = SHERA_TESTBED_CONFIG
@@ -380,6 +383,159 @@ onp.savez(
     psf_refactor=refactor_psf,
     psf_diff=abs_diff,
 )
+
+# Print out and compare each parameter for the legacy and refactor models
+# Legacy: data_model
+# data_model.wf_npixels
+# data_model.psf_npixels
+# data_model.p1_diameter
+# data_model.p2_diameter
+# data_params.m1_focal_length
+# data_params.m2_focal_length
+# data_model.plane_separation
+# data_params.pixel_size
+# data_model.psf_pixel_scale
+# data_model.oversample
+# data_model.magnification
+# data_model.pad_factor
+# data_model.m1_noll_ind
+# data_model.m2_noll_ind
+# data_model.m1_aperture.coefficients # Expect vector of zernike coefficients
+# data_model.m2_aperture.coefficients # Expect vector of zernike coefficients
+# data_model.dp.opd # Expect array of size [wf_npixels, wf_npixels] default [256, 256]
+# data_model.x_position
+# data_model.y_position
+# data_model.separation
+# data_model.position_angle
+# data_model.log_flux
+# data_model.contrast
+# data_model.raw_fluxes # Expect tuple (2,)
+# data_model.wavelengths # Expect tuple (3,) matches (n_wavelengths,)
+
+# Refactor: forward_truth_store -> binder
+# Build the optics explicitly so that we can access internal attributes
+# optics = build_shera_threeplane_optics(
+#             binder.cfg, store=binder.base_forward_store, spec=binder.forward_spec
+#         )
+# source = build_alpha_cen_source(binder.base_forward_store, n_wavels=binder.cfg.n_lambda)
+# binder.pupil_npix
+# binder.psf_npix
+# binder.m1_diameter_m
+# binder.m2_diameter_m
+# binder.m1_focal_length_m
+# binder.m2_focal_length_m
+# binder.m1_m2_separation_m
+# binder.pixel_pitch_m
+# binder.plate_scale_as_per_pix
+# optics.oversample
+# optics.magnification
+# optics.pad_factor
+# binder.primary_noll_indices
+# binder.secondary_noll_indices
+# binder.primary.zernike_coeffs_nm
+# binder.secondary.zernike_coeffs_nm
+# optics.p1_layers.dp.opd
+# binder.binary.x_position_as
+# binder.binary.y_position_as
+# binder.binary.separation_as
+# binder.binary.position_angle_deg
+# binder.binary.log_flux_total
+# binder.binary.contrast
+# binder.binary.raw_fluxes
+# source.wavelengths
+
+# --- Build refactor-era internals explicitly (so we can access optics/source attrs) ---
+optics = build_shera_threeplane_optics(
+    binder.cfg,
+    store=binder.base_forward_store,
+    spec=binder.forward_spec,
+)
+source = build_alpha_cen_source(binder.base_forward_store, n_wavels=binder.cfg.n_lambda)
+
+print("\n" + "=" * 100)
+print("LEGACY vs REFACTOR parameter snapshot")
+print("=" * 100)
+
+# -------------------------
+# Grid / sampling
+# -------------------------
+print("\n--- Grid / sampling ---")
+print(f"wf_npixels        legacy={data_model.wf_npixels} | refactor(pupil_npix)={binder.pupil_npix} | Δ={binder.pupil_npix - data_model.wf_npixels}")
+print(f"psf_npixels       legacy={data_model.psf_npixels} | refactor(psf_npix)={binder.psf_npix} | Δ={binder.psf_npix - data_model.psf_npixels}")
+
+# -------------------------
+# Geometry
+# -------------------------
+print("\n--- Optics geometry (assumed same units) ---")
+print(f"p1_diameter       legacy={data_model.p1_diameter} | refactor(m1_diameter_m)={binder.m1_diameter_m} | Δ={binder.m1_diameter_m - data_model.p1_diameter}")
+print(f"p2_diameter       legacy={data_model.p2_diameter} | refactor(m2_diameter_m)={binder.m2_diameter_m} | Δ={binder.m2_diameter_m - data_model.p2_diameter}")
+print(f"m1_focal_length   legacy={data_params.m1_focal_length} | refactor(m1_focal_length_m)={binder.m1_focal_length_m} | Δ={binder.m1_focal_length_m - data_params.m1_focal_length}")
+print(f"m2_focal_length   legacy={data_params.m2_focal_length} | refactor(m2_focal_length_m)={binder.m2_focal_length_m} | Δ={binder.m2_focal_length_m - data_params.m2_focal_length}")
+print(f"plane_separation  legacy={data_model.plane_separation} | refactor(m1_m2_separation_m)={binder.m1_m2_separation_m} | Δ={binder.m1_m2_separation_m - data_model.plane_separation}")
+
+# -------------------------
+# Detector sampling / plate scale
+# -------------------------
+print("\n--- Detector sampling / plate scale ---")
+print(f"pixel_size        legacy={data_params.pixel_size} | refactor(pixel_pitch_m)={binder.pixel_pitch_m} | Δ={binder.pixel_pitch_m - data_params.pixel_size}")
+print(f"psf_pixel_scale   legacy={data_model.psf_pixel_scale} | refactor(plate_scale_as_per_pix)={binder.plate_scale_as_per_pix} | Δ={binder.plate_scale_as_per_pix - data_model.psf_pixel_scale}")
+
+# -------------------------
+# Internal optics attrs (only accessible from built optics)
+# -------------------------
+print("\n--- Internal optics attributes ---")
+print(f"oversample        legacy={data_model.oversample} | refactor(optics.oversample)={optics.oversample} | Δ={optics.oversample - data_model.oversample}")
+print(f"magnification     legacy={data_model.magnification} | refactor(optics.magnification)={optics.magnification} | Δ={optics.magnification - data_model.magnification}")
+print(f"pad_factor        legacy={data_model.pad_factor} | refactor(optics.pad_factor)={optics.pad_factor} | Δ={optics.pad_factor - data_model.pad_factor}")
+
+# -------------------------
+# Zernike indexing / coefficients
+# -------------------------
+print("\n--- Zernike indexing ---")
+print(f"m1_noll_ind       legacy={data_model.m1_noll_ind} | refactor(primary_noll_indices)={binder.primary_noll_indices}")
+print(f"m2_noll_ind       legacy={data_model.m2_noll_ind} | refactor(secondary_noll_indices)={binder.secondary_noll_indices}")
+
+print("\n--- Zernike coefficients ---")
+print(f"m1 coeffs shape   legacy={data_model.m1_aperture.coefficients.shape} | refactor={binder.primary.zernike_coeffs_nm.shape}")
+print(f"m1 coeffs first8  legacy={data_model.m1_aperture.coefficients[:8]} | refactor={binder.primary.zernike_coeffs_nm[:8]}")
+print(f"m1 coeffs max|.|  legacy={abs(data_model.m1_aperture.coefficients).max()} | refactor={abs(binder.primary.zernike_coeffs_nm).max()}")
+
+print(f"m2 coeffs shape   legacy={data_model.m2_aperture.coefficients.shape} | refactor={binder.secondary.zernike_coeffs_nm.shape}")
+print(f"m2 coeffs first8  legacy={data_model.m2_aperture.coefficients[:8]} | refactor={binder.secondary.zernike_coeffs_nm[:8]}")
+print(f"m2 coeffs max|.|  legacy={abs(data_model.m2_aperture.coefficients).max()} | refactor={abs(binder.secondary.zernike_coeffs_nm).max()}")
+
+# -------------------------
+# Diffractive pupil OPD
+# -------------------------
+print("\n--- Diffractive pupil OPD ---")
+print(f"dp.opd shape      legacy={data_model.dp.opd.shape} | refactor={optics.dp.opd.shape}")
+print(f"dp.opd min/max    legacy=({data_model.dp.opd.min()}, {data_model.dp.opd.max()}) | "
+      f"refactor=({optics.dp.opd.min()}, {optics.dp.opd.max()})")
+print(f"dp.opd mean       legacy={data_model.dp.opd.mean()} | refactor={optics.dp.opd.mean()}")
+dp_diff = data_model.dp.opd - optics.dp.opd
+print(f"dp.opd max diff   max(abs(diff(opd)))={onp.abs(dp_diff).max()}")
+
+# -------------------------
+# Binary parameters
+# -------------------------
+print("\n--- Binary parameters ---")
+print(f"x_position        legacy={data_model.x_position} | refactor(binder.binary.x_position_as)={binder.binary.x_position_as} | Δ={binder.binary.x_position_as - data_model.x_position}")
+print(f"y_position        legacy={data_model.y_position} | refactor(binder.binary.y_position_as)={binder.binary.y_position_as} | Δ={binder.binary.y_position_as - data_model.y_position}")
+print(f"separation        legacy={data_model.separation} | refactor(binder.binary.separation_as)={binder.binary.separation_as} | Δ={binder.binary.separation_as - data_model.separation}")
+print(f"position_angle    legacy={data_model.position_angle} | refactor(binder.binary.position_angle_deg)={binder.binary.position_angle_deg} | Δ={binder.binary.position_angle_deg - data_model.position_angle}")
+print(f"log_flux(total)   legacy={data_model.log_flux} | refactor(binder.binary.log_flux_total)={binder.binary.log_flux_total} | Δ={binder.binary.log_flux_total - data_model.log_flux}")
+print(f"contrast          legacy={data_model.contrast} | refactor(binder.binary.contrast)={binder.binary.contrast} | Δ={binder.binary.contrast - data_model.contrast}")
+
+print(f"raw_fluxes        legacy={data_model.raw_fluxes} | refactor(binder.binary.raw_fluxes)={binder.binary.raw_fluxes}")
+
+# -------------------------
+# Spectral
+# -------------------------
+print("\n--- Spectral ---")
+print(f"wavelengths       legacy={data_model.wavelengths} | refactor(source.wavelengths)={source.wavelengths}")
+
+print("\n" + "=" * 100 + "\n")
+
 
 # Save a simple 3-panel PNG
 fig, axes = plt.subplots(1, 3, figsize=(12, 4))
