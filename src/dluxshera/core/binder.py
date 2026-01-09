@@ -12,7 +12,11 @@ from ..graph.system_graph import (
     build_shera_twoplane_system_graph,
 )
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
-from ..optics.builder import build_shera_threeplane_optics, build_shera_twoplane_optics
+from ..optics.builder import (
+    build_shera_threeplane_optics,
+    build_shera_twoplane_optics,
+    structural_hash_from_config,
+)
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
 from ..params.store_namespace import StoreNamespace
@@ -52,6 +56,11 @@ class BaseSheraBinder:
         self.cfg = cfg
         self.forward_spec = forward_spec
         self.use_system_graph = bool(use_system_graph)
+        self.structural_hash = (
+            structural_hash_from_config(cfg)
+            if isinstance(cfg, SheraThreePlaneConfig)
+            else None
+        )
 
         # Validate and freeze the base forward store; derived values are allowed
         # because forward_spec includes them explicitly.
