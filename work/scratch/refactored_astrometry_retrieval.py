@@ -1,21 +1,37 @@
-
-
-# The goal of this script is to set up the astrometry retrieval algorithm using the refactored dLuxShera codebase
+# This script initializes a 3-plane model, generates data, and runs a single astrometry retrieval optimization loop
+# to recover the specified parameters using the refactored dLuxShera codebase
 
 # High Level Steps:
-# Create a Config
+# Create/choose a Config
+#   Pre-defined configs are available, but are customizable
 # Build two Parameter Specs
-    # One for the forward model
-    # Another for the parameter inference
-# Build a forward Parameter Store -> forward_store
-    # Store won't contain derived values by default
-    # Use a helper function to update the store with derived values
-        # forward_store = refresh_derived(store, ...)
-# Build an inference Parameter Store -> truth_store
-# Build a SheraThreePlaneBinder from config, forward_spec, and forward_store
-
-# Define Inference Keys + PriorSpec
-# Sample from PriorSpec to seed initial model
+#   One for the forward model -> forward_spec
+#   Another for the parameter inference -> inference_spec
+#   The Spec describes what parameters exist, and how the model uses them
+#   The Spec does not actually store values for parameters
+#   The forward_spec holds all parameters necessary to simulate data
+#       Certain parameters in the forward_spec are derived from others
+#           Ex. system.plate_scale derived from focal lengths + mirror separation
+# Build a forward Parameter Store -> forward_truth_store
+#   The store holds parameter values
+#   The store uses a helper function to compute and populate derived values like the system plate scale
+#       Transforms registered to each derived parameter are used to compute from primitive parameters
+# Build a SheraThreePlaneBinder from config, forward_spec, and forward_truth_store
+#   The binder is what 'binds' the parameters to the optics, source, and detector objects from dLux
+# Use the binder to generate synthetic Data
+#   Optionally add noise to the data
+# Define Inference Keys + Priors
+    # infer_keys defines which parameters to solve for
+    # prior_info defines how well we know each parameter
+# Sample from Priors to seed an initial starting point for the model
+# Define the loss function
+#   We normally use the Negative Log-Likelihood (NLL) between data and model
+#   A MAP loss function that additionally incorporates a penalty based on priors is also available
+# Compute the Fisher information matrix (FIM)
+#   We use the inverse curvature of each parameter, given by the (inverse) diagonal of the FIM to define
+#       per-parameter learning rates
+# Run the gradient descent optimization
+# Collect, Print, Plot and Save the results
 
 # Imports
 import jax
@@ -169,24 +185,24 @@ infer_keys = (
     "binary.contrast",
     "system.plate_scale_as_per_pix",
     "primary.zernike_coeffs_nm",
-    "secondary.zernike_coeffs_nm", # Remove secondary Zernike's for stability
+    "secondary.zernike_coeffs_nm", # Optionally remove Secondary Zernike's for stability
 )
 inference_subspec = make_inference_subspec(base_spec=inference_spec, infer_keys=infer_keys, cfg=cfg)
 
 # Set up prior knowledge
 prior_info = {
-    "binary.separation_as": {"sigma": 1e-6, "dist": "Normal"},
-    "binary.position_angle_deg": {"sigma": 1e-3, "dist": "Uniform"},
-    "binary.x_position_as": {"sigma": 1e-6, "dist": "Normal"},
-    "binary.y_position_as": {"sigma": 1e-6, "dist": "Normal"},
-    "binary.log_flux_total": {"sigma": 1e-6, "dist": "LogNormal"},
-    "binary.contrast": {"sigma": 1e-6, "dist": "LogNormal"},
+    "binary.separation_as":          {"sigma": 1e-6, "dist": "Normal"},
+    "binary.position_angle_deg":     {"sigma": 1e-3, "dist": "Uniform"},
+    "binary.x_position_as":          {"sigma": 1e-6, "dist": "Normal"},
+    "binary.y_position_as":          {"sigma": 1e-6, "dist": "Normal"},
+    "binary.log_flux_total":         {"sigma": 1e-6, "dist": "LogNormal"},
+    "binary.contrast":               {"sigma": 1e-6, "dist": "LogNormal"},
     "system.plate_scale_as_per_pix": {"sigma": 1e-6, "dist": "LogNormal"},
-    "primary.zernike_coeffs_nm": {
+    "primary.zernike_coeffs_nm":     {
         "sigma": np.full_like(forward_truth_store.get("primary.zernike_coeffs_nm"), 1e-2),
         "dist": "Normal",
     },
-    "secondary.zernike_coeffs_nm": {
+    "secondary.zernike_coeffs_nm":   {
         "sigma": np.full_like(forward_truth_store.get("secondary.zernike_coeffs_nm"), 1e-2),
         "dist": "Normal",
     },
