@@ -61,6 +61,7 @@ class BaseSheraBinder:
 
         # Shared detector construction; subclasses can override if needed.
         self._detector = self._build_detector()
+        self.telescope = self._build_telescope(self.base_forward_store)
 
         self._graph = None
         if self.use_system_graph:
@@ -134,6 +135,19 @@ class BaseSheraBinder:
 
     def _build_detector(self) -> dl.LayeredDetector:
         return dl.LayeredDetector(layers=[("downsample", dl.Downsample(self.cfg.oversample))])
+
+    def _build_optics(self, store: ParameterStore):  # pragma: no cover - abstract hook
+        raise NotImplementedError
+
+    def _build_source(self, store: ParameterStore):  # pragma: no cover - abstract hook
+        raise NotImplementedError
+
+    def _build_telescope(self, store: ParameterStore) -> dl.Telescope:
+        return dl.Telescope(
+            source=self._build_source(store),
+            optics=self._build_optics(store),
+            detector=self._detector,
+        )
 
     def _build_graph(self):  # pragma: no cover - abstract hook
         raise NotImplementedError
@@ -223,6 +237,18 @@ class BaseSheraBinder:
 
         return self._direct_model(eff_store)
 
+    @property
+    def optics(self):
+        return self.telescope.optics
+
+    @property
+    def source(self):
+        return self.telescope.source
+
+    @property
+    def detector(self):
+        return self.telescope.detector
+
     # ------------------------------------------------------------------
     # Mostly immutable helpers
     # ------------------------------------------------------------------
@@ -296,16 +322,15 @@ class SheraThreePlaneBinder(BaseSheraBinder):
         )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
-        optics = build_shera_threeplane_optics(
-            self.cfg, store=eff_store, spec=self.forward_spec
+        return self._build_telescope(eff_store).model()
+
+    def _build_optics(self, store: ParameterStore):
+        return build_shera_threeplane_optics(
+            self.cfg, store=store, spec=self.forward_spec
         )
-        source = build_alpha_cen_source(eff_store, cfg=self.cfg)
-        telescope = dl.Telescope(
-            source=source,
-            optics=optics,
-            detector=self._detector,
-        )
-        return telescope.model()
+
+    def _build_source(self, store: ParameterStore):
+        return build_alpha_cen_source(store, cfg=self.cfg)
 
     with_store = BaseSheraBinder.with_store
 
@@ -353,14 +378,11 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
-        optics = build_shera_twoplane_optics(
-            self.cfg, store=eff_store, spec=self.forward_spec
-        )
-        source = build_alpha_cen_source(eff_store, cfg=self.cfg)
-        telescope = dl.Telescope(
-            source=source,
-            optics=optics,
-            detector=self._detector,
-        )
-        return telescope.model()
+        return self._build_telescope(eff_store).model()
+
+    def _build_optics(self, store: ParameterStore):
+        return build_shera_twoplane_optics(self.cfg, store=store, spec=self.forward_spec)
+
+    def _build_source(self, store: ParameterStore):
+        return build_alpha_cen_source(store, cfg=self.cfg)
     with_store = BaseSheraBinder.with_store
