@@ -252,8 +252,50 @@ class BaseSheraBinder:
 
         return StoreNamespace(self.base_forward_store, prefix)
 
-    def model(self, store_delta: Optional[ParameterStore] = None) -> jnp.ndarray:
-        """Evaluate the Shera PSF for an optional store overlay."""
+    def _structural_store_keys(self) -> set[str]:
+        """Return store keys treated as structural for this binder."""
+
+        structural_keys = {
+            key
+            for key in self.forward_spec.keys()
+            if key.startswith(("system.", "band."))
+        }
+        runtime_keys = {store_key for store_key, _ in self._runtime_bindings()}
+        return structural_keys - runtime_keys
+
+    def model(
+        self,
+        store_delta: Optional[ParameterStore] = None,
+        *,
+        allow_rebuild: bool = False,
+    ) -> jnp.ndarray:
+        """Evaluate the Shera PSF for an optional store overlay.
+
+        With ``store_delta=None`` this uses the stored telescope/graph directly
+        for a fast-path evaluation. When providing a ``store_delta`` the binder
+        only accepts non-structural keys by default; pass ``allow_rebuild=True``
+        to validate a full store and delegate to :meth:`update_store`.
+        """
+
+        if store_delta is None:
+            if self.use_system_graph and self._graph is not None:
+                return self._graph.evaluate(self.base_forward_store, outputs=("psf",))
+            return self.telescope.model()
+
+        if allow_rebuild:
+            return self.update_store(store_delta).model()
+
+        structural_keys = self._structural_store_keys()
+        provided_structural = sorted(
+            key for key in store_delta.keys() if key in structural_keys
+        )
+        if provided_structural:
+            joined = ", ".join(provided_structural)
+            raise ValueError(
+                "model() only accepts non-structural store keys; "
+                f"found structural keys: {joined}. "
+                "Use allow_rebuild=True with a full store to rebuild."
+            )
 
         eff_store = self._merge_store(store_delta)
 
@@ -346,9 +388,11 @@ class SheraThreePlaneBinder(BaseSheraBinder):
       ParameterStore (derived values already populated).
     - Eagerly constructs and owns a SystemGraph when ``use_system_graph=True``;
       otherwise follows a direct optics + source builder path.
-    - ``.model()`` is the primary API and is intentionally lightweight: merge
-      ``store_delta`` onto the base store, then evaluate either the graph or the
-      direct builder path.
+    - ``.model()`` is the primary API and is intentionally lightweight: for
+      non-structural overlays it merges ``store_delta`` onto the base store,
+      then evaluates either the graph or the direct builder path. Structural
+      overrides require ``allow_rebuild=True`` and delegate to
+      ``update_store()``.
     - ``.update_store()`` returns a new binder instance with the refreshed base
       store; the original binder remains unchanged.
     """
@@ -415,9 +459,11 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
 
     Mirrors :class:`SheraThreePlaneBinder` semantics: mostly immutable, owns a
     forward-spec-validated base store, and exposes ``.model(store_delta)`` as the
-    canonical evaluation path. When ``use_system_graph`` is enabled, the binder
-    delegates execution to a lightweight SystemGraph; otherwise a direct builder
-    path is used.
+    canonical evaluation path. ``.model`` accepts non-structural overlays by
+    default; structural updates require ``allow_rebuild=True`` to rebuild the
+    binder state. When ``use_system_graph`` is enabled, the binder delegates
+    execution to a lightweight SystemGraph; otherwise a direct builder path is
+    used.
 
     ``.update_store()`` returns a new binder instance with the refreshed base
     store so the original binder remains unchanged.
