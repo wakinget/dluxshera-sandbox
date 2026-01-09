@@ -13,9 +13,13 @@ from ..graph.system_graph import (
 )
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..optics.builder import (
+    apply_runtime_bindings,
     build_shera_threeplane_optics,
     build_shera_twoplane_optics,
+    structural_hash_for_twoplane,
     structural_hash_from_config,
+    THREEPLANE_RUNTIME_BINDINGS,
+    TWOPLANE_RUNTIME_BINDINGS,
 )
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
@@ -42,7 +46,8 @@ class BaseSheraBinder:
     eager detector + optional SystemGraph construction, functional store merge,
     and the public ``.model`` / ``.with_store`` helpers. Concrete subclasses
     remain the public entry points and supply system-specific optics/graph
-    builders via protected hooks.
+    builders via protected hooks. Methods that update the base store, such as
+    :meth:`update_store`, always return a new binder instance.
     """
 
     def __init__(
@@ -56,11 +61,7 @@ class BaseSheraBinder:
         self.cfg = cfg
         self.forward_spec = forward_spec
         self.use_system_graph = bool(use_system_graph)
-        self.structural_hash = (
-            structural_hash_from_config(cfg)
-            if isinstance(cfg, SheraThreePlaneConfig)
-            else None
-        )
+        self.structural_hash = self._compute_structural_hash()
 
         # Validate and freeze the base forward store; derived values are allowed
         # because forward_spec includes them explicitly.
@@ -163,6 +164,21 @@ class BaseSheraBinder:
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:  # pragma: no cover - abstract hook
         raise NotImplementedError
+
+    def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        return ()
+
+    def _compute_structural_hash(self) -> Optional[str]:
+        return None
+
+    def _update_telescope_runtime(self, store: ParameterStore) -> dl.Telescope:
+        optics = apply_runtime_bindings(
+            self.telescope.optics,
+            store,
+            self._runtime_bindings(),
+        )
+        source = self._build_source(store)
+        return dl.Telescope(source=source, optics=optics, detector=self._detector)
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -272,6 +288,47 @@ class BaseSheraBinder:
             use_system_graph=self.use_system_graph,
         )
 
+    def update_store(self, store: ParameterStore):
+        """Return a new Binder with an updated base store.
+
+        The incoming store is validated against ``forward_spec``. If the
+        configuration structure has changed (based on the stored structural
+        hash), the telescope is rebuilt and a warning is emitted. Otherwise the
+        telescope optics are updated in-place via runtime bindings for a
+        lightweight refresh.
+        """
+
+        validated_store = store.validate_against(
+            self.forward_spec,
+            allow_derived=True,
+        )
+
+        new_structural_hash = self._compute_structural_hash()
+        structural_changed = new_structural_hash != self.structural_hash
+
+        if structural_changed:
+            import warnings
+
+            warnings.warn(
+                "Structural config hash changed; rebuilding telescope and binder state.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return self.with_store(validated_store)
+
+        updated = self.__class__.__new__(self.__class__)
+        updated.cfg = self.cfg
+        updated.forward_spec = self.forward_spec
+        updated.base_forward_store = validated_store
+        updated.use_system_graph = self.use_system_graph
+        updated.structural_hash = new_structural_hash
+        updated._detector = self._detector
+        updated.telescope = self._update_telescope_runtime(validated_store)
+        updated._graph = None
+        if self.use_system_graph and self._graph is not None:
+            updated._graph = updated._build_graph()
+        return updated
+
 
 @dataclass
 class SheraThreePlaneBinder(BaseSheraBinder):
@@ -292,6 +349,8 @@ class SheraThreePlaneBinder(BaseSheraBinder):
     - ``.model()`` is the primary API and is intentionally lightweight: merge
       ``store_delta`` onto the base store, then evaluate either the graph or the
       direct builder path.
+    - ``.update_store()`` returns a new binder instance with the refreshed base
+      store; the original binder remains unchanged.
     """
 
     cfg: SheraThreePlaneConfig
@@ -341,6 +400,12 @@ class SheraThreePlaneBinder(BaseSheraBinder):
     def _build_source(self, store: ParameterStore):
         return build_alpha_cen_source(store, cfg=self.cfg)
 
+    def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        return THREEPLANE_RUNTIME_BINDINGS
+
+    def _compute_structural_hash(self) -> Optional[str]:
+        return structural_hash_from_config(self.cfg)
+
     with_store = BaseSheraBinder.with_store
 
 
@@ -353,6 +418,9 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
     canonical evaluation path. When ``use_system_graph`` is enabled, the binder
     delegates execution to a lightweight SystemGraph; otherwise a direct builder
     path is used.
+
+    ``.update_store()`` returns a new binder instance with the refreshed base
+    store so the original binder remains unchanged.
     """
 
     cfg: SheraTwoPlaneConfig
@@ -394,4 +462,11 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
 
     def _build_source(self, store: ParameterStore):
         return build_alpha_cen_source(store, cfg=self.cfg)
+
+    def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        return TWOPLANE_RUNTIME_BINDINGS
+
+    def _compute_structural_hash(self) -> Optional[str]:
+        return structural_hash_for_twoplane(self.cfg)
+
     with_store = BaseSheraBinder.with_store
