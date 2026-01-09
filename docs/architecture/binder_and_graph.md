@@ -45,6 +45,23 @@ This is an API- and workflow-level contract (immutability by convention), not ne
     binder2 = binder.with_store(new_store)
     ```
 
+### Store-delta helpers (recommended usage)
+
+Binder evaluation expects **non-structural deltas** (only values that can be
+updated without rebuilding optics). Two helpers in `params.store` make it easy
+to prepare these deltas:
+
+- `subset_store(store, infer_keys)` trims a full `ParameterStore` down to just
+  the inference keys packed into θ. This is the recommended way to convert
+  `store_unpack_params(...)` outputs into a delta suitable for `binder.model`.
+- `strip_structural(store)` (or `strip_structural(store, structural_keys=...)`)
+  removes structural keys like `system.*` / `band.*` when you want to sanitize
+  an overlay before evaluation.
+
+In short: **unpack θ → subset → model**, and reserve structural updates for
+explicit rebuilds via `binder.model(..., allow_rebuild=True)` or by creating a
+fresh binder with `binder.update_store(...)`.
+
 ### Why we avoid in-place mutation
 
 The Binder is frequently used as “static context” for compiled/JIT code. Mutating a Binder that has been captured by a JAX closure can lead to confusing behavior (compiled functions may not reflect changes the way users expect, and reproducibility suffers). The “mostly immutable” pattern (static Binder + dynamic deltas) keeps evaluation predictable and JIT-friendly.
