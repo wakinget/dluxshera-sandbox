@@ -29,7 +29,7 @@ from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..params.spec import ParamSpec, ParamKey
-from ..params.store import ParameterStore
+from ..params.store import ParameterStore, subset_store
 from ..params.packing import (
     pack_params as store_pack_params,
     unpack_params as store_unpack_params,
@@ -436,7 +436,8 @@ def make_binder_nll_fn(
         )
 
     def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
-        return store_unpack_params(sub_spec, theta, base_forward_store)
+        full_store = store_unpack_params(sub_spec, theta, base_forward_store)
+        return subset_store(full_store, infer_keys)
 
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         store_delta = theta_to_store_delta(theta)

@@ -22,7 +22,7 @@ from ..optics.builder import (
     TWOPLANE_RUNTIME_BINDINGS,
 )
 from ..params.spec import ParamSpec
-from ..params.store import ParameterStore
+from ..params.store import ParameterStore, strip_structural
 from ..params.store_namespace import StoreNamespace
 
 
@@ -286,8 +286,9 @@ class BaseSheraBinder:
             return self.update_store(store_delta).model()
 
         structural_keys = self._structural_store_keys()
+        non_structural = strip_structural(store_delta, structural_keys=structural_keys)
         provided_structural = sorted(
-            key for key in store_delta.keys() if key in structural_keys
+            key for key in store_delta.keys() if key not in non_structural
         )
         if provided_structural:
             joined = ", ".join(provided_structural)
@@ -297,7 +298,7 @@ class BaseSheraBinder:
                 "Use allow_rebuild=True with a full store to rebuild."
             )
 
-        eff_store = self._merge_store(store_delta)
+        eff_store = self._merge_store(non_structural)
 
         if self.use_system_graph and self._graph is not None:
             return self._graph.evaluate(eff_store, outputs=("psf",))
