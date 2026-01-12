@@ -15,7 +15,7 @@ from dluxshera.optics.config import SheraTwoPlaneConfig
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import ParamKey, ParamSpec, build_inference_spec_basic
 from dluxshera.params.spec import build_shera_twoplane_forward_spec_from_config
-from dluxshera.params.store import ParameterStore, refresh_derived
+from dluxshera.params.store import ParameterStore, refresh_derived, subset_store
 from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
 import dluxshera.params.shera_threeplane_transforms  # Registers default transforms
 from dluxshera.plot.plotting import (
@@ -153,15 +153,6 @@ def main(
             gd_psf=noisy_psf,
         )
 
-    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
-
-    truth_psf = _evaluate_psf(binder, truth_store)
-
-    noisy_psf = truth_psf.copy()
-    if add_noise:
-        noisy_psf = noisy_psf + rng.normal(scale=0.01 * noisy_psf.max(), size=noisy_psf.shape)
-
-    # 4) Inference setup
     infer_keys = (
         "binary.separation_as",
         "binary.position_angle_deg",
@@ -169,13 +160,23 @@ def main(
     )
     sub_spec = forward_spec.subset(infer_keys)
 
+    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
+
+    truth_psf = _evaluate_psf(binder, subset_store(truth_store, infer_keys))
+
+    noisy_psf = truth_psf.copy()
+    if add_noise:
+        noisy_psf = noisy_psf + rng.normal(scale=0.01 * noisy_psf.max(), size=noisy_psf.shape)
+
+    # 4) Inference setup
+
     init_updates = {
         "binary.separation_as": truth_updates["binary.separation_as"] * 0.8,
         "binary.position_angle_deg": truth_updates["binary.position_angle_deg"] + 10.0,
         "binary.contrast": truth_updates["binary.contrast"] * 1.5,
     }
     init_store = base_store.replace(init_updates)
-    init_psf = _evaluate_psf(binder, init_store)
+    init_psf = _evaluate_psf(binder, subset_store(init_store, infer_keys))
 
     var = jnp.ones_like(noisy_psf)
     loss_fn, theta0 = make_binder_image_nll_fn(
@@ -204,7 +205,7 @@ def main(
 
     theta_history = history["theta"]
     final_store = store_unpack_params(sub_spec, theta_final, base_store)
-    gd_psf = _evaluate_psf(binder, final_store)
+    gd_psf = _evaluate_psf(binder, subset_store(final_store, infer_keys))
 
     # 5) Plotting
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -27,7 +27,7 @@ from dluxshera.params.spec import (
     build_forward_model_spec_from_config,
     build_inference_spec_basic,
 )
-from dluxshera.params.store import ParameterStore
+from dluxshera.params.store import ParameterStore, subset_store
 from dluxshera.plot.plotting import plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 
 DEFAULT_RESULTS_DIR = Path("Results/CanonicalAstrometryDemo")
@@ -236,7 +236,7 @@ def make_inference_setup(
     init_store = prior_spec.sample_near(truth_store, jitter_key, keys=infer_keys)
     updates = {key: init_store.get(key) for key in infer_keys}
     init_forward_store = forward_store.replace(updates)
-    init_psf = _evaluate_psf(binder, init_forward_store)
+    init_psf = _evaluate_psf(binder, subset_store(init_forward_store, infer_keys))
 
     var_image = np.ones_like(truth_psf) * 0.01
     sub_spec = forward_spec.subset(infer_keys)
@@ -283,7 +283,7 @@ def run_gradient_descent(
     if fast:
         theta_history = [np.array(theta0)]
         param_history_gd = _build_param_history(theta_history, init_store, sub_spec)
-        gd_psf = _evaluate_psf(binder, init_store)
+        gd_psf = _evaluate_psf(binder, subset_store(init_store, infer_keys))
         return init_store, param_history_gd, gd_psf, np.array([])
 
     theta_final, history = run_simple_gd(
@@ -302,7 +302,7 @@ def run_gradient_descent(
     if "theta" in history:
         theta_history.extend([np.array(t) for t in history["theta"]])
     param_history_gd = _build_param_history(theta_history, init_store, sub_spec)
-    gd_psf = _evaluate_psf(binder, final_store)
+    gd_psf = _evaluate_psf(binder, subset_store(final_store, infer_keys))
     return final_store, param_history_gd, gd_psf, np.array(history.get("loss", []))
 
 
@@ -346,7 +346,7 @@ def run_eigen_optimization(
     if eigen_results.theta_history.size:
         theta_history_eigen.extend([np.array(t) for t in eigen_results.theta_history])
     param_history_eigen = _build_param_history(theta_history_eigen, base_store, sub_spec)
-    eigen_psf = _evaluate_psf(binder, eigen_store)
+    eigen_psf = _evaluate_psf(binder, subset_store(eigen_store, infer_keys))
 
     print("Step 9: Running gradient descent in eigenmode coordinates...")
     print("  -> initial z-norm:", float(np.linalg.norm(np.array(eigen_results.z_history[0]))))
