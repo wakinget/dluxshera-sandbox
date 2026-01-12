@@ -19,7 +19,7 @@ This page is the source of truth for how the test suite is organized, what it ex
   - `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` (39.65s call).
   - `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` (25.62s call).
   - `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` (20.95s call).
-  - `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` (14.54s setup; legacy SystemGraph coverage).
+  - `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` (14.54s setup; legacy SystemGraph coverage, deprecated path).
 
 ## Shared fixtures (Task 3)
 - `shera_smoke_cfg` / `shera_smoke_updates`: session fixtures for the standard SHERA testbed config and canonical parameter overrides (shared separation/position defaults plus zeroed Zernike vectors).
@@ -59,7 +59,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 ### Optics, modeling, and legacy graph
 - `tests/optics/test_optics_config.py`, `tests/optics/test_optics_builder.py`: optics configuration defaults, builder caching/miss/hit behavior.
 - `tests/model/test_model_builder.py`, `tests/model/test_modeling_components.py`: model construction smoke tests and component bundle validation.
-- `tests/optics/test_system_graph.py`: legacy SystemGraph outputs vs. Binder parity and output mapping behavior.
+- `tests/optics/test_system_graph.py`: legacy SystemGraph outputs vs. Binder parity and output mapping behavior (deprecated; keep only while the legacy code remains).
 - `tests/optics/test_shera_threeplane_transforms.py`, `tests/optics/test_shera_twoplane_spec.py`: system-specific transform/spec wiring.
 - `tests/model/test_universe_builder.py`: Alpha Cen source construction round-trip.
 
