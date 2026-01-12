@@ -54,7 +54,7 @@ Priority levels are intentionally coarse:
 Establish dLuxShera as a stable, principled modeling framework with a clear internal contract.
 
 Focus areas:
-- Binder / SystemGraph / ParamSpec architecture
+- Binder / ParamSpec architecture
 - Clear separation of structural vs parametric concerns
 - Canonical θ-space definitions and transformations
 - Robust handling of derived parameters

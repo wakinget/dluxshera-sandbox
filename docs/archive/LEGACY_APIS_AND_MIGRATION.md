@@ -1,9 +1,11 @@
 # Legacy APIs and migration notes (archival)
 
-This document maps legacy APIs to the current ParamSpec/ParameterStore/Binder/SystemGraph architecture. It is intentionally rough and should be updated as migrations progress.
+This document maps legacy APIs to the current ParamSpec/ParameterStore/Binder architecture. It is intentionally rough and should be updated as migrations progress.
+
+**Note:** The SystemGraph scaffold referenced in this document has been removed from the codebase; binder-only evaluation is the current runtime path.
 
 ## High-level mapping
-- **Legacy model classes:** `SheraThreePlane_Model` → `Binder` wrapping a `SystemGraph` node (`DLuxSystemNode`) for the three-plane system.
+- **Legacy model classes:** `SheraThreePlane_Model` → `Binder` (binder-only evaluation for the three-plane system).
 - **Legacy optics builders/configs:** imperative optics builders → `optics` and `config` modules driven by `ParamSpec` definitions and derived transforms.
 - **Inference helpers:** legacy inference utilities → `InferenceSpec` and associated binders configured via the parameter store.
 
@@ -18,7 +20,6 @@ forward model pipeline.
 
 New development should prefer:
 - `SheraThreePlaneBinder(...).model(store_delta)`
-- `SystemGraph.evaluate(store_delta)` where appropriate
 
 and rely on optics builder caching for structure reuse.
 

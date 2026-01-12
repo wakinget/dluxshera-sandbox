@@ -1,6 +1,6 @@
 # Canonical astrometry demo (three-plane)
 
-The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (implemented in `dluxshera.demos.canonical_astrometry`) builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. The script highlights the current stack: `ParamSpec`/`ParameterStore`, `DerivedResolver`, binder-only model evaluation (SystemGraph is deprecated), image NLL construction, and optimisation in θ-space (with optional eigen-θ runs when enabled).
+The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (implemented in `dluxshera.demos.canonical_astrometry`) builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. The script highlights the current stack: `ParamSpec`/`ParameterStore`, `DerivedResolver`, binder-only model evaluation, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs when enabled).
 
 ## What the demo covers
 - Shera-style three-plane optical path with Fresnel propagation.
