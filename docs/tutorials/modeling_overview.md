@@ -5,7 +5,8 @@ dLuxShera provides a Fresnel-based optical model and inference stack for Shera/T
 ## Pipeline at a glance
 - **Configuration ➜ forward ParamSpec:** start from a configuration object (e.g., Shera three-plane defaults) and build a forward-facing `ParamSpec` that defines primitives and derived fields.
 - **Forward ParameterStore:** instantiate a primitives-only `ParameterStore`, then `refresh_derived` to populate derived quantities via pure transforms.
-- **Binder:** wrap the optics in a `Binder`, exposing a clean "give me a parameter delta ➜ I will produce PSFs/images" interface.
+- **Binder-only evaluation:** wrap the optics in a `Binder`, exposing a clean "give me a parameter delta ➜ I will produce PSFs/images" interface (SystemGraph is deprecated).
+- **Update/delta workflow:** use `binder.model(store_delta)` for per-call overlays; if you truly need a new baseline (or a structural change), create a new binder via `binder.update_store(...)`.
 - **Image synthesis:** evaluate the binder to generate polychromatic PSFs or detector images.
 - **Losses and optimisation:** construct image NLL/loss functions that pack/unpack θ-vectors to/from stores, and run optimisation loops in θ-space or in eigenmode space via `EigenThetaMap`.
 - **Outputs:** inspect recovered parameters, images, and diagnostics via the plotting utilities.

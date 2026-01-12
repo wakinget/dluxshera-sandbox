@@ -1,4 +1,4 @@
-# Binder (SystemGraph deprecated)
+# Binder (binder-only evaluation)
 
 ## Binders
 
@@ -81,11 +81,27 @@ As of the current refactor:
 - Binder is **not** an `equinox.Module` and **not** a `zodiax.Base`—it is a lightweight wrapper around config/spec/store plus evaluation helpers.
 - The baseline store is a `ParameterStore` that supports dict-like introspection (`get`, `keys`, `items`, `as_dict`, …) and includes core derived keys (e.g., `system.plate_scale_as_per_pix`) after construction.
 
+## Update/delta workflow (recommended)
+
+Binders are designed to evaluate via **per-call overlays** while keeping the
+baseline immutable:
+
+- Use `binder.model(store_delta)` to apply non-structural updates per evaluation
+  (fast path, no rebuild).
+- Use `binder.update_store(new_store)` to persist a new baseline (or to apply
+  structural edits that must rebuild the optics).
+- Prefer `binder.with_store(new_store)` when you are only swapping baseline
+  values and do not intend to trigger a structural rebuild.
+
+This keeps binder-only evaluation predictable and avoids relying on any graph
+layer.
+
 ## SystemGraphs (deprecated)
-The internal SystemGraph scaffold is no longer used by binders in the current
-workflow. Binders now evaluate through the cached telescope + optics builder
-directly. The graph code remains as a deprecated reference and should not be
-relied on for new work.
+The internal SystemGraph scaffold is deprecated and no longer used by binders
+in the current workflow. Binders now evaluate through the cached telescope +
+optics builder directly. The graph code remains only for legacy reference and
+should not be used for new work; references to SystemGraph should be treated
+as historical context and may be removed in future cleanups.
 
 ## Builders and caching (where structure is decided)
 
