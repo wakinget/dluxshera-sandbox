@@ -465,7 +465,6 @@ def make_binder_image_nll_fn(
     binder: Optional[object] = None,
     noise_model: NoiseModel = "gaussian",
     reduce: Literal["sum", "mean"] = "sum",
-    use_system_graph: bool = False,
     return_predict_fn: bool = False,
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], np.ndarray] | Tuple[
     Callable[[np.ndarray], np.ndarray], np.ndarray, Callable[[np.ndarray], np.ndarray]
@@ -491,9 +490,6 @@ def make_binder_image_nll_fn(
         is constructed using ``cfg``, ``forward_spec``, and ``base_forward_store``.
     noise_model, reduce
         Noise model selector and reduction for the NLL.
-    use_system_graph
-        Passed through when constructing a binder (ignored when ``binder`` is
-        provided).
     return_predict_fn
         If ``True``, also return a callable ``predict_fn(theta) -> image`` that
         uses the exact binder/model path underlying the loss. This is helpful
@@ -534,14 +530,12 @@ def make_binder_image_nll_fn(
             cfg,
             forward_spec,
             base_forward_store,
-            use_system_graph=use_system_graph,
         )
     elif isinstance(cfg, SheraTwoPlaneConfig):
         binder_obj = SheraTwoPlaneBinder(
             cfg,
             forward_spec,
             base_forward_store,
-            use_system_graph=use_system_graph,
         )
     else:
         raise TypeError(

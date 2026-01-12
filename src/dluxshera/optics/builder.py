@@ -382,7 +382,7 @@ def build_legacy_shera_threeplane_model(
 
     This helper exists for backwards compatibility with legacy
     ``SheraThreePlaneParams`` and ``SheraThreePlane_Model`` usage. New workflows
-    should use binder/system graph pipelines instead of this bridge.
+    should use the binder-based pipeline instead of this bridge.
     """
 
     from ..core.modeling import SheraThreePlane_Model, SheraThreePlaneParams
@@ -390,7 +390,7 @@ def build_legacy_shera_threeplane_model(
     warnings.warn(
         "build_legacy_shera_threeplane_model is deprecated and exists only for "
         "legacy SheraThreePlaneParams/SheraThreePlane_Model usage. Prefer the "
-        "Binder/SystemGraph pipeline for new workflows.",
+        "binder-based pipeline for new workflows.",
         DeprecationWarning,
         stacklevel=2,
     )

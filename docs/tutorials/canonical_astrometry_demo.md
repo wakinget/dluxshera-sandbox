@@ -1,6 +1,6 @@
 # Canonical astrometry demo (three-plane)
 
-The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (implemented in `dluxshera.demos.canonical_astrometry`) builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. The script highlights the current stack: `ParamSpec`/`ParameterStore`, `DerivedResolver`, `Binder`/`SystemGraph`, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs when enabled).
+The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (implemented in `dluxshera.demos.canonical_astrometry`) builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. The script highlights the current stack: `ParamSpec`/`ParameterStore`, `DerivedResolver`, Binder-based model evaluation, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs when enabled).
 
 ## What the demo covers
 - Shera-style three-plane optical path with Fresnel propagation.
@@ -30,14 +30,14 @@ The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (imple
   )
   validate_inference_base_store(forward_store, inference_subspec)
   ```
-- **Construct the Binder/SystemGraph:** Instantiate a `SheraThreePlaneBinder` (optionally `use_system_graph=True`) so evaluation is a single `binder.model(store_delta)` call that runs through the DAG. Calling `binder.model()` with no delta takes the fast-path through the cached telescope/graph; pass a non-structural delta to update values per call. If you need to persist a new baseline (or apply a structural change), use `binder.update_store(...)` to build a new binder.
+- **Construct the Binder:** Instantiate a `SheraThreePlaneBinder` so evaluation is a single `binder.model(store_delta)` call. Calling `binder.model()` with no delta takes the fast-path through the cached telescope; pass a non-structural delta to update values per call. If you need to persist a new baseline (or apply a structural change), use `binder.update_store(...)` to build a new binder.
 - **Generate synthetic data:** Draw a "truth" `ParameterStore`, evaluate the binder to get a noiseless image, and add Gaussian noise to obtain observations.
 - **Build the binder-based loss:** `make_binder_image_nll_fn` returns a θ-packing loss and the initial θ vector. The demo adds a quadratic prior penalty for MAP optimisation.
 - **Run gradient descent:** The main loop applies Optax updates to θ in pure θ-space; when eigenmode helpers are enabled, the same loss is wrapped via `EigenThetaMap` for optimisation in eigen-θ coordinates. When you unpack θ into a full `ParameterStore`, use `subset_store(store, infer_keys)` to form a safe delta before calling `binder.model(store_delta)`.
 - **Inspect results:** The script saves PSF comparison plots and parameter history grids (see `plot_psf_comparison` and `plot_parameter_history_grid`), writing outputs when an output directory is provided.
 
 ## Looking ahead: two-plane canonical demo
-A forthcoming two-plane canonical demo will follow the same structure with a simplified optical path. Expect the same flow—config ➜ forward spec ➜ base store ➜ Binder/SystemGraph ➜ loss ➜ optimisation—but with fewer planes to help new users get started quickly.
+A forthcoming two-plane canonical demo will follow the same structure with a simplified optical path. Expect the same flow—config ➜ forward spec ➜ base store ➜ Binder ➜ loss ➜ optimisation—but with fewer planes to help new users get started quickly.
 
 ## Running the script
 From the repository root:

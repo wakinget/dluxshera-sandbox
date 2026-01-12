@@ -89,7 +89,6 @@ def test_make_binder_image_nll_fn_twoplane_smoke():
         infer_keys,
         image,
         var,
-        use_system_graph=True,
     )
 
     loss_val = loss_fn(theta0)

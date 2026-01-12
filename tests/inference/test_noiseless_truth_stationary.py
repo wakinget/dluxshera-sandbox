@@ -34,9 +34,7 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder_truth = SheraThreePlaneBinder(
-        cfg, forward_spec, truth_store, use_system_graph=False
-    )
+    binder_truth = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
     data = binder_truth.model()
     var = jnp.ones_like(data)
 

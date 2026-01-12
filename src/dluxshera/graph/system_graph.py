@@ -1,4 +1,4 @@
-"""Shera three-plane SystemGraph owned by :class:`SheraThreePlaneBinder`."""
+"""Deprecated Shera SystemGraph helpers (no longer used by binders)."""
 
 from __future__ import annotations
 

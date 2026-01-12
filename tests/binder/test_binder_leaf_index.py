@@ -11,7 +11,6 @@ def _make_binder():
         SHERA_TESTBED_CONFIG,
         forward_spec,
         forward_store,
-        use_system_graph=False,
     )
 
 
