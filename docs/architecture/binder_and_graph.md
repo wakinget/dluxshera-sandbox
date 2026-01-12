@@ -96,12 +96,11 @@ baseline immutable:
 This keeps binder-only evaluation predictable and avoids relying on any graph
 layer.
 
-## SystemGraphs (deprecated)
-The internal SystemGraph scaffold is deprecated and no longer used by binders
-in the current workflow. Binders now evaluate through the cached telescope +
-optics builder directly. The graph code remains only for legacy reference and
-should not be used for new work; references to SystemGraph should be treated
-as historical context and may be removed in future cleanups.
+## SystemGraphs (removed)
+The legacy SystemGraph scaffold has been removed from the codebase. Binders
+evaluate through the cached telescope + optics builder directly. Historical
+context about the graph-era design lives in the archive docs; the current
+architecture is binder-only.
 
 ## Builders and caching (where structure is decided)
 

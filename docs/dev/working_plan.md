@@ -27,7 +27,7 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 **Target outcome (Partially met):**
 - ✅ Consistent `psf_pixel_scale` (and other deriveds) regardless of whether they are optimized directly or computed from primitives.
 - ⚠️ Clear primitives↔derived boundary and testable pure transforms (global registry implemented; system-scoped resolver still pending).
-- ⚠️ Structured execution graph (legacy SystemGraph scaffold exists; no longer used by binders).
+- ⚠️ Structured execution graph (legacy SystemGraph scaffold removed; binder-only execution is current).
 - ⚠️ Minimal churn to current examples; future models (e.g., four-plane) to slot in (four-plane support missing).
 
 ---
@@ -37,7 +37,7 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 The refactor-era architecture cleanly separates **what exists** (ParamSpec), **what values are in play** (ParameterStore), **how deriveds are computed** (DerivedResolver/transform registry), and **how execution is wired** (Binder). The public model façade for Shera systems remains the binder-based PSF generator; legacy helpers wrap this internally.
 
 - **Why this shape:** Legacy flows intertwined parameter definitions, derived computations, and execution; the new layering keeps ParamSpec/Store declarative and Binder as the sole runtime surface. Derived transforms stay pure and testable.
-- **Current state:** ParamSpec/Store are in daily use with strict-by-default validation; the transform registry is scoped by system_id; Binder is the supported forward path for both two- and three-plane optics. The SystemGraph scaffold is deprecated and no longer wired into binders.
+- **Current state:** ParamSpec/Store are in daily use with strict-by-default validation; the transform registry is scoped by system_id; Binder is the supported forward path for both two- and three-plane optics. The legacy SystemGraph scaffold has been removed.
 - **Details:** For full diagrams and API notes see `docs/architecture/binder_and_graph.md` (Binder) and `docs/architecture/inference_and_loss.md` (loss stack, packing/unpacking). Eigenmode-specific context lives in `docs/architecture/eigenmodes.md`. Broader rationale sits in `docs/architecture/adr/0001-core-architecture-foundations.md`.
 
 ---
@@ -54,7 +54,6 @@ dLuxShera/
 │  └─ tutorials/{modeling_overview.md,canonical_astrometry_demo.md}
 ├─ src/dluxshera/
 │  ├─ core/{binder.py,modeling.py,universe.py}
-│  ├─ graph/system_graph.py  (deprecated; no longer used by binders)
 │  ├─ inference/{losses.py,prior.py,numpyro_bridge.py,optimization.py}
 │  ├─ params/{spec.py,store.py,registry.py,packing.py,transforms.py,shera_threeplane_transforms.py}
 │  ├─ optics/{config.py,builder.py,optical_systems.py}
@@ -104,7 +103,7 @@ Details and registry diagrams live in `docs/architecture/binder_and_graph.md` (t
 
 ## 7) Integrating dLux `ThreePlaneOpticalSystem`
 
-Shera binders own configs/specs/stores, expose `.model(store_delta)` as the PSF generator, and evaluate via the cached telescope + optics/source builders. Binders stay mostly immutable (`.with_store(...)`) to keep JAX friendliness; the SystemGraph scaffold remains deprecated.
+Shera binders own configs/specs/stores, expose `.model(store_delta)` as the PSF generator, and evaluate via the cached telescope + optics/source builders. Binders stay mostly immutable (`.with_store(...)`) to keep JAX friendliness.
 
 - **Why:** Keeps execution encapsulated while letting θ overlays be the only source of dynamism. Structural caching lives in the optics builders; graph caching hooks remain future work.
 - **Gotchas:** Derived values must be refreshed before binding; structural changes require a binder rebuild.
@@ -133,7 +132,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 
 ## 10) Testing Philosophy
 
-- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, eigenmode utilities, legacy SystemGraph smoke/regression via graph tests, and the canonical astrometry demo in fast mode.
+- Existing tests cover: ParamSpec/store validation and packing, transform resolution (including cycle guards), optics builder/binder smoke paths, optimization loss wrapper, eigenmode utilities, and the canonical astrometry demo in fast mode.
 - Missing: Four-plane variant tests and serialization/profile coverage.
 
 ---
@@ -163,7 +162,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 
 ### Attribute Access
 
-- **Baseline test status:** Running `pytest` requires adding `src/` to `PYTHONPATH` (or installing the package) so Binder-related tests (`tests/test_binder_smoke.py`, `tests/test_binder_shared_behaviour.py`, graph smoke, and Binder-backed loss/optimization tests) import `dluxshera` correctly.
+- **Baseline test status:** Running `pytest` requires adding `src/` to `PYTHONPATH` (or installing the package) so Binder-related tests (`tests/test_binder_smoke.py`, `tests/test_binder_shared_behaviour.py`, and Binder-backed loss/optimization tests) import `dluxshera` correctly.
 - **Binder mutability/shape:** `SheraThreePlaneBinder` instances are `dataclasses` with `frozen=False` and `slots=False`; they do not present as `equinox.Module` or `zodiax.Base`, so mutation is guarded only by convention rather than framework-level immutability.
 - **Store surface area:** `binder.base_forward_store` is a `ParameterStore` exposing `get/keys/items/values/as_dict/replace/validate_against` and similar mapping semantics.
 - **Derived placement:** With the default forward spec + refreshed forward store (via `tests.helpers.make_forward_store`), derived values such as `system.plate_scale_as_per_pix` are present directly in the base forward store prior to any evaluation.
@@ -198,7 +197,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ Scoped transform registry + Shera plate-scale/log-flux transforms.  
 - ✅ ThreePlaneBuilder structural hash + cache/clear helper.  
 - ✅ Binder-first loss wiring (Binder NLL helpers using `gaussian_image_nll`) and binder namespace UX (Task 1A–1E).  
-- ✅ SystemGraph single-node scaffold (deprecated; retained only for legacy tests).  
+- ✅ SystemGraph single-node scaffold (removed from mainline; retained in archive history).  
 - ✅ Binder NLL stationary-point regression landed; follow-on scenarios pending (multi-wavelength/multi-PSF).  
 
 **P0 — Current focus**  
@@ -226,7 +225,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 1. **Add SystemGraph + DLuxSystemNode scaffold (P0) — DONE**
    - **Outcome:** Added `graph/` package with `DLuxSystemNode` + `SystemGraph`, regression-tested against the legacy three-plane forward path.
-   - **Follow-ups:** This scaffold is now deprecated; any future graph work should re-evaluate caching/multi-node needs before re-enabling it.
+   - **Follow-ups:** This scaffold has been removed; any future graph work should re-evaluate caching/multi-node needs before reintroducing it.
 
 2. **Scoped DerivedResolver with system IDs (P0) — DONE**
    - **Outcome:** Added `params/registry.py` with system-scoped resolver/decorator, defaulting to the Shera three-plane system; tests cover isolation across system_ids and existing Shera transforms continue to resolve via the default registry.
@@ -284,7 +283,7 @@ See `docs/architecture/adr/0001-core-architecture-foundations.md` for a curated,
 
 - Transform registry is now system-scoped (defaulting to Shera three-plane) with lazy registration.  
 - ParameterStore validation is strict-by-default (primitives-first) with opt-in derived overrides and refresh helpers.  
-- Binder-first loss wiring is the canonical inference path; binders execute via the cached telescope/optics builders and the SystemGraph scaffold is deprecated.  
+- Binder-first loss wiring is the canonical inference path; binders execute via the cached telescope/optics builders.  
 - ThreePlaneBuilder structural hashing + caching shipped; graph-level caching/derived hooks remain future work.
 
 ---
@@ -322,17 +321,17 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 **Follow-up implementation tasks (next steps)**
 - ✅ Wired a `SheraTwoPlaneBinder` path plus smoke tests to validate parity with the legacy two-plane model. Binder mirrors the three-plane API (forward-style base store with deriveds refreshed, `.model(store_delta)` public entry point) and uses the same structural hash/cache pattern, now including plate scale as a structural knob sourced from the effective store. Optics and source both consume the merged store (base + delta).
 - Loss/optimisation stack now dispatches binders based on cfg type inside `make_binder_image_nll_fn`, so downstream helpers (`run_shera_image_gd`, `run_shera_image_gd_eigen`, FIM helpers) accept two- or three-plane configs without special casing.
-- Graph templates remain legacy/deprecated; consider factoring shared binder helpers or a base binder class if/when the systems converge further.
+- Graph templates have been removed; consider factoring shared binder helpers or a base binder class if/when the systems converge further.
 - ✅ Added a minimal two-plane astrometry demo mirroring the canonical three-plane example (`examples/scripts/run_twoplane_astrometry_demo.py` using `SheraTwoPlaneConfig` + `SheraTwoPlaneBinder`).
 - Evaluate whether shared binder behaviour (two- vs three-plane) should live in a common base class once both paths exist.
 
 ---
 
 ## 21) Task 10 — Legacy SystemGraph design options (deprecated)
-Status: archived; SystemGraph is no longer wired into binders. The legacy
-graph scaffold remains in `graph/system_graph.py` only for historical
-reference and legacy tests. New work should focus on binder + optics caching
-and shared binder helpers if further consolidation is needed.
+Status: archived; SystemGraph is no longer part of the runtime. The legacy
+design is preserved only in historical documentation. New work should focus
+on binder + optics caching and shared binder helpers if further consolidation
+is needed.
 
 ---
 
@@ -363,7 +362,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 - **Code & tests**
   - ParamSpec / ParameterStore / transforms / DerivedResolver are wired together and passing tests.
   - Optics builders (2- and 3-plane) use the new patterns and have basic test coverage.
-  - Binder is the main way to instantiate and run models; legacy SystemGraph tests are treated as historical coverage only.
+  - Binder is the main way to instantiate and run models; legacy SystemGraph tests have been removed.
   - Canonical three-plane astrometry demo runs end-to-end and has at least a smoke test.
   - Test suite passes on my main development environment.
 
@@ -400,7 +399,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
     - Walks through the canonical three-plane astrometry workflow step-by-step (config → Binder → simulate data → loss/inference → plotting).
   - **Concept docs** (short, focused):
     - Parameters & Stores: ParamSpec, ParameterStore, transforms.
-    - Binder execution: Binder as the user-facing “model object,” with cached telescope evaluation and SystemGraph noted as deprecated.
+    - Binder execution: Binder as the user-facing “model object,” with cached telescope evaluation and no graph layer.
     - Optical Systems: three-plane Shera optics as the baseline, two-plane optics as a simplified variant.
   - **examples index**:
     - Lists the canonical three-plane demo, the two-plane demo, and any specialty examples (FIM, eigenmodes, priors) with one-line descriptions.
@@ -441,8 +440,8 @@ Near-term doc housekeeping:
 ## 24) Binder/SystemGraph shared implementation follow-through
 Status: implemented; historical context
 
-- Base implementations landed for binders; the SystemGraph scaffold remains as deprecated legacy code (see `core/binder.py`, `graph/system_graph.py`). Optics builders remain system-specific.
-- Implementation follow-up: caching and derived-resolution hooks remain future work if a future graph layer is reintroduced; see `docs/architecture/binder_and_graph.md` for current binder intent.
+- Base implementations landed for binders; the SystemGraph scaffold has been removed from the codebase. Optics builders remain system-specific.
+- Implementation follow-up: caching and derived-resolution hooks remain future work if a graph layer is ever reintroduced; see `docs/architecture/binder_and_graph.md` for current binder intent.
 
 ## 25) Parking Lot
 

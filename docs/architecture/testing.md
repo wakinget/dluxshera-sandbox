@@ -19,7 +19,6 @@ This page is the source of truth for how the test suite is organized, what it ex
   - `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` (39.65s call).
   - `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` (25.62s call).
   - `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` (20.95s call).
-  - `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` (14.54s setup; legacy SystemGraph coverage, deprecated path).
 
 ## Shared fixtures (Task 3)
 - `shera_smoke_cfg` / `shera_smoke_updates`: session fixtures for the standard SHERA testbed config and canonical parameter overrides (shared separation/position defaults plus zeroed Zernike vectors).
@@ -56,10 +55,9 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 - `tests/params/test_prior_spec.py`, `tests/params/test_refresh_derived_workflow.py`: prior spec definitions, derived value refresh workflow.
 - Shared helpers live in `tests/conftest.py` (moved from `tests/helpers.py`) for forward/inference store construction.
 
-### Optics, modeling, and legacy graph
+### Optics and modeling
 - `tests/optics/test_optics_config.py`, `tests/optics/test_optics_builder.py`: optics configuration defaults, builder caching/miss/hit behavior.
 - `tests/model/test_model_builder.py`, `tests/model/test_modeling_components.py`: model construction smoke tests and component bundle validation.
-- `tests/optics/test_system_graph.py`: legacy SystemGraph outputs vs. Binder parity and output mapping behavior (deprecated; keep only while the legacy code remains).
 - `tests/optics/test_shera_threeplane_transforms.py`, `tests/optics/test_shera_twoplane_spec.py`: system-specific transform/spec wiring.
 - `tests/model/test_universe_builder.py`: Alpha Cen source construction round-trip.
 
@@ -77,7 +75,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 ## `tests/` taxonomy
 - `tests/binder/`: Binder behavior, namespaces, diagnostics (`test_binder_*` files).
 - `tests/params/`: specs, packing/unpacking, stores, transforms, priors, derived refresh.
-- `tests/optics/`: optics config, builders, transforms, legacy system graphs.
+- `tests/optics/`: optics config, builders, transforms.
 - `tests/model/`: model builder, components, universe/source builders.
 - `tests/inference/`: image NLL/FIM, GD helpers (simple and eigen), binder NLL, loss canonical, inference helpers.
 - `tests/demos/`: demo script fast-mode checks.
@@ -88,7 +86,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 ### Path moves applied in Task 2
 - `tests/test_binder_*.py` → `tests/binder/`
 - `tests/test_params_*.py`, `tests/test_prior_spec.py`, `tests/test_refresh_derived_workflow.py`, `tests/test_store_namespace.py` → `tests/params/`
-- `tests/test_optics_*.py`, `tests/test_shera_threeplane_transforms.py`, `tests/test_shera_twoplane_spec.py`, `tests/graph/test_system_graph.py` → `tests/optics/`
+- `tests/test_optics_*.py`, `tests/test_shera_threeplane_transforms.py`, `tests/test_shera_twoplane_spec.py` → `tests/optics/`
 - `tests/test_model_builder.py`, `tests/test_modeling_components.py`, `tests/test_universe_builder.py` → `tests/model/`
 - `tests/test_image_nll_bridge.py`, `tests/test_loss_canonical.py`, `tests/test_losses.py`, `tests/test_fim_theta.py`, `tests/test_inference_api.py`, `tests/test_run_eigen_gd.py`, `tests/test_run_simple_gd.py`, `tests/test_eigen_theta_map.py`, `tests/test_inference/*.py` → `tests/inference/`
 - `tests/test_demo_canonical_astrometry.py`, `tests/test_twoplane_astrometry_demo.py` → `tests/demos/`
@@ -109,7 +107,6 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 | 25.62 (call) | `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` |
 | 20.95 (call) | `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` |
 | 17.57 (setup) | `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
-| 14.54 (call) | `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` |
 | 14.46 (setup) | `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` |
 | 12.50 (call) | `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
 | 12.23 (call) | `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_demo_runs` |
@@ -137,7 +134,6 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
     6. `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` — 14.22s call
     7. `tests/model/test_model_builder.py::test_build_shera_threeplane_model_smoke` — 11.16s call
     8. `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` — 8.80s call
-    9. `tests/optics/test_system_graph.py::test_system_graph_forward_matches_legacy_model` — 6.93s call
     10. `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` — 6.85s setup
 - Root causes:
   - Smoke fixtures reused the full SHERA testbed config (256×256 PSFs, oversample=3, n_lambda=3), so every Binder/model/Hessian compile ran on the largest grid.
@@ -145,7 +141,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
   - Several slow tests rebuilt the high-res config independently instead of reusing the shared session fixture.
 - Changes applied:
   - Standardized `shera_smoke_cfg` to a lighter-weight SHERA test config (pupil_npix=128, psf_npix=128, oversample=2, n_lambda=2) to keep shapes canonical but cheaper for smokes. Inference fixtures now reuse this for Binder/model/data construction.
-  - Swapped the slowest direct-constant tests to the shared fixture (`test_make_binder_nll_fn.py`, `test_noiseless_truth_stationary.py`, `test_model_builder.py`, `test_binder_smoke.py`, `test_system_graph.py`) to avoid rebuilding the high-res config and to align shapes for JAX cache hits.
+  - Swapped the slowest direct-constant tests to the shared fixture (`test_make_binder_nll_fn.py`, `test_noiseless_truth_stationary.py`, `test_model_builder.py`, `test_binder_smoke.py`) to avoid rebuilding the high-res config and to align shapes for JAX cache hits.
   - Trimmed GD smoke loops from 20→10 steps in `test_inference_api.py` and `test_image_nll_bridge.py`; assertions still require the loss to decrease and the estimate to move toward the truth.
 - After (post-changes): 122.58s wall-clock (113 passed, 1 skipped).
   - Top offenders now:
@@ -165,13 +161,13 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
   - Align inference/Binder tests on the canonical small shapes to encourage JAX cache hits; when shape variation is required, mark it `slow` and document why.
 
 ## Repeated expensive setups
-- SHERA synthetic data generation (`SHERA_TESTBED_CONFIG` + `ParameterStore` + Binder/model `.model()`): repeated in `tests/inference/test_inference_api.py`, `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_loss_canonical.py`, `tests/inference/test_fim_theta.py`, and parts of the legacy `tests/optics/test_system_graph.py`. Each re-JITs the same Binder/model build and produces fresh PSFs.
+- SHERA synthetic data generation (`SHERA_TESTBED_CONFIG` + `ParameterStore` + Binder/model `.model()`): repeated in `tests/inference/test_inference_api.py`, `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_loss_canonical.py`, `tests/inference/test_fim_theta.py`. Each re-JITs the same Binder/model build and produces fresh PSFs.
 - 20-step gradient-descent loops (e.g., `run_image_gd`, `run_shera_image_gd_basic`, `run_shera_image_gd_eigen`): appear in `tests/inference/test_inference_api.py`, `tests/inference/test_image_nll_bridge.py`, `tests/inference/test_run_eigen_gd.py`, and `tests/inference/test_run_simple_gd.py`, all starting from similar stores and data.
 - FIM and NLL construction with identical infer key sets (`binary.separation_as`, `binary.x_position_as`, `binary.y_position_as`) across `tests/inference/test_fim_theta.py`, `tests/inference/test_image_nll_bridge.py`, and `tests/inference/test_loss_canonical.py` regenerate the same `make_binder_image_nll_fn`/`make_image_nll_fn` closures.
 - Demo smoke tests re-run SHERA builders in `fast` mode but still trigger Binder/model creation twice (`tests/demos/test_demo_canonical_astrometry.py`, `tests/demos/test_twoplane_astrometry_demo.py`).
 
 ## Prioritized consolidation plan
-1) **Centralize SHERA testbed fixtures:** Create `tests/conftest.py` session-scoped fixtures that return `(cfg, forward_spec, forward_store, inference_spec, inference_store, binder/model outputs, synthetic data/var)`. Reuse in inference/FIM/graph tests to avoid repeat builds and JITs of identical configs.
+1) **Centralize SHERA testbed fixtures:** Create `tests/conftest.py` session-scoped fixtures that return `(cfg, forward_spec, forward_store, inference_spec, inference_store, binder/model outputs, synthetic data/var)`. Reuse in inference/FIM tests to avoid repeat builds and JITs of identical configs.
 2) **Share gradient-descent harnesses:** Provide a small fixture or helper that returns a precomputed `(loss_fn, theta0, truth_store)` tuple for SHERA runs. Let GD-centric tests consume it with parameterized step counts to keep assertions while shortening loops; mark the longest variants as `@pytest.mark.slow`.
 3) **Unify NLL/FIM construction:** Extract a helper that constructs `make_binder_image_nll_fn`/`make_image_nll_fn` with standard infer keys and synthetic data. Use it across `test_fim_theta`, `test_image_nll_bridge`, `test_loss_canonical`, and `test_inference_api` to collapse duplicate setup blocks and enable caching of compiled closures.
 4) **Isolate demo exercises:** Move demo smoke tests under `tests/demos/` and gate plots via fixtures to avoid repeated filesystem writes; consider a shared “fast demo” fixture that produces the cached PSFs once per session.
