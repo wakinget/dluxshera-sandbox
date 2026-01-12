@@ -355,13 +355,34 @@ class BaseSheraBinder:
         )
 
         new_structural_hash = self._compute_structural_hash()
-        structural_changed = new_structural_hash != self.structural_hash
+        structural_hash_changed = new_structural_hash != self.structural_hash
+        structural_store_changed = False
+        for key in self._structural_store_keys():
+            current_value = self.base_forward_store.get(key)
+            incoming_value = validated_store.get(key)
+            try:
+                values_equal = bool(
+                    jnp.array_equal(jnp.asarray(current_value), jnp.asarray(incoming_value))
+                )
+            except Exception:
+                values_equal = current_value == incoming_value
+            if not values_equal:
+                structural_store_changed = True
+                break
+
+        structural_changed = structural_hash_changed or structural_store_changed
 
         if structural_changed:
             import warnings
 
+            reasons = []
+            if structural_hash_changed:
+                reasons.append("structural config hash changed")
+            if structural_store_changed:
+                reasons.append("structural store values changed")
+            reason_text = " and ".join(reasons)
             warnings.warn(
-                "Structural config hash changed; rebuilding telescope and binder state.",
+                f"{reason_text.capitalize()}; rebuilding telescope and binder state.",
                 RuntimeWarning,
                 stacklevel=2,
             )
