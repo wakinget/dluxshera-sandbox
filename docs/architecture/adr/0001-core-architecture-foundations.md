@@ -23,12 +23,12 @@ The architecture relies on a handful of foundational choices to keep parameter v
 - **Rationale:** Single source of truth for deriveds, improved testability, and clearer provenance.
 - **Tradeoffs:** Registry management introduces indirection; requires guardrails to avoid duplicate or conflicting transforms.
 
-### Binder as the primary model object, backed by a SystemGraph
+### Binder as the primary model object, with direct telescope evaluation
 
 - **Context:** Execution order and parameter flow were implicit inside optics code, making debugging and extension difficult.
-- **Decision:** Make `Binder` the main model façade backed by an explicit `SystemGraph` DAG of nodes.
-- **Rationale:** Execution becomes explicit, cacheable, and testable; new systems can reuse nodes and wiring.
-- **Tradeoffs:** Additional abstraction layers; SystemGraph tooling must stay lightweight to avoid over-engineering.
+- **Decision:** Make `Binder` the main model façade that owns a cached telescope and evaluates via the optics/source builders.
+- **Rationale:** Execution remains explicit and testable while avoiding extra graph wiring for the current single-node flow.
+- **Tradeoffs:** Foregoes graph-level inspection until a multi-node execution layer is reintroduced.
 
 ### Aligning with dLux/JAX idioms where possible
 
@@ -41,7 +41,7 @@ The architecture relies on a handful of foundational choices to keep parameter v
 
 - Parameter schemas and values remain synchronized through explicit specs and immutable stores.
 - Derived values follow a single registry-driven resolver, reducing drift across components.
-- Binder and SystemGraph provide an explicit, testable execution path with room for reuse across systems.
+- Binder provides an explicit, testable execution path with room for reuse across systems.
 - Adopting dLux/JAX patterns prioritizes composability and performance while requiring mindful migrations from legacy utilities.
 
 ## Links

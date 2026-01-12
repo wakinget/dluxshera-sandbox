@@ -17,7 +17,7 @@ from tests.conftest import make_forward_store
 )
 def test_binder_merge_overlay_is_shared(binder_cls, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store, use_system_graph=False)
+    binder = binder_cls(cfg, forward_spec, forward_store)
 
     base_contrast = forward_store.get("binary.contrast")
     delta_store = ParameterStore.from_dict({"binary.contrast": base_contrast + 0.5})
@@ -41,7 +41,7 @@ def test_binder_merge_overlay_is_shared(binder_cls, cfg):
 )
 def test_binder_get_reads_cfg_and_store(binder_cls, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store, use_system_graph=False)
+    binder = binder_cls(cfg, forward_spec, forward_store)
 
     psf_npix_value = binder.get("psf_npix")
     assert psf_npix_value == binder.cfg.psf_npix
@@ -63,7 +63,7 @@ def test_binder_get_reads_cfg_and_store(binder_cls, cfg):
 )
 def test_binder_cfg_field_forwarding(binder_cls, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store, use_system_graph=False)
+    binder = binder_cls(cfg, forward_spec, forward_store)
 
     assert binder.cfg is cfg
     assert binder.psf_npix == binder.cfg.psf_npix

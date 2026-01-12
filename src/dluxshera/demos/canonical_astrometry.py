@@ -241,7 +241,7 @@ def make_inference_setup(
     var_image = np.ones_like(truth_psf) * 0.01
     sub_spec = forward_spec.subset(infer_keys)
 
-    print("Step 6: Building loss and running binder/SystemGraph-based gradient descent...")
+    print("Step 6: Building loss and running binder-based gradient descent...")
     loss_nll, theta0 = make_binder_image_nll_fn(
         cfg=binder.cfg,
         forward_spec=forward_spec,
@@ -251,7 +251,6 @@ def make_inference_setup(
         var=var_image,
         noise_model="gaussian",
         reduce="sum",
-        use_system_graph=not fast,
     )
 
     def gaussian_prior_penalty(store_theta: ParameterStore) -> jnp.ndarray:
@@ -337,7 +336,6 @@ def run_eigen_optimization(
         truncate=None,
         whiten=True,
         theta_ref=theta0,
-        use_system_graph=True,
     )
 
     sub_spec = inference_spec.subset(infer_keys)

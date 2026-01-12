@@ -20,7 +20,7 @@ def test_theta0_store_override_keeps_binder_base_alignment(shera_smoke_cfg):
     base_store = ParameterStore.from_spec_defaults(forward_spec)
     base_store = base_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store, use_system_graph=False)
+    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
     data = binder.model()
     var = jnp.ones_like(data)
 

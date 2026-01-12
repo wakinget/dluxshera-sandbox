@@ -160,7 +160,7 @@ def main(
     )
     sub_spec = forward_spec.subset(infer_keys)
 
-    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
+    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store)
 
     truth_psf = _evaluate_psf(binder, subset_store(truth_store, infer_keys))
 
@@ -186,7 +186,6 @@ def main(
         infer_keys,
         noisy_psf,
         var,
-        use_system_graph=True,
     )
 
     num_steps = 5 if fast else 15

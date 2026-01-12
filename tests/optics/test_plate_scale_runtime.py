@@ -25,7 +25,6 @@ def test_plate_scale_updates_psf(shera_smoke_cfg, shera_smoke_updates):
         shera_smoke_cfg,
         forward_spec,
         forward_store,
-        use_system_graph=False,
     )
 
     inference_spec = build_inference_spec_basic()
@@ -61,7 +60,6 @@ def test_twoplane_plate_scale_updates_without_cache_rebuild():
         cfg,
         forward_spec,
         forward_store,
-        use_system_graph=False,
     )
 
     store_a = forward_store.replace(

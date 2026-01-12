@@ -1,4 +1,4 @@
-# Binder and SystemGraph
+# Binder (SystemGraph deprecated)
 
 ## Binders
 
@@ -8,7 +8,7 @@ The Binder is the primary model object in dLuxShera. It combines a configuration
 
 Binders are **operationally (mostly) immutable** by design:
 
-- Treat a Binder instance as a **stable, canonical model**: it captures `(cfg, forward_spec, base_forward_store)` and any internal build products (e.g., a `SystemGraph`) that should remain fixed for the lifetime of that Binder.
+- Treat a Binder instance as a **stable, canonical model**: it captures `(cfg, forward_spec, base_forward_store)` and any internal build products (e.g., a cached telescope) that should remain fixed for the lifetime of that Binder.
 - “Changing parameters” during optimization or inference should happen via **inputs** (deltas / θ-overlays), not by mutating the Binder.
 - If you need a new baseline store/config, create a **new Binder** from the old one.
 
@@ -20,7 +20,7 @@ This is an API- and workflow-level contract (immutability by convention), not ne
   - `cfg`: system configuration (geometry, wavelengths, etc.)
   - `forward_spec`: parameter specification / mapping rules
   - `base_forward_store`: baseline `ParameterStore` with derived parameters refreshed
-  - internal build products (e.g., `SystemGraph`) used to evaluate the optical system
+  - internal build products (e.g., cached telescope) used to evaluate the optical system
 
 - **Dynamic (passed per call):**
   - `store_delta`: a `ParameterStore`-like overlay containing updates relative to the baseline
@@ -29,8 +29,8 @@ This is an API- and workflow-level contract (immutability by convention), not ne
 ### Public API expectations
 
 - `.model(store_delta=None, ...)` is the primary entry point for evaluation.
-- With `store_delta=None`, `.model()` uses the binder's persistent telescope or
-  SystemGraph for a fast-path evaluation (no optics rebuild).
+- With `store_delta=None`, `.model()` uses the binder's persistent telescope
+  for a fast-path evaluation (no optics rebuild).
 - `.with_store(new_store)` returns a **new Binder** whose baseline store is replaced (and deriveds refreshed).
 - `.update_store(new_store)` returns a **new Binder** with a refreshed base
   store; it is the preferred way to persist new truth stores or apply
@@ -38,7 +38,7 @@ This is an API- and workflow-level contract (immutability by convention), not ne
 - If a similar need arises for config changes, prefer a constructor or `with_cfg(...)`-style helper rather than mutating in-place.
 
     ```python
-    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store, use_system_graph=True)
+    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
 
     # baseline evaluation
     psf = binder.model()
@@ -81,11 +81,11 @@ As of the current refactor:
 - Binder is **not** an `equinox.Module` and **not** a `zodiax.Base`—it is a lightweight wrapper around config/spec/store plus evaluation helpers.
 - The baseline store is a `ParameterStore` that supports dict-like introspection (`get`, `keys`, `items`, `as_dict`, …) and includes core derived keys (e.g., `system.plate_scale_as_per_pix`) after construction.
 
-## SystemGraphs
-Under the hood, a `SystemGraph` represents the computation as a directed acyclic graph. Nodes correspond to optical elements, intermediate wavefronts or images, and detector steps; edges capture data flow between them. The Binder manages this graph so that typical users do not need to manipulate it directly, but the structure is available for advanced workflows such as inspecting intermediate values or enabling caching.
-
-### How they fit together
-ParamSpecs and ParameterStores define what can change. The Binder is the object you call to run the model, taking care of parameter bookkeeping and model evaluation. The SystemGraph is the wiring the Binder orchestrates to generate outputs. Canonical demos interact with the Binder interface and treat the SystemGraph as an implementation detail unless deeper introspection is needed.
+## SystemGraphs (deprecated)
+The internal SystemGraph scaffold is no longer used by binders in the current
+workflow. Binders now evaluate through the cached telescope + optics builder
+directly. The graph code remains as a deprecated reference and should not be
+relied on for new work.
 
 ## Builders and caching (where structure is decided)
 
@@ -106,10 +106,8 @@ into *runtime objects* used to evaluate the forward model.
 - Universe/source builders (`src/dluxshera/core/universe.py`)
   - Build astrophysical sources (e.g., Alpha Cen) from the effective store.
 
-- Binder / SystemGraph (`src/dluxshera/core/binder.py`, `src/dluxshera/graph/system_graph.py`)
+- Binder (`src/dluxshera/core/binder.py`)
   - Binder is the public entry point: `.model(store_delta)` merges an overlay store and evaluates.
-  - SystemGraph is an internal executor (currently a minimal single-node graph) that evaluates
-    “cfg/spec/store → optics/source/detector → telescope.model”.
 
 ### Structural vs non-structural parameters
 
@@ -135,12 +133,8 @@ reflects the current knob values.
 ### Caching boundaries (current)
 
 - Optics caching lives in the optics builders (structural hash → cached optics structure).
-- SystemGraph caching / multi-node / derived enforcement are intentionally future work:
-  the graph is currently eager and minimal, and relies on callers to provide stores with
-  derived values refreshed.
-
-(If/when graph-level caching is added, it should reuse the optics structural hash contract rather
-than inventing a parallel notion of “structure”.)
+Graph-level caching / multi-node wiring remain future work if the graph layer
+is revived; the current recommendation is to focus on binder + optics caching.
 
 ### Relationship diagram
 

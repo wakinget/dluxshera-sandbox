@@ -7,10 +7,6 @@ from typing import Optional
 import jax.numpy as jnp
 import dLux as dl
 
-from ..graph.system_graph import (
-    build_shera_system_graph,
-    build_shera_twoplane_system_graph,
-)
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..optics.builder import (
     apply_runtime_bindings,
@@ -34,7 +30,6 @@ BINDER_RESERVED_NAMES = {
     "ns",
     "model",
     "with_store",
-    "use_system_graph",
 }
 from .universe import build_alpha_cen_source
 
@@ -43,12 +38,12 @@ class BaseSheraBinder:
     """Shared backbone for Shera binder implementations.
 
     Encapsulates the common binder behaviour: storing config/spec/base-store,
-    eager detector + optional SystemGraph construction, functional store merge,
-    and the public ``.model`` / ``.with_store`` helpers. Concrete subclasses
-    remain the public entry points and supply system-specific optics/graph
-    builders via protected hooks. Methods that update the base store, such as
+    eager detector construction, functional store merge, and the public
+    ``.model`` / ``.with_store`` helpers. Concrete subclasses remain the public
+    entry points and supply system-specific optics/source builders via
+    protected hooks. Methods that update the base store, such as
     :meth:`update_store`, always return a new binder instance. The binder owns
-    a persistent telescope/graph built from the baseline store; fast-path
+    a persistent telescope built from the baseline store; fast-path
     evaluations reuse these cached objects instead of rebuilding optics each
     call.
     """
@@ -58,12 +53,9 @@ class BaseSheraBinder:
         cfg,
         forward_spec: ParamSpec,
         base_forward_store: ParameterStore,
-        *,
-        use_system_graph: bool = True,
     ) -> None:
         self.cfg = cfg
         self.forward_spec = forward_spec
-        self.use_system_graph = bool(use_system_graph)
         self.structural_hash = self._compute_structural_hash()
 
         # Validate and freeze the base forward store; derived values are allowed
@@ -76,9 +68,6 @@ class BaseSheraBinder:
         self._detector = self._build_detector()
         self.telescope = self._build_telescope(self.base_forward_store)
 
-        self._graph = None
-        if self.use_system_graph:
-            self._graph = self._build_graph()
 
     def __dir__(self):
         entries = set(super().__dir__())
@@ -161,9 +150,6 @@ class BaseSheraBinder:
             optics=self._build_optics(store),
             detector=self._detector,
         )
-
-    def _build_graph(self):  # pragma: no cover - abstract hook
-        raise NotImplementedError
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:  # pragma: no cover - abstract hook
         raise NotImplementedError
@@ -274,7 +260,7 @@ class BaseSheraBinder:
     ) -> jnp.ndarray:
         """Evaluate the Shera PSF for an optional store overlay.
 
-        With ``store_delta=None`` this uses the stored telescope/graph directly
+        With ``store_delta=None`` this uses the stored telescope directly
         for a fast-path evaluation that reuses the persistent binder state.
         When providing a ``store_delta`` the binder only accepts non-structural
         keys by default; this is the slower path that merges an overlay and
@@ -284,8 +270,6 @@ class BaseSheraBinder:
         """
 
         if store_delta is None:
-            if self.use_system_graph and self._graph is not None:
-                return self._graph.evaluate(self.base_forward_store, outputs=("psf",))
             return self.telescope.model()
 
         if allow_rebuild:
@@ -305,9 +289,6 @@ class BaseSheraBinder:
             )
 
         eff_store = self._merge_store(non_structural)
-
-        if self.use_system_graph and self._graph is not None:
-            return self._graph.evaluate(eff_store, outputs=("psf",))
 
         return self._direct_model(eff_store)
 
@@ -334,7 +315,6 @@ class BaseSheraBinder:
             cfg=self.cfg,
             forward_spec=self.forward_spec,
             base_forward_store=new_base_store,
-            use_system_graph=self.use_system_graph,
         )
 
     def update_store(self, store: ParameterStore):
@@ -392,13 +372,9 @@ class BaseSheraBinder:
         updated.cfg = self.cfg
         updated.forward_spec = self.forward_spec
         updated.base_forward_store = validated_store
-        updated.use_system_graph = self.use_system_graph
         updated.structural_hash = new_structural_hash
         updated._detector = self._detector
         updated.telescope = self._update_telescope_runtime(validated_store)
-        updated._graph = None
-        if self.use_system_graph and self._graph is not None:
-            updated._graph = updated._build_graph()
         return updated
 
 
@@ -416,14 +392,11 @@ class SheraThreePlaneBinder(BaseSheraBinder):
     --------------
     - Holds the Shera config, forward ParamSpec, and a *forward-style* base
       ParameterStore (derived values already populated).
-    - Eagerly constructs and owns a SystemGraph when ``use_system_graph=True``;
-      otherwise follows a direct optics + source builder path.
     - ``.model()`` is the primary API and is intentionally lightweight: with
-      ``store_delta=None`` it fast-paths through the cached telescope/graph.
-      For non-structural overlays it merges ``store_delta`` onto the base
-      store, then evaluates either the graph or the direct builder path.
-      Structural overrides require ``allow_rebuild=True`` and delegate to
-      ``update_store()``.
+      ``store_delta=None`` it fast-paths through the cached telescope. For
+      non-structural overlays it merges ``store_delta`` onto the base store,
+      then evaluates the direct builder path. Structural overrides require
+      ``allow_rebuild=True`` and delegate to ``update_store()``.
     - ``.update_store()`` returns a new binder instance with the refreshed base
       store; the original binder remains unchanged.
     """
@@ -431,10 +404,7 @@ class SheraThreePlaneBinder(BaseSheraBinder):
     cfg: SheraThreePlaneConfig
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
-    use_system_graph: bool = True
-
-    # Internal graph/detector references (prepared eagerly)
-    _graph: Optional[object] = None
+    # Internal detector references (prepared eagerly)
     _detector: Optional[dl.LayeredDetector] = None
 
     def __init__(
@@ -442,27 +412,16 @@ class SheraThreePlaneBinder(BaseSheraBinder):
         cfg: SheraThreePlaneConfig,
         forward_spec: ParamSpec,
         base_forward_store: ParameterStore,
-        *,
-        use_system_graph: bool = True,
     ) -> None:
         super().__init__(
             cfg=cfg,
             forward_spec=forward_spec,
             base_forward_store=base_forward_store,
-            use_system_graph=use_system_graph,
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _build_graph(self):
-        return build_shera_system_graph(
-            cfg=self.cfg,
-            forward_spec=self.forward_spec,
-            base_forward_store=self.base_forward_store,
-            detector=self._detector,
-        )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
         return self._build_telescope(eff_store).model()
@@ -491,12 +450,9 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
     Mirrors :class:`SheraThreePlaneBinder` semantics: mostly immutable, owns a
     forward-spec-validated base store, and exposes ``.model(store_delta)`` as the
     canonical evaluation path. ``.model`` fast-paths through the cached
-    telescope/graph when ``store_delta`` is omitted, and accepts non-structural
+    telescope when ``store_delta`` is omitted, and accepts non-structural
     overlays by default when an explicit delta is provided. Structural updates
     require ``allow_rebuild=True`` to rebuild the binder state. When
-    ``use_system_graph`` is enabled, the binder delegates execution to a
-    lightweight SystemGraph; otherwise a direct builder path is used.
-
     ``.update_store()`` returns a new binder instance with the refreshed base
     store so the original binder remains unchanged.
     """
@@ -504,9 +460,6 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
     cfg: SheraTwoPlaneConfig
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
-    use_system_graph: bool = True
-
-    _graph: Optional[object] = None
     _detector: Optional[dl.LayeredDetector] = None
 
     def __init__(
@@ -514,22 +467,11 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         cfg: SheraTwoPlaneConfig,
         forward_spec: ParamSpec,
         base_forward_store: ParameterStore,
-        *,
-        use_system_graph: bool = True,
     ) -> None:
         super().__init__(
             cfg=cfg,
             forward_spec=forward_spec,
             base_forward_store=base_forward_store,
-            use_system_graph=use_system_graph,
-        )
-
-    def _build_graph(self):
-        return build_shera_twoplane_system_graph(
-            cfg=self.cfg,
-            forward_spec=self.forward_spec,
-            base_forward_store=self.base_forward_store,
-            detector=self._detector,
         )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:

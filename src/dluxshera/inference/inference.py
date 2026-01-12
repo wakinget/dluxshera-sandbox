@@ -184,7 +184,6 @@ def run_shera_image_gd_basic(
         var,
         noise_model=noise_model,
         reduce="sum",
-        use_system_graph=True,
     )
 
     sub_spec = forward_spec.subset(infer_keys)
@@ -244,7 +243,6 @@ def run_shera_image_gd_eigen(
     whiten: bool = False,
     theta_ref: Optional[jnp.ndarray] = None,
     fim_kwargs: Optional[Dict[str, Any]] = None,
-    use_system_graph: bool = False,
 ) -> EigenGdResults:
     """
     Run Shera image-based gradient descent in eigenmode coordinates.
@@ -292,10 +290,6 @@ def run_shera_image_gd_eigen(
     fim_kwargs : dict, optional
         Reserved for future extensions; currently unused but accepted to
         mirror other FIM helpers.
-    use_system_graph : bool
-        Whether to route Binder execution through SystemGraph when
-        auto-building the loss function.
-
     Returns
     -------
     EigenGdResults
@@ -333,7 +327,6 @@ def run_shera_image_gd_eigen(
             var,
             noise_model=noise_model,
             reduce="sum",
-            use_system_graph=use_system_graph,
         )
     else:
         if theta0 is None:
@@ -485,4 +478,3 @@ def SheraThreePlane_NumpyroModel(data, model):
         poisson_model = dist.Poisson(
             model.set(parameters, values).model().flatten())
         return npy.sample("psf", poisson_model, obs=data.flatten())
-
