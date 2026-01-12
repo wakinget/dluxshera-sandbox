@@ -47,7 +47,10 @@ class BaseSheraBinder:
     and the public ``.model`` / ``.with_store`` helpers. Concrete subclasses
     remain the public entry points and supply system-specific optics/graph
     builders via protected hooks. Methods that update the base store, such as
-    :meth:`update_store`, always return a new binder instance.
+    :meth:`update_store`, always return a new binder instance. The binder owns
+    a persistent telescope/graph built from the baseline store; fast-path
+    evaluations reuse these cached objects instead of rebuilding optics each
+    call.
     """
 
     def __init__(
@@ -272,9 +275,12 @@ class BaseSheraBinder:
         """Evaluate the Shera PSF for an optional store overlay.
 
         With ``store_delta=None`` this uses the stored telescope/graph directly
-        for a fast-path evaluation. When providing a ``store_delta`` the binder
-        only accepts non-structural keys by default; pass ``allow_rebuild=True``
-        to validate a full store and delegate to :meth:`update_store`.
+        for a fast-path evaluation that reuses the persistent binder state.
+        When providing a ``store_delta`` the binder only accepts non-structural
+        keys by default; this is the slower path that merges an overlay and
+        evaluates with updated values. Pass ``allow_rebuild=True`` to validate
+        a full store and delegate to :meth:`update_store` when structural keys
+        need to change.
         """
 
         if store_delta is None:
@@ -338,7 +344,9 @@ class BaseSheraBinder:
         configuration structure has changed (based on the stored structural
         hash), the telescope is rebuilt and a warning is emitted. Otherwise the
         telescope optics are updated in-place via runtime bindings for a
-        lightweight refresh.
+        lightweight refresh. Use ``update_store`` when you want a new baseline
+        (e.g., to make a structural change or to persist a new truth store)
+        rather than supplying a per-call overlay.
         """
 
         validated_store = store.validate_against(
@@ -389,10 +397,11 @@ class SheraThreePlaneBinder(BaseSheraBinder):
       ParameterStore (derived values already populated).
     - Eagerly constructs and owns a SystemGraph when ``use_system_graph=True``;
       otherwise follows a direct optics + source builder path.
-    - ``.model()`` is the primary API and is intentionally lightweight: for
-      non-structural overlays it merges ``store_delta`` onto the base store,
-      then evaluates either the graph or the direct builder path. Structural
-      overrides require ``allow_rebuild=True`` and delegate to
+    - ``.model()`` is the primary API and is intentionally lightweight: with
+      ``store_delta=None`` it fast-paths through the cached telescope/graph.
+      For non-structural overlays it merges ``store_delta`` onto the base
+      store, then evaluates either the graph or the direct builder path.
+      Structural overrides require ``allow_rebuild=True`` and delegate to
       ``update_store()``.
     - ``.update_store()`` returns a new binder instance with the refreshed base
       store; the original binder remains unchanged.
@@ -460,11 +469,12 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
 
     Mirrors :class:`SheraThreePlaneBinder` semantics: mostly immutable, owns a
     forward-spec-validated base store, and exposes ``.model(store_delta)`` as the
-    canonical evaluation path. ``.model`` accepts non-structural overlays by
-    default; structural updates require ``allow_rebuild=True`` to rebuild the
-    binder state. When ``use_system_graph`` is enabled, the binder delegates
-    execution to a lightweight SystemGraph; otherwise a direct builder path is
-    used.
+    canonical evaluation path. ``.model`` fast-paths through the cached
+    telescope/graph when ``store_delta`` is omitted, and accepts non-structural
+    overlays by default when an explicit delta is provided. Structural updates
+    require ``allow_rebuild=True`` to rebuild the binder state. When
+    ``use_system_graph`` is enabled, the binder delegates execution to a
+    lightweight SystemGraph; otherwise a direct builder path is used.
 
     ``.update_store()`` returns a new binder instance with the refreshed base
     store so the original binder remains unchanged.

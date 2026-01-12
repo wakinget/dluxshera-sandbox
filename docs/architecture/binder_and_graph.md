@@ -29,7 +29,12 @@ This is an API- and workflow-level contract (immutability by convention), not ne
 ### Public API expectations
 
 - `.model(store_delta=None, ...)` is the primary entry point for evaluation.
+- With `store_delta=None`, `.model()` uses the binder's persistent telescope or
+  SystemGraph for a fast-path evaluation (no optics rebuild).
 - `.with_store(new_store)` returns a **new Binder** whose baseline store is replaced (and deriveds refreshed).
+- `.update_store(new_store)` returns a **new Binder** with a refreshed base
+  store; it is the preferred way to persist new truth stores or apply
+  structural changes (it will rebuild if the structural hash changes).
 - If a similar need arises for config changes, prefer a constructor or `with_cfg(...)`-style helper rather than mutating in-place.
 
     ```python
@@ -56,7 +61,9 @@ to prepare these deltas:
   `store_unpack_params(...)` outputs into a delta suitable for `binder.model`.
 - `strip_structural(store)` (or `strip_structural(store, structural_keys=...)`)
   removes structural keys like `system.*` / `band.*` when you want to sanitize
-  an overlay before evaluation.
+  an overlay before evaluation. For finer control, pass the binder's own
+  structural key set (e.g., `binder._structural_store_keys()`) so runtime-bound
+  keys like `system.plate_scale_as_per_pix` remain allowed.
 
 In short: **unpack θ → subset → model**, and reserve structural updates for
 explicit rebuilds via `binder.model(..., allow_rebuild=True)` or by creating a

@@ -30,10 +30,10 @@ The canonical demo in `examples/scripts/run_canonical_astrometry_demo.py` (imple
   )
   validate_inference_base_store(forward_store, inference_subspec)
   ```
-- **Construct the Binder/SystemGraph:** Instantiate a `SheraThreePlaneBinder` (optionally `use_system_graph=True`) so evaluation is a single `binder.model(store_delta)` call that runs through the DAG.
+- **Construct the Binder/SystemGraph:** Instantiate a `SheraThreePlaneBinder` (optionally `use_system_graph=True`) so evaluation is a single `binder.model(store_delta)` call that runs through the DAG. Calling `binder.model()` with no delta takes the fast-path through the cached telescope/graph; pass a non-structural delta to update values per call. If you need to persist a new baseline (or apply a structural change), use `binder.update_store(...)` to build a new binder.
 - **Generate synthetic data:** Draw a "truth" `ParameterStore`, evaluate the binder to get a noiseless image, and add Gaussian noise to obtain observations.
 - **Build the binder-based loss:** `make_binder_image_nll_fn` returns a θ-packing loss and the initial θ vector. The demo adds a quadratic prior penalty for MAP optimisation.
-- **Run gradient descent:** The main loop applies Optax updates to θ in pure θ-space; when eigenmode helpers are enabled, the same loss is wrapped via `EigenThetaMap` for optimisation in eigen-θ coordinates.
+- **Run gradient descent:** The main loop applies Optax updates to θ in pure θ-space; when eigenmode helpers are enabled, the same loss is wrapped via `EigenThetaMap` for optimisation in eigen-θ coordinates. When you unpack θ into a full `ParameterStore`, use `subset_store(store, infer_keys)` to form a safe delta before calling `binder.model(store_delta)`.
 - **Inspect results:** The script saves PSF comparison plots and parameter history grids (see `plot_psf_comparison` and `plot_parameter_history_grid`), writing outputs when an output directory is provided.
 
 ## Looking ahead: two-plane canonical demo
