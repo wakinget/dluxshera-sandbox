@@ -257,9 +257,8 @@ prior_spec = PriorSpec.from_info(forward_truth_store, prior_info)
 print("Drawing starting point from priors...")
 # Draw an initial point for the model from the priors
 rng_key, split_key = jr.split(rng_key)
-init_store = prior_spec.sample_near(forward_truth_store, rng_key=split_key, keys=infer_keys)
-# We use prior_spec.sample_near to draw a random sample from the priors using the
-# provided forward_truth_store as the center (mean) of the distribution
+init_store = prior_spec.sample(rng_key=split_key, keys=infer_keys)
+# We use prior_spec.sample to draw a random sample from the priors using the stored prior_info
 init_psf = binder.model(strip_structural(init_store, structural_keys=binder.structural_keys()))
 # To compute the initial (perturbed) PSF, we can provide a store to the binder.model() method.
 # By default, the .model() method will throw an error if the user provides any structural parameter updates.
