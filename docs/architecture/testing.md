@@ -11,6 +11,7 @@ This page is the source of truth for how the test suite is organized, what it ex
 
 ## Marker policy
 - `slow`: integration-heavy SHERA/Binder runs that dominate the runtime snapshot. Use `-m "not slow"` for a developer-speed pass; the full suite must still include them.
+- Legacy SystemGraph coverage has been retired along with the graph layer; there are no legacy SystemGraph tests or markers in the active suite.
 - Currently marked slow (from the 869.89s baseline timing):
   - `tests/inference/test_inference_api.py::test_run_shera_image_gd_basic_separation_smoke` (270.84s call from 20-step GD loop).
   - `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` (14.46s setup, 126.46s call) and `::test_fim_theta_shera_wrapper_consistency` (90.75s call).
