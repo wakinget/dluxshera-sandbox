@@ -32,6 +32,9 @@ ArrayLike = Union[onp.ndarray, np.ndarray]
 PanelPaths = MutableSequence[Path]
 
 __all__ = [
+    "apply_plot_defaults",
+    "get_default_cmaps",
+    "make_nan_cmaps",
     "merge_cbar",
     "plot_parameter_history",
     "plot_parameter_history_grid",
@@ -44,6 +47,64 @@ __all__ = [
     "plot_signals_panels",
     "plot_signals_grid",
 ]
+
+
+def apply_plot_defaults(
+    *,
+    font_family: str = "serif",
+    image_origin: str = "lower",
+    figure_dpi: int = 120,
+) -> None:
+    """Apply default matplotlib rcParams used in the refactor scripts."""
+
+    plt.rcParams["font.family"] = font_family
+    plt.rcParams["image.origin"] = image_origin
+    plt.rcParams["figure.dpi"] = figure_dpi
+
+
+def make_nan_cmaps(
+    names: Sequence[str],
+    *,
+    bad_color: str = "k",
+    bad_alpha: float = 0.5,
+) -> Mapping[str, matplotlib.colors.Colormap]:
+    """Create colormaps with NaNs rendered as a specified color.
+
+    Parameters
+    ----------
+    names : sequence[str]
+        Names of Matplotlib colormaps to clone.
+    bad_color : str
+        Color to use for NaNs/invalid entries.
+    bad_alpha : float
+        Alpha value to use for NaNs/invalid entries.
+
+    Returns
+    -------
+    Mapping[str, matplotlib.colors.Colormap]
+        Mapping of colormap names to NaN-safe colormap objects.
+    """
+
+    cmaps = {}
+    for name in names:
+        cmap = matplotlib.colormaps[name].copy()
+        cmap.set_bad(bad_color, bad_alpha)
+        cmaps[name] = cmap
+    return cmaps
+
+
+def get_default_cmaps(
+    *,
+    bad_color: str = "k",
+    bad_alpha: float = 0.5,
+) -> Mapping[str, matplotlib.colors.Colormap]:
+    """Return the default plotting colormaps with NaN handling."""
+
+    return make_nan_cmaps(
+        ["inferno", "seismic", "coolwarm"],
+        bad_color=bad_color,
+        bad_alpha=bad_alpha,
+    )
 
 
 def _normalise_histories(
