@@ -252,6 +252,11 @@ class BaseSheraBinder:
         runtime_keys = {store_key for store_key, _ in self._runtime_bindings()}
         return structural_keys - runtime_keys
 
+    def structural_store_keys(self) -> set[str]:
+        """Return the structural store keys for this binder."""
+
+        return self._structural_store_keys()
+
     def model(
         self,
         store_delta: Optional[ParameterStore] = None,

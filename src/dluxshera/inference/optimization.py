@@ -438,7 +438,11 @@ def make_binder_nll_fn(
     def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
         full_store = store_unpack_params(sub_spec, theta, base_forward_store)
         # Protect binder.model from structural keys while keeping fast path intact.
-        return strip_structural(subset_store(full_store, infer_keys))
+        structural_keys = binder.structural_store_keys()
+        return strip_structural(
+            subset_store(full_store, infer_keys),
+            structural_keys=structural_keys,
+        )
 
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         store_delta = theta_to_store_delta(theta)
