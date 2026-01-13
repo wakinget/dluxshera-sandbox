@@ -50,7 +50,7 @@ from dluxshera.params.spec import (
     build_forward_model_spec_from_config,
     make_inference_subspec, build_inference_spec_basic,
 )
-from dluxshera.params.store import ParameterStore, refresh_derived
+from dluxshera.params.store import ParameterStore, refresh_derived, strip_structural
 from dluxshera.params.transforms import get_resolver
 from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
@@ -213,7 +213,7 @@ print("Drawing starting point from priors...")
 # Draw an initial point for the model from the priors
 rng_key, split_key = jr.split(rng_key)
 init_store = prior_spec.sample_near(forward_truth_store, rng_key=split_key, keys=infer_keys)
-init_psf = binder.model(init_store)
+init_psf = binder.model(strip_structural(init_store))
 
 print("Building the loss function...")
 # Build the Loss function
@@ -311,7 +311,7 @@ theta_final, trace = run_shera_gd(
 final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 
 # Collect GD outputs
-final_psf = binder.model(final_store)
+final_psf = binder.model(strip_structural(final_store))
 
 ##################
 # Print a Summary
