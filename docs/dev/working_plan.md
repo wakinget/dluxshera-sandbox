@@ -3,7 +3,7 @@ _Last updated: 2025-12-19_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
-This Working Plan is the near/medium-term map for developers. For the theme-level, longer-horizon roadmap see `docs/architecture/roadmap.md`. For concept-level architecture detail (ParamSpec/Store, Binder-based execution, loss/optimization, eigenmodes), use the `docs/architecture/*.md` set referenced below; this doc points to them rather than duplicating their content.
+This Working Plan is the near/medium-term map for developers. For the theme-level, longer-horizon roadmap see `docs/dev/roadmap.md`. For concept-level architecture detail (ParamSpec/Store, Binder-based execution, loss/optimization, eigenmodes), use the `docs/architecture/*.md` set referenced below; this doc points to them rather than duplicating their content.
 
 ## How to use this doc
 - **Sections 1–12:** Current architecture focus areas, gotchas, and open questions (developer-facing summaries with links to canonical architecture docs).
@@ -49,7 +49,7 @@ High-level snapshot (illustrative; run `python devtools/print_tree.py` or `pytho
 ```
 dLuxShera/
 ├─ docs/
-│  ├─ architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,roadmap.md,...}
+│  ├─ architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,...}
 │  ├─ dev/working_plan.md   ← this document
 │  └─ tutorials/{modeling_overview.md,canonical_astrometry_demo.md}
 ├─ src/dluxshera/
@@ -427,7 +427,7 @@ This section captures our strategy for (a) deciding when to merge the refactor w
 ## 23) Documentation roadmap for dLuxShera
 Status: docs housekeeping (dev-facing)
 
-- Canonical long-range roadmap: `docs/architecture/roadmap.md`. Treat this as the theme-level plan; keep this Working Plan focused on near/medium-term execution and dev notes.
+- Canonical long-range roadmap: `docs/dev/roadmap.md`. Treat this as the theme-level plan; keep this Working Plan focused on near/medium-term execution and dev notes.
 - Concept/architecture sources of truth: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,params_and_store.md}`. Use these for detailed design rather than duplicating content here.
 - Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md` and `examples/scripts/run_canonical_astrometry_demo.py` / `run_twoplane_astrometry_demo.py` for runnable flows).
 - Dev-facing planning: this file (`docs/dev/working_plan.md`) and any future dev notes under `docs/dev/`. Keep cross-links back to the architecture docs for specifics.
