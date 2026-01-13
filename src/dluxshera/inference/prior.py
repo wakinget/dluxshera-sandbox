@@ -157,7 +157,17 @@ class PriorSpec:
         rng_key: jax.Array,
         keys: Optional[Iterable[ParamKey]] = None,
     ) -> ParameterStore:
-        """Draw a new store by sampling independent priors around a reference store."""
+        """Draw a new store by sampling independent priors around a reference store.
+
+        Parameters
+        ----------
+        center_store:
+            Store providing the mean value for each parameter.
+        rng_key:
+            JAX random key used to sample each prior.
+        keys:
+            Optional subset of parameter keys to sample. Defaults to all keys in the spec.
+        """
 
         updates: MutableMapping[ParamKey, jnp.ndarray] = {}
         selected_keys = self._select_keys(keys)
@@ -185,3 +195,56 @@ class PriorSpec:
                     "Supported distributions are: 'Normal', 'Uniform', 'LogNormal'."
                 )
         return center_store.replace(updates)
+
+    def sample(
+        self,
+        rng_key: jax.Array,
+        keys: Optional[Iterable[ParamKey]] = None,
+    ) -> ParameterStore:
+        """Draw a new store by sampling independent priors from stored means.
+
+        This method mirrors :meth:`sample_near` but uses the stored
+        :class:`PriorField` mean values instead of requiring a reference store.
+
+        Parameters
+        ----------
+        rng_key:
+            JAX random key used to sample each prior.
+        keys:
+            Optional subset of parameter keys to sample. Defaults to all keys in the spec.
+        """
+
+        updates: MutableMapping[ParamKey, jnp.ndarray] = {}
+        selected_keys = self._select_keys(keys)
+        subkeys = jax.random.split(rng_key, len(selected_keys)) if selected_keys else ()
+        for subkey, key in zip(subkeys, selected_keys):
+            field = self.fields[key]
+            field._assert_supported()
+            mean = jnp.asarray(field.mean)
+            sigma = jnp.asarray(field.sigma)
+            if field.dist == "Normal":
+                noise = jax.random.normal(subkey, shape=mean.shape, dtype=mean.dtype)
+                updates[key] = mean + sigma * noise
+            elif field.dist == "Uniform":
+                updates[key] = jax.random.uniform(
+                    subkey,
+                    shape=mean.shape,
+                    dtype=mean.dtype,
+                    minval=mean - sigma,
+                    maxval=mean + sigma,
+                )
+            elif field.dist == "LogNormal":
+                updates[key] = mean * jax.random.lognormal(
+                    subkey, sigma=sigma, shape=mean.shape, dtype=mean.dtype
+                )
+                # NOTE: Lognormal sampling — sigma is the std dev in *log-space*.
+                # This matches NumPyro's LogNormal(loc, scale) with:
+                #   JAX:     mean * jax.random.lognormal(key, sigma)
+                #   NumPyro: dist.LogNormal(loc=np.log(mean), scale=sigma)
+                # In this parameterization, `mean` is the *median* of the distribution.
+            else: # Raise unrecognized distribution types
+                raise ValueError(
+                    f"Unsupported prior distribution '{field.dist}' for parameter '{key}'. "
+                    "Supported distributions are: 'Normal', 'Uniform', 'LogNormal'."
+                )
+        return ParameterStore.from_dict(dict(updates))
