@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Optional
 
 import jax.numpy as jnp
 import numpy as np
@@ -190,6 +190,50 @@ def build_index_map(
         "entries": entries,
         "layout_hash": _compute_layout_hash(entries),
     }
+
+    return index_map
+
+
+def build_eigen_index_map(eigen_map: Any) -> dict:
+    """Build a serializable IndexMap aligned with an EigenThetaMap layout."""
+
+    dim_eigen = getattr(eigen_map, "dim_eigen", None)
+    if dim_eigen is None:
+        raise ValueError("eigen_map must provide dim_eigen.")
+
+    entries = []
+    for i in range(int(dim_eigen)):
+        entries.append(
+            {
+                "name": f"eigen.mode[{i:02d}]",
+                "start": i,
+                "stop": i + 1,
+                "shape": [],
+                "block": "eigen",
+            }
+        )
+
+    index_map = {
+        "entries": entries,
+        "layout_hash": _compute_layout_hash(entries),
+    }
+
+    meta: dict[str, object] = {}
+    for name in ("dim_theta", "dim_eigen", "whiten"):
+        if hasattr(eigen_map, name):
+            meta[name] = getattr(eigen_map, name)
+
+    eigvals = getattr(eigen_map, "eigvals", None)
+    if eigvals is not None:
+        eigvals_arr = np.asarray(eigvals)
+        if eigvals_arr.size:
+            meta["eigval_summary"] = {
+                "min": float(np.min(eigvals_arr)),
+                "max": float(np.max(eigvals_arr)),
+            }
+
+    if meta:
+        index_map["eigen"] = meta
 
     return index_map
 

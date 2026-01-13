@@ -38,8 +38,6 @@
 import jax
 from pathlib import Path
 import time, datetime, os
-import hashlib
-import json
 import jax.numpy as jnp
 import numpy as np
 import numpy.random._generator as rng
@@ -65,7 +63,7 @@ from dluxshera.inference.optimization import (
     fim_theta,
     EigenThetaMap,
 )
-from dluxshera.params.packing import build_index_map
+from dluxshera.params.packing import build_index_map, build_eigen_index_map
 from dluxshera.inference.signals import build_signals
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
@@ -306,24 +304,6 @@ loss0 = loss_fn(theta0)
 grads_true = jax.grad(loss_fn)(theta_true)
 grads0 = jax.grad(loss_fn)(theta0)
 
-def build_eigen_index_map(dim: int) -> dict:
-    entries = []
-    for i in range(dim):
-        entries.append(
-            {
-                "name": f"eigen.mode[{i:02d}]",
-                "start": i,
-                "stop": i + 1,
-                "shape": [],
-                "block": "eigen",
-            }
-        )
-
-    payload = [(entry["name"], entry["shape"]) for entry in entries]
-    serialized = json.dumps(payload, separators=(",", ":"), sort_keys=False)
-    layout_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    return {"entries": entries, "layout_hash": layout_hash}
 
 print("Computing Fisher Information Matrix (FIM) for preconditioning...")
 theta_ref = theta_true  # Use truth for synthetic demo; swap to theta0 for realism later.
@@ -381,7 +361,7 @@ if use_eigen:
         lr_vec = 1.0 / (eigvals_kept + 1e-12)
         curvature_vec = eigvals_kept
 
-    index_map = build_eigen_index_map(k_kept)
+    index_map = build_eigen_index_map(eigen_map)
     loss_opt = lambda z: loss_fn(eigen_map.theta_from_z(z))
     theta0_opt = z0
     theta_space = "eigen"
