@@ -82,14 +82,11 @@ from dluxshera.params.packing import pack_params, unpack_params
 # Plotting
 import matplotlib.pyplot as plt
 
+# Load default colormaps + apply default settings
 cmaps = get_default_cmaps()
 inferno = cmaps["inferno"]
-seismic = cmaps["seismic"]
-coolwarm = cmaps["coolwarm"]
-
 apply_plot_defaults()
-
-plt.rcParams['image.cmap'] = 'inferno'
+plt.rcParams['image.cmap'] = inferno
 
 
 # Directories
