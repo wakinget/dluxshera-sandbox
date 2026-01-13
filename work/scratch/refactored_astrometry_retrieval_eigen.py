@@ -133,21 +133,44 @@ rng_key = jr.PRNGKey(rng_seed)
 
 # Start with a pre-defined config
 cfg = SHERA_TESTBED_CONFIG
+# config objects hold 'structural' parameters of the model
+# ex: pupil/psf sampling, mirror focal lengths + sizes, etc.
 # Use the config to set Zernike Noll indices
-# The Noll indices are a 'structural' parameter of the model,
-# this setting influences the size of the basis, and
-# generally shouldn't be changed after creation.
+# The Noll indices are 'structural' to the model, if they change,
+# then we need to rebuild the internal 'basis'.
+# We generally set these structural parameters up prior to creating
+# the model, and generally refrain from changing these parameters later
 cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
                   secondary_noll_indices=tuple(range(4, 12)))
 
 # Create Parameter Specs from the config
+# parameter specs describe the available parameters and how they are used.
+# The forward model spec describes all the parameters required to produce a forward PSF
+# Most parameters are considered 'primitive' like the binary X/Y position or the pixel pitch
+# Some parameters are 'derived' and are computed using a specific registered transform
+# Ex: system.focal_length_m derived from system.m1_focal_length_m, system.m2_focal_length_m,
+#       and system.m1_m2_separation_m
+# Ex: system.plate_scale_as_per_pix derived from system.focal_length_m and system.pixel_pitch_m
 forward_spec = build_forward_model_spec_from_config(cfg)
+# The inference spec describes the set of parameters that we are allowed to solve for
+# In the inference spec, all parameters are considered 'primitive' for the purposes of the optimization
+# Ex: system.plate_scale_as_per_pix is 'derived' in the forward_spec, but 'primitive' in the inference_spec
+# The difference between forward model and inference specs may seem confusing at first,
+# but we are just being explicit about what parameters exist and how we use them.
+# This provides flexibility for different model types (2-, 3-, or, 4-plane, etc.) that may be parameterized differently
 inference_spec = build_inference_spec_basic(cfg)
+# `build_inference_spec_basic()` is meant to return all inference parameters that we might want to use,
+# but we might not want to use all of them.
 
-# Create forward Parameter Store from the specs
+# Create forward-model Parameter Store from the spec
 forward_truth_store = ParameterStore.from_spec_defaults(forward_spec)
+# The spec *describes* the parameters, while the store *holds* the parameters
+# The store represents a set of parameters with specific values
+# ParameterStore.from_spec_defaults(spec) populates a ParameterStore
+#   using default values from the provided spec. By default, this method does not populate any derived
 
-# Update any desired parameters - This defines the Truth value for the Data
+# If desired, replace any default parameters with custom values
+# The forward_truth_store defines the 'truth' values for the Data
 forward_truth_store = forward_truth_store.replace(
     {
         "binary.separation_as": 10.0,
@@ -160,6 +183,7 @@ forward_truth_store = forward_truth_store.replace(
 
 # Compute derived parameters
 forward_truth_store = forward_truth_store.refresh_derived(forward_spec)
+# If desired, could I update the 'system.plate_scale_as_per_pix' here?
 
 # Create the Binder
 binder = SheraThreePlaneBinder(cfg, forward_spec, forward_truth_store)
