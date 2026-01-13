@@ -4,14 +4,13 @@ import numpy as np
 import pytest
 
 from dluxshera.inference.run_artifacts import (
-    build_index_map,
     load_checkpoint,
     load_meta,
     load_summary,
     load_trace,
     save_run,
 )
-from dluxshera.params.packing import pack_params
+from dluxshera.params.packing import build_index_map, pack_params
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 

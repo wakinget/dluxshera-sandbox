@@ -56,7 +56,7 @@ from dluxshera.inference.optimization import (
     make_binder_nll_fn,
     fim_theta,
 )
-from dluxshera.inference.run_artifacts import build_index_map
+from dluxshera.params.packing import build_index_map
 from dluxshera.params.packing import pack_params
 
 inferno = mpl.colormaps["inferno"]
