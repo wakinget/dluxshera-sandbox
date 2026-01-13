@@ -8,16 +8,11 @@ additional diagnostics remain opt-in.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Optional
+from typing import Iterable, Mapping, Optional
 
 import numpy as np
-
-from dluxshera.params.spec import ParamSpec
-from dluxshera.params.store import ParameterStore
-
 
 ArrayMapping = Mapping[str, object]
 
@@ -113,62 +108,3 @@ def load_summary(run_dir: Path | str):
 def load_checkpoint(run_dir: Path | str, which: str = "best") -> dict[str, np.ndarray]:
     path = Path(run_dir) / f"checkpoint_{which}.npz"
     return _load_npz(path)
-
-
-def _compute_layout_hash(entries: list[dict[str, object]]) -> str:
-    payload = [(entry["name"], entry["shape"]) for entry in entries]
-    serialized = json.dumps(payload, separators=(",", ":"), sort_keys=False)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def build_index_map(
-    spec_subset: ParamSpec,
-    store: ParameterStore,
-    *,
-    theta=None,
-    block_fn: Optional[Callable[[str], str]] = None,
-) -> dict:
-    """Build a serializable IndexMap aligned with parameter packing order."""
-
-    entries: list[dict[str, object]] = []
-    offset = 0
-
-    for key in spec_subset.keys():
-        value = store.get(key)
-        if value is None:
-            raise ValueError(
-                f"IndexMap requires concrete values; got None for key {key!r}."
-            )
-        arr = np.asarray(value)
-        size = int(arr.size)
-        shape = list(arr.shape)
-        start = offset
-        stop = offset + size
-        block = block_fn(key) if block_fn is not None else key
-
-        entries.append(
-            {
-                "name": key,
-                "start": start,
-                "stop": stop,
-                "shape": shape,
-                "block": block,
-            }
-        )
-
-        offset = stop
-
-    if theta is not None:
-        theta_size = int(np.asarray(theta).size)
-        if theta_size != offset:
-            raise ValueError(
-                "IndexMap size mismatch: packed size from spec/store does not "
-                f"match theta.size ({offset} vs {theta_size})."
-            )
-
-    index_map = {
-        "entries": entries,
-        "layout_hash": _compute_layout_hash(entries),
-    }
-
-    return index_map

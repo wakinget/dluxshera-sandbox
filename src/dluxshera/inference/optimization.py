@@ -24,13 +24,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .losses import gaussian_image_nll
-from .run_artifacts import save_run, build_index_map
+from .run_artifacts import save_run
 from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
 from ..params.spec import ParamSpec, ParamKey
 from ..params.store import ParameterStore, strip_structural, subset_store
 from ..params.packing import (
+    build_index_map,
     pack_params as store_pack_params,
     unpack_params as store_unpack_params,
 )
@@ -939,7 +940,7 @@ def run_gd_with_artifacts(
     index_map :
         Optional IndexMap describing how θ indices map to parameter names and
         blocks. When provided it is stored under ``meta["theta"]["index_map"]``;
-        see :func:`dluxshera.inference.run_artifacts.build_index_map`.
+        see :func:`dluxshera.params.packing.build_index_map`.
     run_dir / runs_dir / run_id :
         Optional run directory configuration controlling how artifacts are
         written to disk.
@@ -1177,7 +1178,7 @@ def run_shera_gd(
         Initial packed parameter vector of shape ``(D,)``.
     index_map :
         Optional IndexMap describing θ layout, typically created by
-        :func:`dluxshera.inference.run_artifacts.build_index_map` from a Shera
+        :func:`dluxshera.params.packing.build_index_map` from a Shera
         inference spec.
     learning_rate :
         Base learning rate used when ``lr_vec`` is not supplied. When

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import hashlib
+import json
+from typing import Callable, Mapping, Optional
 
 import jax.numpy as jnp
+import numpy as np
 
 from .spec import ParamSpec, ParamKey
 from .store import ParameterStore
@@ -49,6 +52,11 @@ def pack_params(
     ValueError
         If any value for a key in `spec_subset` is `None` (we require
         concrete numeric values for all inferred parameters).
+
+    See Also
+    --------
+    unpack_params : Inverse operation that restores structured values.
+    build_index_map : Metadata-only description of the packed layout.
     """
     keys = list(spec_subset.keys())
 
@@ -79,6 +87,111 @@ def pack_params(
 
     theta = jnp.concatenate(pieces) if pieces else jnp.zeros((0,), dtype=dtype)
     return theta
+
+
+def _compute_layout_hash(entries: list[dict[str, object]]) -> str:
+    """
+    Compute a stable SHA-256 hash for an IndexMap layout.
+
+    The hash is derived from the ordered (name, shape) pairs only. This keeps
+    the hash invariant to offsets and other metadata while still detecting any
+    change to the packed layout (e.g., reordering parameters or altering
+    shapes).
+    """
+    payload = [(entry["name"], entry["shape"]) for entry in entries]
+    serialized = json.dumps(payload, separators=(",", ":"), sort_keys=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def build_index_map(
+    spec_subset: ParamSpec,
+    store: ParameterStore,
+    *,
+    theta=None,
+    block_fn: Optional[Callable[[str], str]] = None,
+) -> dict:
+    """
+    Build a serializable IndexMap aligned with parameter packing order.
+
+    ``build_index_map`` reports where each parameter lives inside the packed
+    θ-vector produced by :func:`pack_params`. It is intended for artifact
+    metadata (e.g., ``meta.json``) so downstream tooling can interpret θ without
+    re-running the pack/unpack logic.
+
+    Parameters
+    ----------
+    spec_subset:
+        ParamSpec describing the keys and their order, matching the spec used
+        for :func:`pack_params`.
+    store:
+        ParameterStore providing concrete numeric values for every key in
+        ``spec_subset``. The values are only used to infer shapes and sizes.
+    theta:
+        Optional packed θ-vector. When provided, its length is validated
+        against the total packed size implied by ``spec_subset`` and ``store``.
+    block_fn:
+        Optional callable mapping a parameter key to a block label. This allows
+        grouping related parameters in visualization or reporting tools.
+
+    Returns
+    -------
+    dict
+        A JSON-serializable IndexMap with ``entries`` (one per parameter) and
+        a ``layout_hash``. Each entry includes:
+
+        - ``name``: parameter key.
+        - ``start`` / ``stop``: half-open indices into θ.
+        - ``shape``: original array shape.
+        - ``block``: block label (defaults to the key).
+
+    Notes
+    -----
+    Unlike :func:`pack_params`, this function does **not** return θ or perform
+    any numerical packing. Its purpose is *metadata only*—to describe how an
+    already-packed θ vector maps back to named parameters.
+    """
+    entries: list[dict[str, object]] = []
+    offset = 0
+
+    for key in spec_subset.keys():
+        value = store.get(key)
+        if value is None:
+            raise ValueError(
+                f"IndexMap requires concrete values; got None for key {key!r}."
+            )
+        arr = np.asarray(value)
+        size = int(arr.size)
+        shape = list(arr.shape)
+        start = offset
+        stop = offset + size
+        block = block_fn(key) if block_fn is not None else key
+
+        entries.append(
+            {
+                "name": key,
+                "start": start,
+                "stop": stop,
+                "shape": shape,
+                "block": block,
+            }
+        )
+
+        offset = stop
+
+    if theta is not None:
+        theta_size = int(np.asarray(theta).size)
+        if theta_size != offset:
+            raise ValueError(
+                "IndexMap size mismatch: packed size from spec/store does not "
+                f"match theta.size ({offset} vs {theta_size})."
+            )
+
+    index_map = {
+        "entries": entries,
+        "layout_hash": _compute_layout_hash(entries),
+    }
+
+    return index_map
 
 
 def unpack_params(
@@ -125,6 +238,11 @@ def unpack_params(
         If `theta` does not have the expected total size implied by the
         shapes of the corresponding values in `base_store`, or if any
         template value is `None`.
+
+    See Also
+    --------
+    pack_params : Packs structured values into a flat θ vector.
+    build_index_map : Emits layout metadata without unpacking θ.
     """
     keys = list(spec_subset.keys())
     n_theta = int(theta.size)

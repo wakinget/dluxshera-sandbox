@@ -61,7 +61,7 @@ from dluxshera.inference.optimization import (
     run_shera_gd,
     fim_theta,
 )
-from dluxshera.inference.run_artifacts import build_index_map
+from dluxshera.params.packing import build_index_map
 from dluxshera.inference.signals import build_signals
 from dluxshera.plot.plotting import (
     plot_fim,
