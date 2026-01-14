@@ -808,6 +808,11 @@ class SheraThreePlaneBinder(BaseSheraBinder):
       ``allow_rebuild=True`` and delegate to ``update_store()``.
     - ``.update_store()`` returns a new binder instance with the refreshed base
       store; the original binder remains unchanged.
+
+    The ``with_store`` attribute is an alias of
+    :meth:`BaseSheraBinder.with_store`, provided for parity with legacy APIs.
+    It preserves the binder's immutable-style semantics by always returning a
+    fresh binder instance rather than mutating in-place.
     """
 
     cfg: SheraThreePlaneConfig
@@ -822,6 +827,22 @@ class SheraThreePlaneBinder(BaseSheraBinder):
         forward_spec: ParamSpec,
         base_forward_store: ParameterStore,
     ) -> None:
+        """Construct a binder for the three-plane Shera configuration.
+
+        Parameters
+        ----------
+        cfg : SheraThreePlaneConfig
+            Fully prepared Shera three-plane configuration. Any derived
+            configuration values needed by the optics/source builders should
+            already be present on this object.
+        forward_spec : ParamSpec
+            Parameter specification describing the full forward store,
+            including structural keys and derived entries.
+        base_forward_store : ParameterStore
+            Forward-style base store with derived values populated. The store
+            is validated against ``forward_spec`` and treated as immutable
+            baseline state for subsequent evaluations.
+        """
         super().__init__(
             cfg=cfg,
             forward_spec=forward_spec,
@@ -833,20 +854,34 @@ class SheraThreePlaneBinder(BaseSheraBinder):
     # ------------------------------------------------------------------
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
+        """Evaluate the Shera three-plane model directly.
+
+        Uses the three-plane optics and alpha Cen source builders to assemble
+        a fresh telescope from ``eff_store`` and returns the PSF model output.
+        This path is used when a non-structural store overlay is supplied.
+        """
         return self._build_telescope(eff_store).model()
 
     def _build_optics(self, store: ParameterStore):
+        """Build the Shera three-plane optics stack.
+
+        Delegates to ``build_shera_threeplane_optics`` with the configured
+        three-plane configuration, validated store, and forward specification.
+        """
         return build_shera_threeplane_optics(
             self.cfg, store=store, spec=self.forward_spec
         )
 
     def _build_source(self, store: ParameterStore):
+        """Build the Shera alpha Cen source for the three-plane system."""
         return build_alpha_cen_source(store, cfg=self.cfg)
 
     def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return the three-plane runtime bindings for non-structural keys."""
         return THREEPLANE_RUNTIME_BINDINGS
 
     def _compute_structural_hash(self) -> Optional[str]:
+        """Return the structural hash derived from the three-plane config."""
         return structural_hash_from_config(self.cfg)
 
     with_store = BaseSheraBinder.with_store
@@ -864,6 +899,10 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
     require ``allow_rebuild=True`` to rebuild the binder state. When
     ``.update_store()`` returns a new binder instance with the refreshed base
     store so the original binder remains unchanged.
+
+    The ``with_store`` attribute is an alias of
+    :meth:`BaseSheraBinder.with_store` to keep a stable public API. It preserves
+    immutable-style semantics by always returning a new binder instance.
     """
 
     cfg: SheraTwoPlaneConfig
@@ -877,6 +916,22 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         forward_spec: ParamSpec,
         base_forward_store: ParameterStore,
     ) -> None:
+        """Construct a binder for the two-plane Shera configuration.
+
+        Parameters
+        ----------
+        cfg : SheraTwoPlaneConfig
+            Fully prepared Shera two-plane configuration. Derived config
+            values expected by the optics/source builders should already be
+            present.
+        forward_spec : ParamSpec
+            Parameter specification describing the forward store, including
+            structural keys and derived entries.
+        base_forward_store : ParameterStore
+            Forward-style base store with derived values populated. The store
+            is validated against ``forward_spec`` and used as the immutable
+            baseline for evaluations.
+        """
         super().__init__(
             cfg=cfg,
             forward_spec=forward_spec,
@@ -884,18 +939,27 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
+        """Evaluate the Shera two-plane model directly.
+
+        Builds a fresh telescope using the two-plane optics and alpha Cen
+        source with ``eff_store`` and returns the modeled PSF output.
+        """
         return self._build_telescope(eff_store).model()
 
     def _build_optics(self, store: ParameterStore):
+        """Build the Shera two-plane optics stack."""
         return build_shera_twoplane_optics(self.cfg, store=store, spec=self.forward_spec)
 
     def _build_source(self, store: ParameterStore):
+        """Build the Shera alpha Cen source for the two-plane system."""
         return build_alpha_cen_source(store, cfg=self.cfg)
 
     def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return the two-plane runtime bindings for non-structural keys."""
         return TWOPLANE_RUNTIME_BINDINGS
 
     def _compute_structural_hash(self) -> Optional[str]:
+        """Return the structural hash derived from the two-plane config."""
         return structural_hash_for_twoplane(self.cfg)
 
     with_store = BaseSheraBinder.with_store
