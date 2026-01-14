@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace as dataclass_replace
+import importlib.resources as resources
 from typing import Optional, Tuple, Self
 from pathlib import Path
 
@@ -322,17 +323,21 @@ class SheraThreePlaneConfig(BaseConfig):
     """
 
 
+def default_diffractive_pupil_path() -> str:
+    """Resolve the default diffractive pupil path as a string."""
+    try:
+        return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
+    except Exception:
+        return str(Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy")
+
+
 
 # ---------------------------------------------------------------------
 # Named point designs
 # ---------------------------------------------------------------------
 
 # Define the path to the default diffractive pupil file
-_THIS_DIR = Path(__file__).resolve().parent          # .../dluxshera/optics
-_PACKAGE_ROOT = _THIS_DIR.parent                     # .../dluxshera
-_DATA_DIR = _PACKAGE_ROOT / "data"                   # .../dluxshera/data
-
-DEFAULT_DP_PATH = _DATA_DIR / "diffractive_pupil.npy"
+DEFAULT_DP_PATH = default_diffractive_pupil_path()
 
 SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     design_name="shera_testbed",
@@ -364,7 +369,7 @@ SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     secondary_noll_indices=tuple(range(4, 12)),
 
     # --- diffractive pupil ---
-    diffractive_pupil_path=str(DEFAULT_DP_PATH),
+    diffractive_pupil_path=DEFAULT_DP_PATH,
     dp_design_wavelength_m=550e-9,
 )
 
@@ -398,6 +403,6 @@ SHERA_FLIGHT_CONFIG = SheraThreePlaneConfig(
     primary_noll_indices=tuple(range(4, 12)),
     secondary_noll_indices=tuple(range(4, 12)),
 
-    diffractive_pupil_path=str(DEFAULT_DP_PATH),
+    diffractive_pupil_path=DEFAULT_DP_PATH,
     dp_design_wavelength_m=550e-9,
 )
