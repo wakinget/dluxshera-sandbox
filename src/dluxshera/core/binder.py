@@ -48,6 +48,13 @@ class BaseSheraBinder:
     call.
     """
 
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig
+    forward_spec: ParamSpec
+    base_forward_store: ParameterStore
+    structural_hash: Optional[str]
+    _detector: Optional[dl.LayeredDetector]
+    telescope: dl.Telescope
+
     def __init__(
         self,
         cfg,
