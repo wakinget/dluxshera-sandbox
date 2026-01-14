@@ -42,7 +42,11 @@ import numpy as np
 import numpy.random._generator as rng
 import jax.random as jr
 
-from dluxshera.optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
+from dluxshera.optics.config import (
+    SHERA_TESTBED_CONFIG,
+    SheraThreePlaneConfig,
+    default_diffractive_pupil_path,
+)
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import (
     ParamKey,
@@ -85,8 +89,7 @@ plt.rcParams['image.cmap'] = inferno
 
 
 # Directories
-_PACKAGE_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DP_PATH = _PACKAGE_ROOT / "data" / "diffractive_pupil.npy"
+DEFAULT_DP_PATH = default_diffractive_pupil_path()
 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 DEFAULT_RESULTS_DIR = Path("Results/refactored_astrometry_retrieval_"+timestamp)
 

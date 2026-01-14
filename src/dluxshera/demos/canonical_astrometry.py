@@ -19,7 +19,7 @@ from dluxshera.core.binder import SheraThreePlaneBinder
 from dluxshera.inference.inference import run_shera_image_gd_eigen
 from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.optics.config import SheraThreePlaneConfig
+from dluxshera.optics.config import SheraThreePlaneConfig, default_diffractive_pupil_path
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import (
     ParamKey,
@@ -31,8 +31,7 @@ from dluxshera.params.store import ParameterStore, subset_store
 from dluxshera.plot.plotting import plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 
 DEFAULT_RESULTS_DIR = Path("Results/CanonicalAstrometryDemo")
-_PACKAGE_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DP_PATH = _PACKAGE_ROOT / "data" / "diffractive_pupil.npy"
+DEFAULT_DP_PATH = default_diffractive_pupil_path()
 
 
 @dataclass
@@ -126,7 +125,7 @@ def build_system(
         n_struts=4,
         strut_width_m=0.002,
         strut_rotation_deg=45.0,
-        diffractive_pupil_path=str(DEFAULT_DP_PATH),
+        diffractive_pupil_path=DEFAULT_DP_PATH,
         dp_design_wavelength_m=550e-9,
         primary_noll_indices=(4, 5, 6, 7, 8, 9, 10, 11),
         secondary_noll_indices=(4, 5, 6, 7, 8, 9, 10, 11),

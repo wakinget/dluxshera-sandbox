@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import importlib.resources as resources
-from pathlib import Path
-
 import dLux as dl
 import dLux.layers as dll
 import dLux.utils as dlu
@@ -10,8 +7,9 @@ import dLuxToliman as dlT
 import jax.numpy as np
 import jax.random as jr
 
-from ..legacy.params import SheraThreePlaneParams, SheraTwoPlaneParams
-from ..optics.optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
+from ..legacy.params import SheraThreePlaneParams
+from ..optics.config import default_diffractive_pupil_path
+from ..optics.optical_systems import SheraThreePlaneOptics
 from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
 from ..utils.utils import nanrms
 
@@ -26,16 +24,7 @@ __all__ = [
 _UNSET = object()
 
 
-def _default_dp_path() -> str:
-    # Preferred: package resource (works in editable installs + normal installs)
-    try:
-        return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
-    except Exception:
-        # Fallback: resolve relative to this file (…/dluxshera/legacy/modeling.py -> …/dluxshera/data/…)
-        return str((Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy"))
-
-
-DEFAULT_DP_PATH = _default_dp_path()
+DEFAULT_DP_PATH = default_diffractive_pupil_path()
 
 
 def SheraThreePlane_ForwardModel(params, return_model=False, mask=_UNSET):
@@ -299,12 +288,12 @@ class SheraThreePlane_Model(dl.Telescope):
 
     def extract_params(self, names=None):
         """
-        Extract the current parameters from this SheraTwoPlane_Model instance.
+        Extract the current parameters from this SheraThreePlane_Model instance.
 
         Returns
         -------
-        SheraTwoPlaneParams
-            A new SheraTwoPlaneParams object populated with the current model parameters.
+        SheraThreePlaneParams
+            A new SheraThreePlaneParams object populated with the current model parameters.
         """
 
         # Determine the point design from the model diameter

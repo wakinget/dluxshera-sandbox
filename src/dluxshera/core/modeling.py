@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import dLuxToliman as dlT
 
 from ..optics.builder import build_shera_threeplane_optics
