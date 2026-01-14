@@ -53,7 +53,7 @@ dLuxShera/
 │  ├─ dev/working_plan.md   ← this document
 │  └─ tutorials/{modeling_overview.md,canonical_astrometry_demo.md}
 ├─ src/dluxshera/
-│  ├─ core/{binder.py,modeling.py,universe.py}
+│  ├─ core/{binder.py,universe.py}
 │  ├─ inference/{losses.py,prior.py,numpyro_bridge.py,optimization.py}
 │  ├─ params/{spec.py,store.py,registry.py,packing.py,transforms.py,shera_threeplane_transforms.py}
 │  ├─ optics/{config.py,builder.py,optical_systems.py}
@@ -168,7 +168,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 - **Derived placement:** With the default forward spec + refreshed forward store (via `tests.helpers.make_forward_store`), derived values such as `system.plate_scale_as_per_pix` are present directly in the base forward store prior to any evaluation.
 
 - `SheraThreePlane_Model` remains the public entry point; new plumbing should remain internal to avoid churn in existing scripts.
-- Legacy files (`modeling.py`, optics helpers) still carry pre-refactor pathways; the refactor must avoid breaking current examples until replacements land.
+- Legacy optics helpers still carry pre-refactor pathways; the refactor must avoid breaking current examples until replacements land.
 
 ---
 
@@ -294,16 +294,16 @@ Status: analysis + historical mapping; two-plane refactor implementation now lan
 For a concise mapping of legacy APIs to the current architecture, see `docs/archive/LEGACY_APIS_AND_MIGRATION.md`.
 
 **Current two-plane parameter vocabulary and behavior (legacy `SheraTwoPlaneParams`/`SheraTwoPlane_Model`)**
-- Point designs expose primary/secondary diameters, PSF pixel scale (primitive, arcsec/pix), bandpass width, and log flux; operational knobs include pupil/PSF sampling, binary astrometry (x/y offsets, separation in mas, PA in deg, contrast), central wavelength, number of wavelengths, and a single Zernike basis (Noll indices + amplitudes) applied to the primary pupil mask. Noise fields include calibrated/uncalibrated 1/f power-law/amplitude pairs. No explicit plate-scale derivation occurs; pixel scale is passed straight into the optics builder.【F:src/dluxshera/inference/optimization.py†L1224-L1312】【F:src/dluxshera/core/modeling.py†L330-L419】
-- Binary astrometry mirrors the three-plane vocabulary (x/y offsets, separation, PA, contrast, log_flux) and is forwarded to the `AlphaCen` source; no secondary-mirror parameters appear. Flux is handled as a stored log_flux scalar (no transform), and plate scale is treated as a primitive `psf_pixel_scale` handed directly to the optics and detector sampling (oversample=1).【F:src/dluxshera/core/modeling.py†L330-L419】
-- The optics path is Toliman-like: a two-plane `SheraTwoPlaneOptics` fed by wavefront/PSF sampling, oversample, pixel scale, aperture diameters, strut geometry, diffractive pupil (dp_design_wavel), and optional Zernike basis; primary Zernikes are normalized to nm before setting coefficients. Detector is a simple downsample layer; PSF sampling equals the provided oversample (hard-coded to 1 in the model).【F:src/dluxshera/core/modeling.py†L330-L384】【F:src/dluxshera/optics/optical_systems.py†L95-L190】
+- Point designs expose primary/secondary diameters, PSF pixel scale (primitive, arcsec/pix), bandpass width, and log flux; operational knobs include pupil/PSF sampling, binary astrometry (x/y offsets, separation in mas, PA in deg, contrast), central wavelength, number of wavelengths, and a single Zernike basis (Noll indices + amplitudes) applied to the primary pupil mask. Noise fields include calibrated/uncalibrated 1/f power-law/amplitude pairs. No explicit plate-scale derivation occurs; pixel scale is passed straight into the optics builder.【F:src/dluxshera/inference/optimization.py†L1224-L1312】
+- Binary astrometry mirrors the three-plane vocabulary (x/y offsets, separation, PA, contrast, log_flux) and is forwarded to the `AlphaCen` source; no secondary-mirror parameters appear. Flux is handled as a stored log_flux scalar (no transform), and plate scale is treated as a primitive `psf_pixel_scale` handed directly to the optics and detector sampling (oversample=1).
+- The optics path is Toliman-like: a two-plane `SheraTwoPlaneOptics` fed by wavefront/PSF sampling, oversample, pixel scale, aperture diameters, strut geometry, diffractive pupil (dp_design_wavel), and optional Zernike basis; primary Zernikes are normalized to nm before setting coefficients. Detector is a simple downsample layer; PSF sampling equals the provided oversample (hard-coded to 1 in the model).【F:src/dluxshera/optics/optical_systems.py†L95-L190】
 
 **SheraTwoPlaneOptics vs TolimanThreePlaneSystem**
 - SheraTwoPlaneOptics is an `AngularOpticalSystem` with only aperture + diffractive pupil layers, optional Zernike basis on the primary, and propagator knobs for PSF sampling, oversample, and pixel scale. It uses primary/secondary diameters and strut geometry to build a single pupil; no secondary mirror surface/aberrations or Fresnel relay are present. Aberrations are strictly Zernike-based (no 1/f WFE), and the diffractive pupil is loaded from a numpy mask and converted to an aberrated layer. This mirrors Toliman-style two-plane optics but with Shera-specific defaults (diameters 0.09/0.025 m, four struts at -45°, 550 nm design wavelength).【F:src/dluxshera/optics/optical_systems.py†L95-L190】
 
 **Two-plane vs three-plane comparison**
-- Shared: binary astrometry/flux knobs, central wavelength + bandwidth + wavelength sampling, pupil/PSF grid sizes, primary Zernike basis (nm-scaled), and calibrated/uncalibrated 1/f knobs (though the three-plane applies them to both mirrors). Both models hand binaries to `AlphaCen` with the same argument set and normalize Zernikes on the primary.【F:src/dluxshera/core/modeling.py†L120-L221】【F:src/dluxshera/core/modeling.py†L330-L419】
-- Three-plane-only: explicit mirror focal lengths, plane separation, detector pixel size, derived plate scale (EFL from two-mirror relay plus pixel size), and full secondary mirror aperture with its own Zernike basis and 1/f layers. The optics builder constructs a Fresnel relay (`SheraThreePlaneOptics`) and adds separate calibrated/uncalibrated WFE layers for both mirrors. Detector sampling uses `oversample=1` but plate scale comes from geometry unless overridden.【F:src/dluxshera/core/modeling.py†L120-L221】【F:src/dluxshera/inference/optimization.py†L1224-L1312】
+- Shared: binary astrometry/flux knobs, central wavelength + bandwidth + wavelength sampling, pupil/PSF grid sizes, primary Zernike basis (nm-scaled), and calibrated/uncalibrated 1/f knobs (though the three-plane applies them to both mirrors). Both models hand binaries to `AlphaCen` with the same argument set and normalize Zernikes on the primary.
+- Three-plane-only: explicit mirror focal lengths, plane separation, detector pixel size, derived plate scale (EFL from two-mirror relay plus pixel size), and full secondary mirror aperture with its own Zernike basis and 1/f layers. The optics builder constructs a Fresnel relay (`SheraThreePlaneOptics`) and adds separate calibrated/uncalibrated WFE layers for both mirrors. Detector sampling uses `oversample=1` but plate scale comes from geometry unless overridden.【F:src/dluxshera/inference/optimization.py†L1224-L1312】
 - Two-plane-only: primitive PSF pixel scale passed directly into `SheraTwoPlaneOptics`; no secondary mirror geometry/aberrations; no plane separation/focal lengths; 1/f maps inserted but only after the single aperture layer. The pipeline is strictly pupil → focal plane without Fresnel relay.
 
 **Mapping plan to refactor-era concepts**
