@@ -127,6 +127,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
   - Architecture: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,params_and_store.md,optimization_artifacts_and_plotting.md}`
   - Tutorials: `docs/tutorials/canonical_astrometry_demo.md`
   - Dev-facing: this plan (`docs/dev/working_plan.md`)
+  - Dev-facing: `docs/dev/style_guide.md` (Style guide)
 
 ---
 

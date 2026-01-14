@@ -207,6 +207,8 @@ Focus areas:
 - Migration and refactor history
 - Clear distinction between legacy and refactor-era APIs
 - Capturing “why we did this” alongside “what we did”
+- Maintain a project-wide style guide (`docs/dev/style_guide.md`) to keep
+  formatting and API conventions consistent during the refactor
 
 This theme reduces future cognitive load.
 

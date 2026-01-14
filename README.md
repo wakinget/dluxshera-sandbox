@@ -15,6 +15,7 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 - [Dev notes](docs/dev/):
   - [Roadmap](docs/dev/roadmap.md) (longer term goals + ideas)
   - [Working Plan](docs/dev/working_plan.md) (near term implementation plan)
+  - [Style guide](docs/dev/style_guide.md) (formatting + API conventions)
 
 ## Install
 
