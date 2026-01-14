@@ -5,8 +5,8 @@ import dLux.utils as dlu
 import dLux.layers as dll
 import dLux
 import dLuxToliman
-import os
 from ..utils.utils import scale_array
+from .config import default_diffractive_pupil_path
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
@@ -131,7 +131,7 @@ class TolimanOpticalSystem(AngularOpticalSystem()):
 
         # Generate Mask
         if mask is None:
-            path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
+            path = default_diffractive_pupil_path()
             # arr_in = np.load(path)
             # ratio = wf_npixels / arr_in.shape[-1]
             mask = scale_array(np.load(path), wf_npixels, order=1)
@@ -278,7 +278,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
 
         # Generate Mask
         if mask is None:
-            path = os.path.join(os.path.dirname(__file__), "diffractive_pupil.npy")
+            path = default_diffractive_pupil_path()
             mask = scale_array(np.load(path), wf_npixels, order=1)
 
             # Enforce full binary
