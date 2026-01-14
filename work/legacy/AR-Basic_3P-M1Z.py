@@ -14,17 +14,21 @@ import optax
 
 # Optics / inference
 from dluxshera.inference.optimization import (
-    FIM,
-    generate_fim_labels,
-    pack_params,
-    unpack_params,
-    get_optimiser,
-    get_lr_model,
-    get_lr_from_curvature,
     loss_fn,
     loss_with_injected,
     step_fn_general,
+)
+from dluxshera.legacy.optimization import (
+    FIM,
+    generate_fim_labels,
+    get_optimiser,
+    get_lr_model,
+    get_lr_from_curvature,
     construct_priors_from_dict,
+)
+from dluxshera.legacy.params import (
+    pack_params,
+    unpack_params,
     ModelParams,
     SheraThreePlaneParams,
 )
