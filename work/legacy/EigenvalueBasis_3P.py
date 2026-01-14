@@ -16,9 +16,22 @@ import optax
 # import dLux as dl
 # import dLux.layers as dll
 # import dLux.utils as dlu
-from src.dluxshera.inference.optimization import get_optimiser, get_lr_from_curvature, loss_fn, step_fn_general, construct_priors_from_dict, loss_with_injected
-from src.dluxshera.inference.optimization import ModelParams, SheraThreePlaneParams, EigenParams
-from src.dluxshera.inference.optimization import FIM, generate_fim_labels, pack_params, unpack_params, build_basis
+from src.dluxshera.inference.optimization import loss_fn, step_fn_general, loss_with_injected
+from src.dluxshera.legacy.optimization import (
+    FIM,
+    generate_fim_labels,
+    get_optimiser,
+    get_lr_from_curvature,
+    construct_priors_from_dict,
+    build_basis,
+)
+from src.dluxshera.legacy.params import (
+    ModelParams,
+    SheraThreePlaneParams,
+    EigenParams,
+    pack_params,
+    unpack_params,
+)
 from src.dluxshera.core.modeling import SheraThreePlane_Model
 from src.dluxshera.utils.utils import calculate_log_flux, set_array, nanrms, save_prior_info, load_prior_info
 from src.dluxshera.utils.utils import save_results as write_results_xlsx, log_step_jsonl

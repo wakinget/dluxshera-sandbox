@@ -21,7 +21,7 @@ import dLux.utils as dlu
 import jax.numpy as np
 import jax.random as jr
 from ..optics.optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
-from ..inference.optimization import SheraTwoPlaneParams, SheraThreePlaneParams
+from ..legacy.params import SheraTwoPlaneParams, SheraThreePlaneParams
 from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
 from ..utils.utils import nanrms
 from pathlib import Path
@@ -638,4 +638,3 @@ def build_shera_threeplane_components(
         optics=optics,
         source=source,
     )
-
