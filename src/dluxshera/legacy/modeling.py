@@ -7,9 +7,9 @@ import dLuxToliman as dlT
 import jax.numpy as np
 import jax.random as jr
 
-from ..legacy.params import SheraThreePlaneParams
+from ..legacy.params import SheraThreePlaneParams, SheraTwoPlaneParams
 from ..optics.config import default_diffractive_pupil_path
-from ..optics.optical_systems import SheraThreePlaneOptics
+from ..optics.optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
 from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
 from ..utils.utils import nanrms
 
