@@ -13,7 +13,7 @@ import equinox as eqx
 import zodiax as zdx
 
 if TYPE_CHECKING:
-    from dluxshera.core.modeling import SheraThreePlane_Model
+    from dluxshera.legacy.modeling import SheraThreePlane_Model
 
 __all__ = [
     "BaseModeller",
@@ -546,7 +546,7 @@ def pack_params(values_pytree, params, model_template, from_model=False):
     Flatten values into a vector + labels.
     Can handle either ModelParams/SheraThreePlaneParams or a SheraThreePlane_Model.
     """
-    from dluxshera.core.modeling import SheraThreePlane_Model  # Importing locally avoids a circular import error
+    from dluxshera.legacy.modeling import SheraThreePlane_Model  # Importing locally avoids a circular import error
     labels = []
     flat_values = []
 
