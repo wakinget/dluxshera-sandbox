@@ -63,7 +63,6 @@ from dluxshera.inference.optimization import (
     fim_theta,
     EigenThetaMap,
 )
-from dluxshera.params.packing import build_index_map, build_eigen_index_map
 from dluxshera.inference.signals import build_signals
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
@@ -75,7 +74,7 @@ from dluxshera.plot.plotting import (
     plot_signals_grid,
 )
 from dluxshera.plot.printing import print_optimization_summary
-from dluxshera.params.packing import pack_params, unpack_params
+from dluxshera.params.packing import pack_params, unpack_params, build_index_map, build_eigen_index_map
 
 # Plotting
 import matplotlib.pyplot as plt
