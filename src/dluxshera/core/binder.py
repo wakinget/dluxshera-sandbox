@@ -207,15 +207,95 @@ class BaseSheraBinder:
     # ------------------------------------------------------------------
 
     def _build_detector(self) -> dl.LayeredDetector:
+        """Construct the detector instance for the binder.
+
+        Called during binder initialization to create a detector that can be
+        cached across model evaluations. Subclasses may override this to
+        provide a different detector topology or to derive detector parameters
+        from the configuration.
+
+        Returns
+        -------
+        dl.LayeredDetector
+            Detector instance used by the cached telescope and runtime updates.
+
+        Notes
+        -----
+        The returned detector is intended to be immutable at runtime; changing
+        detector structure should trigger a full binder rebuild instead of
+        runtime bindings.
+        """
         return dl.LayeredDetector(layers=[("downsample", dl.Downsample(self.cfg.oversample))])
 
     def _build_optics(self, store: ParameterStore):  # pragma: no cover - abstract hook
+        """Build the optics model for the given store.
+
+        Called when constructing a telescope (either at initialization or via
+        direct model evaluation). Implementations must read any required
+        structural and non-structural keys from ``store``.
+
+        Parameters
+        ----------
+        store : ParameterStore
+            Fully validated store providing both structural and runtime values.
+
+        Returns
+        -------
+        dl.OpticalLayer | dl.Optics
+            Optics object compatible with ``dl.Telescope``.
+
+        Notes
+        -----
+        Subclasses should treat structural changes in ``store`` as requiring a
+        rebuild. Non-structural keys that can be updated at runtime should be
+        surfaced via :meth:`_runtime_bindings`.
+        """
         raise NotImplementedError
 
     def _build_source(self, store: ParameterStore):  # pragma: no cover - abstract hook
+        """Build the source model for the given store.
+
+        Called when constructing a telescope or applying runtime updates that
+        change source parameters. Subclasses should read store values needed
+        to build the source and return a ``dl.Source`` compatible object.
+
+        Parameters
+        ----------
+        store : ParameterStore
+            Store providing source parameters. Typically contains non-
+            structural keys, but may include structural keys if the source
+            configuration is structural for the system.
+
+        Returns
+        -------
+        dl.Source
+            Source object to inject into the telescope model.
+
+        Notes
+        -----
+        Source construction is typically lightweight; it is rebuilt for
+        runtime updates even when optics are updated via bindings.
+        """
         raise NotImplementedError
 
     def _build_telescope(self, store: ParameterStore) -> dl.Telescope:
+        """Build a full telescope model from the given store.
+
+        Called during initialization (to create the cached telescope) and by
+        direct model evaluation paths. Subclasses may override this if they
+        need custom telescope assembly logic.
+
+        Parameters
+        ----------
+        store : ParameterStore
+            Validated store containing all parameters required to build the
+            source, optics, and detector.
+
+        Returns
+        -------
+        dl.Telescope
+            Fully constructed telescope.
+        """
         return dl.Telescope(
             source=self._build_source(store),
             optics=self._build_optics(store),
@@ -223,15 +303,96 @@ class BaseSheraBinder:
         )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:  # pragma: no cover - abstract hook
+        """Evaluate the model using a fully merged effective store.
+
+        Called by :meth:`model` after merging a non-structural store delta with
+        the base store. Subclasses should implement this as a direct modeling
+        path (usually by building a telescope and calling ``model()``).
+
+        Parameters
+        ----------
+        eff_store : ParameterStore
+            Fully validated store that includes all values needed for a model
+            evaluation.
+
+        Returns
+        -------
+        jax.numpy.ndarray
+            The evaluated PSF model output.
+
+        Notes
+        -----
+        This method should not mutate the binder; use runtime bindings or
+        rebuild logic for structural changes instead of modifying state here.
+        """
         raise NotImplementedError
 
     def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return runtime binding pairs for non-structural keys.
+
+        Runtime bindings map store keys to optics attributes (or paths) that
+        can be updated without rebuilding the full optics model. Subclasses
+        should override this to list the non-structural keys eligible for
+        fast-path updates.
+
+        Returns
+        -------
+        tuple[tuple[str, str], ...]
+            Sequence of ``(store_key, optics_path)`` bindings. Defaults to
+            empty, meaning no runtime updates are supported.
+
+        Notes
+        -----
+        Keys returned here are considered **non-structural** for the purposes
+        of :meth:`_structural_store_keys`, and updates to them will use runtime
+        bindings instead of triggering a rebuild.
+        """
         return ()
 
     def _compute_structural_hash(self) -> Optional[str]:
+        """Compute a structural hash for the current configuration.
+
+        Called during initialization and store updates to detect structural
+        configuration changes that require a full rebuild. Subclasses should
+        return a stable hash string or ``None`` if structural hashing is not
+        applicable.
+
+        Returns
+        -------
+        str | None
+            Hash representing structural config state, or ``None``.
+
+        Notes
+        -----
+        The structural hash is compared against the stored value to determine
+        if runtime bindings are safe or if a rebuild is required.
+        """
         return None
 
     def _update_telescope_runtime(self, store: ParameterStore) -> dl.Telescope:
+        """Apply runtime bindings to update the cached telescope.
+
+        Called from :meth:`update_store` when structural changes are absent.
+        Uses the runtime binding map to update optics parameters in-place (via
+        ``apply_runtime_bindings``) and rebuilds the source as needed.
+
+        Parameters
+        ----------
+        store : ParameterStore
+            Validated store containing updated non-structural values.
+
+        Returns
+        -------
+        dl.Telescope
+            Telescope with updated optics and source, reusing the cached
+            detector.
+
+        Notes
+        -----
+        This path is performance-oriented: it avoids rebuilding the full
+        optics when only non-structural parameters change. Structural keys
+        must be excluded from ``store`` for this path to remain valid.
+        """
         optics = apply_runtime_bindings(
             self.telescope.optics,
             store,
@@ -245,7 +406,29 @@ class BaseSheraBinder:
     # ------------------------------------------------------------------
 
     def _merge_store(self, store_delta: Optional[ParameterStore]) -> ParameterStore:
-        """Merge a (possibly partial) store into the base forward store."""
+        """Merge a (possibly partial) store into the base forward store.
+
+        Called by :meth:`model` to overlay a delta of non-structural values
+        onto the baseline store. The delta is validated against the forward
+        spec and may be partial; the resulting store is a full, validated
+        forward store.
+
+        Parameters
+        ----------
+        store_delta : ParameterStore | None
+            Partial overlay of values. When ``None``, the base store is
+            returned unchanged.
+
+        Returns
+        -------
+        ParameterStore
+            The merged forward store used for evaluation.
+
+        Notes
+        -----
+        This helper does not accept structural changes; those are handled by
+        :meth:`update_store` and require a rebuild.
+        """
 
         if store_delta is None:
             return self.base_forward_store
@@ -259,7 +442,22 @@ class BaseSheraBinder:
         return self.base_forward_store.replace(store_delta.as_dict())
 
     def _leaf_index(self) -> dict[str, list[str]]:
-        """Build an index mapping leaf names to full store paths."""
+        """Build an index mapping leaf names to full store paths.
+
+        Called by ``__dir__`` and ``__getattr__`` to allow ergonomic access to
+        store values by leaf name (suffix). This is a read-only helper that
+        scans the base store keys.
+
+        Returns
+        -------
+        dict[str, list[str]]
+            Mapping of leaf name to all matching fully-qualified store keys.
+
+        Notes
+        -----
+        Leaf-name access is only provided when the leaf is unambiguous; this
+        helper surfaces all candidates so callers can enforce uniqueness.
+        """
 
         leaf_index: dict[str, list[str]] = {}
 
@@ -361,7 +559,24 @@ class BaseSheraBinder:
         return StoreNamespace(self.base_forward_store, prefix)
 
     def _structural_store_keys(self) -> set[str]:
-        """Return store keys treated as structural for this binder."""
+        """Return store keys treated as structural for this binder.
+
+        Called by :meth:`model` and :meth:`update_store` to separate
+        structural keys from non-structural runtime bindings. Structural keys
+        are expected to require a full rebuild when they change.
+
+        Returns
+        -------
+        set[str]
+            Keys considered structural for this binder instance.
+
+        Notes
+        -----
+        The base structural set is derived from the forward spec (keys under
+        ``system.`` and ``band.``). Keys listed in :meth:`_runtime_bindings`
+        are explicitly treated as **non-structural** and removed from the
+        set so they can be updated via runtime bindings.
+        """
 
         structural_keys = {
             key
@@ -372,7 +587,17 @@ class BaseSheraBinder:
         return structural_keys - runtime_keys
 
     def structural_store_keys(self) -> set[str]:
-        """Return the structural store keys for this binder."""
+        """Return the structural store keys for this binder.
+
+        Public wrapper around :meth:`_structural_store_keys`. Use this to
+        inspect which keys are treated as structural (rebuild-required)
+        versus non-structural (runtime-bound) for the current binder.
+
+        Returns
+        -------
+        set[str]
+            Structural store keys after accounting for runtime bindings.
+        """
 
         return self._structural_store_keys()
 
