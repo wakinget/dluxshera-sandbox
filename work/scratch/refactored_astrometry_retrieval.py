@@ -63,6 +63,8 @@ from dluxshera.inference.optimization import (
 )
 from dluxshera.inference.signals import build_signals
 from dluxshera.plot.plotting import (
+    apply_plot_defaults,
+    get_default_cmaps,
     plot_fim,
     plot_parameter_history,
     plot_psf_comparison,
@@ -73,21 +75,13 @@ from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params, build_index_map
 
 # Plotting
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 
-inferno = mpl.colormaps["inferno"]
-seismic = mpl.colormaps["seismic"]
-coolwarm = mpl.colormaps["coolwarm"]
-
-inferno.set_bad("k", 0.5)
-seismic.set_bad("k", 0.5)
-coolwarm.set_bad("k", 0.5)
-
-plt.rcParams['image.cmap'] = 'inferno'
-plt.rcParams["font.family"] = "serif"
-plt.rcParams["image.origin"] = 'lower'
-plt.rcParams['figure.dpi'] = 120
+# Load default colormaps + apply default settings
+cmaps = get_default_cmaps()
+inferno = cmaps["inferno"]
+apply_plot_defaults()
+plt.rcParams['image.cmap'] = inferno
 
 
 # Directories
