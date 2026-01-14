@@ -385,7 +385,8 @@ def build_legacy_shera_threeplane_model(
     should use the binder-based pipeline instead of this bridge.
     """
 
-    from ..core.modeling import SheraThreePlane_Model, SheraThreePlaneParams
+    from ..legacy.modeling import SheraThreePlane_Model
+    from ..legacy.params import SheraThreePlaneParams
 
     warnings.warn(
         "build_legacy_shera_threeplane_model is deprecated and exists only for "
