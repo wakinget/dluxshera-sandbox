@@ -27,7 +27,7 @@ from src.dluxshera.legacy.params import (
     SheraThreePlaneParams,
     pack_params,
 )
-from src.dluxshera.core.modeling import SheraThreePlane_Model
+from src.dluxshera.legacy.modeling import SheraThreePlane_Model
 from src.dluxshera.utils.utils import calculate_log_flux, set_array, nanrms, save_prior_info, load_prior_info
 
 # Plotting/visualisation

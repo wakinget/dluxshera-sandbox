@@ -29,7 +29,7 @@ from dluxshera.inference.optimization import (
     ModelParams,
     SheraThreePlaneParams,
 )
-from dluxshera.core.modeling import SheraThreePlane_Model
+from dluxshera.legacy.modeling import SheraThreePlane_Model
 from dluxshera.utils.utils import (
     calculate_log_flux,
     nanrms,

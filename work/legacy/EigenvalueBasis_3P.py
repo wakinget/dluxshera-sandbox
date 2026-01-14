@@ -32,7 +32,7 @@ from src.dluxshera.legacy.params import (
     pack_params,
     unpack_params,
 )
-from src.dluxshera.core.modeling import SheraThreePlane_Model
+from src.dluxshera.legacy.modeling import SheraThreePlane_Model
 from src.dluxshera.utils.utils import calculate_log_flux, set_array, nanrms, save_prior_info, load_prior_info
 from src.dluxshera.utils.utils import save_results as write_results_xlsx, log_step_jsonl
 from src.dluxshera.plot.plotting import merge_cbar, plot_psf_comparison, plot_parameter_history

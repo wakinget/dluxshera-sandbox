@@ -32,7 +32,7 @@ from dluxshera.legacy.params import (
     ModelParams,
     SheraThreePlaneParams,
 )
-from dluxshera.core.modeling import SheraThreePlane_Model
+from dluxshera.legacy.modeling import SheraThreePlane_Model
 
 # Utilities (math / array helpers)
 from dluxshera.utils.utils import (
