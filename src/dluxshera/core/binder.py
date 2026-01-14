@@ -54,6 +54,37 @@ class BaseSheraBinder:
         forward_spec: ParamSpec,
         base_forward_store: ParameterStore,
     ) -> None:
+        """Initialize the binder with a config, parameter spec, and base store.
+
+        This sets up the shared baseline state used by all binder evaluations:
+        the configuration, parameter spec, a validated base forward store, and
+        cached telescope/detector instances for fast-path evaluations. Use this
+        when constructing a new binder from a known-good configuration and
+        fully populated forward store.
+
+        Parameters
+        ----------
+        cfg : Any
+            Configuration object for the optics/source builders. The object is
+            stored as-is and may be a dataclass with attributes accessed via
+            ``__getattr__``/``get``.
+        forward_spec : ParamSpec
+            Parameter specification describing the allowed store keys and
+            their metadata (including structural keys).
+        base_forward_store : ParameterStore
+            Forward-style store containing the baseline parameter values.
+            Derived values are allowed and validated against ``forward_spec``.
+
+        Returns
+        -------
+        None
+            Initializes the binder instance in-place.
+
+        Raises
+        ------
+        ValueError
+            If ``base_forward_store`` fails validation against ``forward_spec``.
+        """
         self.cfg = cfg
         self.forward_spec = forward_spec
         self.structural_hash = self._compute_structural_hash()
@@ -70,6 +101,18 @@ class BaseSheraBinder:
 
 
     def __dir__(self):
+        """List attribute names available on the binder.
+
+        This augments the default ``dir()`` output with configuration fields,
+        store namespace prefixes, and unique leaf keys (when unambiguous).
+        Use this for discovery in interactive sessions; it does not mutate the
+        binder and only reflects the current base store/config.
+
+        Returns
+        -------
+        list[str]
+            Sorted attribute names that can be accessed on the binder.
+        """
         entries = set(super().__dir__())
         reserved = BINDER_RESERVED_NAMES
 
@@ -103,6 +146,34 @@ class BaseSheraBinder:
         return sorted(entries)
 
     def __getattr__(self, name):
+        """Resolve dynamic attributes from the config or base store.
+
+        Resolution order:
+        1) Configuration attributes (e.g., ``binder.oversample``).
+        2) Namespace proxies for store prefixes (``binder.ns("prefix")``).
+        3) Unique leaf names in the store (unambiguous suffixes).
+
+        Use this for ergonomic access to configuration fields and store values.
+        For ambiguous leaf names, prefer ``binder.<prefix>.<leaf>`` or
+        ``binder.get("full.key")``.
+
+        Parameters
+        ----------
+        name : str
+            Attribute name being requested.
+
+        Returns
+        -------
+        Any
+            Configuration attribute value, store namespace proxy, or store
+            value.
+
+        Raises
+        ------
+        AttributeError
+            If ``name`` is reserved, missing, or refers to an ambiguous leaf
+            name in the store.
+        """
         if name in BINDER_RESERVED_NAMES:
             raise AttributeError(name)
 
@@ -206,7 +277,34 @@ class BaseSheraBinder:
     # ------------------------------------------------------------------
 
     def get(self, paths, default=None):
-        """Retrieve values from the binder configuration or base store."""
+        """Retrieve values from the configuration or base store.
+
+        This method is a convenience accessor that reads configuration fields
+        (by attribute name) or store values (by key). Use it when you need a
+        uniform accessor that works for both config fields and store entries.
+        When ``paths`` is a sequence, a list of resolved values is returned.
+
+        Parameters
+        ----------
+        paths : str | Sequence[str]
+            A single config attribute name or store key, or a sequence of them.
+            Store keys containing ``"."`` are treated as fully-qualified keys.
+        default : Any, optional
+            Default to return if the store key is missing. When ``None``, a
+            missing key raises the underlying store error.
+
+        Returns
+        -------
+        Any | list[Any]
+            The resolved value(s) from config or store.
+
+        Raises
+        ------
+        KeyError
+            If a store key is missing and ``default`` is ``None``.
+        AttributeError
+            If a configuration attribute is missing.
+        """
 
         if isinstance(paths, (list, tuple)):
             return [self.get(path, default=default) for path in paths]
@@ -225,7 +323,28 @@ class BaseSheraBinder:
         return self.base_forward_store.get(path, default)
 
     def ns(self, prefix: str) -> StoreNamespace:
-        """Return a StoreNamespace proxy for a prefix in the base forward store."""
+        """Return a namespace proxy for a store prefix.
+
+        This is a typed convenience wrapper around store paths: it returns a
+        ``StoreNamespace`` that exposes ``<prefix>.<key>`` entries as attributes.
+        Use this to access grouped store values (e.g., ``binder.ns("system")``).
+
+        Parameters
+        ----------
+        prefix : str
+            Namespace prefix (must be a valid Python identifier and not a
+            reserved binder name).
+
+        Returns
+        -------
+        StoreNamespace
+            Proxy object for accessing store values under the given prefix.
+
+        Raises
+        ------
+        ValueError
+            If the prefix is invalid, reserved, or no keys exist under it.
+        """
 
         if not isinstance(prefix, str) or not prefix.isidentifier():
             raise ValueError(f"Invalid namespace prefix: {prefix!r}")
@@ -265,13 +384,32 @@ class BaseSheraBinder:
     ) -> jnp.ndarray:
         """Evaluate the Shera PSF for an optional store overlay.
 
-        With ``store_delta=None`` this uses the stored telescope directly
-        for a fast-path evaluation that reuses the persistent binder state.
-        When providing a ``store_delta`` the binder only accepts non-structural
-        keys by default; this is the slower path that merges an overlay and
-        evaluates with updated values. Pass ``allow_rebuild=True`` to validate
-        a full store and delegate to :meth:`update_store` when structural keys
-        need to change.
+        Use this as the primary evaluation API. With ``store_delta=None``, the
+        cached telescope is reused for a fast-path model evaluation. When a
+        ``store_delta`` is provided, the delta is merged with the base store
+        and evaluated through the direct model path. Structural keys are not
+        accepted by default; pass ``allow_rebuild=True`` to rebuild the binder
+        state via :meth:`update_store` when structural changes are required.
+
+        Parameters
+        ----------
+        store_delta : ParameterStore, optional
+            Overlay of parameter values to merge onto the base store. May
+            contain only non-structural keys unless ``allow_rebuild=True``.
+        allow_rebuild : bool, optional
+            When ``True``, structural keys are accepted and the binder is
+            rebuilt via :meth:`update_store` before evaluation.
+
+        Returns
+        -------
+        jax.numpy.ndarray
+            PSF model evaluated with the effective store.
+
+        Raises
+        ------
+        ValueError
+            If structural keys are present in ``store_delta`` and
+            ``allow_rebuild`` is ``False``.
         """
 
         if store_delta is None:
@@ -314,7 +452,28 @@ class BaseSheraBinder:
     # ------------------------------------------------------------------
 
     def with_store(self, new_base_store: ParameterStore):
-        """Return a new Binder sharing cfg/spec but with a different base store."""
+        """Return a new binder that uses a different base store.
+
+        This is an immutable-style helper: it constructs a new binder instance
+        with the same configuration and parameter specification but a new base
+        store. Use this when you want to swap the baseline store while keeping
+        the current config/spec.
+
+        Parameters
+        ----------
+        new_base_store : ParameterStore
+            Fully populated base store to use for the new binder.
+
+        Returns
+        -------
+        BaseSheraBinder
+            New binder instance with the updated base store.
+
+        Raises
+        ------
+        ValueError
+            If ``new_base_store`` fails validation against ``forward_spec``.
+        """
 
         return self.__class__(
             cfg=self.cfg,
@@ -323,15 +482,35 @@ class BaseSheraBinder:
         )
 
     def update_store(self, store: ParameterStore):
-        """Return a new Binder with an updated base store.
+        """Return a new binder with an updated base store.
 
-        The incoming store is validated against ``forward_spec``. If the
-        configuration structure has changed (based on the stored structural
-        hash), the telescope is rebuilt and a warning is emitted. Otherwise the
-        telescope optics are updated in-place via runtime bindings for a
-        lightweight refresh. Use ``update_store`` when you want a new baseline
-        (e.g., to make a structural change or to persist a new truth store)
-        rather than supplying a per-call overlay.
+        This is the immutable-style path for changing the baseline store. The
+        incoming store is validated against ``forward_spec`` and then compared
+        against the structural hash and structural store keys. If structural
+        changes are detected, a new binder is created via ``with_store`` and a
+        warning is emitted; otherwise runtime bindings are applied to refresh
+        the cached telescope without a full rebuild. Use this to persist a new
+        baseline store or when structural changes are intended.
+
+        Parameters
+        ----------
+        store : ParameterStore
+            Full base store with derived values populated.
+
+        Returns
+        -------
+        BaseSheraBinder
+            New binder instance with refreshed base store and telescope state.
+
+        Raises
+        ------
+        ValueError
+            If ``store`` fails validation against ``forward_spec``.
+
+        Notes
+        -----
+        This method never mutates the existing binder instance; it always
+        returns a new binder (either a full rebuild or a runtime-updated copy).
         """
 
         validated_store = store.validate_against(
