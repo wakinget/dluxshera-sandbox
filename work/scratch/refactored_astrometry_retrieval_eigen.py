@@ -43,21 +43,20 @@ import numpy as np
 import numpy.random._generator as rng
 import jax.random as jr
 
-from dluxshera.systems import (
+from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneConfig,
+    SHERA_FLIGHT_CONFIG,
+    SheraThreePlaneBinder,
     default_diffractive_pupil_path,
+    build_forward_spec_from_config,
 )
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import (
     ParamKey,
     ParamSpec,
-    build_forward_model_spec_from_config,
     make_inference_subspec, build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived, strip_structural
-from dluxshera.params.transforms import get_resolver
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
     generate_fim_labels_refactor,
@@ -152,13 +151,13 @@ cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
 
 # Create Parameter Specs from the config
 # parameter specs describe the available parameters and how they are used.
-# The forward model spec describes all the parameters required to produce a forward PSF
+# The forward spec describes all the parameters required to produce a forward PSF
 # Most parameters are considered 'primitive' like the binary X/Y position or the pixel pitch
 # Some parameters are 'derived' and are computed using a specific registered transform
 # Ex: system.focal_length_m derived from system.m1_focal_length_m, system.m2_focal_length_m,
 #       and system.m1_m2_separation_m
 # Ex: system.plate_scale_as_per_pix derived from system.focal_length_m and system.pixel_pitch_m
-forward_spec = build_forward_model_spec_from_config(cfg)
+forward_spec = build_forward_spec_from_config(cfg)
 # The inference spec describes the set of parameters that we are allowed to solve for
 # In the inference spec, all parameters are considered 'primitive' for the purposes of the optimization
 # Ex: system.plate_scale_as_per_pix is 'derived' in the forward_spec, but 'primitive' in the inference_spec

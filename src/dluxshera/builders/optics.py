@@ -14,7 +14,7 @@ import dLux.layers as dll
 if TYPE_CHECKING:
     from ..systems.three_plane import SheraThreePlaneConfig
     from ..systems.two_plane import SheraTwoPlaneConfig
-from ..optics.optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
+from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
 from ..params.store import ParameterStore
 from ..params.spec import ParamSpec
 
