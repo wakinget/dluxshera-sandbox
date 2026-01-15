@@ -252,7 +252,7 @@ print("Drawing starting point from priors...")
 rng_key, split_key = jr.split(rng_key)
 init_store = prior_spec.sample(rng_key=split_key, keys=infer_keys)
 # We use prior_spec.sample to draw a random sample from the priors using the stored prior_info
-init_psf = binder.model(strip_structural(init_store, structural_keys=binder.structural_keys()))
+init_psf = binder.model(strip_structural(init_store, structural_keys=binder.structural_store_keys()))
 # To compute the initial (perturbed) PSF, we can provide a store to the binder.model() method.
 # By default, the .model() method will throw an error if the user provides any structural parameter updates.
 # We can use the strip_structural helper to remove structural keys listed by the binder
@@ -436,7 +436,7 @@ else:
 final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 
 # Collect GD outputs
-final_psf = binder.model(strip_structural(final_store, structural_keys=binder.structural_keys()))
+final_psf = binder.model(strip_structural(final_store, structural_keys=binder.structural_store_keys()))
 
 ##################
 # Print a Summary

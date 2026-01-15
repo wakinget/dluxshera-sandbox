@@ -209,7 +209,7 @@ print("Drawing starting point from priors...")
 # Draw an initial point for the model from the priors
 rng_key, split_key = jr.split(rng_key)
 init_store = prior_spec.sample_near(forward_truth_store, rng_key=split_key, keys=infer_keys)
-init_psf = binder.model(strip_structural(init_store))
+init_psf = binder.model(strip_structural(init_store, structural_keys=binder.structural_store_keys()))
 
 print("Building the loss function...")
 # Build the Loss function
@@ -307,7 +307,7 @@ theta_final, trace = run_shera_gd(
 final_store = store_unpack_params(inference_subspec, theta_final, init_store)
 
 # Collect GD outputs
-final_psf = binder.model(strip_structural(final_store))
+final_psf = binder.model(strip_structural(final_store, structural_keys=binder.structural_store_keys()))
 
 ##################
 # Print a Summary
