@@ -9,8 +9,7 @@ import jax.numpy as jnp
 import dLux as dl
 
 from ..params.spec import ParamSpec
-from ..params.store import ParameterStore, strip_structural
-from ..params.store_namespace import StoreNamespace
+from ..params.store import ParameterStore, StoreNamespace, strip_structural
 
 
 class BaseConfig:

@@ -60,6 +60,27 @@ from .spec import ParamSpec, ParamKey
 _MISSING = object()
 
 
+class StoreNamespace:
+    """Expose dotted store keys under a shared prefix as attributes."""
+
+    def __init__(self, store: Any, prefix: str) -> None:
+        self._store = store
+        self._prefix = prefix
+
+    def __getattr__(self, leaf: str) -> Any:
+        key = f"{self._prefix}.{leaf}"
+        try:
+            return self._store.get(key)
+        except KeyError:
+            raise AttributeError(leaf) from None
+
+    def get(self, leaf: str, default: Any = None) -> Any:
+        """Return the value for ``prefix.leaf`` if present, else ``default``."""
+
+        key = f"{self._prefix}.{leaf}"
+        return self._store.get(key, default)
+
+
 @dataclass(frozen=True)
 class ParameterStore:
     """
@@ -210,10 +231,10 @@ class ParameterStore:
         3. The global default system configured for the transform resolver
 
         Derived transform modules are lazily imported via
-        :func:`dluxshera.params.transforms.ensure_registered`.
+        :func:`dluxshera.params.transform_registry.ensure_registered`.
         """
 
-        from .transforms import DEFAULT_SYSTEM_ID, ensure_registered, get_resolver
+        from .transform_registry import DEFAULT_SYSTEM_ID, ensure_registered, get_resolver
 
         sid = system_id or getattr(spec, "system_id", None) or DEFAULT_SYSTEM_ID
 
@@ -697,7 +718,7 @@ def refresh_derived(
         store. If False, only primitives/extras are returned.
     """
 
-    from .transforms import DEFAULT_SYSTEM_ID, ensure_registered, get_resolver
+    from .transform_registry import DEFAULT_SYSTEM_ID, ensure_registered, get_resolver
 
     sid = system_id or getattr(spec, "system_id", None) or DEFAULT_SYSTEM_ID
 
