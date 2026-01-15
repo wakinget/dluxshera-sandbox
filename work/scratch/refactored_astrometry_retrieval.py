@@ -85,7 +85,7 @@ import matplotlib.pyplot as plt
 cmaps = get_default_cmaps()
 inferno = cmaps["inferno"]
 apply_plot_defaults()
-plt.rcParams['image.cmap'] = inferno
+plt.rcParams["image.cmap"] = "inferno_nan"
 
 
 # Directories
