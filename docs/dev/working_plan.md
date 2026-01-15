@@ -341,6 +341,8 @@ Documentation:
 
 **Goal:** Make `builders/` the single source of truth for component assembly logic.
 
+Status: ✅ Complete — optics, source, and detector assembly are consolidated under `src/dluxshera/builders/` with binders delegating to these builders.
+
 Actions:
 - Move optics builder implementation into `builders/optics.py`:
   - build functions for two-plane and three-plane optics

@@ -4,11 +4,11 @@ import jax.numpy as jnp
 
 from dluxshera.systems.three_plane import SheraThreePlaneBinder
 from dluxshera.systems.two_plane import SheraTwoPlaneBinder
-from dluxshera.optics import builder
+from dluxshera.builders import optics as builder
 from dataclasses import replace
 
-from dluxshera.optics.builder import clear_threeplane_optics_cache
-from dluxshera.optics.builder import clear_twoplane_optics_cache
+from dluxshera.builders.optics import clear_threeplane_optics_cache
+from dluxshera.builders.optics import clear_twoplane_optics_cache
 from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.packing import pack_params as store_pack_params

@@ -9,7 +9,7 @@ import dLux as dl
 import jax.numpy as jnp
 
 from .base import BaseConfig, BaseSheraBinder
-from ..core.universe import build_alpha_cen_source
+from ..builders.source import build_alpha_cen_source
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
 
@@ -168,7 +168,7 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
 
     def _build_optics(self, store: ParameterStore):
         """Build the Shera two-plane optics stack."""
-        from ..optics.builder import build_shera_twoplane_optics
+        from ..builders.optics import build_shera_twoplane_optics
 
         return build_shera_twoplane_optics(self.cfg, store=store, spec=self.forward_spec)
 
@@ -178,13 +178,13 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
 
     def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return the two-plane runtime bindings for non-structural keys."""
-        from ..optics.builder import TWOPLANE_RUNTIME_BINDINGS
+        from ..builders.optics import TWOPLANE_RUNTIME_BINDINGS
 
         return TWOPLANE_RUNTIME_BINDINGS
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Return the structural hash derived from the two-plane config."""
-        from ..optics.builder import structural_hash_for_twoplane
+        from ..builders.optics import structural_hash_for_twoplane
 
         return structural_hash_for_twoplane(self.cfg)
 

@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import pytest
 
 from dluxshera.systems.three_plane import SheraThreePlaneBinder
-from dluxshera.optics.builder import build_legacy_shera_threeplane_model
+from dluxshera.legacy.builders import build_legacy_shera_threeplane_model
 from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG, SheraThreePlaneConfig
 from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.spec import (

@@ -4,8 +4,8 @@ import jax.numpy as jnp
 
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
-from dluxshera.optics import builder
-from dluxshera.optics.builder import (
+from dluxshera.builders import optics as builder
+from dluxshera.builders.optics import (
     build_shera_threeplane_optics,
     clear_threeplane_optics_cache,
     structural_hash_from_config,
