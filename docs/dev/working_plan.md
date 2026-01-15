@@ -187,7 +187,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 
 ---
 
-## 16) Tasks & Priorities (Updated)
+## 16) Tasks & Priorities
 
 Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
@@ -216,9 +216,257 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ⏳ Four-plane variant (specs, transforms, builder, resolver tests).  
 - ⏳ Ergonomic shims (`ModelParams`), deprecation path for legacy APIs, upstream PR prep.
 
-**Near-term hygiene**  
-- ⚠️ Plate-scale policy decision and potential future graph caching/multi-node hooks remain open.  
-- ⚠️ Sweep remaining scripts/tests for legacy unit-less astrometry aliases once canonical unit-aware keys settle.
+---
+
+## System / Binder / Builder Reorganization Plan (Phased)
+
+This section captures the agreed-upon plan for reorganizing the `dluxshera` codebase around a
+clear separation between **components**, **builders**, and **systems**, with the Binder acting
+as the authoritative system object that owns a persistent cached telescope.
+
+This plan is intended to be executed incrementally. The working plan should be updated as each
+phase is completed (checkboxes, notes, or links to commits), so this document remains the
+authoritative record of architectural intent.
+
+
+---
+
+### Architectural Goals (Summary)
+
+We are reorganizing the codebase to:
+
+- Improve discoverability: make it obvious where two-plane and three-plane systems are defined.
+- Reduce cross-file scatter of plane-specific logic.
+- Clarify layering and ownership:
+  - **components/** → dLux-compatible classes we own (Optics / Sources / Detectors)
+  - **builders/** → assembly logic, runtime bindings, structural hashing
+  - **systems/** → Binder + Config + presets + forward spec builders
+- Evolve the Binder to hold a **persistent cached `dl.Telescope`**, with:
+  - per-component structural vs runtime parameter policies,
+  - a clear conflict rule: *if any component says “structural”, the parameter is structural*.
+
+
+---
+
+### Phase 0 — Architecture Freeze (Design Only)
+
+**Goal:** Lock the mental model before touching code.
+
+Status:
+- Three-layer architecture agreed (components / builders / systems).
+- Binder semantics agreed (cached telescope, runtime vs structural update logic).
+- Legacy builders will live under `legacy/`.
+- Forward spec builders move out of `params/spec.py` into `systems/`.
+- `components/detectors.py` will be plural.
+- No backward-compatibility shims required during refactor.
+
+Deliverables:
+- This working plan section (kept up to date).
+- No code changes yet.
+
+Documentation:
+- This section is the authoritative design reference.
+
+
+---
+
+### Phase 1 — Create New Package Skeleton (No Behavior Changes)
+
+**Goal:** Introduce the new directory structure without changing semantics.
+
+Actions:
+- Create new packages:
+  - `src/dluxshera/systems/`
+  - `src/dluxshera/builders/`
+  - `src/dluxshera/components/`
+- Create placeholder files:
+  - `systems/base.py`
+  - `systems/two_plane.py`
+  - `systems/three_plane.py`
+  - `builders/optics.py`, `builders/source.py`, `builders/detector.py`
+  - `components/optics.py`, `components/sources.py`, `components/detectors.py`
+- Move `optical_systems.py` → `components/optics.py` (verbatim).
+- Move legacy builder logic into `legacy/builders.py`.
+
+Rules:
+- No refactoring of logic.
+- Imports may temporarily break.
+- Focus is topology, not correctness.
+
+Tests:
+- Not required to pass during this phase.
+
+Documentation:
+- Update this working plan with notes once skeleton is in place.
+
+
+---
+
+### Phase 2 — Systems Layer Extraction (Binder + Config + Presets)
+
+**Goal:** Make `systems/` the authoritative home of plane-specific logic.
+
+Actions:
+- Move `BaseBinder` into `systems/base.py`.
+- Move:
+  - `SheraTwoPlaneBinder` → `systems/two_plane.py`
+  - `SheraThreePlaneBinder` → `systems/three_plane.py`
+- Move configs out of optics:
+  - `SheraTwoPlaneConfig` → `systems/two_plane.py`
+  - `SheraThreePlaneConfig` → `systems/three_plane.py`
+- Move named presets (testbed / flight) alongside their systems.
+
+Outcome:
+- Opening `systems/two_plane.py` or `systems/three_plane.py` should give a complete picture
+  of that system’s configuration and Binder.
+
+Tests:
+- Fix imports and ensure basic scripts can import the new system modules.
+- Run:
+    PYTHONPATH=src pytest -q
+
+Documentation:
+- Update `code_structure.md` and/or `binder_and_graph.md` if references to `core/` remain.
+
+
+---
+
+### Phase 3 — Builder Consolidation and Ownership
+
+**Goal:** Make `builders/` the single source of truth for component assembly logic.
+
+Actions:
+- Move optics builder implementation into `builders/optics.py`:
+  - build functions for two-plane and three-plane optics
+  - runtime bindings
+  - structural hashing / structural subset helpers
+  - optional builder-level caches
+- Move `build_alpha_cen_source` into `builders/source.py`.
+- Add trivial `builders/detector.py` for symmetry.
+- Remove assembly logic from binders and components.
+
+Outcome:
+- Binders *call* builders.
+- Components define objects, not construction.
+- Runtime binding logic lives with the builder.
+
+Tests:
+- Update system binders to use builders.
+- Run:
+    PYTHONPATH=src pytest -q
+
+Documentation:
+- Update this working plan to mark Phase 3 complete.
+
+
+---
+
+### Phase 4 — Spec Ownership Realignment
+
+**Goal:** Align spec construction with system ownership.
+
+Actions:
+- Keep in `params/spec.py`:
+  - `ParamField`
+  - `ParamSpec`
+  - `build_inference_spec_basic`
+  - `make_inference_subspec`
+- Move forward spec builders out of `params/spec.py`:
+  - two-plane forward spec builder → `systems/two_plane.py`
+  - three-plane forward spec builder → `systems/three_plane.py`
+- Optionally normalize naming (e.g. `build_forward_spec_from_config`).
+
+Notes:
+- Inference spec remains shared across systems for now.
+- A `systems/spec_utils.py` may be introduced later if duplication emerges.
+
+Tests:
+- Update imports in scripts and binders.
+- Run:
+    PYTHONPATH=src pytest -q
+
+Documentation:
+- Update any docs referencing `params/spec.py` forward builders.
+
+
+---
+
+### Phase 5 — Params Consolidation
+
+**Goal:** Reduce cognitive overhead in the params subsystem.
+
+Actions:
+- Merge `StoreNamespace` into `params/store.py`.
+- Create `params/transform_registry.py`:
+  - move registry classes, resolver logic, dependency/cycle checks here.
+- Move all actual transform functions into `params/transforms.py`
+  (including contents of `shera_threeplane_transforms.py`).
+
+Tests:
+- Verify derived parameter resolution still works.
+- Run:
+    PYTHONPATH=src pytest -q
+
+Documentation:
+- Update `params_and_store.md` if needed.
+
+
+---
+
+### Phase 6 — Binder Behavior Evolution (Intentional Behavior Change)
+
+**Goal:** Implement the new Binder semantics cleanly, now that structure is stable.
+
+Actions:
+- Finalize cached telescope behavior.
+- Centralize structural vs runtime detection logic.
+- Apply runtime bindings per component (source / optics / detector).
+- Enforce rebuild policy explicitly.
+- Remove redundant optics-only caching inside Binder if telescope is cached.
+
+This is the phase where behavior changes are expected and intentional.
+
+Tests:
+- Add or update tests covering:
+  - runtime updates
+  - structural rebuild detection
+  - error behavior when rebuild is disallowed
+- Run:
+    PYTHONPATH=src pytest -q
+
+
+---
+
+### Phase 7 — Validation, Tests, and Documentation Alignment
+
+**Goal:** Ensure the new architecture is legible and stable.
+
+Actions:
+- Update:
+  - `binder_and_graph.md`
+  - `code_structure.md`
+  - any architecture diagrams or notes
+- Ensure examples and scripts use the new system modules.
+- Use tests and example scripts as validation (not backward compatibility).
+
+Ongoing:
+- Keep this working plan section updated as phases are completed.
+- Add notes or follow-up tasks as new insights emerge.
+
+
+---
+
+### Test Execution Notes
+
+All tests should be run from the repository root using:
+
+    PYTHONPATH=src pytest -q
+
+This should be noted whenever new tests are added or test behavior changes during the refactor.
+
+
+
+
 
 ---
 
