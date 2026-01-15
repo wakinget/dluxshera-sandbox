@@ -235,7 +235,9 @@ class BaseSheraBinder:
         detector structure should trigger a full binder rebuild instead of
         runtime bindings.
         """
-        return dl.LayeredDetector(layers=[("downsample", dl.Downsample(self.cfg.oversample))])
+        from ..builders.detector import build_detector
+
+        return build_detector(self.cfg)
 
     def _build_optics(self, store: ParameterStore):  # pragma: no cover - abstract hook
         """Build the optics model for the given store.
@@ -403,7 +405,7 @@ class BaseSheraBinder:
         optics when only non-structural parameters change. Structural keys
         must be excluded from ``store`` for this path to remain valid.
         """
-        from ..optics.builder import apply_runtime_bindings
+        from ..builders.optics import apply_runtime_bindings
 
         optics = apply_runtime_bindings(
             self.telescope.optics,

@@ -6,7 +6,7 @@ import pytest
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 
-from dluxshera.optics.builder import build_legacy_shera_threeplane_model
+from dluxshera.legacy.builders import build_legacy_shera_threeplane_model
 from dluxshera.legacy.modeling import SheraThreePlane_Model
 
 

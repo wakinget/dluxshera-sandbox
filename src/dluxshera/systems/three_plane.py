@@ -11,7 +11,7 @@ import dLux as dl
 import jax.numpy as jnp
 
 from .base import BaseConfig, BaseSheraBinder
-from ..core.universe import build_alpha_cen_source
+from ..builders.source import build_alpha_cen_source
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
 
@@ -388,7 +388,7 @@ class SheraThreePlaneBinder(BaseSheraBinder):
         Delegates to ``build_shera_threeplane_optics`` with the configured
         three-plane configuration, validated store, and forward specification.
         """
-        from ..optics.builder import build_shera_threeplane_optics
+        from ..builders.optics import build_shera_threeplane_optics
 
         return build_shera_threeplane_optics(
             self.cfg, store=store, spec=self.forward_spec
@@ -400,13 +400,13 @@ class SheraThreePlaneBinder(BaseSheraBinder):
 
     def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return the three-plane runtime bindings for non-structural keys."""
-        from ..optics.builder import THREEPLANE_RUNTIME_BINDINGS
+        from ..builders.optics import THREEPLANE_RUNTIME_BINDINGS
 
         return THREEPLANE_RUNTIME_BINDINGS
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Return the structural hash derived from the three-plane config."""
-        from ..optics.builder import structural_hash_from_config
+        from ..builders.optics import structural_hash_from_config
 
         return structural_hash_from_config(self.cfg)
 

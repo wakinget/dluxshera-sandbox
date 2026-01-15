@@ -6,7 +6,7 @@ import math
 import pytest
 
 from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
-from dluxshera.optics.builder import build_shera_threeplane_optics
+from dluxshera.builders.optics import build_shera_threeplane_optics
 from dluxshera.params.spec import build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import TRANSFORMS
