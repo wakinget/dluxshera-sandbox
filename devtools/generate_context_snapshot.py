@@ -565,7 +565,7 @@ def _collect_configs_metadata(repo_root: Path) -> Dict[str, Any]:
 def _collect_demo_metadata(repo_root: Path) -> List[Dict[str, Any]]:
     demos = [
         {
-            "script": "examples/scripts/run_canonical_astrometry_demo.py",
+            "script": "examples/runners/run_canonical_astrometry.py",
             "system_id": "shera_threeplane",
             "param_specs": ["forward_threeplane", "inference_basic"],
         },

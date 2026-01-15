@@ -7,13 +7,13 @@ project in editable mode before executing them:
 python -m pip install -e .
 ```
 
-## Scripts
+## Recipes + runners
 
-Run scripts directly from the repository root; they import code from
-`dluxshera.demos`:
+Read-first recipes live under `examples/recipes/`. Execute-first runners live
+under `examples/runners/`.
 
 ```bash
-python examples/scripts/run_canonical_astrometry_demo.py --fast --save-plots-dir Results/CanonicalAstrometryDemo
+python examples/runners/run_canonical_astrometry.py --fast
 python examples/scripts/run_twoplane_astrometry_demo.py --fast --save-plots-dir Results/TwoplaneAstrometryDemo
 ```
 
@@ -25,6 +25,6 @@ installed `dluxshera` package—no `sys.path` tweaks should be required.
 
 ## Policy
 
-Examples under this directory are not a Python package. Importable logic should
-live under `src/dluxshera/` (for example, `dluxshera.demos.canonical_astrometry`),
-while the files here stay as runnable references.
+Examples under this directory are not a Python package. Keep shared library
+logic under `src/dluxshera/`; the files here stay as runnable or read-first
+references.
