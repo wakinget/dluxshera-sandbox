@@ -93,6 +93,7 @@ def test_build_index_map_matches_pack_params(tmp_path: Path):
             "secondary.zernike_coeffs_nm": np.zeros(2),
         }
     )
+    store = store.refresh_derived(spec)
 
     theta = pack_params(spec, store)
     index_map = build_index_map(spec, store, theta=theta)

@@ -51,8 +51,8 @@ def test_forward_spec_zernike_coeffs_follow_noll_indices():
     assert field_m1.shape == (n_m1,)
     assert field_m2.shape == (n_m2,)
 
-    assert store.get("primary.zernike_coeffs_nm") == tuple([0.0] * n_m1)
-    assert store.get("secondary.zernike_coeffs_nm") == tuple([0.0] * n_m2)
+    assert store.get("primary.zernike_coeffs_nm") == pytest.approx([0.0] * n_m1)
+    assert store.get("secondary.zernike_coeffs_nm") == pytest.approx([0.0] * n_m2)
 
 
 def test_forward_spec_omits_zernike_when_basis_absent():

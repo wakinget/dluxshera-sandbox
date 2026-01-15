@@ -123,6 +123,9 @@ def test_eigen_and_pure_theta_share_binder_loss():
             shift = store_delta.get("binary.x_position_as") + store_delta.get("binary.y_position_as")
             return self.base_image + shift
 
+        def structural_store_keys(self):
+            return set()
+
     truth_image = jnp.ones((4, 4)) * 0.2
     binder = _LinearBinder(
         truth_image, forward_spec=forward_spec, base_forward_store=base_store

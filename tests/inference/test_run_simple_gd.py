@@ -86,8 +86,8 @@ def test_gd_loop_runs_without_tqdm(monkeypatch):
         return 0.5 * jnp.sum((theta - theta_true) ** 2)
 
     monkeypatch.setattr(
-        "dluxshera.inference.optimization.importlib.util.find_spec",
-        lambda name: None,
+        "dluxshera.inference.optimization.tqdm",
+        lambda iterable: iterable,
     )
 
     theta0 = jnp.array([0.0, 0.0])

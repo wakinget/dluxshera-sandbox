@@ -53,9 +53,11 @@ dLuxShera/
 │  ├─ dev/working_plan.md   ← this document
 │  └─ tutorials/{modeling_overview.md,canonical_astrometry_demo.md}
 ├─ src/dluxshera/
-│  ├─ core/{binder.py,universe.py}
+│  ├─ builders/{optics.py,source.py}
+│  ├─ components/{optics.py,detector.py,source.py}
+│  ├─ systems/{three_plane.py,two_plane.py}
 │  ├─ inference/{losses.py,prior.py,numpyro_bridge.py,optimization.py}
-│  ├─ params/{spec.py,store.py,registry.py,packing.py,transforms.py,shera_threeplane_transforms.py}
+│  ├─ params/{spec.py,store.py,transform_registry.py,packing.py,transforms.py,shera_threeplane_transforms.py}
 │  ├─ optics/{config.py,builder.py,optical_systems.py}
 │  ├─ plot/plotting.py
 │  └─ utils/utils.py
@@ -332,7 +334,7 @@ Tests:
     PYTHONPATH=src pytest -q
 
 Documentation:
-- Update `code_structure.md` and/or `binder_and_graph.md` if references to `core/` remain.
+- Update `code_structure.md` and/or `binder_and_graph.md` if references to legacy `core/` remain.
 
 
 ---
@@ -476,9 +478,14 @@ Actions:
 - Ensure examples and scripts use the new system modules.
 - Use tests and example scripts as validation (not backward compatibility).
 
-Ongoing:
-- Keep this working plan section updated as phases are completed.
-- Add notes or follow-up tasks as new insights emerge.
+Status:
+- ✅ Complete.
+- ✅ Overall reorganization effort complete (components/builders/systems layering in place).
+
+Post-Refactor Notes:
+- **Key outcomes:** Binders are the canonical system surface; builders own structural caching and runtime bindings; ParamSpec/Store/transform registry provide schema + value + derived plumbing with strict validation defaults.
+- **Known limitations:** Preconditioning remains heuristic (EMA of squared gradients); multi-PSF/multi-wavelength regression coverage is still partial; profiles/IO are still pending.
+- **Suggested follow-ups:** add FIM-based preconditioning options, expand transform coverage for additional system variants, and formalize profile/serialization workflows.
 
 
 ---
@@ -504,7 +511,7 @@ This should be noted whenever new tests are added or test behavior changes durin
    - **Follow-ups:** This scaffold has been removed; any future graph work should re-evaluate caching/multi-node needs before reintroducing it.
 
 2. **Scoped DerivedResolver with system IDs (P0) — DONE**
-   - **Outcome:** Added `params/registry.py` with system-scoped resolver/decorator, defaulting to the Shera three-plane system; tests cover isolation across system_ids and existing Shera transforms continue to resolve via the default registry.
+   - **Outcome:** Added `params/transform_registry.py` with system-scoped resolver/decorator, defaulting to the Shera three-plane system; tests cover isolation across system_ids and existing Shera transforms continue to resolve via the default registry.
    - **Follow-ups:** Extend coverage for future system variants (two-/four-plane) once their specs land and align ergonomics with ParameterStore primitives-only enforcement.
 
 3. **ParameterStore enforcement + serialization (P0) — DONE**
@@ -525,8 +532,8 @@ This should be noted whenever new tests are added or test behavior changes durin
 
 **Current behavior (“split personality”)**
 - `build_inference_spec_basic()` marks `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **primitive knobs** for optimisation.【F:src/dluxshera/params/spec.py†L95-L167】【F:src/dluxshera/params/spec.py†L207-L245】
-- `build_forward_model_spec_from_config()` mirrors geometry/throughput primitives from `SheraThreePlaneConfig` and declares `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **derived** with registered transforms (geometric plate scale and collecting-area × band × throughput flux).【F:src/dluxshera/params/spec.py†L337-L458】
-- The transform registry is **store-wins**: if a key is present in the `ParameterStore`, the transform is skipped; otherwise dependencies are resolved recursively.【F:src/dluxshera/params/registry.py†L117-L186】 Tests exercise this by computing plate scale/log flux from a forward-model store seeded with primitives only.【F:tests/test_shera_threeplane_transforms.py†L1-L71】
+- `build_forward_spec_from_config()` (in the system modules) mirrors geometry/throughput primitives from `SheraThreePlaneConfig` and declares `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **derived** with registered transforms (geometric plate scale and collecting-area × band × throughput flux).【F:src/dluxshera/systems/three_plane.py†L456-L656】
+- The transform registry is **store-wins**: if a key is present in the `ParameterStore`, the transform is skipped; otherwise dependencies are resolved recursively.【F:src/dluxshera/params/transform_registry.py†L1-L200】 Tests exercise this by computing plate scale/log flux from a forward-model store seeded with primitives only.【F:tests/optics/test_shera_threeplane_transforms.py†L1-L120】
 - `ParameterStore.from_spec_defaults()` skips derived fields, so a forward-model store built from defaults contains only primitives unless the caller injects derived values. Validation now rejects derived keys by default (unless `allow_derived=True`) and provides `refresh_derived`/`strip_derived` helpers for deterministic recomputation.【F:src/dluxshera/params/store.py†L72-L167】【F:src/dluxshera/params/store.py†L202-L251】
 
 **Practical interactions & risks**
@@ -732,7 +739,7 @@ Status: implemented; historical context
 ### 26.1 Current state (survey)
 
 - **Optimization + packing surfaces:** θ-space loops live in `src/dluxshera/inference/optimization.py` (e.g., `run_simple_gd`, binder-aware `run_image_gd`, and Fisher helpers). Packing/unpacking utilities live in `src/dluxshera/params/packing.py`; binder NLL builders and theta mapping hooks are in `src/dluxshera/inference/losses.py` and `src/dluxshera/inference/inference.py`. IndexMap export exists via `run_artifacts.build_index_map(...)`; packing order is aligned with `ParamSpec.subset(...)`.
-- **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/registry.py`; Shera-specific transforms (plate scale, log flux, raw fluxes) are in `src/dluxshera/params/shera_threeplane_transforms.py`.
+- **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/transform_registry.py`; Shera-specific transforms (plate scale, log flux, raw fluxes) are in `src/dluxshera/params/shera_threeplane_transforms.py`.
 - **Plotting:** Refactor-era plotting helpers (PSF and parameter histories) are in `src/dluxshera/plot/plotting.py` with headless-friendly IO (return fig/axes, optional `save_path`). Signal builders and panel recipes for intro diagnostics live in `src/dluxshera/inference/{signals.py,plotting.py}` and feed optional run artifacts/plots.
 - **Scripts/demos:** Canonical/binder-based runs are in `examples/scripts/run_canonical_astrometry_demo.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, and `work/scratch/refactored_astrometry_retrieval.py`; artifact writing is opt-in and disabled by default.
 - **Docs:** Strategy and schema for artifacts/signals/preconditioning live in `docs/architecture/optimization_artifacts_and_plotting.md` (source of truth). Working plan now tracks phased implementation here; `src/dluxshera/inference/run_artifacts.py` and regression tests cover the core I/O scaffold.

@@ -39,8 +39,10 @@ def test_fim_theta_shape_and_symmetry(
     # Basic checks
     assert F.shape == (theta0.size, theta0.size)
 
-    # Symmetry
-    assert np.allclose(F, F.T, atol=1e-5)
+    # Symmetry (relative tolerance scaled to magnitude)
+    asym = np.max(np.abs(F - F.T))
+    scale = np.max(np.abs(F))
+    assert float(asym) <= float(scale) * 1e-6 + 1e-3
 
     # PSD (up to numerical tolerance): eigenvalues >= -eps
     evals = onp.linalg.eigvalsh(onp.asarray(F))

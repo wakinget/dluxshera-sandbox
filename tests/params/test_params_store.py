@@ -58,8 +58,9 @@ def test_parameter_store_from_spec_defaults():
     spec = build_inference_spec_basic()
     store = ParameterStore.from_spec_defaults(spec)
 
-    # Keys should match exactly between spec and store
-    assert set(store.keys()) == set(spec.keys())
+    # Store should include primitives only (derived keys are omitted).
+    derived_keys = {key for key, field in spec.items() if field.kind == "derived"}
+    assert set(store.keys()) == set(spec.keys()) - derived_keys
 
     # It should validate cleanly against the spec
     store.validate_against(spec)
@@ -90,7 +91,7 @@ def test_parameter_store_validate_against_inference_spec_basic():
     store = ParameterStore.from_dict(values)
 
     # Should validate without error when keys match exactly.
-    store.validate_against(spec)
+    store.validate_against(spec, allow_derived=True)
 
     # Now drop one key to force a missing-key error.
     some_key = next(iter(spec.keys()))
@@ -99,7 +100,7 @@ def test_parameter_store_validate_against_inference_spec_basic():
     store_missing = ParameterStore.from_dict(values_missing)
 
     with pytest.raises(ValueError):
-        store_missing.validate_against(spec)
+        store_missing.validate_against(spec, allow_derived=True)
 
     # Now add an extra bogus key to force an extra-key error.
     values_extra = dict(values)
@@ -107,7 +108,7 @@ def test_parameter_store_validate_against_inference_spec_basic():
     store_extra = ParameterStore.from_dict(values_extra)
 
     with pytest.raises(ValueError):
-        store_extra.validate_against(spec)
+        store_extra.validate_against(spec, allow_derived=True)
 
 
 def test_parameter_store_validate_against_with_flags():
@@ -125,13 +126,13 @@ def test_parameter_store_validate_against_with_flags():
     values_missing = dict(base_values)
     values_missing.pop("binary.separation_as")
     store_missing = ParameterStore.from_dict(values_missing)
-    store_missing.validate_against(spec, allow_missing=True)
+    store_missing.validate_against(spec, allow_missing=True, allow_derived=True)
 
     # Extra allowed
     values_extra = dict(base_values)
     values_extra["debug.flag"] = True
     store_extra = ParameterStore.from_dict(values_extra)
-    store_extra.validate_against(spec, allow_extra=True)
+    store_extra.validate_against(spec, allow_extra=True, allow_derived=True)
 
 
 def _make_primitive_derived_spec() -> ParamSpec:

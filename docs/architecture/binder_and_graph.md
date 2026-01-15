@@ -113,15 +113,15 @@ into *runtime objects* used to evaluate the forward model.
 
 ### What is built where
 
-- Optics builders (`src/dluxshera/optics/builder.py`)
+- Optics builders (`src/dluxshera/builders/optics.py`)
   - Build the dLux optical system (“optics stack”) used by the telescope forward model.
   - Own the **structural hash + caching** policy for optics construction.
   - Key idea: optics are expensive to build; coefficients/parameters are cheap to update.
 
-- Universe/source builders (`src/dluxshera/core/universe.py`)
+- Universe/source builders (`src/dluxshera/builders/source.py`)
   - Build astrophysical sources (e.g., Alpha Cen) from the effective store.
 
-- Binder (`src/dluxshera/core/binder.py`)
+- Binder (`src/dluxshera/systems/{three_plane.py,two_plane.py}`)
   - Binder is the public entry point: `.model(store_delta)` merges an overlay store and evaluates.
 
 ### Structural vs non-structural parameters

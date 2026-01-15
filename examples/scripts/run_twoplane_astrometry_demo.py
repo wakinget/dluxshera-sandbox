@@ -9,12 +9,9 @@ from typing import Iterable, Mapping, Optional, Sequence
 import jax.numpy as jnp
 import numpy as np
 
-from dluxshera.core.binder import SheraTwoPlaneBinder
 from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
-from dluxshera.optics.config import SheraTwoPlaneConfig
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import ParamKey, ParamSpec, build_inference_spec_basic
-from dluxshera.systems.two_plane import build_forward_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived, subset_store
 from dluxshera.params.transform_registry import DEFAULT_SYSTEM_ID, TRANSFORMS
 import dluxshera.params.transforms  # Registers default transforms
@@ -22,6 +19,11 @@ from dluxshera.plot.plotting import (
     plot_parameter_history_grid,
     plot_psf_comparison,
     plot_psf_single,
+)
+from dluxshera.systems.two_plane import (
+    SheraTwoPlaneBinder,
+    SheraTwoPlaneConfig,
+    build_forward_spec_from_config,
 )
 
 
