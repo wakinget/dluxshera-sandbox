@@ -6,7 +6,8 @@ import dLuxToliman as dlT
 
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
-from dluxshera.core.universe import build_alpha_cen_source
+from dluxshera.builders.source import build_alpha_cen_source
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 
 
 def test_build_alpha_cen_source_roundtrip():
@@ -26,7 +27,8 @@ def test_build_alpha_cen_source_roundtrip():
     store = store.replace(updates)
 
     # Build the source – for now we just pick n_wavels=3
-    source = build_alpha_cen_source(store, n_wavels=3)
+    cfg = SHERA_TESTBED_CONFIG.replace(n_lambda=3)
+    source = build_alpha_cen_source(store, cfg=cfg)
 
     # Sanity check type
     assert isinstance(source, dlT.AlphaCen)

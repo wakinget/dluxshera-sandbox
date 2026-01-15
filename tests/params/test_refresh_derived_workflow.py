@@ -47,7 +47,7 @@ def test_refresh_derived_deterministic_ordering():
     class RecordingResolver:
         def compute(self, key, store, system_id=None):
             calls.append(key)
-            return f"value-{key}"
+            return {"alpha": 1.0, "beta": 2.0}[key]
 
     spec = ParamSpec(
         [
@@ -61,8 +61,8 @@ def test_refresh_derived_deterministic_ordering():
     refreshed = refresh_derived(store, spec, resolver=RecordingResolver())
 
     assert calls == ["alpha", "beta"]
-    assert refreshed.get("alpha") == "value-alpha"
-    assert refreshed.get("beta") == "value-beta"
+    assert refreshed.get("alpha") == 1.0
+    assert refreshed.get("beta") == 2.0
 
 
 def test_refresh_derived_recomputes_existing_values():

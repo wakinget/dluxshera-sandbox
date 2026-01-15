@@ -38,7 +38,8 @@ def build_legacy_shera_threeplane_model(
     )
 
     # Optional: ensure the store doesn’t contain unknown keys for this spec.
-    store = store.validate_against(spec)
+    # Allow derived keys because inference stores may already include them.
+    store = store.validate_against(spec, allow_derived=True)
 
     # ------------------------------------------------------------------
     # 1) Seed legacy params from the point design, if available

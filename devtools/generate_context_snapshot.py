@@ -366,7 +366,14 @@ def _collect_param_specs(repo_root: Path) -> Dict[str, Any]:
     _ensure_repo_on_sys_path(repo_root)
     try:
         from dluxshera.params import spec as params_spec
-        from dluxshera.optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
+        from dluxshera.systems.three_plane import (
+            SheraThreePlaneConfig,
+            build_forward_spec_from_config as build_threeplane_forward_spec,
+        )
+        from dluxshera.systems.two_plane import (
+            SheraTwoPlaneConfig,
+            build_forward_spec_from_config as build_twoplane_forward_spec,
+        )
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import param spec modules: {exc!r}"}
 
@@ -382,14 +389,14 @@ def _collect_param_specs(repo_root: Path) -> Dict[str, Any]:
         },
         {
             "name": "forward_threeplane",
-            "builder": params_spec.build_forward_model_spec_from_config,
+            "builder": build_threeplane_forward_spec,
             "kwargs": {"cfg": SheraThreePlaneConfig()},
             "system_id": "shera_threeplane",
             "category": "forward",
         },
         {
             "name": "forward_twoplane",
-            "builder": params_spec.build_shera_twoplane_forward_spec_from_config,
+            "builder": build_twoplane_forward_spec,
             "kwargs": {"cfg": SheraTwoPlaneConfig()},
             "system_id": "shera_twoplane",
             "category": "forward",
@@ -418,22 +425,28 @@ def _collect_param_specs(repo_root: Path) -> Dict[str, Any]:
         systems[sid]["spec_names"].append(spec.get("name"))
         systems[sid]["count"] += 1
 
-    return {"modules": ["dluxshera.params.spec"], "specs": specs, "systems": systems}
+    return {
+        "modules": [
+            "dluxshera.params.spec",
+            "dluxshera.systems.three_plane",
+            "dluxshera.systems.two_plane",
+        ],
+        "specs": specs,
+        "systems": systems,
+    }
 
 
 def _collect_transforms(repo_root: Path) -> Dict[str, Any]:
     _ensure_repo_on_sys_path(repo_root)
     try:
-        from dluxshera.params import registry as registry_mod
+        from dluxshera.params import transform_registry as registry_mod
         from dluxshera.params import transforms  # Registers transforms on import
-        from dluxshera.params import shera_threeplane_transforms  # noqa: F401
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import transforms: {exc!r}"}
 
     try:
-        resolver = getattr(transforms, "DERIVED_RESOLVER", None)
-        if resolver is None:
-            resolver = registry_mod.DerivedResolver(default_system_id="default")
+        resolver = registry_mod.DERIVED_RESOLVER
+        registry_mod.ensure_registered(registry_mod.DEFAULT_SYSTEM_ID)
 
         systems: Dict[str, Any] = {}
         registries = getattr(resolver, "_registries", {})
@@ -461,8 +474,8 @@ def _collect_transforms(repo_root: Path) -> Dict[str, Any]:
 
         return {
             "modules": [
+                "dluxshera.params.transform_registry",
                 "dluxshera.params.transforms",
-                "dluxshera.params.shera_threeplane_transforms",
             ],
             "systems": systems,
         }
@@ -480,16 +493,16 @@ def _format_default(value: Any, max_length: int = 120) -> str:
 def _collect_configs_metadata(repo_root: Path) -> Dict[str, Any]:
     _ensure_repo_on_sys_path(repo_root)
     try:
-        from dluxshera import optics
         from dluxshera.optics import builder
+        from dluxshera.optics import config as optics_config
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"Failed to import optics configs: {exc!r}"}
 
     candidate_names = ["SheraTwoPlaneConfig", "SheraThreePlaneConfig"]
     cfg_classes = [
-        getattr(optics.config, name)
+        getattr(optics_config, name)
         for name in candidate_names
-        if hasattr(optics.config, name)
+        if hasattr(optics_config, name)
     ]
 
     configs: List[Dict[str, Any]] = []
@@ -531,11 +544,11 @@ def _collect_configs_metadata(repo_root: Path) -> Dict[str, Any]:
         if instance is not None:
             try:
                 if hasattr(builder, "structural_hash_from_config") and isinstance(
-                    instance, getattr(optics.config, "SheraThreePlaneConfig", object)
+                    instance, getattr(optics_config, "SheraThreePlaneConfig", object)
                 ):
                     cfg_meta["structural_hash_example"] = builder.structural_hash_from_config(instance)
                 if hasattr(builder, "structural_hash_for_twoplane") and isinstance(
-                    instance, getattr(optics.config, "SheraTwoPlaneConfig", object)
+                    instance, getattr(optics_config, "SheraTwoPlaneConfig", object)
                 ):
                     cfg_meta["structural_hash_example"] = builder.structural_hash_for_twoplane(instance)
             except Exception:

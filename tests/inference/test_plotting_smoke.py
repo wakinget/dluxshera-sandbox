@@ -16,7 +16,7 @@ def test_plot_signals_panels_creates_pngs(tmp_path: Path):
         "primary.zernike_error_nm": np.zeros((5, 3)),
     }
 
-    paths = plot_signals_panels(signals, tmp_path, panel_set="intro", title_prefix="test")
+    paths = plot_signals_panels(signals, tmp_path, title_prefix="test")
 
     assert paths, "No plots were generated"
     for path in paths:

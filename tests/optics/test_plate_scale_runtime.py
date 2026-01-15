@@ -14,6 +14,7 @@ from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.packing import pack_params as store_pack_params
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import build_inference_spec_basic
+from dluxshera.params.store import subset_store
 from tests.conftest import make_forward_store
 
 
@@ -39,8 +40,11 @@ def test_plate_scale_updates_psf(shera_smoke_cfg, shera_smoke_updates):
         "system.plate_scale_as_per_pix"
     )
 
-    psf0 = binder.model(store0)
-    psf1 = binder.model(store1)
+    delta0 = subset_store(store0, ["system.plate_scale_as_per_pix"])
+    delta1 = subset_store(store1, ["system.plate_scale_as_per_pix"])
+
+    psf0 = binder.model(delta0)
+    psf1 = binder.model(delta1)
 
     diff = jnp.max(jnp.abs(psf1 - psf0))
     assert diff > 1e-9
@@ -69,10 +73,13 @@ def test_twoplane_plate_scale_updates_without_cache_rebuild():
         {"system.plate_scale_as_per_pix": cfg.plate_scale_as_per_pix + 1e-3}
     )
 
-    psf_a = binder.model(store_a)
+    delta_a = subset_store(store_a, ["system.plate_scale_as_per_pix"])
+    delta_b = subset_store(store_b, ["system.plate_scale_as_per_pix"])
+
+    psf_a = binder.model(delta_a)
     assert len(builder._TWOPLANE_CACHE) == 1
 
-    psf_b = binder.model(store_b)
+    psf_b = binder.model(delta_b)
     assert len(builder._TWOPLANE_CACHE) == 1
 
     diff = jnp.max(jnp.abs(psf_b - psf_a))
