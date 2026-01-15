@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.params.registry import Transform
+from dluxshera.params.transform_registry import Transform, TransformRegistry
 from dluxshera.params.store import (
     ParameterStore,
     check_consistency,
@@ -10,7 +10,6 @@ from dluxshera.params.store import (
     strip_derived,
 )
 from dluxshera.params.spec import ParamField, ParamSpec, build_inference_spec_basic
-from dluxshera.params.transforms import TransformRegistry
 
 
 def test_parameter_store_get_and_replace():

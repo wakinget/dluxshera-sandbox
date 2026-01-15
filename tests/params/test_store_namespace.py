@@ -1,7 +1,7 @@
 import pytest
 
 from dluxshera.params.store import ParameterStore
-from dluxshera.params.store_namespace import StoreNamespace
+from dluxshera.params.store import StoreNamespace
 
 
 def test_attribute_access_returns_prefixed_value():

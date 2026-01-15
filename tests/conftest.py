@@ -23,7 +23,7 @@ from dluxshera.params.spec import (
     build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore
-from dluxshera.params.transforms import DEFAULT_SYSTEM_ID
+from dluxshera.params.transform_registry import DEFAULT_SYSTEM_ID
 
 
 def make_forward_store(

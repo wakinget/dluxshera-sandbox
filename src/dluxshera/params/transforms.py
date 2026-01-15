@@ -1,122 +1,173 @@
 from __future__ import annotations
 
-import importlib
-from typing import Iterable, Optional
+import math
+from typing import Any, Mapping
 
-from .registry import (
-    DerivedResolver,
-    Transform,
-    TransformRegistry,
-    TransformCycleError,
-    TransformDepthError,
-    TransformError,
-    TransformMissingDependencyError,
-)
+import numpy as np
+
 from .spec import ParamKey
-from .store import ParameterStore
+from .transform_registry import DEFAULT_SYSTEM_ID, register_transform
 
-# Default system ID preserves backward-compatibility with the Shera three-plane
-# transforms previously registered in the global registry.
-DEFAULT_SYSTEM_ID = "shera_threeplane"
+# Type alias for the ctx mapping each transform receives
+Ctx = Mapping[ParamKey, Any]
 
-# Scoped resolver instance that all modules should use.
-DERIVED_RESOLVER = DerivedResolver(default_system_id=DEFAULT_SYSTEM_ID)
+# Conversion factor: radians → arcseconds
+ARCSEC_PER_RAD = 206264.8062470963551565  # 180 / pi * 3600
 
-# Track which system-specific transform modules have been imported.
-_REGISTERED_SYSTEMS: set[str] = set()
-
-
-def ensure_registered(system_id: Optional[str]) -> None:
-    """Lazily import system-specific transforms once per system ID."""
-
-    sid = system_id or DEFAULT_SYSTEM_ID
-    if sid in _REGISTERED_SYSTEMS:
-        return
-
-    if sid == "shera_threeplane":
-        module = "dluxshera.params.shera_threeplane_transforms"
-    elif sid == "shera_twoplane":
-        module = "dluxshera.params.shera_twoplane_transforms"
-    else:
-        raise ValueError(f"Unknown system_id {sid!r} for transform registration")
-
-    try:
-        importlib.import_module(module)
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            f"Missing transform module {module!r} for system_id {sid!r}"
-        ) from exc
-
-    _REGISTERED_SYSTEMS.add(sid)
+# ---------------------------------------------------------------------------
+# Effective focal length: system.focal_length_m
+# ---------------------------------------------------------------------------
 
 
-def get_resolver(system_id: Optional[str] = None) -> TransformRegistry:
-    """Return the TransformRegistry for the given system_id (lazy-created)."""
-
-    ensure_registered(system_id)
-    return DERIVED_RESOLVER.get_registry(system_id)
-
-
-def resolve_derived(
-    key: ParamKey,
-    store: ParameterStore,
-    *,
-    system_id: Optional[str] = None,
-    max_depth: int = 32,
-):
-    """Resolve a derived parameter for the requested system."""
-
-    ensure_registered(system_id)
-    return DERIVED_RESOLVER.compute(
-        key,
-        store,
-        max_depth=max_depth,
-        system_id=system_id,
-    )
-
-
-def register_transform(
-    key: ParamKey,
-    *,
-    depends_on: Iterable[ParamKey] = (),
-    doc: Optional[str] = None,
-    system_id: Optional[str] = None,
-):
+@register_transform(
+    "system.focal_length_m",
+    depends_on=(
+        "system.m1_focal_length_m",
+        "system.m2_focal_length_m",
+        "system.m1_m2_separation_m",
+    ),
+    system_id=DEFAULT_SYSTEM_ID,
+)
+def transform_system_focal_length_m(ctx: Ctx) -> float:
     """
-    Convenience decorator for registering a transform function.
+    Compute the effective telescope focal length for the Shera two-mirror relay.
 
-    Parameters
-    ----------
-    system_id:
-        Identifier for the system this transform belongs to. Defaults to the
-        resolver's default system, which currently corresponds to the Shera
-        three-plane configuration.
+        1 / f_eff = 1 / f1 + 1 / f2 - sep / (f1 * f2)
+
+    where:
+        f1  = primary focal length
+        f2  = secondary focal length
+        sep = axial separation between mirrors
     """
+    f1 = float(ctx["system.m1_focal_length_m"])
+    f2 = float(ctx["system.m2_focal_length_m"])
+    sep = float(ctx["system.m1_m2_separation_m"])
 
-    return DERIVED_RESOLVER.register_transform(
-        key,
-        depends_on=depends_on,
-        doc=doc,
-        system_id=system_id,
-    )
+    denom = (1.0 / f1) + (1.0 / f2) - sep / (f1 * f2)
+    # Optionally: guard against denom ≈ 0.0 and raise a TransformError.
+    f_eff = 1.0 / denom
+    return f_eff
 
 
-# Backward-compatible global registry alias for the default system.
-TRANSFORMS = get_resolver()
+# ---------------------------------------------------------------------------
+# Plate scale: system.plate_scale_as_per_pix
+# ---------------------------------------------------------------------------
 
-__all__ = [
-    "Transform",
-    "TransformRegistry",
-    "TransformError",
-    "TransformMissingDependencyError",
-    "TransformCycleError",
-    "TransformDepthError",
-    "DerivedResolver",
-    "DERIVED_RESOLVER",
-    "DEFAULT_SYSTEM_ID",
-    "ensure_registered",
-    "register_transform",
-    "get_resolver",
-    "resolve_derived",
-    "TRANSFORMS",
-]
+
+@register_transform(
+    "system.plate_scale_as_per_pix",
+    depends_on=(
+        "system.focal_length_m",
+        "system.pixel_pitch_m",
+    ),
+    system_id=DEFAULT_SYSTEM_ID,
+)
+def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
+    """
+    Compute the geometric plate scale in arcseconds per pixel.
+
+        plate_scale_rad_per_pix = pixel_pitch_m / f_eff
+        plate_scale_as_per_pix  = plate_scale_rad_per_pix * ARCSEC_PER_RAD
+
+    This is equivalent to:
+
+        dLux.utils.rad2arcsec(pixel_pitch_m / f_eff)
+
+    but kept self-contained to avoid a heavy dependency on dLux in the
+    parameter transforms layer.
+    """
+    f_eff = float(ctx["system.focal_length_m"])
+    pixel_pitch = float(ctx["system.pixel_pitch_m"])
+
+    plate_scale_rad = pixel_pitch / f_eff
+    plate_scale_as = plate_scale_rad * ARCSEC_PER_RAD
+    return plate_scale_as
+
+
+# ---------------------------------------------------------------------------
+# Log-flux: binary.log_flux_total
+# ---------------------------------------------------------------------------
+
+
+@register_transform(
+    "binary.log_flux_total",
+    depends_on=(
+        "system.m1_diameter_m",
+        "band.bandwidth_m",
+        "imaging.exposure_time_s",
+        "imaging.throughput",
+        "binary.spectral_flux_density",
+    ),
+    system_id=DEFAULT_SYSTEM_ID,
+)
+def transform_binary_log_flux_total(ctx: Ctx) -> float:
+    """
+    Compute the truth-level log10 total photon count over the exposure.
+
+    Model:
+
+        area         = π (D / 2)^2
+        total_flux   = spectral_flux_density * bandwidth_m
+                       * area * exposure_time_s * throughput
+        log_flux_tot = log10(total_flux)
+
+    where:
+        D                      = primary mirror diameter [m]
+        spectral_flux_density  = mean photon flux density at the pupil in
+                                 ph/s/m^2 per *meter* of band
+        bandwidth_m            = bandpass width [m]
+        exposure_time_s        = integration time [s]
+        throughput             = end-to-end efficiency (0–1)
+    """
+    D = float(ctx["system.m1_diameter_m"])
+    bandwidth_m = float(ctx["band.bandwidth_m"])
+    t_exp = float(ctx["imaging.exposure_time_s"])
+    throughput = float(ctx["imaging.throughput"])
+    flux_density = float(ctx["binary.spectral_flux_density"])
+
+    area = math.pi * (D / 2.0) ** 2
+    total_flux = flux_density * bandwidth_m * area * t_exp * throughput
+
+    # total_flux should be > 0 for physical configurations
+    if not (total_flux > 0.0):
+        # Optional guard; you could also just let log10 blow up.
+        raise ValueError(
+            f"Non-positive total_flux={total_flux} in binary_log_flux_total "
+            "(check flux_density, bandwidth, area, exposure_time, throughput)."
+        )
+
+    log_flux = math.log10(total_flux)
+    return log_flux
+
+
+# ---------------------------------------------------------------------------
+# Raw fluxes: binary.raw_fluxes
+# ---------------------------------------------------------------------------
+
+
+@register_transform(
+    "binary.raw_fluxes",
+    depends_on=(
+        "binary.log_flux_total",
+        "binary.contrast",
+    ),
+    system_id=DEFAULT_SYSTEM_ID,
+)
+def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
+    """
+    Compute raw fluxes for the binary pair (photons for star A and B).
+
+    This mirrors the AlphaCen source model:
+
+        total_flux = 10 ** log_flux_total
+        flux_A = total_flux * contrast / (1 + contrast)
+        flux_B = total_flux / (1 + contrast)
+    """
+    log_flux = float(ctx["binary.log_flux_total"])
+    contrast = float(ctx["binary.contrast"])
+
+    total_flux = 10.0 ** log_flux
+    flux_B = total_flux / (1.0 + contrast)
+    flux_A = contrast * flux_B
+
+    return np.asarray([flux_A, flux_B])

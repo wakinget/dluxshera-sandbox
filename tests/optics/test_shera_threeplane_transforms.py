@@ -11,7 +11,7 @@ from dluxshera.systems.three_plane import (
 )
 from dluxshera.builders.optics import build_shera_threeplane_optics
 from dluxshera.params.store import ParameterStore, refresh_derived
-from dluxshera.params.transforms import TRANSFORMS
+from dluxshera.params.transform_registry import TRANSFORMS
 
 
 def _build_forward_model_store(cfg=SHERA_TESTBED_CONFIG):

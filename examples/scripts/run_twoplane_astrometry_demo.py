@@ -16,8 +16,8 @@ from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import ParamKey, ParamSpec, build_inference_spec_basic
 from dluxshera.systems.two_plane import build_forward_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived, subset_store
-from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
-import dluxshera.params.shera_threeplane_transforms  # Registers default transforms
+from dluxshera.params.transform_registry import DEFAULT_SYSTEM_ID, TRANSFORMS
+import dluxshera.params.transforms  # Registers default transforms
 from dluxshera.plot.plotting import (
     plot_parameter_history_grid,
     plot_psf_comparison,

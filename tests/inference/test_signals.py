@@ -2,7 +2,7 @@ import numpy as np
 
 from dluxshera.inference.signals import build_signals
 from dluxshera.params.store import ParameterStore
-from dluxshera.params.transforms import TRANSFORMS
+from dluxshera.params.transform_registry import TRANSFORMS
 
 
 def test_binary_raw_flux_transform_matches_alpha_cen_formula():

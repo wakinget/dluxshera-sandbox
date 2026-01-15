@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import pytest
 
 from dluxshera.params.store import ParameterStore
-from dluxshera.params.transforms import (
+from dluxshera.params.transform_registry import (
     DEFAULT_SYSTEM_ID,
     DERIVED_RESOLVER,
     DerivedResolver,

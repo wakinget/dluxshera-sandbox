@@ -1,7 +1,7 @@
 import pytest
 
 from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
-from dluxshera.params.store_namespace import StoreNamespace
+from dluxshera.params.store import StoreNamespace
 from tests.conftest import make_forward_store
 
 

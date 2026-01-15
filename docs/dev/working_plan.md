@@ -413,12 +413,19 @@ Documentation:
 
 **Goal:** Reduce cognitive overhead in the params subsystem.
 
+Status: ✅ Complete
+
 Actions:
 - Merge `StoreNamespace` into `params/store.py`.
 - Create `params/transform_registry.py`:
   - move registry classes, resolver logic, dependency/cycle checks here.
 - Move all actual transform functions into `params/transforms.py`
   (including contents of `shera_threeplane_transforms.py`).
+
+Notes:
+- `StoreNamespace` now lives alongside `ParameterStore` in `params/store.py`.
+- Transform registry/resolver plumbing moved to `params/transform_registry.py`;
+  concrete transforms live in `params/transforms.py`.
 
 Tests:
 - Verify derived parameter resolution still works.

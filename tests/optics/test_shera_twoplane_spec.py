@@ -1,6 +1,6 @@
 import pytest
 
-import dluxshera.params.shera_threeplane_transforms  # noqa: F401
+import dluxshera.params.transforms  # noqa: F401
 from dluxshera.systems.two_plane import (
     SheraTwoPlaneConfig,
     build_forward_spec_from_config,
@@ -10,7 +10,7 @@ from dluxshera.params.spec import (
     build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived
-from dluxshera.params.transforms import DERIVED_RESOLVER, DEFAULT_SYSTEM_ID
+from dluxshera.params.transform_registry import DERIVED_RESOLVER, DEFAULT_SYSTEM_ID
 
 
 def test_twoplane_config_defaults():
