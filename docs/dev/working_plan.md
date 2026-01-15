@@ -275,6 +275,9 @@ Documentation:
 
 **Goal:** Introduce the new directory structure without changing semantics.
 
+Status:
+- ✅ Complete (topology-only updates; broken imports are acceptable at this phase).
+
 Actions:
 - Create new packages:
   - `src/dluxshera/systems/`
@@ -298,7 +301,7 @@ Tests:
 - Not required to pass during this phase.
 
 Documentation:
-- Update this working plan with notes once skeleton is in place.
+- Update this working plan with notes once skeleton is in place (topology-only, imports may be broken).
 
 
 ---
