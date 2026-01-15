@@ -6,16 +6,21 @@ from typing import Dict, Optional
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems.three_plane import (
+    SHERA_TESTBED_CONFIG,
+    SheraThreePlaneBinder,
+    SheraThreePlaneConfig,
+    build_forward_spec_from_config,
+)
 from dluxshera.legacy.builders import build_legacy_shera_threeplane_model
-from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG, SheraThreePlaneConfig
-from dluxshera.systems.two_plane import SheraTwoPlaneConfig
+from dluxshera.systems.two_plane import (
+    SHERA_TWOPLANE_SYSTEM_ID,
+    SheraTwoPlaneConfig,
+    build_forward_spec_from_config as build_twoplane_forward_spec_from_config,
+)
 from dluxshera.params.spec import (
     ParamSpec,
-    build_forward_model_spec_from_config,
     build_inference_spec_basic,
-    build_shera_twoplane_forward_spec_from_config,
-    SHERA_TWOPLANE_SYSTEM_ID,
 )
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.transforms import DEFAULT_SYSTEM_ID
@@ -28,9 +33,9 @@ def make_forward_store(
     """Build a forward-style spec + store with deriveds refreshed."""
 
     if isinstance(cfg, SheraTwoPlaneConfig):
-        spec = build_shera_twoplane_forward_spec_from_config(cfg)
+        spec = build_twoplane_forward_spec_from_config(cfg)
     else:
-        spec = build_forward_model_spec_from_config(cfg)
+        spec = build_forward_spec_from_config(cfg)
     store = ParameterStore.from_spec_defaults(spec)
     if updates:
         store = store.replace(updates)

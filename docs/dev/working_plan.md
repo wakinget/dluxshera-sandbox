@@ -373,6 +373,8 @@ Documentation:
 
 **Goal:** Align spec construction with system ownership.
 
+Status: ✅ Complete
+
 Actions:
 - Keep in `params/spec.py`:
   - `ParamField`
@@ -387,11 +389,19 @@ Actions:
 Notes:
 - Inference spec remains shared across systems for now.
 - A `systems/spec_utils.py` may be introduced later if duplication emerges.
+- Forward spec builders now live in `systems/` with system-specific ownership.
+- `params/spec.py` now only contains spec types and generic inference helpers.
 
 Tests:
 - Update imports in scripts and binders.
 - Run:
     PYTHONPATH=src pytest -q
+
+Test notes:
+- `PYTHONPATH=src pytest -q` reported failures in inference/optics/params/devtools tests
+  (e.g., legacy model validation, signal plotting, plate scale runtime checks, and
+  ParameterStore/refresh_derived expectations). These are tracked for follow-up in
+  later phases.
 
 Documentation:
 - Update any docs referencing `params/spec.py` forward builders.

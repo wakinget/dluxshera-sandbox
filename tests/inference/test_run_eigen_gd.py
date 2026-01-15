@@ -4,8 +4,12 @@ import pytest
 
 from dluxshera.inference.inference import run_shera_image_gd_eigen
 from dluxshera.inference.optimization import make_binder_image_nll_fn, make_binder_nll_fn, run_simple_gd
-from dluxshera.systems.three_plane import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
-from dluxshera.params.spec import build_forward_model_spec_from_config, build_inference_spec_basic
+from dluxshera.systems.three_plane import (
+    SHERA_TESTBED_CONFIG,
+    SheraThreePlaneConfig,
+    build_forward_spec_from_config,
+)
+from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.packing import pack_params as store_pack_params, unpack_params as store_unpack_params
 
@@ -104,7 +108,7 @@ def test_eigen_and_pure_theta_share_binder_loss():
         secondary_noll_indices=SHERA_TESTBED_CONFIG.secondary_noll_indices,
     )
 
-    forward_spec = build_forward_model_spec_from_config(cfg)
+    forward_spec = build_forward_spec_from_config(cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec).replace(
         {"binary.x_position_as": 0.0, "binary.y_position_as": 0.0}
     )

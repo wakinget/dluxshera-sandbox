@@ -21,15 +21,11 @@ from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simpl
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.systems.three_plane import (
     SheraThreePlaneConfig,
+    build_forward_spec_from_config,
     default_diffractive_pupil_path,
 )
 from dluxshera.params.packing import unpack_params as store_unpack_params
-from dluxshera.params.spec import (
-    ParamKey,
-    ParamSpec,
-    build_forward_model_spec_from_config,
-    build_inference_spec_basic,
-)
+from dluxshera.params.spec import ParamKey, ParamSpec, build_inference_spec_basic
 from dluxshera.params.store import ParameterStore, subset_store
 from dluxshera.plot.plotting import plot_parameter_history_grid, plot_psf_comparison, plot_psf_single
 
@@ -134,7 +130,7 @@ def build_system(
         secondary_noll_indices=(4, 5, 6, 7, 8, 9, 10, 11),
     )
 
-    forward_spec = build_forward_model_spec_from_config(cfg)
+    forward_spec = build_forward_spec_from_config(cfg)
     inference_spec = build_inference_spec_basic()
 
     print("Step 2: Constructing truth ParameterStore and derived parameters...")

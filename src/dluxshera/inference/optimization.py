@@ -1488,15 +1488,13 @@ def generate_fim_labels_refactor(
             return None
         nonlocal spec
         if spec is None:
-            from ..params.spec import (
-                build_forward_model_spec_from_config,
-                build_shera_twoplane_forward_spec_from_config,
-            )
+            from ..systems.three_plane import build_forward_spec_from_config
+            from ..systems.two_plane import build_forward_spec_from_config as build_twoplane_forward_spec_from_config
 
             if isinstance(cfg, SheraThreePlaneConfig):
-                spec = build_forward_model_spec_from_config(cfg)
+                spec = build_forward_spec_from_config(cfg)
             elif isinstance(cfg, SheraTwoPlaneConfig):
-                spec = build_shera_twoplane_forward_spec_from_config(cfg)
+                spec = build_twoplane_forward_spec_from_config(cfg)
         if spec is not None and key in spec:
             field = spec.get(key)
             if field.shape:
