@@ -4,15 +4,18 @@ import math
 
 import pytest
 
-from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
-from dluxshera.params.spec import ParamField, ParamSpec, build_forward_model_spec_from_config
+from dluxshera.systems.three_plane import (
+    SHERA_TESTBED_CONFIG,
+    build_forward_spec_from_config,
+)
+from dluxshera.params.spec import ParamField, ParamSpec
 from dluxshera.params.store import ParameterStore, refresh_derived
 
 
 def test_refresh_derived_lazy_registration_threeplane():
     """Derived transforms load automatically when refreshing a store."""
 
-    spec = build_forward_model_spec_from_config(SHERA_TESTBED_CONFIG)
+    spec = build_forward_spec_from_config(SHERA_TESTBED_CONFIG)
     store = ParameterStore.from_spec_defaults(spec).replace(
         {
             "imaging.exposure_time_s": 2.0,

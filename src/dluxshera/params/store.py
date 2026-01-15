@@ -673,7 +673,7 @@ def refresh_derived(
 
     A canonical forward-modelling flow is::
 
-        spec = build_forward_model_spec_from_config(cfg)
+        spec = build_forward_spec_from_config(cfg)
         store = ParameterStore.from_spec_defaults(spec)   # primitives only
         store = store.replace({...truth-level primitives...})
         store = store.refresh_derived(spec)

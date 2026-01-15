@@ -5,16 +5,18 @@ import pytest
 import math
 import pytest
 
-from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
+from dluxshera.systems.three_plane import (
+    SHERA_TESTBED_CONFIG,
+    build_forward_spec_from_config,
+)
 from dluxshera.builders.optics import build_shera_threeplane_optics
-from dluxshera.params.spec import build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import TRANSFORMS
 
 
 def _build_forward_model_store(cfg=SHERA_TESTBED_CONFIG):
     """Helper to build a forward-model spec + store from a config."""
-    spec = build_forward_model_spec_from_config(cfg)
+    spec = build_forward_spec_from_config(cfg)
     store = ParameterStore.from_spec_defaults(spec)
     return spec, store
 
@@ -37,7 +39,7 @@ def test_forward_spec_includes_binary_astrometry_primitives():
 
 def test_forward_spec_zernike_coeffs_follow_noll_indices():
     cfg = SHERA_TESTBED_CONFIG
-    spec = build_forward_model_spec_from_config(cfg)
+    spec = build_forward_spec_from_config(cfg)
     store = ParameterStore.from_spec_defaults(spec)
 
     n_m1 = len(cfg.primary_noll_indices)
@@ -58,7 +60,7 @@ def test_forward_spec_omits_zernike_when_basis_absent():
         primary_noll_indices=(),
         secondary_noll_indices=(),
     )
-    spec = build_forward_model_spec_from_config(cfg_empty)
+    spec = build_forward_spec_from_config(cfg_empty)
     store = ParameterStore.from_spec_defaults(spec)
 
     assert "primary.zernike_coeffs_nm" not in spec.keys()

@@ -1,11 +1,13 @@
 import pytest
 
 import dluxshera.params.shera_threeplane_transforms  # noqa: F401
-from dluxshera.systems.two_plane import SheraTwoPlaneConfig
+from dluxshera.systems.two_plane import (
+    SheraTwoPlaneConfig,
+    build_forward_spec_from_config,
+)
 from dluxshera.params.spec import (
     ParamSpec,
     build_inference_spec_basic,
-    build_shera_twoplane_forward_spec_from_config,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transforms import DERIVED_RESOLVER, DEFAULT_SYSTEM_ID
@@ -24,7 +26,7 @@ def test_twoplane_config_defaults():
 
 def test_twoplane_forward_spec_structure_with_primary_basis():
     cfg = SheraTwoPlaneConfig(primary_noll_indices=(2, 3))
-    spec = build_shera_twoplane_forward_spec_from_config(cfg)
+    spec = build_forward_spec_from_config(cfg)
 
     expected_binary_keys = {
         "binary.x_position_as",
@@ -52,7 +54,7 @@ def test_twoplane_forward_spec_structure_with_primary_basis():
 
 def test_twoplane_forward_spec_refresh():
     cfg = SheraTwoPlaneConfig()
-    spec = build_shera_twoplane_forward_spec_from_config(cfg)
+    spec = build_forward_spec_from_config(cfg)
 
     store = ParameterStore.from_spec_defaults(spec)
     assert "binary.log_flux_total" not in store

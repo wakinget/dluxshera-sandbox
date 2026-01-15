@@ -14,7 +14,7 @@ from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simpl
 from dluxshera.optics.config import SheraTwoPlaneConfig
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import ParamKey, ParamSpec, build_inference_spec_basic
-from dluxshera.params.spec import build_shera_twoplane_forward_spec_from_config
+from dluxshera.systems.two_plane import build_forward_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived, subset_store
 from dluxshera.params.transforms import DEFAULT_SYSTEM_ID, TRANSFORMS
 import dluxshera.params.shera_threeplane_transforms  # Registers default transforms
@@ -113,7 +113,7 @@ def main(
         n_lambda=n_lambda,
         primary_noll_indices=(4, 5),
     )
-    forward_spec = build_shera_twoplane_forward_spec_from_config(cfg)
+    forward_spec = build_forward_spec_from_config(cfg)
     inference_spec = build_inference_spec_basic()
 
     base_store = ParameterStore.from_spec_defaults(forward_spec)

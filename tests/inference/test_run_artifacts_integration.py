@@ -8,8 +8,10 @@ from dluxshera.inference.optimization import (
     run_simple_gd,
 )
 from dluxshera.inference.run_artifacts import load_meta, load_summary, load_trace
-from dluxshera.systems.three_plane import SheraThreePlaneConfig
-from dluxshera.params.spec import build_forward_model_spec_from_config
+from dluxshera.systems.three_plane import (
+    SheraThreePlaneConfig,
+    build_forward_spec_from_config,
+)
 from dluxshera.params.store import ParameterStore
 
 
@@ -83,7 +85,7 @@ def test_run_image_gd_writes_index_map_metadata(tmp_path: Path):
         primary_noll_indices=(4,),
     )
 
-    forward_spec = build_forward_model_spec_from_config(cfg)
+    forward_spec = build_forward_spec_from_config(cfg)
     store_init = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
     infer_keys = ("binary.separation_as",)
 

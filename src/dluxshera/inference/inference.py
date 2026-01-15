@@ -11,10 +11,14 @@ import numpyro as npy
 import numpyro.distributions as dist
 import optax
 
-from ..systems.three_plane import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
+from ..systems.three_plane import (
+    SHERA_TESTBED_CONFIG,
+    SheraThreePlaneConfig,
+    build_forward_spec_from_config,
+)
 from ..builders.optics import build_shera_threeplane_optics
 from ..params.packing import unpack_params as store_unpack_params
-from ..params.spec import ParamSpec, ParamKey, build_forward_model_spec_from_config
+from ..params.spec import ParamSpec, ParamKey
 from ..params.store import ParameterStore
 from .optimization import (
     EigenThetaMap,
@@ -102,7 +106,7 @@ def run_shera_image_gd_basic(
           - "loss": 1D array of loss values per step.
     """
     # 1) Build a forward spec and default store (deriveds populated)
-    forward_spec: ParamSpec = build_forward_model_spec_from_config(cfg)
+    forward_spec: ParamSpec = build_forward_spec_from_config(cfg)
     store_init: ParameterStore = ParameterStore.from_spec_defaults(forward_spec)
 
     # 2) Apply user-provided initial overrides, if any
@@ -312,7 +316,7 @@ def run_shera_image_gd_eigen(
             raise ValueError("data and var must be provided when loss_fn is None")
 
         if forward_spec is None:
-            forward_spec = build_forward_model_spec_from_config(cfg)
+            forward_spec = build_forward_spec_from_config(cfg)
         if base_forward_store is None:
             base_forward_store = ParameterStore.from_spec_defaults(forward_spec)
 
