@@ -21,145 +21,252 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 
 This repository is not yet an installable Python package. Installation is done by:
 
-1. Creating a virtual environment  
-2. Installing dependencies from `requirements.txt`  
-3. Running notebooks/scripts from within that environment  
+1. Creating a virtual environment
+2. Installing dependencies from `requirements.txt`
+3. Running notebooks/scripts from within that environment
 
 This will automatically install a temporary **Fresnel-enabled fork of dLux** until the upstream PR is merged.
 
+### Prerequisites (all platforms)
+
+You need:
+- **Python 3.11** (recommended)
+- **Git** (recommended, but zip downloads also work)
+- An editor (we recommend **VS Code**)
+
+If you already have Python installed, skip to “Create the environment”.
+
+---
+
+### 1) Get the repository
+
+**Recommended (Git):**
 ```bash
-# 1. Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# 2. Upgrade pip (recommended)
-pip install --upgrade pip
-
-# 3. Install dependencies
-pip install -r requirements.txt
-```
-
-After installation, your environment should include:
-
-- JAX + jaxlib  
-- The Fresnel-enabled dLux (via Dylan's own [fork of dLux](https://github.com/wakinget/dLux))  
-- numpy, scipy, matplotlib, astropy  
-- numpyro, optax, equinox, chex, jaxtyping, zodiax  
-- JupyterLab  
-
-> **Note:** Once the Fresnel utilities officially merge into upstream dLux, this step will be updated to rely on the released version.
-
----
-
-##  Quickstart for Non-Python Users
-
-If you are not a regular Python user, don’t worry — this project is designed to be easy to set up.  
-Below is the recommended workflow using **Miniconda** (a lightweight Python distribution) and **VS Code** (a friendly editor).  
-This avoids modifying your system Python and keeps everything clean and isolated.
-
----
-
-### 1. Install Miniconda (Python 3.11)
-
-1. Download Miniconda from: https://docs.conda.io/en/latest/miniconda.html  
-2. Run the installer with default settings.  
-3. Open a new terminal:
-   - **Windows**: Anaconda Prompt  
-   - **macOS/Linux**: regular terminal  
-
-Verify installation with:
-
-```
-conda --version
-```
-
----
-
-### 2. Create a clean environment for the model
-
-```
-conda create -n dLuxShera python=3.11
-conda activate dLuxShera
-```
-
-This keeps everything isolated and easy to delete later.
-
----
-
-### 3. Clone the repository and install dependencies
-
-```
 cd <folder-where-you-want-projects>
 git clone <REPO_URL>
 cd <REPO_FOLDER>
+```
 
+**Alternative (zip download):**
+- Download the repo zip and unzip it somewhere reasonable.
+- Then open a terminal in that folder (or `cd` into it).
+
+---
+
+### 2) Create a virtual environment
+
+We create a local `.venv/` folder in the repository root. This keeps dependencies isolated.
+
+**macOS / Linux**
+```bash
+python3 -m venv .venv
+```
+
+**Windows (recommended: use the Python launcher)**
+```powershell
+py -3.11 -m venv .venv
+```
+
+> Why `py -3.11` on Windows?
+> It avoids a common Windows issue where `python` points to a Microsoft Store stub instead of your real install.
+
+---
+
+### 3) Activate the environment
+
+**macOS / Linux**
+```bash
+source .venv/bin/activate
+```
+
+**Windows (PowerShell)**
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+**Windows (Command Prompt / cmd.exe)**
+```bat
+.\.venv\Scripts\activate.bat
+```
+
+If activation works, your prompt usually shows something like `(.venv)`.
+
+---
+
+### 4) Install dependencies
+
+```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-This installs all required libraries, including the correct pinned dLux commit.
-
 ---
 
-### 4. Install Visual Studio Code (VS Code)
+### 5) Verify the install
 
-Download from: https://code.visualstudio.com/
-
-Open the project:
-
-```
-code .
-```
-
-If prompted, install the **Python extension**.
-
-Select the correct interpreter:
-
-1. Ctrl/Cmd+Shift+P → “Python: Select Interpreter”  
-2. Choose: **Python 3.11 (conda env: dLuxShera)**
-
----
-
-### 5. Verify the installation
-
-```
+```bash
 python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
 ```
 
 If versions print without errors, your setup is working.
 
-Try running one of the example scripts or notebooks next.
+---
+
+## Quickstart for Non-Python Users
+
+This section is written like “guided troubleshooting”. If something doesn’t work, follow the “If you see X, do Y” notes.
+
+### Windows Quickstart (recommended path)
+
+#### 0) Install the basics
+
+1. **Install Python 3.11 (Windows installer)** from python.org.
+   - During install, check:
+     - ✅ “Add Python to PATH”
+     - ✅ “Install launcher for all users” (recommended)
+
+2. **Install Git** (recommended) so you can `git clone`.
+
+3. **Install VS Code** and the **Python extension**.
+
+#### 1) Make sure Windows is using the right Python
+
+Open **PowerShell** (Start menu → type “PowerShell”).
+
+Run:
+```powershell
+py -3.11 --version
+where python
+```
+
+**If `where python` shows something like `...\Microsoft\WindowsApps\python.exe`:**
+- That’s a Microsoft Store “app execution alias” stub.
+- Fix:
+  - Windows Settings → Apps → Advanced app settings → **App execution aliases**
+  - Toggle OFF `python.exe` and `python3.exe`
+- Then close and re-open PowerShell and re-run `where python`.
+
+#### 2) Open the repo in VS Code
+
+- In VS Code: **File → Open Folder…** and choose the repository root.
+- Open a terminal in VS Code: **Terminal → New Terminal**
+
+> If you don’t see a terminal, it’s almost always under the “Terminal” menu.
+
+#### 3) Create + activate the environment
+
+In the VS Code terminal (PowerShell recommended):
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**If you see:** “cannot be loaded because running scripts is disabled on this system”
+- That means you’re in PowerShell, but script execution is locked down.
+- Run this in PowerShell (not cmd.exe):
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+- Close and re-open PowerShell, then activate again:
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+**If `Set-ExecutionPolicy` is “not recognized”**
+- You’re not actually in PowerShell (often you’re in cmd.exe or Git Bash).
+- Open *Windows PowerShell* explicitly and try again.
+
+#### 4) Install dependencies
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+#### 5) Tell VS Code to use your `.venv`
+
+- Press: `Ctrl+Shift+P`
+- Run: **Python: Select Interpreter**
+- Choose the interpreter that contains: `.venv\Scripts\python.exe`
+
+This step matters: it ensures VS Code, notebooks, and the “Run Python File” button all use the same environment.
+
+#### 6) Quick verification
+
+```powershell
+python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
+```
 
 ---
 
-### 6. Daily usage (the only two commands you need)
+### macOS / Linux Quickstart
 
-```
-conda activate dLuxShera
+1) Install Python 3.11 (system package manager or python.org)
+
+2) Clone and set up:
+
+```bash
+git clone <REPO_URL>
 cd <REPO_FOLDER>
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
+```
+
+3) In VS Code:
+- Install the Python extension
+- Select interpreter: `.venv/bin/python`
+
+---
+
+### Daily usage (the only two commands you usually need)
+
+**macOS / Linux**
+```bash
+cd <REPO_FOLDER>
+source .venv/bin/activate
 code .
 ```
 
-This opens both the environment and the project.
+**Windows (PowerShell)**
+```powershell
+cd <REPO_FOLDER>
+.\.venv\Scripts\Activate.ps1
+code .
+```
 
 ---
 
-### 7. Optional: Using Jupyter notebooks
+### Optional: Using Jupyter notebooks
 
-If you open a `.ipynb` file:
+Launch JupyterLab **from inside the environment**:
 
-- Select the **dLuxShera** kernel in the top-right.
-- Run cells with Shift+Enter.
+```bash
+# macOS/Linux
+source .venv/bin/activate
+jupyter lab
+```
 
----
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+jupyter lab
+```
 
-### That’s it!
+Notes:
+- To stop Jupyter in the terminal: press `Ctrl+C` and confirm.
+- If tqdm progress bars look weird in notebooks, prefer:
+  - `from tqdm.auto import tqdm`
 
-Once Miniconda and VS Code are installed, everything should “just work.”  
-If something breaks, simply delete and recreate the `dLuxShera` environment — conda environments are disposable.
 
-
----
 
 ## Quickstart (Jupyter Notebook)
 
@@ -236,18 +343,17 @@ The script builds a Shera three-plane model via ParamSpec/ParameterStore, genera
 
   Instead, every update must create a *new* model with the change applied:
 
-    ```python
-      model = model.set("parameter_name", new_value)
-    ```
+```python
+model = model.set("parameter_name", new_value)
+```
 
-    Or for multiple parameters:
-    
-    ```python
-      model = model.set(["param1", "param2"], [val1, val2])
-    ```
+Or for multiple parameters:
 
-    This functional update pattern preserves JAX compatibility (JIT, vmap, grad) and
-    ensures the entire optical system remains differentiable.
+```python
+model = model.set(["param1", "param2"], [val1, val2])
+```
+
+This functional update pattern preserves JAX compatibility (JIT, vmap, grad) and ensures the entire optical system remains differentiable.
 
 - **`.model()` forward pass**
 
