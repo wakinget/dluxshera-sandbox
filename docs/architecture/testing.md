@@ -68,7 +68,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 - `tests/inference/test_losses.py`, `tests/inference/test_inference_helpers.py`, `tests/inference/test_make_binder_nll_fn.py`, `tests/inference/test_noiseless_truth_stationary.py`: loss helpers, inference spec validation, binder NLL construction, and stationary noise checks.
 
 ### Demos, plotting, and misc
-- `tests/demos/test_demo_canonical_astrometry.py`, `tests/demos/test_twoplane_astrometry_demo.py`: demo scripts run in `fast` mode and assert outputs/plots.
+- `tests/demos/test_demo_canonical_astrometry.py`, `tests/demos/test_twoplane_astrometry_demo.py`: canonical recipe/runner smoke tests in `fast` mode that assert outputs/plots.
 - `tests/plotting/test_plotting.py`: plotting utilities including grid layout, PSF comparisons, and parameter history plots.
 - `tests/devtools/test_generate_context_snapshot.py`: devtools context snapshot generation.
 - `tests/devtools/test_imports.py`: package import smoke test.
@@ -110,7 +110,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
 | 17.57 (setup) | `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
 | 14.46 (setup) | `tests/inference/test_fim_theta.py::test_fim_theta_shape_and_symmetry` |
 | 12.50 (call) | `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` |
-| 12.23 (call) | `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_demo_runs` |
+| 12.23 (call) | `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_recipe_runs` |
 | 10.25 (call) | `tests/inference/test_loss_canonical.py::test_loss_canonical_matches_binder_nll_and_is_jittable` |
 | 8.73 (call) | `tests/inference/test_image_nll_bridge.py::test_make_binder_image_nll_fn_smoke_gaussian` |
 | 6.57 (call) | `tests/inference/test_run_eigen_gd.py::test_eigen_helper_quadratic_roundtrip_and_descent` |
@@ -154,7 +154,7 @@ Migrated tests now consume these fixtures to avoid rebuilding identical configs/
     6. `tests/inference/test_make_binder_nll_fn.py::test_theta0_store_override_keeps_binder_base_alignment` — 6.99s call
     7. `tests/inference/test_image_nll_bridge.py::test_make_image_nll_fn_smoke_gaussian` — 6.78s setup
     8. `tests/binder/test_binder_smoke.py::test_shera_threeplane_binder_smoke` — 6.61s call
-    9. `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_demo_runs` — 4.60s call
+    9. `tests/demos/test_demo_canonical_astrometry.py::test_canonical_astrometry_recipe_runs` — 4.60s call
     10. `tests/inference/test_noiseless_truth_stationary.py::test_noiseless_truth_is_stationary_for_gaussian_nll` — 4.40s call
 - Ongoing policy for fast tests:
   - Prefer the shared `shera_smoke_cfg` and companion fixtures for SHERA smoke coverage; avoid re-instantiating the full-resolution testbed config unless specifically validating high-res numerics (mark those tests `slow`).
