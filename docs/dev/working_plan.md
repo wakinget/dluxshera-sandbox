@@ -1,5 +1,5 @@
 # dLuxShera Working Plan & Notes (dev-facing)
-_Last updated: 2025-12-19_
+_Last updated: 2026-01-15_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
@@ -203,8 +203,9 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **P0 — Current focus**  
 - ✅ **Optimization artifacts & logging**: Phase A scaffold (`run_artifacts.py`) is in place and Phase B wiring now emits required artifacts from `run_simple_gd` and binder-backed `run_image_gd` when opt-in flags are provided. Integration smoke tests cover end-to-end writes and metadata (trace/meta/summary + optional checkpoints).  
-- ⏳ **Optimizer control (learning-rate shaping)**: Extend `run_simple_gd` (or successor) with per-parameter/block learning rates derived from FIM/curvature estimates; ensure compatibility with the logging/artifacts pipeline above.  
-  - TODO: Integrate FIM-based preconditioning into `PreconditioningConfig` (e.g., `method='fim_diag'`) so that the same configuration both computes and uses the preconditioner, instead of computing an external `lr_vec` in the script.
+- ⚠️ **Optimizer control (learning-rate shaping)**: θ-space preconditioning is now available via `PreconditioningConfig` + `compute_precond_vectors` and is wired into `run_image_gd` with optional artifact capture (curvature/precond). The current implementation uses an `ema_grad2` diagonal curvature estimate and does not yet expose FIM-based methods or auto-derivation inside `run_simple_gd`.  
+  - TODO: Add FIM-derived preconditioning in `PreconditioningConfig` (e.g., `method='fim_diag'`) so the same configuration both computes and applies the preconditioner, rather than relying on external `lr_vec` scripts.  
+  - TODO: Extend `run_simple_gd` (or a successor) to optionally compute/apply preconditioning for non-Shera loss functions, keeping parity with artifact logging.
 - ⚠️ **Loss regression hardening**: Keep the landed Binder NLL stationary-point regression; add coverage for multi-wavelength / multi-PSF scenarios as new demos land and surface any remaining edge cases.
 
 **P1 — Next up**  
