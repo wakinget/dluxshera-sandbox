@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 from ..params.store import ParameterStore
 
 
+SOURCE_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
+
+
 def build_alpha_cen_source(
     store: ParameterStore,
     cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
@@ -87,6 +90,31 @@ def build_alpha_cen_source(
     )
 
 
+def apply_runtime_bindings(
+    source: AlphaCen,
+    store: ParameterStore | None,
+    *,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+    bindings: tuple[tuple[str, str], ...] = SOURCE_RUNTIME_BINDINGS,
+) -> AlphaCen:
+    """Apply runtime ParameterStore overrides onto a cached source."""
+
+    if store is None:
+        return source
+
+    if bindings:
+        for store_key, set_path in bindings:
+            val = store.get(store_key, default=None)
+            if val is None:
+                continue
+            source = source.set(set_path, val)
+        return source
+
+    return build_alpha_cen_source(store, cfg=cfg)
+
+
 __all__ = [
+    "SOURCE_RUNTIME_BINDINGS",
+    "apply_runtime_bindings",
     "build_alpha_cen_source",
 ]

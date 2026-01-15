@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import dLux as dl
 
 from ..params.spec import ParamSpec
-from ..params.store import ParameterStore, StoreNamespace, strip_structural
+from ..params.store import ParameterStore, StoreNamespace
 
 
 class BaseConfig:
@@ -55,7 +55,6 @@ class BaseSheraBinder:
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
     structural_hash: Optional[str]
-    _detector: Optional[dl.LayeredDetector]
     telescope: dl.Telescope
 
     def __init__(
@@ -68,7 +67,7 @@ class BaseSheraBinder:
 
         This sets up the shared baseline state used by all binder evaluations:
         the configuration, parameter spec, a validated base forward store, and
-        cached telescope/detector instances for fast-path evaluations. Use this
+        cached telescope instance for fast-path evaluations. Use this
         when constructing a new binder from a known-good configuration and
         fully populated forward store.
 
@@ -105,9 +104,8 @@ class BaseSheraBinder:
             forward_spec, allow_derived=True
         )
 
-        # Shared detector construction; subclasses can override if needed.
-        self._detector = self._build_detector()
-        self.telescope = self._build_telescope(self.base_forward_store)
+        detector = self._build_detector()
+        self.telescope = self._build_telescope(self.base_forward_store, detector=detector)
 
     def __dir__(self) -> list[str]:
         """List attribute names available on the binder.
@@ -259,7 +257,7 @@ class BaseSheraBinder:
         -----
         Subclasses should treat structural changes in ``store`` as requiring a
         rebuild. Non-structural keys that can be updated at runtime should be
-        surfaced via :meth:`_runtime_bindings`.
+        surfaced via :meth:`_optics_runtime_bindings`.
         """
         raise NotImplementedError
 
@@ -289,7 +287,12 @@ class BaseSheraBinder:
         """
         raise NotImplementedError
 
-    def _build_telescope(self, store: ParameterStore) -> dl.Telescope:
+    def _build_telescope(
+        self,
+        store: ParameterStore,
+        *,
+        detector: Optional[dl.LayeredDetector] = None,
+    ) -> dl.Telescope:
         """Build a full telescope model from the given store.
 
         Called during initialization (to create the cached telescope) and by
@@ -301,16 +304,22 @@ class BaseSheraBinder:
         store : ParameterStore
             Validated store containing all parameters required to build the
             source, optics, and detector.
+        detector : dl.LayeredDetector, optional
+            Detector instance to reuse. When omitted, a new detector is built
+            via :meth:`_build_detector`.
 
         Returns
         -------
         dl.Telescope
             Fully constructed telescope.
         """
+        if detector is None:
+            detector = self._build_detector()
+
         return dl.Telescope(
             source=self._build_source(store),
             optics=self._build_optics(store),
-            detector=self._detector,
+            detector=detector,
         )
 
     def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:  # pragma: no cover - abstract hook
@@ -338,27 +347,27 @@ class BaseSheraBinder:
         """
         raise NotImplementedError
 
-    def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural keys.
+    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return runtime binding pairs for non-structural optics keys.
 
         Runtime bindings map store keys to optics attributes (or paths) that
         can be updated without rebuilding the full optics model. Subclasses
-        should override this to list the non-structural keys eligible for
-        fast-path updates.
-
-        Returns
-        -------
-        tuple[tuple[str, str], ...]
-            Sequence of ``(store_key, optics_path)`` bindings. Defaults to
-            empty, meaning no runtime updates are supported.
-
-        Notes
-        -----
-        Keys returned here are considered **non-structural** for the purposes
-        of :meth:`_structural_store_keys`, and updates to them will use runtime
-        bindings instead of triggering a rebuild.
+        should override this to list the non-structural optics keys eligible
+        for fast-path updates.
         """
         return ()
+
+    def _source_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return runtime binding pairs for non-structural source keys."""
+        from ..builders.source import SOURCE_RUNTIME_BINDINGS
+
+        return SOURCE_RUNTIME_BINDINGS
+
+    def _detector_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return runtime binding pairs for non-structural detector keys."""
+        from ..builders.detector import DETECTOR_RUNTIME_BINDINGS
+
+        return DETECTOR_RUNTIME_BINDINGS
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Compute a structural hash for the current configuration.
@@ -380,39 +389,95 @@ class BaseSheraBinder:
         """
         return None
 
-    def _update_telescope_runtime(self, store: ParameterStore) -> dl.Telescope:
-        """Apply runtime bindings to update the cached telescope.
+    def _optics_structural_keys(self) -> set[str]:
+        """Return store keys treated as structural for the optics component."""
 
-        Called from :meth:`update_store` when structural changes are absent.
-        Uses the runtime binding map to update optics parameters in-place (via
-        ``apply_runtime_bindings``) and rebuilds the source as needed.
+        structural_keys = {
+            key
+            for key in self.forward_spec.keys()
+            if key.startswith(("system.", "band."))
+        }
+        runtime_keys = {store_key for store_key, _ in self._optics_runtime_bindings()}
+        return structural_keys - runtime_keys
 
-        Parameters
-        ----------
-        store : ParameterStore
-            Validated store containing updated non-structural values.
+    def _source_structural_keys(self) -> set[str]:
+        """Return store keys treated as structural for the source component."""
 
-        Returns
-        -------
-        dl.Telescope
-            Telescope with updated optics and source, reusing the cached
-            detector.
+        return set()
 
-        Notes
-        -----
-        This path is performance-oriented: it avoids rebuilding the full
-        optics when only non-structural parameters change. Structural keys
-        must be excluded from ``store`` for this path to remain valid.
-        """
-        from ..builders.optics import apply_runtime_bindings
+    def _detector_structural_keys(self) -> set[str]:
+        """Return store keys treated as structural for the detector component."""
 
-        optics = apply_runtime_bindings(
+        return set()
+
+    def _apply_runtime_updates(self, store: ParameterStore) -> dl.Telescope:
+        """Apply runtime bindings to update cached telescope components."""
+
+        from ..builders import detector as detector_builder
+        from ..builders import optics as optics_builder
+        from ..builders import source as source_builder
+
+        optics = optics_builder.apply_runtime_bindings(
             self.telescope.optics,
             store,
-            self._runtime_bindings(),
+            self._optics_runtime_bindings(),
         )
-        source = self._build_source(store)
-        return dl.Telescope(source=source, optics=optics, detector=self._detector)
+        source = source_builder.apply_runtime_bindings(
+            self.telescope.source,
+            store,
+            cfg=self.cfg,
+            bindings=self._source_runtime_bindings(),
+        )
+        detector = detector_builder.apply_runtime_bindings(
+            self.telescope.detector,
+            store,
+            self._detector_runtime_bindings(),
+        )
+        return dl.Telescope(source=source, optics=optics, detector=detector)
+
+    def _rebuild_telescope(
+        self,
+        store: ParameterStore,
+        *,
+        structural_components: set[str],
+    ) -> dl.Telescope:
+        """Rebuild structural components while applying runtime updates."""
+
+        from ..builders import detector as detector_builder
+        from ..builders import optics as optics_builder
+        from ..builders import source as source_builder
+
+        if "optics" in structural_components:
+            optics = self._build_optics(store)
+        else:
+            optics = optics_builder.apply_runtime_bindings(
+                self.telescope.optics,
+                store,
+                self._optics_runtime_bindings(),
+            )
+
+        if "source" in structural_components:
+            source = self._build_source(store)
+        else:
+            source = source_builder.apply_runtime_bindings(
+                self.telescope.source,
+                store,
+                cfg=self.cfg,
+                bindings=self._source_runtime_bindings(),
+            )
+
+        if "detector" in structural_components:
+            detector = self._build_detector()
+        else:
+            detector = self.telescope.detector
+
+        detector = detector_builder.apply_runtime_bindings(
+            detector,
+            store,
+            self._detector_runtime_bindings(),
+        )
+
+        return dl.Telescope(source=source, optics=optics, detector=detector)
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -575,39 +640,60 @@ class BaseSheraBinder:
 
         return StoreNamespace(self.base_forward_store, prefix)
 
-    def _structural_store_keys(self) -> set[str]:
-        """Return store keys treated as structural for this binder.
+    def _structural_keys_by_component(self) -> dict[str, set[str]]:
+        """Return structural keys grouped by component."""
 
-        Called by :meth:`model` and :meth:`update_store` to separate
-        structural keys from non-structural runtime bindings. Structural keys
-        are expected to require a full rebuild when they change.
-
-        Returns
-        -------
-        set[str]
-            Keys considered structural for this binder instance.
-
-        Notes
-        -----
-        The base structural set is derived from the forward spec (keys under
-        ``system.`` and ``band.``). Keys listed in :meth:`_runtime_bindings`
-        are explicitly treated as **non-structural** and removed from the
-        set so they can be updated via runtime bindings.
-        """
-
-        structural_keys = {
-            key
-            for key in self.forward_spec.keys()
-            if key.startswith(("system.", "band."))
+        return {
+            "optics": self._optics_structural_keys(),
+            "source": self._source_structural_keys(),
+            "detector": self._detector_structural_keys(),
         }
-        runtime_keys = {store_key for store_key, _ in self._runtime_bindings()}
-        return structural_keys - runtime_keys
+
+    def _structural_keys(self) -> set[str]:
+        """Return the union of structural keys across all components."""
+
+        structural_keys: set[str] = set()
+        for keys in self._structural_keys_by_component().values():
+            structural_keys |= set(keys)
+        return structural_keys
+
+    def _structural_keys_in_store(self, store: ParameterStore) -> list[str]:
+        """Return the structural keys present in ``store``."""
+
+        structural_keys = self._structural_keys()
+        return sorted(key for key in store.keys() if key in structural_keys)
+
+    @staticmethod
+    def _values_equal(current_value: object, incoming_value: object) -> bool:
+        """Return whether two values are equivalent for structural checks."""
+
+        try:
+            return bool(
+                jnp.array_equal(jnp.asarray(current_value), jnp.asarray(incoming_value))
+            )
+        except Exception:
+            return current_value == incoming_value
+
+    def _detect_structural_changes(self, store: ParameterStore) -> dict[str, set[str]]:
+        """Return structural keys that changed, grouped by component."""
+
+        changes: dict[str, set[str]] = {}
+        for component, keys in self._structural_keys_by_component().items():
+            changed: set[str] = set()
+            for key in keys:
+                current_value = self.base_forward_store.get(key)
+                incoming_value = store.get(key)
+                if not self._values_equal(current_value, incoming_value):
+                    changed.add(key)
+            if changed:
+                changes[component] = changed
+        return changes
 
     def structural_store_keys(self) -> set[str]:
         """Return the structural store keys for this binder.
 
-        Public wrapper around :meth:`_structural_store_keys`. Use this to
-        inspect which keys are treated as structural (rebuild-required)
+        Public wrapper around the component-aware structural key helper. Use
+        this to inspect which keys are treated as structural (rebuild-required)
         versus non-structural (runtime-bound) for the current binder.
 
         Returns
@@ -616,7 +702,7 @@ class BaseSheraBinder:
             Structural store keys after accounting for runtime bindings.
         """
 
-        return self._structural_store_keys()
+        return self._structural_keys()
 
     def model(
         self,
@@ -628,8 +714,8 @@ class BaseSheraBinder:
 
         Use this as the primary evaluation API. With ``store_delta=None``, the
         cached telescope is reused for a fast-path model evaluation. When a
-        ``store_delta`` is provided, the delta is merged with the base store
-        and evaluated through the direct model path. Structural keys are not
+        ``store_delta`` is provided, runtime updates are applied per component
+        to the cached telescope without rebuilding. Structural keys are not
         accepted by default; pass ``allow_rebuild=True`` to rebuild the binder
         state via :meth:`update_store` when structural changes are required.
 
@@ -657,25 +743,29 @@ class BaseSheraBinder:
         if store_delta is None:
             return self.telescope.model()
 
-        if allow_rebuild:
-            return self.update_store(store_delta).model()
-
-        structural_keys = self._structural_store_keys()
-        non_structural = strip_structural(store_delta, structural_keys=structural_keys)
-        provided_structural = sorted(
-            key for key in store_delta.keys() if key not in non_structural
+        store_delta = store_delta.validate_against(
+            self.forward_spec,
+            allow_missing=True,
+            allow_extra=False,
+            allow_derived=True,
         )
-        if provided_structural:
-            joined = ", ".join(provided_structural)
+
+        structural_keys = self._structural_keys_in_store(store_delta)
+        if structural_keys:
+            if allow_rebuild:
+                eff_store = self._merge_store(store_delta)
+                rebuilt = self.update_store(eff_store, allow_rebuild=True)
+                return rebuilt.telescope.model()
+
+            joined = ", ".join(structural_keys)
             raise ValueError(
                 "model() only accepts non-structural store keys; "
                 f"found structural keys: {joined}. "
                 "Use allow_rebuild=True with a full store to rebuild."
             )
 
-        eff_store = self._merge_store(non_structural)
-
-        return self._direct_model(eff_store)
+        eff_store = self._merge_store(store_delta)
+        return self._apply_runtime_updates(eff_store).model()
 
     @property
     def optics(self) -> dl.OpticalLayer | dl.Optics:
@@ -723,36 +813,31 @@ class BaseSheraBinder:
             base_forward_store=new_base_store,
         )
 
-    def update_store(self, store: ParameterStore) -> "BaseSheraBinder":
+    def update_store(
+        self,
+        store: ParameterStore,
+        *,
+        allow_rebuild: bool = False,
+    ) -> "BaseSheraBinder":
         """Return a new binder with an updated base store.
 
-        This is the immutable-style path for changing the baseline store. The
-        incoming store is validated against ``forward_spec`` and then compared
-        against the structural hash and structural store keys. If structural
-        changes are detected, a new binder is created via ``with_store`` and a
-        warning is emitted; otherwise runtime bindings are applied to refresh
-        the cached telescope without a full rebuild. Use this to persist a new
-        baseline store or when structural changes are intended.
+        This immutable-style helper validates the incoming store and applies
+        runtime bindings when only non-structural keys change. Structural
+        changes are allowed only when ``allow_rebuild=True``; otherwise a
+        clear error is raised.
 
         Parameters
         ----------
         store : ParameterStore
             Full base store with derived values populated.
-
-        Returns
-        -------
-        BaseSheraBinder
-            New binder instance with refreshed base store and telescope state.
+        allow_rebuild : bool, optional
+            When ``True``, structural changes trigger a rebuild of the
+            affected components. When ``False``, structural changes raise.
 
         Raises
         ------
         ValueError
-            If ``store`` fails validation against ``forward_spec``.
-
-        Notes
-        -----
-        This method never mutates the existing binder instance; it always
-        returns a new binder (either a full rebuild or a runtime-updated copy).
+            If structural keys change while ``allow_rebuild`` is ``False``.
         """
 
         validated_store = store.validate_against(
@@ -762,45 +847,38 @@ class BaseSheraBinder:
 
         new_structural_hash = self._compute_structural_hash()
         structural_hash_changed = new_structural_hash != self.structural_hash
-        structural_store_changed = False
-        for key in self._structural_store_keys():
-            current_value = self.base_forward_store.get(key)
-            incoming_value = validated_store.get(key)
-            try:
-                values_equal = bool(
-                    jnp.array_equal(jnp.asarray(current_value), jnp.asarray(incoming_value))
-                )
-            except Exception:
-                values_equal = current_value == incoming_value
-            if not values_equal:
-                structural_store_changed = True
-                break
+        structural_changes = self._detect_structural_changes(validated_store)
+        structural_changed = structural_hash_changed or bool(structural_changes)
 
-        structural_changed = structural_hash_changed or structural_store_changed
+        if structural_changed and not allow_rebuild:
+            structural_keys = sorted(
+                {key for keys in structural_changes.values() for key in keys}
+            )
+            if structural_hash_changed:
+                structural_keys.append("structural config hash")
+            joined = ", ".join(structural_keys) if structural_keys else "structural config hash"
+            raise ValueError(
+                "update_store() requires allow_rebuild=True when structural "
+                f"keys change. Detected structural keys: {joined}."
+            )
 
         if structural_changed:
-            import warnings
-
-            reasons = []
+            structural_components = set(structural_changes)
             if structural_hash_changed:
-                reasons.append("structural config hash changed")
-            if structural_store_changed:
-                reasons.append("structural store values changed")
-            reason_text = " and ".join(reasons)
-            warnings.warn(
-                f"{reason_text.capitalize()}; rebuilding telescope and binder state.",
-                RuntimeWarning,
-                stacklevel=2,
+                structural_components.add("optics")
+            telescope = self._rebuild_telescope(
+                validated_store,
+                structural_components=structural_components,
             )
-            return self.with_store(validated_store)
+        else:
+            telescope = self._apply_runtime_updates(validated_store)
 
         updated = self.__class__.__new__(self.__class__)
         updated.cfg = self.cfg
         updated.forward_spec = self.forward_spec
         updated.base_forward_store = validated_store
         updated.structural_hash = new_structural_hash
-        updated._detector = self._detector
-        updated.telescope = self._update_telescope_runtime(validated_store)
+        updated.telescope = telescope
         return updated
 
 
