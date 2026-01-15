@@ -1,7 +1,47 @@
-"""Canonical astrometry recipe (three-plane).
+"""
+Canonical astrometry retrieval recipe (Shera three-plane).
 
-Open this file in VS Code and run top-to-bottom. It mirrors the current
-end-to-end inference workflow, including optional eigenmode re-parameterization.
+This script is the primary, end-to-end onboarding example for the dLuxShera workflow.
+It is designed to be read like a Matlab script from top to bottom.
+Open this in your editor and run it.
+
+What this recipe demonstrates
+- Building/choosing a three-plane Shera configuration and applying small overrides.
+- Constructing ParameterSpecs:
+    - a forward spec describing the simulation parameters ("forward_spec")
+    - an inference spec describing the solved-for parameters ("inference_spec")
+- Initializing a ParameterStore (values) and populating derived parameters
+  (e.g., plate scale computed from focal lengths + pixel pitch via registered
+  transforms).
+- Building a SheraThreePlaneBinder to bind parameters to optics/source/detector.
+- Generating synthetic data (optionally with noise).
+- Defining inference keys + priors, sampling an initial state from priors.
+- Defining the loss (typically NLL; MAP variants also available).
+- Running a single optimization loop and saving/plotting results using the
+  repository’s built-in artifacts + plotting utilities.
+
+Eigenmode re-parameterization (recommended default)
+This recipe supports an optional eigenmode parameterization of the inference
+variables. When enabled, the optimization runs in an eigen-basis derived from
+curvature information (e.g., Fisher Information Matrix), which can improve
+conditioning and convergence. You can disable eigenmodes to run in the “raw”
+parameter basis for clarity or debugging.
+
+How to use
+1) Scan the configuration + “options” block near the top (runtime, noise, eigen).
+2) Run the script top-to-bottom.
+3) Inspect the printed summary and saved artifacts/plots in the run directory.
+
+Outputs
+- A run directory containing saved artifacts (e.g., parameters, metrics, traces,
+  and optionally checkpoints), plus summary figures produced by the built-in
+  plotting utilities.
+
+Notes
+- This recipe is intentionally explicit to avoid any hidden helper layers.
+  If you want to adapt the workflow, copy this file and edit the explicit steps.
+- For deeper background, see docs on Params/Stores, inference/losses, eigenmodes,
+  and optimization artifacts in the repository documentation.
 """
 from __future__ import annotations
 
