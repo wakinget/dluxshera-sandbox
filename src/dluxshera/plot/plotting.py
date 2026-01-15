@@ -90,6 +90,9 @@ def make_nan_cmaps(
         cmap = matplotlib.colormaps[name].copy()
         cmap.set_bad(bad_color, bad_alpha)
         cmaps[name] = cmap
+        registered_name = f"{name}_nan"
+        matplotlib.colormaps.register(cmap, name=registered_name, force=True)
+        cmaps[registered_name] = cmap
     return cmaps
 
 
