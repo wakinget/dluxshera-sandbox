@@ -12,8 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
+from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
 from tests.conftest import make_forward_store
 
 

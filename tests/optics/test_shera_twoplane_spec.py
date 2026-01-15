@@ -1,7 +1,7 @@
 import pytest
 
 import dluxshera.params.shera_threeplane_transforms  # noqa: F401
-from dluxshera.optics.config import SheraTwoPlaneConfig
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.spec import (
     ParamSpec,
     build_inference_spec_basic,

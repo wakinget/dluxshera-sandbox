@@ -8,7 +8,7 @@ import jax.numpy as np
 import jax.random as jr
 
 from ..legacy.params import SheraThreePlaneParams, SheraTwoPlaneParams
-from ..optics.config import default_diffractive_pupil_path
+from ..systems.three_plane import default_diffractive_pupil_path
 from ..optics.optical_systems import SheraThreePlaneOptics, SheraTwoPlaneOptics
 from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
 from ..utils.utils import nanrms

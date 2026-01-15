@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dLuxToliman import AlphaCen  # external dependency
 
-from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..systems.three_plane import SheraThreePlaneConfig
+    from ..systems.two_plane import SheraTwoPlaneConfig
 from ..params.store import ParameterStore
 
 

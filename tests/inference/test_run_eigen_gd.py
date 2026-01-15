@@ -4,7 +4,7 @@ import pytest
 
 from dluxshera.inference.inference import run_shera_image_gd_eigen
 from dluxshera.inference.optimization import make_binder_image_nll_fn, make_binder_nll_fn, run_simple_gd
-from dluxshera.optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
+from dluxshera.systems.three_plane import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import build_forward_model_spec_from_config, build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.packing import pack_params as store_pack_params, unpack_params as store_unpack_params

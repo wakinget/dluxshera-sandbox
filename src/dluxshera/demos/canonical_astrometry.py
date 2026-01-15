@@ -15,11 +15,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
 from dluxshera.inference.inference import run_shera_image_gd_eigen
 from dluxshera.inference.optimization import make_binder_image_nll_fn, run_simple_gd
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.optics.config import SheraThreePlaneConfig, default_diffractive_pupil_path
+from dluxshera.systems.three_plane import (
+    SheraThreePlaneConfig,
+    default_diffractive_pupil_path,
+)
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import (
     ParamKey,

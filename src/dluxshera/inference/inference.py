@@ -11,7 +11,7 @@ import numpyro as npy
 import numpyro.distributions as dist
 import optax
 
-from ..optics.config import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
+from ..systems.three_plane import SheraThreePlaneConfig, SHERA_TESTBED_CONFIG
 from ..optics.builder import build_shera_threeplane_optics
 from ..params.packing import unpack_params as store_unpack_params
 from ..params.spec import ParamSpec, ParamKey, build_forward_model_spec_from_config

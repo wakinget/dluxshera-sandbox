@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
-from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..systems.three_plane import SheraThreePlaneConfig
+    from ..systems.two_plane import SheraTwoPlaneConfig
 
 SHERA_THREEPLANE_SYSTEM_ID = "shera_threeplane"
 SHERA_TWOPLANE_SYSTEM_ID = "shera_twoplane"

@@ -6,7 +6,7 @@ import dLux.layers as dll
 import dLux
 import dLuxToliman
 from ..utils.utils import scale_array
-from .config import default_diffractive_pupil_path
+from ..systems.three_plane import default_diffractive_pupil_path
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 

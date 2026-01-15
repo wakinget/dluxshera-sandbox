@@ -10,7 +10,7 @@ from dluxshera.optics.builder import (
     clear_threeplane_optics_cache,
     structural_hash_from_config,
 )
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 
 
 def test_build_shera_threeplane_optics_smoke():

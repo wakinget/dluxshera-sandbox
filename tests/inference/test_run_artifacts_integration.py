@@ -8,7 +8,7 @@ from dluxshera.inference.optimization import (
     run_simple_gd,
 )
 from dluxshera.inference.run_artifacts import load_meta, load_summary, load_trace
-from dluxshera.optics.config import SheraThreePlaneConfig
+from dluxshera.systems.three_plane import SheraThreePlaneConfig
 from dluxshera.params.spec import build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore
 

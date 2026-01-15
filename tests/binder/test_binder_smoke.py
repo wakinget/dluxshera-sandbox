@@ -3,9 +3,8 @@
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.core.binder import SheraTwoPlaneBinder
-from dluxshera.optics.config import SheraTwoPlaneConfig
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems.two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
 from tests.conftest import make_forward_store
 
 

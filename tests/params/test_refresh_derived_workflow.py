@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import ParamField, ParamSpec, build_forward_model_spec_from_config
 from dluxshera.params.store import ParameterStore, refresh_derived
 
