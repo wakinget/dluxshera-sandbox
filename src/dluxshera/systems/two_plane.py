@@ -359,7 +359,6 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
     cfg: SheraTwoPlaneConfig
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
-    _detector: Optional[dl.LayeredDetector] = None
 
     def __init__(
         self,
@@ -407,7 +406,7 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         """Build the Shera alpha Cen source for the two-plane system."""
         return build_alpha_cen_source(store, cfg=self.cfg)
 
-    def _runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return the two-plane runtime bindings for non-structural keys."""
         from ..builders.optics import TWOPLANE_RUNTIME_BINDINGS
 

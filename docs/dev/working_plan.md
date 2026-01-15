@@ -442,6 +442,8 @@ Documentation:
 
 **Goal:** Implement the new Binder semantics cleanly, now that structure is stable.
 
+**Status:** ✅ Complete (Binder now caches telescopes, applies runtime updates per component, and enforces explicit rebuild policy for structural changes.)
+
 Actions:
 - Finalize cached telescope behavior.
 - Centralize structural vs runtime detection logic.
