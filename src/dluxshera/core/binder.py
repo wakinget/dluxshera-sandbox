@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import jax.numpy as jnp
 import dLux as dl
@@ -107,7 +107,7 @@ class BaseSheraBinder:
         self.telescope = self._build_telescope(self.base_forward_store)
 
 
-    def __dir__(self):
+    def __dir__(self) -> list[str]:
         """List attribute names available on the binder.
 
         This augments the default ``dir()`` output with configuration fields,
@@ -152,7 +152,7 @@ class BaseSheraBinder:
 
         return sorted(entries)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> object:
         """Resolve dynamic attributes from the config or base store.
 
         Resolution order:
@@ -481,7 +481,11 @@ class BaseSheraBinder:
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, paths, default=None):
+    def get(
+        self,
+        paths: str | Sequence[str],
+        default: object | None = None,
+    ) -> object | list[object]:
         """Retrieve values from the configuration or base store.
 
         This method is a convenience accessor that reads configuration fields
@@ -668,22 +672,22 @@ class BaseSheraBinder:
         return self._direct_model(eff_store)
 
     @property
-    def optics(self):
+    def optics(self) -> dl.OpticalLayer | dl.Optics:
         return self.telescope.optics
 
     @property
-    def source(self):
+    def source(self) -> dl.Source:
         return self.telescope.source
 
     @property
-    def detector(self):
+    def detector(self) -> dl.LayeredDetector:
         return self.telescope.detector
 
     # ------------------------------------------------------------------
     # Mostly immutable helpers
     # ------------------------------------------------------------------
 
-    def with_store(self, new_base_store: ParameterStore):
+    def with_store(self, new_base_store: ParameterStore) -> BaseSheraBinder:
         """Return a new binder that uses a different base store.
 
         This is an immutable-style helper: it constructs a new binder instance
@@ -713,7 +717,7 @@ class BaseSheraBinder:
             base_forward_store=new_base_store,
         )
 
-    def update_store(self, store: ParameterStore):
+    def update_store(self, store: ParameterStore) -> BaseSheraBinder:
         """Return a new binder with an updated base store.
 
         This is the immutable-style path for changing the baseline store. The
