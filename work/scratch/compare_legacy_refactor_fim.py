@@ -21,14 +21,13 @@ import numpy as onp
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
-from dluxshera.inference.optimization import (
+from dluxshera.legacy.optimization import (
     FIM,
     generate_fim_labels,
     loss_fn,
     construct_priors_from_dict,
-    ModelParams,
-    SheraThreePlaneParams,
 )
+from dluxshera.legacy.params import ModelParams, SheraThreePlaneParams
 from dluxshera.legacy.modeling import SheraThreePlane_Model
 from dluxshera.utils.utils import (
     calculate_log_flux,
@@ -40,16 +39,16 @@ from dluxshera.plot.plotting import (
     plot_psf_single,
 )
 
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
+from dluxshera.systems import SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import (
     build_forward_model_spec_from_config,
     make_inference_subspec,
     build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore
-from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.optics.builder import build_shera_threeplane_optics
-from dluxshera.core.universe import build_alpha_cen_source
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.builders.optics import build_shera_threeplane_optics
+from dluxshera.builders.source import build_alpha_cen_source
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
     generate_fim_labels_refactor,

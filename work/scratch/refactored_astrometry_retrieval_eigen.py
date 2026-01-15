@@ -43,7 +43,7 @@ import numpy as np
 import numpy.random._generator as rng
 import jax.random as jr
 
-from dluxshera.optics.config import (
+from dluxshera.systems import (
     SHERA_TESTBED_CONFIG,
     SheraThreePlaneConfig,
     default_diffractive_pupil_path,
@@ -57,7 +57,7 @@ from dluxshera.params.spec import (
 )
 from dluxshera.params.store import ParameterStore, refresh_derived, strip_structural
 from dluxshera.params.transforms import get_resolver
-from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
     generate_fim_labels_refactor,
