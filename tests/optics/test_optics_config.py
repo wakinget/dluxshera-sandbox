@@ -1,7 +1,8 @@
 import pytest
 from dataclasses import FrozenInstanceError
 
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 
 
 def test_threeplane_config_is_frozen():

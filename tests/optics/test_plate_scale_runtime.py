@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from dluxshera.core.binder import SheraThreePlaneBinder
-from dluxshera.core.binder import SheraTwoPlaneBinder
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems.two_plane import SheraTwoPlaneBinder
 from dluxshera.optics import builder
 from dataclasses import replace
 
 from dluxshera.optics.builder import clear_threeplane_optics_cache
 from dluxshera.optics.builder import clear_twoplane_optics_cache
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG
-from dluxshera.optics.config import SheraTwoPlaneConfig
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.packing import pack_params as store_pack_params
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import build_inference_spec_basic

@@ -2,8 +2,8 @@
 
 import pytest
 
-from dluxshera.core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig
+from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
+from dluxshera.systems.two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
 from dluxshera.params.store import ParameterStore
 from tests.conftest import make_forward_store
 

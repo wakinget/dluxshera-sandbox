@@ -1,8 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from dluxshera.optics.config import SheraTwoPlaneConfig
-from dluxshera.core.binder import SheraTwoPlaneBinder
+from dluxshera.systems.two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
 from dluxshera.inference.optimization import (
     make_binder_image_nll_fn,
     loss_canonical,

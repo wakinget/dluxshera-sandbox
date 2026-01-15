@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
 from dluxshera.inference.optimization import make_binder_nll_fn
 from dluxshera.params.packing import pack_params
 from dluxshera.params.spec import build_forward_model_spec_from_config

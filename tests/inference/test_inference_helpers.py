@@ -2,7 +2,8 @@ import pytest
 
 from dluxshera.params.spec import ParamField, ParamSpec, make_inference_subspec
 from dluxshera.params.store import ParameterStore, validate_inference_base_store
-from dluxshera.optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
+from dluxshera.systems.three_plane import SheraThreePlaneConfig
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 
 
 def _base_spec():
@@ -77,4 +78,3 @@ def test_validate_inference_base_store_shape_mismatch():
         validate_inference_base_store(store, spec)
 
     assert "shape mismatches" in str(excinfo.value)
-

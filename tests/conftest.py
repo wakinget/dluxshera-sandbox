@@ -6,9 +6,10 @@ from typing import Dict, Optional
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.core.binder import SheraThreePlaneBinder
+from dluxshera.systems.three_plane import SheraThreePlaneBinder
 from dluxshera.optics.builder import build_legacy_shera_threeplane_model
-from dluxshera.optics.config import SHERA_TESTBED_CONFIG, SheraThreePlaneConfig, SheraTwoPlaneConfig
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG, SheraThreePlaneConfig
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.spec import (
     ParamSpec,
     build_forward_model_spec_from_config,

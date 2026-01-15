@@ -310,6 +310,8 @@ Documentation:
 
 **Goal:** Make `systems/` the authoritative home of plane-specific logic.
 
+**Status:** ✅ Complete — BaseConfig/BaseSheraBinder now live in `systems/base.py`, with two-plane/three-plane configs, binders, and presets co-located in `systems/two_plane.py` and `systems/three_plane.py`. Imports now flow through `systems/` (with legacy re-exports in `optics/config.py`). 
+
 Actions:
 - Move `BaseBinder` into `systems/base.py`.
 - Move:

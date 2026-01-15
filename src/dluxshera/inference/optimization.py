@@ -19,7 +19,8 @@ from .losses import gaussian_image_nll
 from .run_artifacts import save_run
 from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
-from ..optics.config import SheraThreePlaneConfig, SheraTwoPlaneConfig
+from ..systems.three_plane import SheraThreePlaneConfig
+from ..systems.two_plane import SheraTwoPlaneConfig
 from ..params.spec import ParamSpec, ParamKey
 from ..params.store import ParameterStore, strip_structural, subset_store
 from ..params.packing import (
@@ -29,7 +30,8 @@ from ..params.packing import (
 )
 
 if TYPE_CHECKING:
-    from ..core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
+    from ..systems.three_plane import SheraThreePlaneBinder
+    from ..systems.two_plane import SheraTwoPlaneBinder
 
 ############################
 # Exports
@@ -478,7 +480,8 @@ def make_binder_image_nll_fn(
         unexpectedly non-zero). Set to ``False`` for the standard
         loss-only tuple.
     """
-    from ..core.binder import SheraThreePlaneBinder, SheraTwoPlaneBinder
+    from ..systems.three_plane import SheraThreePlaneBinder
+    from ..systems.two_plane import SheraTwoPlaneBinder
 
     if binder is not None:
         mismatches = []

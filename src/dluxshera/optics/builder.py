@@ -6,13 +6,15 @@ import hashlib
 import json
 import os
 import warnings
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 import jax.numpy as jnp
 import dLux.layers as dll
 
-from .config import SheraThreePlaneConfig, SheraTwoPlaneConfig
+if TYPE_CHECKING:
+    from ..systems.three_plane import SheraThreePlaneConfig
+    from ..systems.two_plane import SheraTwoPlaneConfig
 from ..params.store import ParameterStore
 from ..params.spec import ParamSpec
 
