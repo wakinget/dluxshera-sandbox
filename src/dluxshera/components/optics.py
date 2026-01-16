@@ -5,8 +5,7 @@ import dLux.utils as dlu
 import dLux.layers as dll
 import dLux
 import dLuxToliman
-from ..utils.utils import scale_array
-from ..systems.three_plane import default_diffractive_pupil_path
+from ..utils.utils import scale_array, default_diffractive_pupil_path
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
@@ -189,7 +188,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         m2_diameter: float = 0.025,
         n_struts: int = 4,
         strut_width: float = 0.002,
-        strut_rotation: float = -np.pi / 4,
+        strut_rotation_deg: float = -90.0,
         dp_design_wavel: float = 550e-9,
     ):
         """
@@ -229,8 +228,8 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
             The number of uniformly spaced struts holding the secondary mirror.
         strut_width : float
             The width of the struts in metres.
-        strut_rotation : float
-            The angular rotation of the struts in radians.
+        strut_rotation_deg : float
+            The angular rotation of the struts in degrees.
         """
 
         # Diameter
@@ -241,7 +240,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         coords = dlu.pixel_coords(pupil_oversample * wf_npixels, m1_diameter)
         outer = dlu.circle(coords, m1_diameter / 2)
         inner = dlu.circle(coords, m2_diameter / 2, invert=True)
-        strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + np.rad2deg(strut_rotation)
+        strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + strut_rotation_deg
         spiders = dlu.spider(coords, strut_width, strut_angles)
         transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
 
