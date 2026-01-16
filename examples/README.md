@@ -15,7 +15,7 @@ under `examples/runners/`.
 ```bash
 python examples/runners/run_canonical_astrometry.py --fast
 python examples/recipes/twoplane_astrometry.py
-python examples/scripts/run_twoplane_astrometry_demo.py --fast --save-plots-dir Results/TwoplaneAstrometryDemo
+python examples/runners/run_twoplane_astrometry.py --fast
 ```
 
 ## Notebooks
