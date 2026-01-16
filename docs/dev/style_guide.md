@@ -9,7 +9,7 @@ functional updates, predictable IO).
 - Prefer a consistent top-of-file layout:
   - `from __future__ import annotations` (when helpful for typing)
   - Imports grouped as: **stdlib → third-party → local**
-  - Optional `__all__` to define the public surface area of the module
+  - `__all__` at top to define the public surface area of the module
 - Use clear file sectioning for large modules (optional but encouraged):
   - “Private helpers” vs “Public API”
   - Visually distinct comment banners are acceptable when they improve
