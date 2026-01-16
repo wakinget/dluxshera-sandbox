@@ -14,6 +14,10 @@
 
 ## Systems (implemented as binders)
 
+### System-level configs and named designs
+
+System configuration now lives at the system level: you instantiate a `SheraTwoPlaneConfig` or `SheraThreePlaneConfig` once, then pass that config into builders/spec generation and the System (Binder). The config is treated as a stable, mostly immutable definition of the optical design and sampling defaults, so new users should think of it as the canonical source of truth for geometry, wavelengths, and structural settings. For common starting points, the codebase exports named designs like `SHERA_TESTBED_CONFIG` and `SHERA_FLIGHT_CONFIG` (both two-plane and three-plane variants) with a `design_name` set for traceability. The recommended workflow is to start from a named design and use `.replace(...)` (or an equivalent helper) to derive a customized config, keeping the original untouched so caching, hashing, and reproducibility stay predictable.
+
 The System (Binder) is the primary model object in dLuxShera. It combines a configuration, the relevant `ParamSpec`, and a baseline `ParameterStore`, then exposes user-facing methods to evaluate the optical system. Callers supply parameter deltas or θ-vectors, and the System handles packing/unpacking, derived parameter resolution, and interaction with the underlying optics. When you “build a Shera model” in the canonical demos, you are creating a System (Binder) and invoking it to produce PSFs or images.
 
 ### Immutability + evaluation contract
