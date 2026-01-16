@@ -11,6 +11,7 @@ def test_context_snapshot_reports_param_specs_and_transforms(tmp_path):
     assert md_path.exists(), "Markdown summary should be written"
 
     md_text = md_path.read_text(encoding="utf-8")
+    assert md_text.count("## Transforms") == 1
     for expected in (
         "forward_threeplane",
         "forward_twoplane",

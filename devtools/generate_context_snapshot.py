@@ -611,6 +611,7 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
         f"- Packages: {packages_line}",
         "",
     ]
+    transforms_emitted = False
 
     wp = meta.get("working_plan", {})
     if wp.get("exists"):
@@ -673,9 +674,30 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
         lines.extend(["## Param Specs", f"- ERROR: {param_specs['error']}", ""])
 
     if isinstance(transforms, dict) and transforms.get("systems"):
-        lines.append("## Transforms")
+        if not transforms_emitted and "## Transforms" not in lines:
+            lines.append("## Transforms")
+            transforms_emitted = True
         systems = transforms.get("systems", {})
-        for sid, info in sorted(systems.items()):
+        systems_map: Dict[str, Any] = {}
+        if isinstance(systems, dict):
+            systems_map = dict(systems)
+        elif isinstance(systems, list):
+            for entry in systems:
+                sid = None
+                info = None
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    sid, info = entry
+                elif isinstance(entry, dict):
+                    sid = (
+                        entry.get("system_id")
+                        or entry.get("id")
+                        or entry.get("name")
+                    )
+                    info = entry
+                if sid and sid not in systems_map and info is not None:
+                    systems_map[sid] = info
+
+        for sid, info in sorted(systems_map.items()):
             lines.append(f"- System: {sid} ({info.get('count', 'n/a')} transforms)")
             for entry in info.get("transforms", []):
                 deps = entry.get("depends_on") or []
@@ -687,7 +709,10 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
                 )
         lines.append("")
     elif isinstance(transforms, dict) and "error" in transforms:
-        lines.extend(["## Transforms", f"- ERROR: {transforms['error']}", ""])
+        if not transforms_emitted and "## Transforms" not in lines:
+            lines.append("## Transforms")
+            transforms_emitted = True
+        lines.extend([f"- ERROR: {transforms['error']}", ""])
 
     if configs:
         lines.append("## Configs")
