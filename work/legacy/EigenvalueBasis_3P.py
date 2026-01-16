@@ -16,10 +16,11 @@ import optax
 # import dLux as dl
 # import dLux.layers as dll
 # import dLux.utils as dlu
-from src.dluxshera.inference.optimization import loss_fn, step_fn_general, loss_with_injected
+from src.dluxshera.inference.optimization import loss_fn
+from src.dluxshera.legacy.optimization import loss_with_injected, step_fn
 from src.dluxshera.legacy.optimization import (
     FIM,
-    generate_fim_labels,
+    generate_fim_labels_legacy,
     get_optimiser,
     get_lr_from_curvature,
     construct_priors_from_dict,
@@ -333,7 +334,7 @@ fim = FIM(
 )
 print("FIM shape:", fim.shape)
 # === Plot the Fisher Information Matrix ===
-fim_labels = generate_fim_labels(params, initial_model_params)
+fim_labels = generate_fim_labels_legacy(params, initial_model_params)
 fim_log = np.log10(np.abs(fim) + 1e-20)
 fig, ax = plt.subplots(figsize=(8, 6))
 im = ax.imshow(fim_log, cmap="viridis", vmin=4, vmax=14)
@@ -815,7 +816,7 @@ for obs_i in range(N_observations):
         optim = optax.sgd(lr)
         state = optim.init(c0)
         # step = step_fn_eigen
-        step = step_fn_general
+        step = step_fn
 
         # ---- build lr_model to match EigenParams ----
         k = B.shape[1]
@@ -838,7 +839,7 @@ for obs_i in range(N_observations):
             parameters=params,  # external names you’re optimizing
         )
         # step = step_fn
-        step = step_fn_general
+        step = step_fn
 
         # lr_model must match model_params’ PyTree type/structure
         lr_model = get_lr_from_curvature(np.diag(fim), model_params, order=params)
