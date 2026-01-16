@@ -17,6 +17,8 @@ from pathlib import Path
 
 __all__ = ["nanrms","set_array", "scale_array",
            "sinusoidal_grating_2D", "calculate_log_flux",
+           "default_diffractive_pupil_path",
+           "DEFAULT_DP_PATH",
            ]
 
 inferno = mpl.colormaps["inferno"]
@@ -36,6 +38,8 @@ def default_diffractive_pupil_path() -> str:
         return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
     except Exception:
         return str(Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy")
+
+DEFAULT_DP_PATH = default_diffractive_pupil_path()
 
 
 def debug_param_type(model, key):
