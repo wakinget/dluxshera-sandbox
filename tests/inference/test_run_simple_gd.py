@@ -1,0 +1,128 @@
+import jax.numpy as jnp
+import optax
+
+from dluxshera.inference.optimization import _gd_loop, run_simple_gd
+
+
+def test_run_simple_gd_converges_on_quadratic():
+    # Simple convex quadratic: minimum at theta_true
+    theta_true = jnp.array([1.5, -0.5])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([0.0, 0.0])
+
+    theta_final, history = run_simple_gd(
+        loss_fn,
+        theta0,
+        learning_rate=0.5,
+        num_steps=50,
+    )
+
+    # Loss should strictly decrease overall
+    loss_start = float(history["loss"][0])
+    loss_end = float(history["loss"][-1])
+    assert loss_end < loss_start
+
+    # Final theta should be closer than where it started
+    init_err = jnp.linalg.norm(theta0 - theta_true)
+    err = jnp.linalg.norm(theta_final - theta_true)
+    assert err < init_err
+    assert err < 1e-1
+
+
+def test_gd_loop_trace_shapes():
+    theta_true = jnp.array([2.0, -1.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([0.0, 0.0])
+    theta_final, trace = _gd_loop(loss_fn, theta0, learning_rate=0.2, num_steps=5)
+
+    assert theta_final.shape == theta0.shape
+    assert trace["theta"].shape == (6, 2)
+    assert trace["loss"].shape == (6,)
+    assert trace["grad_norm"].shape == (5,)
+    assert trace["step_norm"].shape == (5,)
+
+
+def test_gd_loop_default_optimizer_decreases_loss():
+    theta_true = jnp.array([1.0, -1.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([2.0, 3.0])
+    _, trace = _gd_loop(loss_fn, theta0, learning_rate=0.1, num_steps=10)
+
+    assert float(trace["loss"][-1]) < float(trace["loss"][0])
+
+
+def test_gd_loop_custom_optimizer_decreases_loss():
+    theta_true = jnp.array([0.5, -1.5])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    theta0 = jnp.array([2.0, 1.0])
+    optimizer = optax.sgd(learning_rate=0.2)
+    _, trace = _gd_loop(
+        loss_fn,
+        theta0,
+        learning_rate=0.1,
+        num_steps=10,
+        optimizer=optimizer,
+    )
+
+    assert float(trace["loss"][-1]) < float(trace["loss"][0])
+
+
+def test_gd_loop_runs_without_tqdm(monkeypatch):
+    theta_true = jnp.array([1.0, -2.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    monkeypatch.setattr(
+        "dluxshera.inference.optimization.tqdm",
+        lambda iterable: iterable,
+    )
+
+    theta0 = jnp.array([0.0, 0.0])
+    theta_final, trace = _gd_loop(
+        loss_fn,
+        theta0,
+        learning_rate=0.1,
+        num_steps=3,
+        show_progress=True,
+    )
+
+    assert theta_final.shape == theta0.shape
+    assert trace["theta"].shape == (4, 2)
+    assert trace["loss"].shape == (4,)
+
+
+def test_run_simple_gd_without_artifacts_does_not_save(monkeypatch):
+    theta_true = jnp.array([1.0, -2.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    def fail_save_run(*_args, **_kwargs):
+        raise AssertionError("save_run should not be called when artifacts are disabled.")
+
+    monkeypatch.setattr("dluxshera.inference.optimization.save_run", fail_save_run)
+
+    theta0 = jnp.array([0.0, 0.0])
+    theta_final, history = run_simple_gd(
+        loss_fn,
+        theta0,
+        learning_rate=0.1,
+        num_steps=4,
+    )
+
+    assert theta_final.shape == theta0.shape
+    assert history["loss"].shape == (4,)
+    assert history["theta"].shape == (4, 2)

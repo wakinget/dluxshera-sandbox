@@ -1,9 +1,35 @@
+# .gitignore
+
+# ----------------------------------------------------------------------
+# devtools rules
+# ----------------------------------------------------------------------
+# Ignore *all* snapshot directories of the form:
+#   devtools/context_snapshot_<timestamp>/
+# Matches anything beginning with "context_snapshot_"
+devtools/context_snapshot_*/
+
+# Ignore any excess context files within the base devtools/ folder
+devtools/*.json
+devtools/*.txt
+
+# If snapshots contain many file types, ignore everything inside them:
+devtools/context_snapshot_*/**
+
+# Explicitly keep real devtools code:
+!devtools/__init__.py
+!devtools/*.py
+
+# If we ever add subpackages/modules under devtools/, keep those too:
+!devtools/**/__init__.py
+!devtools/**/*.py
 
 # My own example files to ignore
 Examples/*
 # BUT do not ignore the notebooks folder
 !Examples/notebooks/
 !Examples/notebooks/**
+!Examples/scripts/
+!Examples/scripts/**
 
 
 
