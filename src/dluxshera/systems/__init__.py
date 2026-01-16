@@ -5,7 +5,6 @@ from .three_plane import (
     SHERA_TESTBED_CONFIG,
     SheraThreePlaneBinder,
     SheraThreePlaneConfig,
-    default_diffractive_pupil_path,
 )
 from .two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
 
