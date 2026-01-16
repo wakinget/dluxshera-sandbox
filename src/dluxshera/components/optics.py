@@ -49,7 +49,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         psf_npixels: int = 128,
         oversample: int = 2,
         psf_pixel_scale: float = 0.3547,  # as/pix
-        mask: Array = None,
+        mask: Array | str = None,
         radial_orders: Array = None,
         noll_indices: Array = None,
         coefficients: Array = None,
