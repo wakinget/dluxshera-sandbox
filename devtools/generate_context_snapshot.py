@@ -133,9 +133,10 @@ def _collect_basic_metadata(
             return str(p)
 
     meta: Dict[str, Any] = {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "generated_at": now.isoformat(timespec="seconds"),
-        "repo_root": str(repo_root),
+        "repo_root_abs": str(repo_root),
+        "repo_root_rel": rel(repo_root),
         "snapshot_dir": rel(snapshot_dir),
         "files": {
             "project_tree": rel(tree_path),
