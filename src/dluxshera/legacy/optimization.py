@@ -21,7 +21,7 @@ __all__ = [
     "get_lr_model",
     "assign_lr_vector",
     "get_lr_from_curvature",
-    "generate_fim_labels",
+    "generate_fim_labels_legacy",
     "build_basis",
     "construct_priors_from_dict",
 ]
@@ -246,11 +246,7 @@ def get_lr_from_curvature(curv_vec, target, order=None, eps=1e-12):
     return assign_lr_vector(lr_vec, target, order=order)
 
 
-############################
-# Reparameterization Utilities
-############################
-
-def generate_fim_labels(params, model_params):
+def generate_fim_labels_legacy(params, model_params):
     """
     Generate human-readable labels for FIM plotting.
 
@@ -277,6 +273,9 @@ def generate_fim_labels(params, model_params):
     return labels
 
 
+############################
+# Reparameterization Utilities
+############################
 
 def build_basis(eigvecs, eigvals, truncate: Optional[int] = None, whiten: bool = False):
     """

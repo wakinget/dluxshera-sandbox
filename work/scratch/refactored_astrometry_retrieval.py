@@ -43,23 +43,21 @@ import numpy.random._generator as rng
 import jax.random as jr
 
 from dluxshera.systems import (
-    SHERA_TESTBED_CONFIG,
     SheraThreePlaneConfig,
-    default_diffractive_pupil_path,
 )
 from dluxshera.params.packing import unpack_params as store_unpack_params
 from dluxshera.params.spec import (
-    ParamKey,
-    ParamSpec,
-    build_forward_model_spec_from_config,
     make_inference_subspec, build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore, refresh_derived, strip_structural
-from dluxshera.params.transforms import get_resolver
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.params.transform_registry import get_resolver
+from dluxshera.systems.three_plane import (
+    SheraThreePlaneBinder, build_forward_spec_from_config,
+    SHERA_TESTBED_CONFIG, SHERA_FLIGHT_CONFIG
+)
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
-    generate_fim_labels_refactor,
+    generate_fim_labels,
     map_labels_to_keys,
     make_binder_nll_fn,
     run_shera_gd,
@@ -77,6 +75,7 @@ from dluxshera.plot.plotting import (
 )
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params, build_index_map
+from dluxshera.utils.utils import default_diffractive_pupil_path
 
 # Plotting
 import matplotlib.pyplot as plt
@@ -121,7 +120,7 @@ cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)),
                   secondary_noll_indices=tuple(range(4, 12)))
 
 # Create Parameter Specs from the config
-forward_spec = build_forward_model_spec_from_config(cfg)
+forward_spec = build_forward_spec_from_config(cfg)
 inference_spec = build_inference_spec_basic(cfg)
 
 # Create forward Parameter Store from the specs
@@ -224,7 +223,7 @@ nll_loss_fn, theta0 = make_binder_nll_fn(
 )
 # nll_loss_fn(theta) gives the negative log-likelihood loss for a given input theta vector
 index_map = build_index_map(inference_subspec, init_store, theta=theta0)
-fim_labels = generate_fim_labels_refactor(
+fim_labels = generate_fim_labels(
     infer_keys,
     cfg=cfg,
     store=init_store,

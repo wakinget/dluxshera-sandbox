@@ -62,7 +62,7 @@ __all__ = [
     "loglikelihood", "loss_fn", "step_fn",
 
     # reparameterisation utils
-    "generate_fim_labels_refactor",
+    "generate_fim_labels",
     "map_labels_to_keys",
 ]
 
@@ -1434,7 +1434,7 @@ def run_image_gd(
 # θ-space Fisher Information utilities (Binder-based)
 # -------------------------------------------------------------------------
 
-def generate_fim_labels_refactor(
+def generate_fim_labels(
     infer_keys: Sequence[ParamKey],
     *,
     cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | None,
@@ -1707,7 +1707,7 @@ def fim_theta_shera(
 
     F = fim_theta(loss_fn, theta0)
     if return_labels:
-        labels = generate_fim_labels_refactor(
+        labels = generate_fim_labels(
             infer_keys,
             cfg=cfg,
             store=base_forward_store,

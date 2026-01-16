@@ -47,7 +47,6 @@ from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
     SHERA_FLIGHT_CONFIG,
     SheraThreePlaneBinder,
-    default_diffractive_pupil_path,
     build_forward_spec_from_config,
 )
 from dluxshera.params.packing import unpack_params as store_unpack_params
@@ -59,7 +58,7 @@ from dluxshera.params.spec import (
 from dluxshera.params.store import ParameterStore, refresh_derived, strip_structural
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
-    generate_fim_labels_refactor,
+    generate_fim_labels,
     map_labels_to_keys,
     make_binder_nll_fn,
     run_shera_gd,
@@ -78,6 +77,7 @@ from dluxshera.plot.plotting import (
 )
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.params.packing import pack_params, unpack_params, build_index_map, build_eigen_index_map
+from dluxshera.utils.utils import default_diffractive_pupil_path
 
 # Plotting
 import matplotlib.pyplot as plt
@@ -279,7 +279,7 @@ nll_loss_fn, theta0 = make_binder_nll_fn(
     theta0_store=init_store,
 )
 # Generate human-readable labels for parameter names
-fim_labels = generate_fim_labels_refactor(
+fim_labels = generate_fim_labels(
     infer_keys,
     cfg=cfg,
     store=init_store,

@@ -23,8 +23,7 @@ import matplotlib.pyplot as plt
 
 from dluxshera.legacy.optimization import (
     FIM,
-    generate_fim_labels,
-    loss_fn,
+    generate_fim_labels_legacy,
     construct_priors_from_dict,
 )
 from dluxshera.legacy.params import ModelParams, SheraThreePlaneParams
@@ -39,21 +38,23 @@ from dluxshera.plot.plotting import (
     plot_psf_single,
 )
 
-from dluxshera.systems import SHERA_TESTBED_CONFIG
 from dluxshera.params.spec import (
-    build_forward_model_spec_from_config,
     make_inference_subspec,
     build_inference_spec_basic,
 )
 from dluxshera.params.store import ParameterStore
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems.three_plane import (
+    SheraThreePlaneBinder, build_forward_spec_from_config,
+    SHERA_TESTBED_CONFIG, SHERA_FLIGHT_CONFIG
+)
 from dluxshera.builders.optics import build_shera_threeplane_optics
 from dluxshera.builders.source import build_alpha_cen_source
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.optimization import (
-    generate_fim_labels_refactor,
+    generate_fim_labels,
     make_binder_nll_fn,
     fim_theta,
+    loss_fn, # legacy loss_fn
 )
 from dluxshera.params.packing import build_index_map
 from dluxshera.params.packing import pack_params
@@ -247,7 +248,7 @@ fim = FIM(
 )
 print("FIM shape:", fim.shape)
 # === Plot the Fisher Information Matrix ===
-fim_labels = generate_fim_labels(params, initial_model_params)
+fim_labels = generate_fim_labels_legacy(params, initial_model_params)
 
 legacy_model_psf = onp.asarray(model_psf)
 legacy_data_psf = onp.asarray(data_psf)
@@ -275,7 +276,7 @@ cfg = SHERA_TESTBED_CONFIG
 cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)), secondary_noll_indices=tuple(range(4, 12)))
 
 # Create Parameter Specs from the config
-forward_spec = build_forward_model_spec_from_config(cfg)
+forward_spec = build_forward_spec_from_config(cfg)
 inference_spec = build_inference_spec_basic(cfg)
 
 # Create forward Parameter Store from the specs
@@ -331,7 +332,7 @@ nll_loss_fn, theta0 = make_binder_nll_fn(
     reduce="sum",
 )
 # nll_loss_fn(theta) gives the negative log-likelihood loss for a given input theta vector
-fim_labels = generate_fim_labels_refactor(
+fim_labels = generate_fim_labels(
     infer_keys,
     cfg=cfg,
     store=forward_truth_store,

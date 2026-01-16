@@ -60,7 +60,7 @@ import numpy as np
 from dluxshera.inference.optimization import (
     EigenThetaMap,
     fim_theta,
-    generate_fim_labels_refactor,
+    generate_fim_labels,
     make_binder_nll_fn,
     map_labels_to_keys,
     run_shera_gd,
@@ -243,7 +243,7 @@ def main(
         reduce="sum",
         theta0_store=init_store,
     )
-    fim_labels = generate_fim_labels_refactor(INFER_KEYS, cfg=cfg, store=init_store)
+    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
 
     def map_loss_fn(theta: np.ndarray) -> np.ndarray:
         store_theta = store_unpack_params(inference_subspec, theta, init_store)
