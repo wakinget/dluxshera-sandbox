@@ -1,10 +1,13 @@
 from __future__ import annotations
+
 import jax.numpy as np
 from jax import Array, vmap
-import dLux.utils as dlu
-import dLux.layers as dll
+
 import dLux
+import dLux.layers as dll
+import dLux.utils as dlu
 import dLuxToliman
+
 from ..utils.utils import scale_array
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
@@ -21,6 +24,25 @@ ThreePlaneOpticalSystem = lambda: dLux.optical_systems.ThreePlaneOpticalSystem
 
 
 class SheraTwoPlaneOptics(AngularOpticalSystem()):
+    """Build a two-plane Shera optical system with optional aberrations.
+
+    This class wires together a Shera-style entrance pupil, optional Zernike
+    aberrations, and an optional diffractive pupil map for use with
+    :class:`dLux.optical_systems.AngularOpticalSystem`.
+
+    Key properties
+    --------------
+    - Supports Zernike aberrations via ``radial_orders`` or ``noll_indices``.
+    - Accepts a diffractive pupil mask as either a path or array.
+    - Interprets diffractive pupil data as normalized phase or OPD depending on
+      ``dp_design_wavel``.
+
+    Notes
+    -----
+    This object is intended to be treated as immutable. Update patterns should
+    follow functional replacements on layers rather than in-place mutation.
+    """
+
     def __init__(
         self,
         wf_npixels: int = 256,
@@ -38,25 +60,23 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         strut_rotation_deg: float = -90.0,
         dp_design_wavel: float = 550e-9,
     ):
-        """
-        A pre-built dLux optics layer of the Shera two-plane optical system.
-        Note TolimanOptics uses units of arcseconds.
+        """Construct a Shera two-plane optical system.
 
         Parameters
         ----------
         wf_npixels : int
-            The pixel width the wavefront layer.
+            Pixel width of the wavefront layer.
         psf_npixels : int
-            The pixel width of the PSF.
+            Pixel width of the PSF.
         oversample : int
-            The Nyquist oversampling factor of the PSF.
+            Nyquist oversampling factor of the PSF.
         psf_pixel_scale : float
-            The pixel scale of the PSF in arcseconds per pixel.
+            Pixel scale of the PSF in arcseconds per pixel.
         mask : Array
             Diffractive pupil mask to apply to the wavefront layer. Accepts a
             path to a .npy file or a 2D array. When provided alongside
-            ``dp_design_wavel``, the input is interpreted as a normalized
-            phase pattern P(x, y) ∈ [0, 1] spanning [0, π] radians at
+            ``dp_design_wavel``, the input is interpreted as a normalized phase
+            pattern ``P(x, y)`` ∈ [0, 1] spanning [0, π] radians at
             ``dp_design_wavel``. When ``dp_design_wavel`` is None, the input
             is interpreted directly as an OPD map in meters.
         radial_orders : Array = None
@@ -82,6 +102,9 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
             The width of the struts in metres.
         strut_rotation_deg : float
             The angular rotation of the struts in degrees.
+        dp_design_wavel : float
+            Design wavelength in meters for interpreting normalized phase
+            diffractive pupil masks.
         """
 
         # Diameter
@@ -95,7 +118,6 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         strut_angles = np.linspace(0, 360, n_struts + 1)[:-1] + strut_rotation_deg
         spiders = dlu.spider(coords, strut_width, strut_angles)
         transmission = dlu.combine([outer, inner, spiders], pupil_oversample)
-
 
         # Hack this in for now, will be in dLux eventually
         if radial_orders is not None:
@@ -125,7 +147,6 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
 
             # Combine into BasisOptic class
             aperture = dll.BasisOptic(basis, transmission, coefficients, normalise=True)
-
 
         # Generate Mask
         if mask is None:
@@ -166,9 +187,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         )
 
     def _apply_aperture(self, wavelength, offset):
-        """
-        Overwrite so mask can be stored as array
-        """
+        """Apply aperture transmission and diffractive pupil terms."""
         wf = self._construct_wavefront(wavelength, offset)
         wf *= self.aperture
         wf = wf.normalise()
@@ -177,6 +196,24 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
 
 
 class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
+    """Build a three-plane Shera optical system with optional aberrations.
+
+    This class defines a two-mirror optical train with a diffractive pupil on
+    the primary plane. It uses :class:`dLux.optical_systems.ThreePlaneOpticalSystem`
+    to handle multi-plane propagation and image formation.
+
+    Key properties
+    --------------
+    - Independent Zernike aberrations can be applied to the M1 and M2 pupils.
+    - Diffractive pupil inputs can be normalized phase or OPD maps.
+    - Plate scale is derived from the focal length and detector pitch.
+
+    Notes
+    -----
+    This object is intended to be treated as immutable. Update patterns should
+    follow functional replacements on layers rather than in-place mutation.
+    """
+
     m1_noll_ind: Array = None
     m2_noll_ind: Array = None
 
@@ -185,7 +222,7 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         wf_npixels: int = 256,
         psf_npixels: int = 128,
         oversample: int = 2,
-        detector_pixel_pitch: float = 4.6e-6, # pixel pitch in meters/pixel
+        detector_pixel_pitch: float = 4.6e-6,  # pixel pitch in meters/pixel
         mask=None,
         m1_noll_ind: Array = None,
         m1_coefficients: Array = None,
@@ -201,6 +238,48 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         strut_rotation_deg: float = 45.0,
         dp_design_wavel: float | None = 550e-9,
     ):
+        """Construct a Shera three-plane optical system.
+
+        Parameters
+        ----------
+        wf_npixels : int
+            Pixel width of the wavefront layer.
+        psf_npixels : int
+            Pixel width of the PSF.
+        oversample : int
+            Nyquist oversampling factor of the PSF.
+        detector_pixel_pitch : float
+            Detector pixel pitch in meters per pixel.
+        mask : Array or str, optional
+            Diffractive pupil mask as a 2D array or path to a ``.npy`` file.
+        m1_noll_ind : Array, optional
+            Zernike Noll indices for M1 aberrations.
+        m1_coefficients : Array, optional
+            Zernike coefficients for the M1 basis (meters of OPD).
+        m2_noll_ind : Array, optional
+            Zernike Noll indices for M2 aberrations.
+        m2_coefficients : Array, optional
+            Zernike coefficients for the M2 basis (meters of OPD).
+        p1_diameter : float
+            Primary pupil diameter in meters.
+        p2_diameter : float
+            Secondary pupil diameter in meters.
+        m1_focal_length : float
+            Primary mirror focal length in meters.
+        m2_focal_length : float
+            Secondary mirror focal length in meters.
+        plane_separation : float
+            Separation between the primary and secondary in meters.
+        n_struts : int
+            Number of uniformly spaced struts holding the secondary mirror.
+        strut_width : float
+            Strut width in meters.
+        strut_rotation_deg : float
+            Strut rotation in degrees.
+        dp_design_wavel : float or None
+            Design wavelength in meters for normalized phase masks. When None,
+            the mask is treated as OPD in meters.
+        """
 
         # Set attributes
         self.m1_noll_ind = m1_noll_ind
@@ -229,22 +308,34 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
             m1_aperture = dll.TransmissiveLayer(m1_transmission, normalise=True)
         else:
             coords = dlu.pixel_coords(wf_npixels, p1_diameter)
-            basis = np.array([dlu.zernike(i, coords, p1_diameter) for i in self.m1_noll_ind])
-            coefficients = np.zeros(len(self.m1_noll_ind)) if m1_coefficients is None else m1_coefficients
+            basis = np.array(
+                [dlu.zernike(i, coords, p1_diameter) for i in self.m1_noll_ind]
+            )
+            coefficients = (
+                np.zeros(len(self.m1_noll_ind))
+                if m1_coefficients is None
+                else m1_coefficients
+            )
             m1_aperture = dll.BasisOptic(basis, m1_transmission, coefficients, normalise=True)
             # Normalize basis so Zernike coefficients represent nanometers of OPD
-            m1_aperture = m1_aperture.multiply('basis', 1e-9)
+            m1_aperture = m1_aperture.multiply("basis", 1e-9)
 
         # Generate Zernike basis for M2
         if self.m2_noll_ind is None:
             m2_aperture = dll.TransmissiveLayer(m2_transmission, normalise=True)
         else:
             coords = dlu.pixel_coords(wf_npixels, p2_diameter)
-            basis = np.array([dlu.zernike(i, coords, p2_diameter) for i in self.m2_noll_ind])
-            coefficients = np.zeros(len(self.m2_noll_ind)) if m2_coefficients is None else m2_coefficients
+            basis = np.array(
+                [dlu.zernike(i, coords, p2_diameter) for i in self.m2_noll_ind]
+            )
+            coefficients = (
+                np.zeros(len(self.m2_noll_ind))
+                if m2_coefficients is None
+                else m2_coefficients
+            )
             m2_aperture = dll.BasisOptic(basis, m2_transmission, coefficients, normalise=True)
             # Normalize basis so Zernike coefficients represent nanometers of OPD
-            m2_aperture = m2_aperture.multiply('basis', 1e-9)
+            m2_aperture = m2_aperture.multiply("basis", 1e-9)
 
         # ------------------------------------------------------------------
         # Generate Diffractive Pupil Mask layer
@@ -315,16 +406,12 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         )
 
     def _apply_aperture(self, wavelength, offset):
-        """
-        Overwrite so mask can be stored as array
-        """
+        """Apply aperture transmission and diffractive pupil terms."""
         wf = self._construct_wavefront(wavelength, offset)
         wf *= self.m1_aperture
         wf = wf.normalise()
         wf += self.dp
         return wf
-
-
 
 # class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):
 #     def __init__(
