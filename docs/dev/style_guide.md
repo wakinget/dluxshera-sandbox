@@ -33,11 +33,11 @@ functional updates, predictable IO).
   - This advertises the “shape” of the object before reading `__init__`.
   - Example:
 
-    ```python
-    psf_npixels: int
-    oversample: int
-    psf_pixel_scale: float
-    ```
+```python
+psf_npixels: int
+oversample: int
+psf_pixel_scale: float
+```
 
 - Method signatures should include argument and return type hints where
   practical.
@@ -95,47 +95,47 @@ functional updates, predictable IO).
 
 - Public method template (binder-style):
 
-    ```python
-    """<One-line summary>.
+```python
+"""<One-line summary>.
 
-    <1–3 paragraphs describing purpose, when to use, and key semantics.>
-    <Optional: Resolution order / behavior notes.>
+<1–3 paragraphs describing purpose, when to use, and key semantics.>
+<Optional: Resolution order / behavior notes.>
 
-    Parameters
-    ----------
-    ...
+Parameters
+----------
+...
 
-    Returns
-    -------
-    ...
+Returns
+-------
+...
 
-    Raises
-    ------
-    ...
+Raises
+------
+...
 
-    Notes
-    -----
-    <Design intent / immutability / performance implications.>
-    """
-    ```
+Notes
+-----
+<Design intent / immutability / performance implications.>
+"""
+```
 
 - Public class template (binder-style overview + properties):
 
-    ```python
-    """<One-line summary>.
+```python
+"""<One-line summary>.
 
-    <Overview paragraph(s) describing the object’s role in the system.>
+<Overview paragraph(s) describing the object’s role in the system.>
 
-    Key properties
-    --------------
-    - <bullet list of key semantics and intended usage>
-    - ...
+Key properties
+--------------
+- <bullet list of key semantics and intended usage>
+- ...
 
-    Notes
-    -----
-    <Important invariants: immutability, caching, structural rebuild rules, etc.>
-    """
-    ```
+Notes
+-----
+<Important invariants: immutability, caching, structural rebuild rules, etc.>
+"""
+```
 
 ## 5) Abstract base classes: `@abstractmethod` vs `NotImplementedError`
 
