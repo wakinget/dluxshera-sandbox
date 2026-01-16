@@ -5,7 +5,7 @@ import dLux.utils as dlu
 import dLux.layers as dll
 import dLux
 import dLuxToliman
-from ..utils.utils import scale_array, default_diffractive_pupil_path
+from ..utils.utils import scale_array
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
@@ -53,7 +53,12 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         psf_pixel_scale : float
             The pixel scale of the PSF in arcseconds per pixel.
         mask : Array
-            The diffractive mask array to apply to the wavefront layer.
+            Diffractive pupil mask to apply to the wavefront layer. Accepts a
+            path to a .npy file or a 2D array. When provided alongside
+            ``dp_design_wavel``, the input is interpreted as a normalized
+            phase pattern P(x, y) ∈ [0, 1] spanning [0, π] radians at
+            ``dp_design_wavel``. When ``dp_design_wavel`` is None, the input
+            is interpreted directly as an OPD map in meters.
         radial_orders : Array = None
             The radial orders of the zernike polynomials to be used for the
             aberrations. Input of [0, 1] would give [Piston, Tilt X, Tilt Y],
@@ -124,18 +129,25 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
 
         # Generate Mask
         if mask is None:
-            path = default_diffractive_pupil_path()
-            mask = scale_array(np.load(path), wf_npixels, order=1)
+            dp_opd = np.zeros((wf_npixels, wf_npixels))
+        else:
+            if isinstance(mask, str):
+                dp_array = np.load(mask)
+            else:
+                dp_array = mask
 
-            # Enforce full binary
-            mask = mask.at[np.where(mask <= 0.5)].set(0.0)
-            mask = mask.at[np.where(mask > 0.5)].set(1.0)
+            if dp_array.shape[-2:] != (wf_npixels, wf_npixels):
+                dp_array = scale_array(dp_array, wf_npixels, order=1)
 
-            # Enforce full binary
-            mask = dlu.phase2opd(mask * np.pi, dp_design_wavel)
+            dp_array = np.array(dp_array)
 
-            # Turn into optic
-            mask = dll.AberratedLayer(mask)
+            if dp_design_wavel is None:
+                dp_opd = dp_array
+            else:
+                phase_rad = dp_array * np.pi
+                dp_opd = dlu.phase2opd(phase_rad, dp_design_wavel)
+
+        mask = dll.AberratedLayer(dp_opd)
 
         layers = [("aperture", aperture), ("pupil", mask)]
 
