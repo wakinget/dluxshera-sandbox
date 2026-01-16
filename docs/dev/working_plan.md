@@ -61,7 +61,7 @@ dLuxShera/
 │  ├─ optics/{config.py,builder.py,optical_systems.py}
 │  ├─ plot/plotting.py
 │  └─ utils/utils.py
-├─ examples/{recipes/canonical_astrometry.py,runners/run_canonical_astrometry.py,scripts/run_twoplane_astrometry_demo.py}
+├─ examples/{recipes/canonical_astrometry.py,recipes/twoplane_astrometry.py,runners/run_canonical_astrometry.py,runners/run_twoplane_astrometry.py}
 ├─ devtools/{print_tree.py,generate_context_snapshot.py}
 └─ tests/
 ```
@@ -122,7 +122,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 
 ## 9) Docs & examples (Phase 1 shipped)
 
-- Canonical binder-based astrometry recipe lives in `examples/recipes/canonical_astrometry.py` with both pure-θ and eigenmode GD flows; the two-plane companion is `examples/scripts/run_twoplane_astrometry_demo.py`. The execute-first runner is `examples/runners/run_canonical_astrometry.py`.
+- Canonical binder-based astrometry recipe lives in `examples/recipes/canonical_astrometry.py` with both pure-θ and eigenmode GD flows; the two-plane companion is `examples/recipes/twoplane_astrometry.py`. Execute-first runners live in `examples/runners/run_canonical_astrometry.py` and `examples/runners/run_twoplane_astrometry.py`.
   - The demo showcases the refactor-era plotting helpers: PSF visualisation via `plot_psf_single` / `plot_psf_comparison` and parameter trajectories via `plot_parameter_history_grid`. Plotting utilities follow the IO policy (return fig/axes; caller decides to save/show) and save figures only when requested to keep tests headless.
 - Current doc stack:
   - Concept orientation: `docs/tutorials/modeling_overview.md`
@@ -524,7 +524,7 @@ This should be noted whenever new tests are added or test behavior changes durin
 
 5. **Canonical astrometry demo + docs (P1)**
    - **Status:** ✅ Added `examples/recipes/canonical_astrometry.py` (with runner at `examples/runners/run_canonical_astrometry.py`) using ParamSpec + ParameterStore + DerivedResolver to build truth/variant stores and a SheraThreePlaneBinder forward model, plus Optax GD with prior penalties. README updated with run command; smoke test exercises `main(fast=True)`.
-   - **Two-plane companion:** Added `examples/scripts/run_twoplane_astrometry_demo.py` as a lighter-weight analogue that exercises the SheraTwoPlaneConfig/Binder stack; both demos serve as reference examples for upcoming docs/tutorials.
+   - **Two-plane companion:** Added `examples/recipes/twoplane_astrometry.py` and `examples/runners/run_twoplane_astrometry.py` as lighter-weight analogues that exercise the SheraTwoPlaneConfig/Binder stack; both demos serve as reference examples for upcoming docs/tutorials.
 
 ---
 
@@ -605,7 +605,7 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 - ✅ Wired a `SheraTwoPlaneBinder` path plus smoke tests to validate parity with the legacy two-plane model. Binder mirrors the three-plane API (forward-style base store with deriveds refreshed, `.model(store_delta)` public entry point) and uses the same structural hash/cache pattern, now including plate scale as a structural knob sourced from the effective store. Optics and source both consume the merged store (base + delta).
 - Loss/optimisation stack now dispatches binders based on cfg type inside `make_binder_image_nll_fn`, so downstream helpers (`run_shera_image_gd`, `run_shera_image_gd_eigen`, FIM helpers) accept two- or three-plane configs without special casing.
 - Graph templates have been removed; consider factoring shared binder helpers or a base binder class if/when the systems converge further.
-- ✅ Added a minimal two-plane astrometry demo mirroring the canonical three-plane example (`examples/scripts/run_twoplane_astrometry_demo.py` using `SheraTwoPlaneConfig` + `SheraTwoPlaneBinder`).
+- ✅ Added a minimal two-plane astrometry demo mirroring the canonical three-plane example (`examples/recipes/twoplane_astrometry.py` and `examples/runners/run_twoplane_astrometry.py` using `SheraTwoPlaneConfig` + `SheraTwoPlaneBinder`).
 - Evaluate whether shared binder behaviour (two- vs three-plane) should live in a common base class once both paths exist.
 
 ---
@@ -712,7 +712,7 @@ Status: docs housekeeping (dev-facing)
 
 - Canonical long-range roadmap: `docs/dev/roadmap.md`. Treat this as the theme-level plan; keep this Working Plan focused on near/medium-term execution and dev notes.
 - Concept/architecture sources of truth: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,params_and_store.md}`. Use these for detailed design rather than duplicating content here.
-- Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md`, `examples/recipes/canonical_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, and `examples/scripts/run_twoplane_astrometry_demo.py` for runnable flows).
+- Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md`, `examples/recipes/canonical_astrometry.py`, `examples/recipes/twoplane_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, and `examples/runners/run_twoplane_astrometry.py` for runnable flows).
 - Dev-facing planning: this file (`docs/dev/working_plan.md`) and any future dev notes under `docs/dev/`. Keep cross-links back to the architecture docs for specifics.
 - Navigation helpers: `devtools/generate_context_snapshot.py` and `devtools/print_tree.py` remain the authoritative way to browse the live tree and ParamSpec/transform snapshots.
 
@@ -741,7 +741,7 @@ Status: implemented; historical context
 - **Optimization + packing surfaces:** θ-space loops live in `src/dluxshera/inference/optimization.py` (e.g., `run_simple_gd`, binder-aware `run_image_gd`, and Fisher helpers). Packing/unpacking utilities live in `src/dluxshera/params/packing.py`; binder NLL builders and theta mapping hooks are in `src/dluxshera/inference/losses.py` and `src/dluxshera/inference/inference.py`. IndexMap export exists via `run_artifacts.build_index_map(...)`; packing order is aligned with `ParamSpec.subset(...)`.
 - **Transforms/DerivedResolver:** Transform registration and recursive resolution live in `src/dluxshera/params/transform_registry.py`; Shera-specific transforms (plate scale, log flux, raw fluxes) are in `src/dluxshera/params/shera_threeplane_transforms.py`.
 - **Plotting:** Refactor-era plotting helpers (PSF and parameter histories) are in `src/dluxshera/plot/plotting.py` with headless-friendly IO (return fig/axes, optional `save_path`). Signal builders and panel recipes for intro diagnostics live in `src/dluxshera/inference/{signals.py,plotting.py}` and feed optional run artifacts/plots.
-- **Scripts/demos:** Canonical/binder-based runs are in `examples/recipes/canonical_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, `examples/scripts/run_twoplane_astrometry_demo.py`, and `work/scratch/refactored_astrometry_retrieval.py`; artifact writing is opt-in and disabled by default.
+- **Recipes/runners:** Canonical/binder-based runs are in `examples/recipes/canonical_astrometry.py`, `examples/recipes/twoplane_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, `examples/runners/run_twoplane_astrometry.py`, and `work/scratch/refactored_astrometry_retrieval.py`; artifact writing is opt-in and disabled by default.
 - **Docs:** Strategy and schema for artifacts/signals/preconditioning live in `docs/architecture/optimization_artifacts_and_plotting.md` (source of truth). Working plan now tracks phased implementation here; `src/dluxshera/inference/run_artifacts.py` and regression tests cover the core I/O scaffold.
 
 ### 26.2 Phased plan (aligned to architecture doc and decisions)
