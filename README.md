@@ -12,6 +12,7 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 
 - Conceptual entry point: [docs/tutorials/modeling_overview.md](docs/tutorials/modeling_overview.md)
 - Tutorial: [docs/tutorials/canonical_astrometry_demo.md](docs/tutorials/canonical_astrometry_demo.md) alongside `examples/recipes/canonical_astrometry.py` (recipe) and `examples/runners/run_canonical_astrometry.py` (runner)
+- Two-plane recipe: `examples/recipes/twoplane_astrometry.py` (read-first variant of the canonical flow)
 - [Dev notes](docs/dev/):
   - [Roadmap](docs/dev/roadmap.md) (longer term goals + ideas)
   - [Working Plan](docs/dev/working_plan.md) (near term implementation plan)
@@ -317,6 +318,12 @@ python examples/runners/run_canonical_astrometry.py
 ```
 
 The script builds a Shera three-plane model via ParamSpec/ParameterStore, generates noiseless synthetic binary-star PSFs, and runs a binder/SystemGraph-based gradient descent (with tight priors) to recover astrometric and wavefront parameters using the current `InferenceSpec`.
+
+For the two-plane system, run the mirrored recipe directly:
+
+```bash
+python examples/recipes/twoplane_astrometry.py
+```
 
 ---
 
