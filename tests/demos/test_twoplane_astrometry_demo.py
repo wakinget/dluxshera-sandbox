@@ -1,26 +1,22 @@
-"""Smoke test for the two-plane astrometry demo script."""
+"""Smoke test for the two-plane astrometry recipe."""
+from __future__ import annotations
 
-import sys
-from importlib import util
+import importlib.util
 from pathlib import Path
 
 
-def _load_twoplane_main():
-    module_path = Path(__file__).resolve().parents[2] / "examples" / "scripts" / "run_twoplane_astrometry_demo.py"
-    spec = util.spec_from_file_location("twoplane_demo", module_path)
+def load_recipe_module():
+    repo_root = Path(__file__).resolve().parents[2]
+    recipe_path = repo_root / "examples" / "recipes" / "twoplane_astrometry.py"
+    spec = importlib.util.spec_from_file_location("twoplane_astrometry_recipe", recipe_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("Unable to load two-plane demo script")
-    module = util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+        raise RuntimeError(f"Unable to load recipe at {recipe_path}")
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.main
+    return module
 
 
-main = _load_twoplane_main()
-
-
-def test_twoplane_astrometry_demo_runs(tmp_path):
-    result = main(fast=True, save_plots=True, add_noise=False, save_plots_dir=tmp_path)
-    assert result.truth_psf is not None
-    assert result.noisy_psf is not None
-    assert any(tmp_path.glob("*.png"))
+def test_twoplane_astrometry_recipe_runs(tmp_path):
+    recipe = load_recipe_module()
+    recipe.main(fast=True, save_plots=True, add_noise=False, results_dir=tmp_path)
+    assert (tmp_path / "initial_psf_comparison.png").exists()
