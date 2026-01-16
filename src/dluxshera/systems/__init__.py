@@ -20,5 +20,4 @@ __all__ = [
     "DEFAULT_DP_PATH",
     "SHERA_TESTBED_CONFIG",
     "SHERA_FLIGHT_CONFIG",
-    "default_diffractive_pupil_path",
 ]
