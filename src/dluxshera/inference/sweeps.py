@@ -17,7 +17,7 @@ DEFAULT_COLUMNS: tuple[str, ...] = (
     "theta.theta_space",
     "optimizer.name",
     "optimizer.num_steps",
-    "optimizer.base_lr",
+    "optimizer.learning_rate",
     "preconditioning.enabled",
     "preconditioning.method",
     "loss_init",
@@ -106,7 +106,7 @@ def load_run_row(run_dir: Path) -> dict[str, Any]:
         "theta.theta_space": _get_nested(meta, "theta.theta_space"),
         "optimizer.name": _get_nested(meta, "optimizer.name"),
         "optimizer.num_steps": _get_nested(meta, "optimizer.num_steps"),
-        "optimizer.base_lr": _get_nested(meta, "optimizer.base_lr"),
+        "optimizer.learning_rate": _get_nested(meta, "optimizer.learning_rate"),
         "preconditioning.enabled": bool(precond_meta)
         if precond_meta is not None
         else False,
