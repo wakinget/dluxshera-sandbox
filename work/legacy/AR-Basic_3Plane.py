@@ -13,14 +13,11 @@ import zodiax as zdx
 import optax
 
 # Optics / inference
-from dluxshera.inference.optimization import (
-    loss_fn,
-    loss_with_injected,
-    step_fn_general,
-)
+from dluxshera.inference.optimization import loss_fn
+from dluxshera.legacy.optimization import loss_with_injected, step_fn
 from dluxshera.legacy.optimization import (
     FIM,
-    generate_fim_labels,
+    generate_fim_labels_legacy,
     get_optimiser,
     get_lr_model,
     get_lr_from_curvature,
@@ -332,7 +329,7 @@ fim = FIM(
 )
 print("FIM shape:", fim.shape)
 # === Plot the Fisher Information Matrix ===
-fim_labels = generate_fim_labels(params, initial_model_params)
+fim_labels = generate_fim_labels_legacy(params, initial_model_params)
 fim_log = np.log10(np.abs(fim) + 1e-20)
 fig, ax = plt.subplots(figsize=(8, 6))
 im = ax.imshow(fim_log, cmap="viridis", vmin=4, vmax=14)
@@ -632,7 +629,7 @@ for obs_i in np.arange(N_observations):
     history = {param: [initial_vals[param]] for param in params}
     losses, models_out = [initial_loss], [obs_model]
     for i in tqdm(range(n_iter)):
-        loss, _, _, _, obs_model, model_params, state = step_fn_general(
+        loss, _, _, _, obs_model, model_params, state = step_fn(
             model_params, data, var, obs_model, lr_model, optim, state, loss_fn
         )
 

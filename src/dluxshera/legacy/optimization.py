@@ -7,6 +7,7 @@ import jax.numpy as np
 from jax import grad, jit, lax, linearize
 import numpyro.distributions as dist
 import optax
+import equinox as eqx
 import zodiax as zdx
 
 from .params import ModelParams
@@ -24,6 +25,10 @@ __all__ = [
     "generate_fim_labels_legacy",
     "build_basis",
     "construct_priors_from_dict",
+    "loss_with_injected",
+    "step_fn",
+    "step_fn_eigen",
+    "sweep_param",
 ]
 
 
@@ -349,3 +354,145 @@ def construct_priors_from_dict(param_info):
             raise ValueError(f"Unsupported distribution type '{dist_type}' for parameter '{param}'")
 
     return param_priors
+
+
+############################
+# Legacy Loss and Update Functions
+############################
+
+def _loss_with_params(params, model, data, var, loss_fn):
+    return loss_fn(params.inject(model), data, var)
+
+
+def loss_with_injected(model_params, model, data, var, loss_fn):
+    return loss_fn(model_params.inject(model), data, var)
+
+
+@eqx.filter_jit
+def step_fn(model_params, data, var, model, lr_model, optim, state, loss_fn):
+    # NOTE: model_params.params may contain keys with dots (e.g. "m1_aperture.coefficients").
+    # zodiax treats dots as path navigation, so we take grads w.r.t. the params dict directly.
+    def _loss_from_params(params_dict, m, d, v):
+        mp = model_params.set("params", params_dict)
+        return loss_with_injected(mp, m, d, v, loss_fn)
+
+    loss, raw_grads_dict = jax.value_and_grad(_loss_from_params)(
+        model_params.params, model, data, var
+    )
+
+    # Lift dict grads back into a pytree matching model_params (non-param leaves -> None)
+    none_tree = jax.tree_util.tree_map(lambda _: None, model_params)
+    raw_grads = none_tree.set("params", raw_grads_dict)
+
+    # Elementwise LR scaling on the params dict only
+    scaled_grads_dict = jax.tree_util.tree_map(
+        lambda g, s: g * s, raw_grads_dict, lr_model.params
+    )
+    scaled_grads = none_tree.set("params", scaled_grads_dict)
+
+    # optax update on exactly those leaves
+    updates, state = optim.update(scaled_grads, state, model_params)
+
+    # apply updates to the params container
+    model_params = zdx.apply_updates(model_params, updates)
+
+    # build next-step model by injecting the (updated) params
+    model = model_params.inject(model)
+
+    # return enough stuff for logging
+    return loss, raw_grads, scaled_grads, updates, model, model_params, state
+
+
+@eqx.filter_jit
+def step_fn_eigen(eparams, data, var, model, lr_model, optim, state, loss_fn):
+    # Pull current coefficients (1D array)
+    c = eparams.params["eigen_coefficients"]
+
+    # Define loss as a function of *only* the coefficients
+    def loss_from_c(c_flat, model, data, var):
+        e_tmp = eqx.tree_at(lambda t: t.params["eigen_coefficients"], eparams, c_flat)
+        return loss_fn(e_tmp.inject(model), data, var)
+
+    loss, g_c = jax.value_and_grad(loss_from_c)(c, model, data, var)
+    g_c = g_c * lr_model.params["eigen_coefficients"]  # elementwise scaling
+    # g_c = g_c * 0  # zero out gradients
+
+    # Update c only (so optax state is tiny)
+    updates, state = optim.update(g_c, state, c)
+    c_new = optax.apply_updates(c, updates)
+    eparams = eqx.tree_at(lambda t: t.params["eigen_coefficients"], eparams, c_new)
+
+    # Build next-step model
+    model = eparams.inject(model)
+    return loss, g_c, model, eparams, state
+
+
+def sweep_param(model, param, sweep_info, loss_fn, *loss_args, **loss_kwargs):
+    """
+    Perform a 1D parameter sweep for any scalar or vector parameter in the model.
+
+    Parameters
+    ----------
+    model : object
+        The optical model that supports `.get(param)` and `.set(param, value)` methods.
+    param : str
+        Name of the parameter to sweep.
+    sweep_info : dict
+        Dictionary of the form {param: (span, steps)} specifying the sweep range and resolution.
+    loss_fn : callable
+        Function to evaluate model loss, must accept (model, *args, **kwargs).
+    *loss_args : tuple
+        Positional arguments passed to the loss function.
+    **loss_kwargs : dict
+        Keyword arguments passed to the loss function.
+
+    Returns
+    -------
+    results : list of dict
+        Each result entry contains:
+        - 'parameter' : str, name of the parameter
+        - 'index' : int or None, for vector parameters
+        - 'value' : float, value of the parameter at that sweep point
+        - 'loss' : float, scalar loss value
+    """
+    from ..utils.utils import get_sweep_values
+
+    results = []
+    span, steps = sweep_info[param]
+    value = model.get(param)
+
+    # Check if vector-valued parameter (ndim > 0)
+    if np.ndim(value) > 0:
+        for i in range(len(value)):
+            center = float(value[i])
+            sweep_values = get_sweep_values(center, span, steps)
+
+            for val in sweep_values:
+                new_value = value.at[i].set(val)
+                model_ = model.set(param, new_value)
+                loss = float(loss_fn(model_, *loss_args, **loss_kwargs))
+
+                results.append({
+                    "parameter": param,
+                    "index": i,
+                    "value": float(val),
+                    "loss": loss,
+                })
+
+    # Scalar parameter
+    else:
+        center = float(value)
+        sweep_values = get_sweep_values(center, span, steps)
+
+        for val in sweep_values:
+            model_ = model.set(param, val)
+            loss = float(loss_fn(model_, *loss_args, **loss_kwargs))
+
+            results.append({
+                "parameter": param,
+                "index": None,
+                "value": float(val),
+                "loss": loss,
+            })
+
+    return results

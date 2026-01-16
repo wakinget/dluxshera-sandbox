@@ -18,7 +18,7 @@ import optax
 from src.dluxshera.inference.optimization import loss_fn
 from src.dluxshera.legacy.optimization import (
     FIM,
-    generate_fim_labels,
+    generate_fim_labels_legacy,
     construct_priors_from_dict,
     build_basis,
 )
@@ -300,7 +300,7 @@ fim = FIM(
 )
 print("FIM shape:", fim.shape)
 # === Plot the Fisher Information Matrix ===
-fim_labels = generate_fim_labels(params, initial_model_params)
+fim_labels = generate_fim_labels_legacy(params, initial_model_params)
 fim_log = np.log10(np.abs(fim) + 1e-20)
 fig, ax = plt.subplots(figsize=(8, 6))
 im = ax.imshow(fim_log, cmap="viridis", vmin=4, vmax=14)
