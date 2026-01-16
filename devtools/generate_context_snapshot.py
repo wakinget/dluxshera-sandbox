@@ -570,7 +570,12 @@ def _collect_demo_metadata(repo_root: Path) -> List[Dict[str, Any]]:
             "param_specs": ["forward_threeplane", "inference_basic"],
         },
         {
-            "script": "examples/scripts/run_twoplane_astrometry_demo.py",
+            "script": "examples/runners/run_twoplane_astrometry.py",
+            "system_id": "shera_twoplane",
+            "param_specs": ["forward_twoplane", "inference_basic"],
+        },
+        {
+            "script": "examples/recipes/twoplane_astrometry.py",
             "system_id": "shera_twoplane",
             "param_specs": ["forward_twoplane", "inference_basic"],
         },
