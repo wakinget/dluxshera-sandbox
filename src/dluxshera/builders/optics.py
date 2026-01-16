@@ -112,7 +112,7 @@ def _twoplane_structural_subset(cfg: SheraTwoPlaneConfig) -> dict:
         "bandwidth_m": float(cfg.bandwidth_m),
         "n_lambda": int(cfg.n_lambda),
         "m1_diameter_m": float(cfg.m1_diameter_m),
-        "central_obscuration_ratio": float(cfg.central_obscuration_ratio),
+        "m2_diameter_m": float(cfg.m2_diameter_m),
         "n_struts": int(cfg.n_struts),
         "strut_width_m": float(cfg.strut_width_m),
         "strut_rotation_deg": float(cfg.strut_rotation_deg),
@@ -329,21 +329,19 @@ def build_shera_twoplane_optics(
         base_optics = _TWOPLANE_CACHE.get(struct_hash)
 
     if base_optics is None:
-        strut_rotation = float(cfg.strut_rotation_deg)
-        mask = _load_diffractive_pupil_mask(cfg)
         base_optics = SheraTwoPlaneOptics(
             wf_npixels=cfg.pupil_npix,
             psf_npixels=cfg.psf_npix,
             oversample=cfg.oversample,
-            psf_pixel_scale=plate_scale,
+            psf_pixel_scale=cfg.plate_scale_as_per_pix,
+            mask=cfg.diffractive_pupil_path,
             m1_diameter=cfg.m1_diameter_m,
-            m2_diameter=cfg.central_obscuration_ratio * cfg.m1_diameter_m,
+            m2_diameter=cfg.m2_diameter_m,
             n_struts=cfg.n_struts,
             strut_width=cfg.strut_width_m,
-            strut_rotation=jnp.deg2rad(strut_rotation),
-            mask=mask,
+            strut_rotation_deg=cfg.strut_rotation_deg,
             dp_design_wavel=cfg.dp_design_wavelength_m,
-            noll_indices=tuple(cfg.primary_noll_indices)
+            noll_indices=jnp.asarray(cfg.primary_noll_indices)
             if cfg.primary_noll_indices
             else None,
         )
