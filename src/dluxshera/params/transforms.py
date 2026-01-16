@@ -11,6 +11,27 @@ from .transform_registry import DEFAULT_SYSTEM_ID, register_transform
 # Type alias for the ctx mapping each transform receives
 Ctx = Mapping[ParamKey, Any]
 
+SYSTEM_IDS = (DEFAULT_SYSTEM_ID, "shera_twoplane")
+
+
+def register_for_systems(
+    key: ParamKey,
+    *,
+    depends_on: tuple[ParamKey, ...] = (),
+    doc: str | None = None,
+):
+    def decorator(fn):
+        for system_id in SYSTEM_IDS:
+            register_transform(
+                key,
+                depends_on=depends_on,
+                doc=doc,
+                system_id=system_id,
+            )(fn)
+        return fn
+
+    return decorator
+
 # Conversion factor: radians → arcseconds
 ARCSEC_PER_RAD = 206264.8062470963551565  # 180 / pi * 3600
 
@@ -19,14 +40,13 @@ ARCSEC_PER_RAD = 206264.8062470963551565  # 180 / pi * 3600
 # ---------------------------------------------------------------------------
 
 
-@register_transform(
+@register_for_systems(
     "system.focal_length_m",
     depends_on=(
         "system.m1_focal_length_m",
         "system.m2_focal_length_m",
         "system.m1_m2_separation_m",
     ),
-    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_system_focal_length_m(ctx: Ctx) -> float:
     """
@@ -54,13 +74,12 @@ def transform_system_focal_length_m(ctx: Ctx) -> float:
 # ---------------------------------------------------------------------------
 
 
-@register_transform(
+@register_for_systems(
     "system.plate_scale_as_per_pix",
     depends_on=(
         "system.focal_length_m",
         "system.pixel_pitch_m",
     ),
-    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
     """
@@ -89,7 +108,7 @@ def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
 # ---------------------------------------------------------------------------
 
 
-@register_transform(
+@register_for_systems(
     "binary.log_flux_total",
     depends_on=(
         "system.m1_diameter_m",
@@ -98,7 +117,6 @@ def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
         "imaging.throughput",
         "binary.spectral_flux_density",
     ),
-    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_binary_log_flux_total(ctx: Ctx) -> float:
     """
@@ -145,13 +163,12 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
 # ---------------------------------------------------------------------------
 
 
-@register_transform(
+@register_for_systems(
     "binary.raw_fluxes",
     depends_on=(
         "binary.log_flux_total",
         "binary.contrast",
     ),
-    system_id=DEFAULT_SYSTEM_ID,
 )
 def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
     """

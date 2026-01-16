@@ -377,10 +377,8 @@ def ensure_registered(system_id: Optional[str]) -> None:
     if sid in _REGISTERED_SYSTEMS:
         return
 
-    if sid == "shera_threeplane":
+    if sid in {"shera_threeplane", "shera_twoplane"}:
         module = "dluxshera.params.transforms"
-    elif sid == "shera_twoplane":
-        module = "dluxshera.params.shera_twoplane_transforms"
     else:
         raise ValueError(f"Unknown system_id {sid!r} for transform registration")
 
