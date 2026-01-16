@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib.resources as resources
-from pathlib import Path
 from typing import Optional, Tuple
 
 import dLux as dl
@@ -14,6 +12,7 @@ from .base import BaseConfig, BaseSheraBinder
 from ..builders.source import build_alpha_cen_source
 from ..params.spec import ParamField, ParamSpec
 from ..params.store import ParameterStore
+from ..utils.utils import DEFAULT_DP_PATH
 
 SHERA_THREEPLANE_SYSTEM_ID = "shera_threeplane"
 
@@ -663,20 +662,9 @@ def build_forward_spec_from_config(cfg: SheraThreePlaneConfig) -> ParamSpec:
     return ParamSpec(fields, system_id=SHERA_THREEPLANE_SYSTEM_ID)
 
 
-def default_diffractive_pupil_path() -> str:
-    """Resolve the default diffractive pupil path as a string."""
-    try:
-        return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
-    except Exception:
-        return str(Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy")
-
-
 # ---------------------------------------------------------------------
 # Named point designs
 # ---------------------------------------------------------------------
-
-# Define the path to the default diffractive pupil file
-DEFAULT_DP_PATH = default_diffractive_pupil_path()
 
 SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     design_name="shera_testbed",
@@ -857,7 +845,5 @@ __all__ = [
     "SheraThreePlaneBinder",
     "SHERA_TESTBED_CONFIG",
     "SHERA_FLIGHT_CONFIG",
-    "DEFAULT_DP_PATH",
-    "default_diffractive_pupil_path",
     "build_forward_spec_from_config",
 ]
