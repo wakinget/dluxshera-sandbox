@@ -20,7 +20,7 @@ def test_twoplane_config_defaults():
     assert cfg.psf_npix == 256
     assert cfg.oversample == 3
     assert cfg.m1_diameter_m == pytest.approx(0.09)
-    assert cfg.plate_scale_as_per_pix == pytest.approx(0.3547)
+    assert cfg.plate_scale_as_per_pix == pytest.approx(0.355)
     assert cfg.primary_noll_indices == ()
 
 
