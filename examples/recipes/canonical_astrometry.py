@@ -83,7 +83,9 @@ from dluxshera.plot.plotting import (
 )
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.systems.three_plane import (
+    SheraThreePlaneConfig,
     SHERA_TESTBED_CONFIG,
+    SHERA_FLIGHT_CONFIG,
     SheraThreePlaneBinder,
     build_forward_spec_from_config,
 )
@@ -96,6 +98,10 @@ RNG_SEED = 42
 FAST_MODE = False
 ADD_NOISE = False
 SAVE_PLOTS = True
+
+# Telescope Config Selection (9cm testbed vs 22cm flight design)
+# Options: None, SHERA_TESTBED_CONFIG / SHERA_FLIGHT_CONFIG
+CONFIG = SHERA_TESTBED_CONFIG
 
 # Eigenmode settings
 USE_EIGEN = True           # Enables re-parameterization
@@ -132,6 +138,7 @@ plt.rcParams["image.cmap"] = "inferno_nan"
 
 def main(
     *,
+    config: SheraThreePlaneConfig | None = CONFIG,
     fast: bool = FAST_MODE,
     save_plots: bool = SAVE_PLOTS,
     add_noise: bool = ADD_NOISE,
@@ -158,7 +165,7 @@ def main(
 
     t0_script = time.time()
 
-    cfg = SHERA_TESTBED_CONFIG
+    cfg = config or SHERA_TESTBED_CONFIG
     cfg = cfg.replace(
         primary_noll_indices=tuple(range(4, 12)),
         secondary_noll_indices=tuple(range(4, 12)),)
