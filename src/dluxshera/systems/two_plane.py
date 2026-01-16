@@ -12,6 +12,7 @@ from .base import BaseConfig, BaseSheraBinder
 from ..builders.source import build_alpha_cen_source
 from ..params.spec import ParamField, ParamSpec
 from ..params.store import ParameterStore
+from ..utils.utils import DEFAULT_DP_PATH
 
 SHERA_TWOPLANE_SYSTEM_ID = "shera_twoplane"
 
@@ -60,12 +61,8 @@ class SheraTwoPlaneConfig(BaseConfig):
     m1_diameter_m: float = 0.09
     """Primary mirror clear diameter [meters]."""
 
-    central_obscuration_ratio: float = 0.0
-    """
-    Ratio of the central obscuration diameter to the primary diameter.
-
-    Defaults to 0 (no obscuration) for the simplified two-plane relay.
-    """
+    m2_diameter_m: float = 0.025
+    """Secondary mirror clear diameter [meters]."""
 
     n_struts: int = 4
     """Number of support struts in the primary aperture."""
@@ -79,7 +76,7 @@ class SheraTwoPlaneConfig(BaseConfig):
     # ------------------------------------------------------------------
     # Fixed plate scale (primitive for the two-plane model)
     # ------------------------------------------------------------------
-    plate_scale_as_per_pix: float = 0.3547
+    plate_scale_as_per_pix: float = 0.355
     """
     Plate scale in arcseconds per pixel.
 
@@ -338,6 +335,70 @@ def build_forward_spec_from_config(cfg: SheraTwoPlaneConfig) -> ParamSpec:
     return ParamSpec(fields, system_id=SHERA_TWOPLANE_SYSTEM_ID)
 
 
+# ---------------------------------------------------------------------
+# Named point designs
+# ---------------------------------------------------------------------
+
+SHERA_TESTBED_CONFIG = SheraTwoPlaneConfig(
+    design_name="shera_testbed",
+
+    # --- system geometry ---
+    m1_diameter_m=0.09,
+    m2_diameter_m=0.025,
+    plate_scale_as_per_pix=0.355,
+
+    # --- grids & sampling ---
+    pupil_npix=256,
+    psf_npix=256,
+    oversample=1,
+    wavelength_m=550e-9,
+    bandwidth_m=110e-9,
+    n_lambda=3,
+
+    # --- spiders / obscurations ---
+    n_struts=4,
+    strut_width_m=0.002,
+    strut_rotation_deg=45.0,
+
+    # --- Zernike basis structure ---
+    # define Noll indices as an immutable Python tuple.
+    primary_noll_indices=tuple(range(4, 12)),
+
+    # --- diffractive pupil ---
+    diffractive_pupil_path=DEFAULT_DP_PATH,
+    dp_design_wavelength_m=550e-9,
+)
+
+
+SHERA_FLIGHT_CONFIG = SheraTwoPlaneConfig(
+    design_name="shera_flight",
+
+    # --- system geometry ---
+    m1_diameter_m=0.22,
+    m2_diameter_m=0.025,
+    plate_scale_as_per_pix=0.123,
+
+    # --- grids & sampling ---
+    pupil_npix=256,
+    psf_npix=256,
+    oversample=1,
+    wavelength_m=550e-9,
+    bandwidth_m=41e-9,
+    n_lambda=3,
+
+    # --- spiders / obscurations ---
+    n_struts=3,
+    strut_width_m=0.002,
+    strut_rotation_deg=-90.0,
+
+    # --- Zernike basis structure ---
+    # define Noll indices as an immutable Python tuple.
+    primary_noll_indices=tuple(range(4, 12)),
+
+    diffractive_pupil_path=DEFAULT_DP_PATH,
+    dp_design_wavelength_m=550e-9,
+)
+
 @dataclass
 class SheraTwoPlaneBinder(BaseSheraBinder):
     """Generative model for the Shera two-plane system.
@@ -425,5 +486,7 @@ __all__ = [
     "SHERA_TWOPLANE_SYSTEM_ID",
     "SheraTwoPlaneConfig",
     "SheraTwoPlaneBinder",
+    "SHERA_TESTBED_CONFIG",
+    "SHERA_FLIGHT_CONFIG",
     "build_forward_spec_from_config",
 ]
