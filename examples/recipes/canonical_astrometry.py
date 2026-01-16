@@ -104,8 +104,8 @@ TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
 # Inference settings
-N_ITER = 100
-FAST_ITER = 8
+N_ITER = 60
+FAST_ITER = 30
 BASE_LR = 0.5
 
 INFER_KEYS = (
@@ -161,16 +161,17 @@ def main(
     cfg = SHERA_TESTBED_CONFIG
     cfg = cfg.replace(
         primary_noll_indices=tuple(range(4, 12)),
-        secondary_noll_indices=tuple(range(4, 12)),
-    )
+        secondary_noll_indices=tuple(range(4, 12)),)
     if fast:
-        cfg = cfg.replace(pupil_npix=32, psf_npix=32, oversample=2, n_lambda=1)
+        cfg = cfg.replace(n_lambda=1,
+            primary_noll_indices=tuple(range(4, 9)),
+            secondary_noll_indices=tuple(range(4, 9)))
 
     forward_spec = build_forward_spec_from_config(cfg)
     inference_spec = build_inference_spec_basic(cfg)
 
-    forward_truth_store = ParameterStore.from_spec_defaults(forward_spec)
-    forward_truth_store = forward_truth_store.replace(
+    truth_store = ParameterStore.from_spec_defaults(forward_spec)
+    truth_store = truth_store.replace(
         {
             "binary.separation_as": 10.0,
             "binary.position_angle_deg": 90.0,
@@ -179,9 +180,9 @@ def main(
             "imaging.exposure_time_s": 1800.0,
         }
     )
-    forward_truth_store = forward_truth_store.refresh_derived(forward_spec)
+    truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, forward_truth_store)
+    binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
     data = binder.model()
@@ -203,29 +204,23 @@ def main(
     )
 
     prior_info = {
-        "binary.separation_as": {"sigma": 1e-6, "dist": "Normal"},
-        "binary.position_angle_deg": {"sigma": 1e-3, "dist": "Uniform"},
-        "binary.x_position_as": {"sigma": 1e-6, "dist": "Normal"},
-        "binary.y_position_as": {"sigma": 1e-6, "dist": "Normal"},
-        "binary.log_flux_total": {"sigma": 1e-6, "dist": "LogNormal"},
-        "binary.contrast": {"sigma": 1e-6, "dist": "LogNormal"},
-        "system.plate_scale_as_per_pix": {"sigma": 1e-6, "dist": "LogNormal"},
+        "binary.separation_as":          {"sigma": 1e-4, "dist": "Normal"},
+        "binary.position_angle_deg":     {"sigma": 1e-3, "dist": "Uniform"},
+        "binary.x_position_as":          {"sigma": 1e-3, "dist": "Normal"},
+        "binary.y_position_as":          {"sigma": 1e-3, "dist": "Normal"},
+        "binary.log_flux_total":         {"sigma": 1e-3, "dist": "LogNormal"},
+        "binary.contrast":               {"sigma": 1e-3, "dist": "LogNormal"},
+        "system.plate_scale_as_per_pix": {"sigma": 1e-5, "dist": "LogNormal"},
         "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(
-                forward_truth_store.get("primary.zernike_coeffs_nm"),
-                1e-2,
-            ),
+            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),5),
             "dist": "Normal",
         },
         "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(
-                forward_truth_store.get("secondary.zernike_coeffs_nm"),
-                1e-2,
-            ),
+            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),5),
             "dist": "Normal",
         },
     }
-    prior_spec = PriorSpec.from_info(forward_truth_store, prior_info)
+    prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
     print("Drawing starting point from priors...")
     rng_key, split_key = jr.split(rng_key)
@@ -251,14 +246,14 @@ def main(
         nll_loss = nll_loss_fn(theta)
         prior_gaussian_loss = prior_spec.quadratic_penalty(
             store_theta,
-            center_store=forward_truth_store,
+            center_store=truth_store,
             keys=INFER_KEYS,
         )
         return nll_loss + prior_gaussian_loss
 
     loss_fn = nll_loss_fn
 
-    theta_true = pack_params(inference_subspec, forward_truth_store)
+    theta_true = pack_params(inference_subspec, truth_store)
     loss_true = loss_fn(theta_true)
     loss0 = loss_fn(theta0)
 
@@ -439,7 +434,7 @@ def main(
     print(f"loss(final theta)       = {float(loss_fn(theta_final)):.8g}")
     print("")
 
-    summary_true = {k: forward_truth_store.get(k) for k in INFER_KEYS}
+    summary_true = {k: truth_store.get(k) for k in INFER_KEYS}
     summary_init = {k: init_store.get(k) for k in INFER_KEYS}
     summary_final = {k: final_store.get(k) for k in INFER_KEYS}
     print_optimization_summary(
@@ -518,7 +513,7 @@ def main(
             trace,
             meta={},
             decoder=decoder,
-            truth=forward_truth_store,
+            truth=truth_store,
             signal_set="intro",
         )
         plot_signals_grid(
