@@ -221,6 +221,27 @@ This theme recognizes that many scientifically relevant effects are inherently t
 
 The emphasis is on *capability and structure*, not on committing to a specific temporal model.
 
+#### Application structure (simulator vs inference)
+
+Long-term, we expect dLuxShera to support multiple “applications” that share the same
+core modeling + inference machinery (forward model, ParamSpec/Store/Binder, noise models),
+but provide different orchestration layers and user-facing entrypoints.
+
+A working hypothesis is to keep these applications **in a single repository** to avoid
+duplicating or fragmenting forward-model physics, while still making the separation clear
+in the codebase. Concretely:
+
+- Add an `apps/` namespace under the main package (e.g. `src/dluxshera/apps/`).
+- Implement a **simulator app** (e.g. `dluxshera.apps.simulate`) responsible for producing
+  data products (single frames, observation blocks, mission/CONOP sequences, ML datasets),
+  including consistent metadata and output layouts.
+- Implement an **inference app** (e.g. `dluxshera.apps.infer`) responsible for consuming
+  data products and producing measurements/posteriors over time.
+
+If these grow to have meaningfully different dependency stacks or release cadences,
+we can later split *apps* into separate repos while preserving a shared core package, but
+we should avoid separate repos that each own their own forward-model implementation.
+
 #### Time-Series Simulation
 
 Potential regimes of interest include (non-exhaustive):
