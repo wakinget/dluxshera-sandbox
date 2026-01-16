@@ -12,7 +12,8 @@ import matplotlib as mpl
 import time, datetime, os
 import json
 from typing import Any, Dict, Optional, Union
-
+import importlib.resources as resources
+from pathlib import Path
 
 __all__ = ["nanrms","set_array", "scale_array",
            "sinusoidal_grating_2D", "calculate_log_flux",
@@ -27,6 +28,14 @@ plt.rcParams["font.family"] = "serif"
 plt.rcParams["image.origin"] = 'lower'
 plt.rcParams['figure.dpi'] = 120
 
+
+
+def default_diffractive_pupil_path() -> str:
+    """Resolve the default diffractive pupil path as a string."""
+    try:
+        return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
+    except Exception:
+        return str(Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy")
 
 
 def debug_param_type(model, key):
