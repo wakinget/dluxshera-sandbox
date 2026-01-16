@@ -597,13 +597,18 @@ def _generate_markdown_report(meta: Dict[str, Any], path: Path) -> None:
     configs = meta.get("configs", {}).get("configs", []) if isinstance(meta.get("configs", {}), dict) else []
     demos = meta.get("demos", [])
 
+    packages = summary.get("packages") or []
+    packages_line = "n/a"
+    if packages:
+        packages_line = ", ".join(packages)
+
     lines = [
         f"# Context Snapshot ({meta.get('generated_at')})",
         "",
         "## Summary",
         f"- Python files: {summary.get('python_files', 'n/a')}",
         f"- Classes: {summary.get('classes', 'n/a')}  Functions: {summary.get('functions', 'n/a')}",
-        f"- Packages: {', '.join(summary.get('packages', [])[:8]) if summary.get('packages') else 'n/a'}",
+        f"- Packages: {packages_line}",
         "",
     ]
 
