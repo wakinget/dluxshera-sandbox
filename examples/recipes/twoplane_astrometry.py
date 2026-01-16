@@ -19,6 +19,9 @@ What this recipe demonstrates
 - Running a single optimization loop and saving/plotting results using the
   repository’s built-in artifacts + plotting utilities.
 
+The two-plane system is set up to mimic the three-plane system, so the overall
+workflow is very similar to the three-plane system in canonical_astrometry.py
+
 Eigenmode re-parameterization (recommended default)
 This recipe supports an optional eigenmode parameterization of the inference
 variables. When enabled, the optimization runs in an eigen-basis derived from
@@ -164,11 +167,12 @@ def main(
     t0_script = time.time()
 
     cfg = config or SHERA_TESTBED_CONFIG
-    cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)))
+    cfg = cfg.replace(n_lambda=7,
+                      primary_noll_indices=tuple(range(4, 37)))
     if fast:
         cfg = cfg.replace(
-            n_lambda=1,
-            primary_noll_indices=tuple(range(4, 9)),
+            n_lambda=3,
+            primary_noll_indices=tuple(range(4, 12)),
         )
 
     forward_spec = build_forward_spec_from_config(cfg)
