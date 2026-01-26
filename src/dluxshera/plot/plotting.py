@@ -930,6 +930,7 @@ def plot_fim(
     vmin=None,
     vmax=None,
     cmap: str = "viridis",
+    cbar_label: Optional[str] = None,
     figsize=(8, 6),
     eps: float = 1e-20,
     ax=None,
@@ -952,6 +953,8 @@ def plot_fim(
         Optional explicit color scaling for imshow.
     cmap : str
         Colormap for the heatmap.
+    cbar_label : str | None
+        Optional label for the colorbar, overrides automatic labels if provided.
     figsize : tuple
         Figure size when creating a new figure.
     eps : float
@@ -974,10 +977,12 @@ def plot_fim(
     fim_array = onp.array(fim)
     if log_scale:
         data = onp.log10(onp.abs(fim_array) + eps)
-        cbar_label = r"$\log_{10}(|\mathrm{FIM}| + \epsilon)$"
+        if cbar_label is None:
+            cbar_label = r"$\log_{10}(|\mathrm{FIM}| + \epsilon)$"
     else:
         data = fim_array
-        cbar_label = "FIM"
+        if cbar_label is None:
+            cbar_label = "FIM"
 
     if vmin is None:
         vmin = onp.nanmin(data)
