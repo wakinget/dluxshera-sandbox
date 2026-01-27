@@ -17,6 +17,7 @@ astropy>=5.0
 
 # Plotting / progress
 matplotlib>=3.9
+PyQt6
 tqdm>=4.67
 pandas>=1.5
 
