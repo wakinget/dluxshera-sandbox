@@ -31,3 +31,5 @@ zodiax>=0.4.1
 # Notebook support (optional but nice for examples)
 ipykernel>=6.31
 jupyterlab>=4.4
+ipywidgets
+jupyterlab_widgets
