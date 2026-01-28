@@ -23,12 +23,15 @@ from pathlib import Path
 import time
 
 import jax
-import matplotlib.pyplot as plt
 import numpy as np
 
 from dluxshera.inference.optimization import fim_theta_shera
 from dluxshera.params.store import ParameterStore
 from dluxshera.plot.plotting import apply_plot_defaults, get_default_cmaps, plot_fim, merge_cbar
+import matplotlib
+matplotlib.use("QtAgg")
+import matplotlib.pyplot as plt
+
 from dluxshera.systems.three_plane import (
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
@@ -50,7 +53,8 @@ DEFAULT_INFER_KEYS = (
     "secondary.zernike_coeffs_nm",
 )
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-DEFAULT_RESULTS_DIR = Path(f"work/experiments/Results/fim_comparison_{TIMESTAMP}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RESULTS_DIR = REPO_ROOT / "work/experiments/Results" / f"fim_comparison_{TIMESTAMP}"
 
 
 def parse_infer_keys(raw_keys: list[str] | None) -> tuple[str, ...]:
@@ -170,6 +174,9 @@ def main() -> None:
     outdir: Path = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
 
+    save_plots = True
+    show_plots = True
+    plots_block = True
     _ = get_default_cmaps()
     apply_plot_defaults()
     plt.rcParams["image.cmap"] = "inferno_nan"
@@ -206,7 +213,10 @@ def main() -> None:
             "Ensure infer keys are consistent across configs."
         )
 
-    fim_ratio = fim_testbed / (fim_flight + args.eps)
+    fim_ratio = fim_flight / (fim_testbed + args.eps)
+    abs_ratio = np.abs(fim_ratio)
+    log_ratio = np.log10(abs_ratio)
+    # log_label = r"$\log_{10}(|\mathrm{Ratio}|)$"
 
     print("Plotting the two FIMs...")
     scale_label = "log" if args.log_scale else "linear"
@@ -238,19 +248,19 @@ def main() -> None:
     axes[1].set_title(f"Flight FIM ({scale_label})")
 
     plot_fim(
-        np.abs(fim_ratio),
+        log_ratio,
         labels_flight,
         log_scale=False,
-        vmin=0.0,
-        vmax=10.0,
+        vmin=-3.0,
+        vmax=3.0,
         # cmap="vididis",
-        cbar_label="|FIM Ratio|",
+        cbar_label=r"$\log_{10}(|\mathrm{Ratio}|)$",
         ax=axes[2],
         save_path=None,
         show=False,
         close=False,
     )
-    axes[2].set_title(f"Ratio: ABS( Testbed / Flight )")
+    axes[2].set_title(f"Log Ratio: Flight / Testbed")
 
     # plot_fim input signature for reference
     # def plot_fim(
@@ -270,9 +280,10 @@ def main() -> None:
     # ):
 
     print("Saving the Results...")
-    fig_path = outdir / "fim_comparison.png"
-    fig.savefig(fig_path)
-    plt.close(fig)
+    if save_plots:
+        fig_path = outdir / "fim_comparison.png"
+        fig.savefig(fig_path)
+        print(f"Saved figure: {fig_path}")
 
     np.savez(
         outdir / "fim_comparison.npz",
@@ -281,9 +292,12 @@ def main() -> None:
         fim_ratio=fim_ratio,
         labels=np.array(labels_testbed, dtype=str),
     )
-
-    print(f"Saved figure: {fig_path}")
     print(f"Saved data: {outdir / 'fim_comparison.npz'}")
+
+    if show_plots:
+        plt.show(block=plots_block)
+    else:
+        plt.close(fig)
 
     t1 = time.time()
     print("Finished in %.3f sec" % (t1 - t0))
