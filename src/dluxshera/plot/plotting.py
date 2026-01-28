@@ -148,10 +148,6 @@ def _maybe_save(fig, save_path: Optional[Union[str, Path]], dpi: int = 300) -> N
     fig.savefig(path, dpi=dpi)
 
 
-def _ensure_plots_dir(out_dir: Path) -> Path:
-    plots_dir = Path(out_dir) / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    return plots_dir
 
 
 def _plot_lines_on_ax(
@@ -438,7 +434,7 @@ def plot_signals_panels(
     signals:
         Mapping from signal names to numpy arrays.
     out_dir:
-        Run directory; plots are written to ``out_dir / 'plots'``.
+        Run directory; plots are written to ``out_dir``.
     title_prefix:
         Optional prefix applied to each panel title.
     include_zernike_rms:
@@ -451,7 +447,6 @@ def plot_signals_panels(
     """
 
 
-    plots_dir = _ensure_plots_dir(Path(out_dir))
     x = onp.arange(next(iter(signals.values())).shape[0])
     saved: PanelPaths = []
 
@@ -461,7 +456,7 @@ def plot_signals_panels(
         title_prefix=title_prefix,
         include_zernike_rms=include_zernike_rms,
     ):
-        path = plots_dir / panel["filename"]
+        path = Path(out_dir / panel["filename"] )
         _plot_lines(x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"], path)
         saved.append(path)
 
@@ -470,12 +465,11 @@ def plot_signals_panels(
 
 def plot_signals_grid(
     signals: Mapping[str, ArrayLike],
-    out_dir: Path,
+    out_dir: Optional[Union[str, Path]] = None,
     *,
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
     figsize: Optional[Tuple[float, float]] = None,
-    save_path: Optional[Union[str, Path]] = None,
     show: bool = False,
     close: bool = True,
 ):
@@ -487,16 +481,13 @@ def plot_signals_grid(
     signals:
         Mapping from signal names to numpy arrays.
     out_dir:
-        Run directory; plots are written to ``out_dir / 'plots'`` when
-        ``save_path`` is not supplied.
+        Optional output directory; plots are written to ``out_dir`` when provided
     title_prefix:
         Optional prefix applied to each panel title.
     include_zernike_rms:
         Whether to include M1/M2 Zernike RMS panels (default False).
     figsize:
         Optional explicit figure size.
-    save_path:
-        If provided, save the figure to this path.
     show:
         Whether to call ``plt.show()`` at the end.
     close:
@@ -535,11 +526,10 @@ def plot_signals_grid(
 
     fig.tight_layout()
 
-    if save_path is None:
-        plots_dir = _ensure_plots_dir(Path(out_dir))
-        save_path = plots_dir / "signals_grid.png"
+    if out_dir is not None:
+        out_dir = Path(out_dir / "signals_grid.png" )
 
-    _maybe_save(fig, save_path)
+    _maybe_save(fig, out_dir)
 
     if show:
         plt.show()
