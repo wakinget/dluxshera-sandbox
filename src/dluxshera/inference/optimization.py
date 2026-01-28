@@ -606,7 +606,7 @@ def _resolve_run_dir(
     if runs_dir is None:
         raise ValueError("Either run_dir or runs_dir must be provided when enabling artifacts.")
 
-    resolved_run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    resolved_run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
     resolved = Path(runs_dir) / resolved_run_id
     return resolved, resolved_run_id
 
