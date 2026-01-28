@@ -27,7 +27,7 @@ import numpy as np
 
 from dluxshera.inference.optimization import fim_theta_shera
 from dluxshera.params.store import ParameterStore
-from dluxshera.plot.plotting import apply_plot_defaults, get_default_cmaps, plot_fim, merge_cbar
+from dluxshera.plot.plotting import apply_plot_defaults, get_default_cmaps, plot_fim, plot_fim_plotly, merge_cbar
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
@@ -115,6 +115,60 @@ def compute_fim(
     )
 
     return np.asarray(fim), labels
+
+
+def plot_fim_comparison_plotly(
+    fim_testbed, fim_flight, fim_ratio, labels,
+    log_scale=True, eps=1e-20, vmin=None, vmax=None,
+    save_path=None, show=False
+):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    def _prep(z):
+        z = np.asarray(z)
+        return np.log10(np.abs(z) + eps) if log_scale else z
+
+    z1, z2, z3 = _prep(fim_testbed), _prep(fim_flight), _prep(fim_ratio)
+
+    if vmin is None:
+        vmin = np.nanmin([np.nanmin(z1), np.nanmin(z2), np.nanmin(z3)])
+    if vmax is None:
+        vmax = np.nanmax([np.nanmax(z1), np.nanmax(z2), np.nanmax(z3)])
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=("Testbed FIM", "Flight FIM", "Ratio (Flight/Testbed)"),
+        horizontal_spacing=0.08,
+    )
+
+    # Share one colorscale range across all three for comparability
+    common = dict(colorscale="Viridis", zmin=vmin, zmax=vmax, x=labels, y=labels)
+
+    fig.add_trace(go.Heatmap(z=z1, colorbar=dict(title="log10(|FIM|+eps)"), **common), row=1, col=1)
+    fig.add_trace(go.Heatmap(z=z2, showscale=False, **common), row=1, col=2)
+    fig.add_trace(go.Heatmap(z=z3, showscale=False, **common), row=1, col=3)
+
+    fig.update_layout(
+        xaxis=dict(tickangle=-45),
+        xaxis2=dict(tickangle=-45),
+        xaxis3=dict(tickangle=-45),
+        yaxis=dict(autorange="reversed"),
+        yaxis2=dict(autorange="reversed"),
+        yaxis3=dict(autorange="reversed"),
+        margin=dict(l=80, r=40, t=60, b=140),
+    )
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(str(save_path if str(save_path).endswith(".html") else save_path.with_suffix(".html")))
+
+    if show:
+        fig.show()
+
+    return fig
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -298,6 +352,13 @@ def main() -> None:
         plt.show(block=plots_block)
     else:
         plt.close(fig)
+
+    # Try using plotly
+    plot_fim_comparison_plotly(
+        fim_testbed, fim_flight, fim_ratio, labels_testbed,
+        save_path=outdir / "fim_comparison_plotly.html",
+        show=True,
+    )
 
     t1 = time.time()
     print("Finished in %.3f sec" % (t1 - t0))
