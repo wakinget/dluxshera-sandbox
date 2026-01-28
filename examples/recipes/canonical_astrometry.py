@@ -406,7 +406,7 @@ def main(
         learning_rate=BASE_LR,
         lr_vec=lr_vec,
         num_steps=n_iter,
-        runs_dir=results_dir,
+        run_dir=results_dir,
         return_artifacts=False,
         theta_space=theta_space,
         curvature=curvature_vec,
