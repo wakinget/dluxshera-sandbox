@@ -1017,6 +1017,97 @@ def plot_fim(
 
     return fig, ax
 
+def plot_fim_plotly(
+    fim: np.ndarray,
+    labels: Sequence[str],
+    log_scale: bool = True,
+    vmin=None,
+    vmax=None,
+    cmap: str = "Viridis",  # Plotly colorscale name; "viridis" -> "Viridis"
+    cbar_label: Optional[str] = None,
+    eps: float = 1e-20,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+):
+    """
+    Plot a Fisher Information Matrix (FIM) heatmap using Plotly.
+
+    Mirrors dluxshera.plot.plotting.plot_fim semantics:
+      - log10(abs(fim) + eps) if log_scale
+      - vmin/vmax default to min/max of the plotted data
+      - labeled axes
+      - optional save to HTML (and PNG if requested and kaleido installed)
+
+    Returns
+    -------
+    fig : plotly.graph_objects.Figure
+        Plotly figure containing the heatmap.
+    """
+    import plotly.graph_objects as go  # local import so Plotly is optional
+
+    fim_array = np.asarray(fim)
+
+    if log_scale:
+        data = np.log10(np.abs(fim_array) + eps)
+        if cbar_label is None:
+            cbar_label = "log10(|FIM| + eps)"
+    else:
+        data = fim_array
+        if cbar_label is None:
+            cbar_label = "FIM"
+
+    if vmin is None:
+        vmin = np.nanmin(data)
+    if vmax is None:
+        vmax = np.nanmax(data)
+
+    # Plotly heatmap: note that z is indexed as [y, x]
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=data,
+            x=list(labels),
+            y=list(labels),
+            colorscale=cmap,
+            zmin=vmin,
+            zmax=vmax,
+            colorbar=dict(title=cbar_label),
+            hovertemplate=(
+                "y=%{y}<br>"
+                "x=%{x}<br>"
+                "value=%{z:.4g}<extra></extra>"
+            ),
+        )
+    )
+
+    # Make it feel like your Matplotlib layout: square-ish with readable labels
+    fig.update_layout(
+        title=None,
+        xaxis=dict(tickangle=-45),
+        yaxis=dict(autorange="reversed"),  # match imshow top-left origin feel
+        margin=dict(l=80, r=40, t=40, b=120),
+    )
+
+    # Save
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # If user passes "something.png", also write "something.html" unless they meant png-only.
+        # Recommended: save HTML as primary artifact.
+        if save_path.suffix.lower() == ".html":
+            fig.write_html(str(save_path))
+        elif save_path.suffix.lower() in (".png", ".jpg", ".jpeg", ".svg", ".pdf", ".webp"):
+            # Requires kaleido (pip install kaleido)
+            fig.write_image(str(save_path))
+        else:
+            # default to HTML
+            fig.write_html(str(save_path.with_suffix(".html")))
+
+    if show:
+        fig.show()
+
+    return fig
+
 
 # --- Legacy Functions ---
 def plot_parameter_sweeps(
