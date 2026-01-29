@@ -41,8 +41,8 @@ def _call_builder(builder: Callable[..., Any], meta: Mapping[str, Any], run_dir:
     return builder(**kwargs) if kwargs else builder()
 
 
-def _load_theta_from_checkpoint(checkpoint_path: Path, checkpoint: str) -> np.ndarray:
-    payload = load_checkpoint(checkpoint_path.parent, which=checkpoint)
+def _load_theta_from_checkpoint(run_dir: Path, checkpoint: str) -> np.ndarray:
+    payload = load_checkpoint(run_dir, which=checkpoint)
     if checkpoint == "best":
         for key in ("theta_best", "theta"):
             if key in payload:
@@ -54,7 +54,7 @@ def _load_theta_from_checkpoint(checkpoint_path: Path, checkpoint: str) -> np.nd
     # fallback: take the first array
     if payload:
         return np.asarray(next(iter(payload.values())))
-    raise ValueError(f"No theta found in checkpoint_{checkpoint}.npz")
+    raise ValueError(f"No theta found in checkpoint artifact '{checkpoint}'")
 
 
 def _compute_block_norms(grad: np.ndarray, meta: Mapping[str, Any]) -> dict[str, float]:
@@ -91,7 +91,7 @@ def compute_checkpoint_gradients(
     Parameters
     ----------
     run_dir : Path
-        Run directory containing ``checkpoint_<which>.npz`` and metadata files.
+        Run directory containing checkpoint artifacts and metadata files.
     builder : str | Callable[..., Any]
         Builder that returns a loss function of the form ``loss(theta) -> scalar``.
         If a string, it must be ``\"module:func\"``. The builder may accept
@@ -112,7 +112,7 @@ def compute_checkpoint_gradients(
     meta = load_meta(run_dir)
     summary = load_summary(run_dir) if (run_dir / "summary.json").exists() else {}
 
-    theta = _load_theta_from_checkpoint(run_dir / f"checkpoint_{checkpoint}.npz", checkpoint)
+    theta = _load_theta_from_checkpoint(run_dir, checkpoint)
 
     builder_fn = _resolve_builder(builder)
     loss_fn = _call_builder(builder_fn, meta, run_dir)

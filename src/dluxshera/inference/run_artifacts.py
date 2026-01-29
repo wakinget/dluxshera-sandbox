@@ -208,6 +208,35 @@ def load_summary(run_dir: Path | str):
         return json.load(f)
 
 
+def _load_manifest(run_dir: Path | str) -> Mapping[str, Mapping[str, object]] | None:
+    run_path = Path(run_dir)
+    summary_path = run_path / "summary.json"
+    if summary_path.exists():
+        summary = load_summary(run_path)
+        manifest = summary.get("manifest")
+        if isinstance(manifest, Mapping):
+            return manifest
+    meta_path = run_path / "meta.json"
+    if meta_path.exists():
+        meta = load_meta(run_path)
+        manifest = meta.get("manifest")
+        if isinstance(manifest, Mapping):
+            return manifest
+    return None
+
+
 def load_checkpoint(run_dir: Path | str, which: str = "best") -> dict[str, np.ndarray]:
-    path = Path(run_dir) / f"checkpoint_{which}.npz"
+    name = f"checkpoint_{which}"
+    manifest = _load_manifest(run_dir)
+    if manifest and name in manifest:
+        entry = manifest[name]
+        filename = entry.get("filename")
+        kind = entry.get("kind")
+        if kind != "npz":
+            raise ValueError(f"Checkpoint artifact '{name}' has non-npz kind '{kind}'")
+        if not filename:
+            raise ValueError(f"Checkpoint artifact '{name}' is missing a filename")
+        path = Path(run_dir) / str(filename)
+        return _load_npz(path)
+    path = Path(run_dir) / f"{name}.npz"
     return _load_npz(path)
