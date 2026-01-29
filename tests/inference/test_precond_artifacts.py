@@ -7,7 +7,7 @@ from dluxshera.inference.preconditioning import (
     PreconditioningConfig,
     compute_precond_vectors,
 )
-from dluxshera.inference.run_artifacts import save_run
+from dluxshera.inference.run_artifacts import load_npz_artifact, save_run
 
 
 def test_quadratic_precond_vectors_shapes_and_values():
@@ -76,9 +76,11 @@ def test_artifact_writing(tmp_path: Path):
         },
     )
 
-    with np.load(run_dir / "precond.npz", allow_pickle=False) as npz:
-        np.testing.assert_allclose(npz["lr_vec"], precond["lr_vec"])
-        np.testing.assert_allclose(npz["precond"], precond["precond"])
+    loaded_precond = load_npz_artifact(run_dir, "precond")
+    assert loaded_precond is not None
+    np.testing.assert_allclose(loaded_precond["lr_vec"], precond["lr_vec"])
+    np.testing.assert_allclose(loaded_precond["precond"], precond["precond"])
 
-    with np.load(run_dir / "curvature.npz", allow_pickle=False) as npz:
-        np.testing.assert_allclose(npz["curv_diag"], curvature["curv_diag"])
+    loaded_curvature = load_npz_artifact(run_dir, "curvature")
+    assert loaded_curvature is not None
+    np.testing.assert_allclose(loaded_curvature["curv_diag"], curvature["curv_diag"])

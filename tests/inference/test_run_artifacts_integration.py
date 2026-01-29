@@ -7,7 +7,12 @@ from dluxshera.inference.optimization import (
     run_image_gd,
     run_simple_gd,
 )
-from dluxshera.inference.run_artifacts import load_meta, load_summary, load_trace
+from dluxshera.inference.run_artifacts import (
+    load_meta,
+    load_npz_artifact,
+    load_summary,
+    load_trace,
+)
 from dluxshera.systems.three_plane import (
     SheraThreePlaneConfig,
     build_forward_spec_from_config,
@@ -64,12 +69,14 @@ def test_run_simple_gd_writes_artifacts(tmp_path: Path):
     assert summary["has_checkpoint_best"] is True
     assert summary["has_checkpoint_final"] is True
 
-    checkpoint_best = np.load(run_dir / "checkpoint_best.npz")
+    checkpoint_best = load_npz_artifact(run_dir, "checkpoint_best")
+    assert checkpoint_best is not None
     assert "theta_best" in checkpoint_best
     assert "best_step" in checkpoint_best
     assert "best_loss" in checkpoint_best
 
-    checkpoint_final = np.load(run_dir / "checkpoint_final.npz")
+    checkpoint_final = load_npz_artifact(run_dir, "checkpoint_final")
+    assert checkpoint_final is not None
     assert "theta_final" in checkpoint_final
     assert "final_step" in checkpoint_final
     assert "final_loss" in checkpoint_final
