@@ -31,6 +31,36 @@ if TYPE_CHECKING:
     from ..systems.three_plane import SheraThreePlaneBinder
     from ..systems.two_plane import SheraTwoPlaneBinder
 
+
+def _build_artifacts_mapping(
+    *,
+    checkpoints: Optional[Mapping[str, Mapping[str, np.ndarray]]] = None,
+    curvature: Optional[Mapping[str, np.ndarray]] = None,
+    precond: Optional[Mapping[str, np.ndarray]] = None,
+    signals: Optional[Mapping[str, np.ndarray]] = None,
+) -> Optional[dict[str, dict[str, object]]]:
+    artifacts: dict[str, dict[str, object]] = {}
+
+    if signals is not None:
+        artifacts["signals"] = {"kind": "npz", "content": signals}
+
+    if curvature is not None:
+        artifacts["curvature"] = {"kind": "npz", "content": curvature}
+
+    if precond is not None:
+        artifacts["precond"] = {"kind": "npz", "content": precond}
+
+    if checkpoints is not None:
+        for name, payload in checkpoints.items():
+            artifact_name = f"checkpoint_{name}"
+            artifacts[artifact_name] = {
+                "kind": "npz",
+                "content": payload,
+                "filename": f"{artifact_name}.npz",
+            }
+
+    return artifacts or None
+
 ############################
 # Exports
 ############################
@@ -1106,9 +1136,11 @@ def run_gd_with_artifacts(
             trace=trace,
             meta=base_meta,
             summary=base_summary,
-            checkpoints=checkpoints,
-            curvature=artifact_curvature,
-            precond=artifact_precond,
+            artifacts=_build_artifacts_mapping(
+                checkpoints=checkpoints,
+                curvature=artifact_curvature,
+                precond=artifact_precond,
+            ),
         )
 
     if return_artifacts:
@@ -1414,10 +1446,12 @@ def run_image_gd(
                 trace=artifact_payload["trace"],
                 meta=artifact_payload["meta"],
                 summary=summary,
-                checkpoints=artifact_payload["checkpoints"],
-                signals=signals if save_signals else None,
-                curvature=artifact_payload.get("curvature"),
-                precond=artifact_payload.get("precond"),
+                artifacts=_build_artifacts_mapping(
+                    checkpoints=artifact_payload["checkpoints"],
+                    curvature=artifact_payload.get("curvature"),
+                    precond=artifact_payload.get("precond"),
+                    signals=signals if save_signals else None,
+                ),
             )
 
     # Map final θ back into a ParameterStore

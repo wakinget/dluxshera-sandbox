@@ -70,8 +70,10 @@ def test_artifact_writing(tmp_path: Path):
         trace=trace,
         meta=meta,
         summary=summary,
-        precond=precond,
-        curvature=curvature,
+        artifacts={
+            "precond": {"kind": "npz", "content": precond},
+            "curvature": {"kind": "npz", "content": curvature},
+        },
     )
 
     with np.load(run_dir / "precond.npz", allow_pickle=False) as npz:
