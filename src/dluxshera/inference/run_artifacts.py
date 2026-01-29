@@ -54,6 +54,42 @@ def save_run(
     Always writes ``trace.npz``, ``meta.json``, and ``summary.json``. Optional
     artifacts are only written when their corresponding argument is provided.
     """
+    # ---------------------------------------------------------------------
+    # Artifact manifest + payload spec (Phase 0)
+    #
+    # Required artifacts (always written):
+    #   - trace.npz   (kind="npz", name="trace")
+    #   - meta.json   (kind="json", name="meta")
+    #   - summary.json (kind="json", name="summary")
+    #
+    # Optional artifacts: provided explicitly by caller; only saved if present.
+    #
+    # Artifact kinds (minimum viable):
+    #   - "npz"  : dense numeric arrays (dict-of-arrays)
+    #   - "json" : JSON-serializable dicts/metadata
+    #   - "jsonl": line-delimited logs (iterable of dicts/strings)
+    #
+    # Naming + filenames:
+    #   - Artifact name defaults to filename stem (e.g., "signals").
+    #   - Default filename is "{name}.{ext}" derived from kind.
+    #   - Explicit filename override is allowed when needed
+    #     (e.g., "checkpoint_best.npz").
+    #
+    # Manifest placement:
+    #   - meta["manifest"]: mapping keyed by artifact name
+    #     {name: {"name", "filename", "kind", "description"?}}
+    #   - summary["manifest"]: compact mapping keyed by name
+    #     {name: {"name", "filename", "kind"}}
+    #
+    # Overwrite behavior:
+    #   - save_run may be called multiple times with the same run_dir.
+    #     Overwriting meta.json/summary.json is acceptable when explicitly
+    #     targeting a fixed run_dir. (runs_dir callers should use distinct
+    #     subdirectories per run.)
+    #
+    # Git provenance (best-effort, written into meta.json):
+    #   - meta["git"] = {"commit": "<sha>", "dirty": bool} when available.
+    # ---------------------------------------------------------------------
 
     run_path = Path(run_dir)
     _ensure_dir(run_path)
