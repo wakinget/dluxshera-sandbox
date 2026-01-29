@@ -77,8 +77,16 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
         artifacts={
             "signals": {"kind": "npz", "content": signals},
             "grads": {"kind": "npz", "content": grads},
-            "checkpoint_best": {"kind": "npz", "content": checkpoints["checkpoint_best"]},
-            "checkpoint_final": {"kind": "npz", "content": checkpoints["checkpoint_final"]},
+            "checkpoint_best": {
+                "kind": "npz",
+                "content": checkpoints["checkpoint_best"],
+                "filename": "best_model.npz",
+            },
+            "checkpoint_final": {
+                "kind": "npz",
+                "content": checkpoints["checkpoint_final"],
+                "filename": "final_model.npz",
+            },
         },
     )
 
@@ -88,6 +96,11 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
     loaded_summary = load_summary(run_dir)
     for name in ("signals", "grads", "checkpoint_best", "checkpoint_final"):
         assert name in loaded_summary["manifest"]
+
+    assert (run_dir / "best_model.npz").exists()
+    assert (run_dir / "final_model.npz").exists()
+    assert not (run_dir / "checkpoint_best.npz").exists()
+    assert not (run_dir / "checkpoint_final.npz").exists()
 
     best = load_checkpoint(run_dir, "best")
     np.testing.assert_allclose(best["theta_best"], checkpoints["checkpoint_best"]["theta_best"])
