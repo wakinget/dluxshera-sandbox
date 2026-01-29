@@ -1041,7 +1041,6 @@ def run_gd_with_artifacts(
     created_at = datetime.now(timezone.utc).isoformat()
 
     base_meta: Dict[str, Any] = {
-        "artifact_schema": "dluxshera-run-v0",
         "run_id": resolved_run_id,
         "created_at": created_at,
         "theta": {
@@ -1085,8 +1084,6 @@ def run_gd_with_artifacts(
         "has_checkpoint_best": False,
         "has_checkpoint_final": False,
         "has_signals": False,
-        "has_precond": precond is not None,
-        "has_curvature": curvature is not None,
     }
 
     if extra_summary:
