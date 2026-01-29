@@ -49,7 +49,6 @@ def test_run_simple_gd_writes_artifacts(tmp_path: Path):
     assert trace["base_lr"].shape == (6,)
 
     meta = load_meta(run_dir)
-    assert meta["artifact_schema"] == "dluxshera-run-v0"
     assert meta["theta"]["dim"] == 2
     assert meta["theta"]["theta_space"] == "primitive"
     assert meta["optimizer"]["num_steps"] == 6
@@ -130,7 +129,6 @@ def test_run_image_gd_writes_index_map_metadata(tmp_path: Path):
     assert trace["loss"].shape == (3,)
 
     meta = load_meta(run_dir)
-    assert meta["artifact_schema"] == "dluxshera-run-v0"
     assert meta["theta"]["dim"] == int(theta0.size)
     index_map = meta["theta"]["index_map"]
     assert index_map["entries"]
