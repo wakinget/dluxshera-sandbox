@@ -1,6 +1,6 @@
 # Optimization artifacts, logging, and plotting strategy (v0)
 
-Status: Phase A/B implemented; Phase C implemented; Phase D in progress
+Status: Phase A/B implemented; Phase C implemented; Phase D implemented
 
 ## Goals
 
@@ -87,8 +87,10 @@ Always-save (small, scalable):
   - arrays: `loss`, `theta`, optional generic diagnostic channels
 - `meta.json`
   - lightweight identity + θ interpretation metadata + config identifiers
+  - rich artifact manifest (`meta["manifest"]`)
 - `summary.json`
   - tiny, aggregation-friendly scalars (final loss, runtime, convergence flags, etc.)
+  - compact artifact manifest (`summary["manifest"]`)
 
 Optional diagnostics (opt-in):
 - `diag_steps.jsonl`
@@ -115,7 +117,7 @@ Design principle:
 ### Status snapshot (v0)
 - Phase A/B: implemented. Trace/meta/summary are always written, with opt-in optional artifacts.
 - Phase C: implemented. `signals.npz` remains self-contained (no sidecar metadata) and plotting recipes live in `src/dluxshera/inference/{signals.py,plotting.py}`.
-- Phase D: in progress. A deterministic diagonal preconditioner (`ema_grad2` at θ₀) produces `lr_vec` and `curv_diag` saved to `precond.npz` / `curvature.npz` when enabled; metadata is recorded under `meta["optimizer"]["preconditioning"]`.
+- Phase D: implemented. A deterministic diagonal preconditioner (`ema_grad2` at θ₀) produces `lr_vec` and `curv_diag` saved to `precond.npz` / `curvature.npz` when enabled; metadata is recorded under `meta["optimizer"]["preconditioning"]`.
 
 ## Optimization run artifacts (v0) — schema + IndexMap
 
@@ -166,9 +168,9 @@ This project standardizes a small, stable set of run artifacts to support refact
 `meta.json` is the primary, human-readable record of: (a) how to interpret `theta`, and (b) what optimizer/preconditioning configuration produced the trace.
 
 Recommended top-level fields:
-- `artifact_schema`: e.g. `"dluxshera-run-v0"`
 - `run_id`, `created_at` (ISO-8601)
-- `git`: `{commit, dirty}` (recommended)
+- `git`: `{commit, dirty}` (recommended; best-effort)
+- `manifest`: mapping of artifact names to rich entries (see below)
 - `theta`: details about θ-space and its interpretation (see below)
 - `objective`: objective/loss identity (name + data identifiers)
 - `optimizer`: algorithm identity + step count + schedule
@@ -479,7 +481,7 @@ Metadata should be lightweight but sufficient for reproducibility:
 - Optional environment/provenance: package versions, platform notes
 
 Design principle:
-- Keep metadata schema versioned and evolvable (avoid over-specifying v0).
+- Keep metadata lightweight and evolvable (avoid over-specifying v0).
 
 ## Signals strategy (v0) — where they live, and what belongs in Transforms vs Signals
 
@@ -583,7 +585,7 @@ A run directory contains the always-saved core artifacts plus optional diagnosti
       curvature.npz
       grads.npz
 
-Key principle: **Trace is minimal and generic**, while `meta.json` contains the information needed to interpret `theta` (including IndexMap). Signals and diagnostics are optional.
+Key principle: **Trace is minimal and generic**, while `meta.json` contains the information needed to interpret `theta` (including IndexMap) and the artifact manifest. Signals and diagnostics are optional.
 
 ---
 
@@ -591,7 +593,7 @@ Key principle: **Trace is minimal and generic**, while `meta.json` contains the 
 
 The primary interface is a small set of functions (not a mandatory new class):
 
-- `save_run(run_dir, trace, meta, summary, *, signals=None, grads=None, curvature=None, precond=None, checkpoints=None, diag_steps=None)`
+- `save_run(run_dir, trace, meta, summary, *, artifacts=None)`
 - `load_trace(run_dir)` → returns trace arrays (at minimum `theta`, `loss`)
 - `load_meta(run_dir)` / `load_summary(run_dir)`
 - `load_checkpoint(run_dir, which="best"|"final")` → returns checkpoint payload (`theta`, `step`, `loss`, etc.)
@@ -600,12 +602,12 @@ This supports the most common workflow (inspect results immediately) while enabl
 
 ### Checkpoints: enabling gradient/FIM analysis workflows
 
-To support “load the optimized point later and analyze gradients,” v0 adds optional checkpoints:
+To support “load the optimized point later and analyze gradients,” v0 adds optional checkpoints represented as standard artifacts:
 
 - `checkpoint_best.npz`: best step `theta_best`, `best_step`, `best_loss` (and any minimal extras)
 - `checkpoint_final.npz`: final step `theta_final`, `final_step`, `final_loss`
 
-These allow downstream scripts to rehydrate the best/final θ state without re-running the optimizer and without requiring large trace loads.
+These allow downstream scripts to rehydrate the best/final θ state without re-running the optimizer and without requiring large trace loads. `load_checkpoint` resolves the artifact filename via the manifest when available.
 
 ---
 
@@ -616,9 +618,9 @@ These allow downstream scripts to rehydrate the best/final θ state without re-r
 `meta.json` should answer: **“How do I interpret θ?”** The goal is not perfect reproducibility on day one, but enough structure to decode past runs without guessing.
 
 Minimum recommended fields (v0):
-- `artifact_schema`: `"dluxshera-run-v0"`
 - `run_id`, `created_at` (ISO-8601)
-- `git`: `{commit, dirty}` (recommended)
+- `git`: `{commit, dirty}` (recommended; best-effort)
+- `manifest`: artifact manifest entries (see below)
 - `theta`:
   - `dim`
   - `theta_space`: `"primitive"` or `"eigen"`
@@ -641,10 +643,47 @@ Minimum recommended fields (v0):
 - step counts: `num_steps_completed`
 - loss summary: `loss_init`, `loss_final`, `loss_best`, `best_step`
 - runtime: `runtime_total_s` (approximate is acceptable)
-- artifact presence flags:
-  - `has_signals`, `has_precond`, `has_curvature`, `has_checkpoint_best`, `has_checkpoint_final`
+- `manifest`: compact artifact manifest entries (see below)
 
 This schema may evolve, but these fields provide a stable baseline for run indexing and comparison.
+
+### Artifact manifest (rich + compact)
+
+The manifest records which artifacts were written during a save call. It is rebuilt on each `save_run` invocation (overwriting `meta.json` and `summary.json` is acceptable), so consumers should treat it as the source of truth for the artifacts present in that run directory.
+
+**Supported artifact kinds (minimum viable):**
+- `npz`: dense numeric arrays
+- `json`: metadata-like dicts
+- `jsonl`: line-delimited records
+
+**Naming and filenames:**
+- The artifact key is a canonical name (e.g., `signals`, `checkpoint_best`).
+- The default filename is derived from the name and kind (e.g., `signals.npz`).
+- A caller may override the filename (e.g., `filename="checkpoint_best.npz"`).
+
+**Manifest structure:**
+- `meta["manifest"]` (rich) maps artifact names to:
+  - `name`, `filename`, `kind`, and optional `description`.
+- `summary["manifest"]` (compact) maps artifact names to:
+  - `name`, `filename`, `kind`.
+
+Example:
+
+```json
+{
+  "manifest": {
+    "trace": {"name": "trace", "filename": "trace.npz", "kind": "npz"},
+    "meta": {"name": "meta", "filename": "meta.json", "kind": "json"},
+    "summary": {"name": "summary", "filename": "summary.json", "kind": "json"},
+    "checkpoint_best": {
+      "name": "checkpoint_best",
+      "filename": "checkpoint_best.npz",
+      "kind": "npz",
+      "description": "best-step checkpoint payload"
+    }
+  }
+}
+```
 
 ---
 
