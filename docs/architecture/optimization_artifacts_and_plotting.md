@@ -99,8 +99,8 @@ Optional diagnostics (opt-in):
   - gradients only when explicitly enabled; prefer sparse logging
 - `signals.npz`
   - cached derived time series used for plotting (optional)
-- `curvature.npz` / `precond.npz`
-  - curvature/preconditioning artifacts for advanced optimizers (optional)
+- `metric.npz`
+  - combined curvature/preconditioning artifacts for advanced optimizers (optional)
 
 Design principle:
 - Default outputs should remain small enough to support large ensembles/time-series runs.
@@ -117,7 +117,7 @@ Design principle:
 ### Status snapshot (v0)
 - Phase A/B: implemented. Trace/meta/summary are always written, with opt-in optional artifacts.
 - Phase C: implemented. `signals.npz` remains self-contained (no sidecar metadata) and plotting recipes live in `src/dluxshera/inference/{signals.py,plotting.py}`.
-- Phase D: implemented. A deterministic diagonal preconditioner (`ema_grad2` at θ₀) produces `lr_vec` and `curv_diag` saved to `precond.npz` / `curvature.npz` when enabled; metadata is recorded under `meta["optimizer"]["preconditioning"]`.
+- Phase D: implemented. A deterministic diagonal preconditioner (`ema_grad2` at θ₀) produces `metric_diag` + `lr_scale` saved to `metric.npz` when enabled; metadata is recorded under `meta["optimizer"]["preconditioning"]`.
 
 ## Optimization run artifacts (v0) — schema + IndexMap
 
@@ -129,7 +129,7 @@ This project standardizes a small, stable set of run artifacts to support refact
   - Required: `loss[t]` and `theta[t, :]`.
   - No decoded/physical parameter values in Trace by default.
 - **Interpretation lives in metadata**:
-  - `meta.json` carries all information needed to interpret `theta`, `lr_vec`, curvature/preconditioning outputs, etc.
+  - `meta.json` carries all information needed to interpret `theta`, `lr_scale`, curvature/preconditioning outputs, etc.
 - **Diagnostics are opt-in**:
   - Do not save full gradient histories by default.
   - Save only small generic scalars in Trace; larger arrays go into optional files.
@@ -145,8 +145,7 @@ This project standardizes a small, stable set of run artifacts to support refact
       signals.npz
       diag_steps.jsonl
       grads.npz
-      curvature.npz
-      precond.npz
+      metric.npz
 
 **Implementation note:** The Phase A I/O scaffold for this layout lives in
 `dluxshera.inference.run_artifacts` (see `save_run` and helpers).
@@ -178,7 +177,7 @@ Recommended top-level fields:
 
 ### IndexMap (stored in metadata, not in Trace)
 
-**IndexMap** is the serialized description of the θ layout used by packing/unpacking. It is *not a separate mapping system*; it is the exported, recorded view of the packing order. It exists to make arrays like `theta[t, :]`, `lr_vec[:]`, and curvature/preconditioning vectors interpretable without guessing ordering.
+**IndexMap** is the serialized description of the θ layout used by packing/unpacking. It is *not a separate mapping system*; it is the exported, recorded view of the packing order. It exists to make arrays like `theta[t, :]`, `lr_scale[:]`, and curvature/preconditioning vectors interpretable without guessing ordering.
 
 **Key decision (v0):** IndexMap is stored in `meta.json`, not inside `trace.npz`.
 
@@ -215,11 +214,17 @@ Notes:
 
 ### Optional artifacts (v0)
 
-- `precond.npz`: optional preconditioning outputs (e.g., `lr_vec[D]`, `precond[D]`).
-- `curvature.npz`: optional curvature summaries (e.g., `curv_diag[D]`).
+- `metric.npz`: optional local-geometry/preconditioning outputs (e.g., `theta_ref[D]`, `metric_diag[D]`, `lr_scale[D]`).
 - `grads.npz`: optional sparse debugging gradients (not default).
 - `diag_steps.jsonl`: optional sparse per-step scalar logs.
 - `signals.npz`: optional cached derived time series for plotting (to be specified next).
+
+`metric.npz` keys (v1 minimal):
+- `theta_ref`: reference θ vector used to estimate the metric (shape `(D,)`).
+- `metric_diag`: diagonal metric/curvature proxy aligned with θ (shape `(D,)`).
+- `lr_scale`: per-index learning-rate scale applied before `base_lr` (shape `(D,)`).
+
+Optional keys (write only when available): `precond` (raw inverse-sqrt vector), `metric` (dense), `metric_ut` (packed upper triangle), or low-rank factorization via `metric_eigvecs`/`metric_eigvals`.
 
 ## Learning rates and curvature-based preconditioning
 
@@ -237,23 +242,23 @@ Refactor-era goal:
 - While staying agnostic to the specifics of the model (the optimizer should operate on θ),
 - And keeping outputs aligned with our Trace / Meta / Summary / Signals philosophy.
 
-### Key idea: per-index learning-rate vector in θ-space
-The advanced optimizer will operate on a flat θ vector and use a per-index learning-rate vector:
+### Key idea: per-index learning-rate scale in θ-space
+The advanced optimizer will operate on a flat θ vector and use a per-index learning-rate scale:
 
 - Let θ ∈ R^D
 - Let g = ∂loss/∂θ ∈ R^D
-- Define lr_vec ∈ R^D (per-index learning rates)
+- Define lr_scale ∈ R^D (per-index learning-rate scales)
 
 Then the update can be written generically as:
 
-- θ_{t+1} = θ_t - (lr_vec ⊙ g_t)
+- θ_{t+1} = θ_t - (base_lr * lr_scale ⊙ g_t)
 
 This is deliberately compatible with:
 - primitive θ (physical parameters),
 - eigenmode θ (mode amplitudes),
 - any future θ-map, as long as we can map “indices” to “meaning” for metadata/diagnostics.
 
-Note: In v0, θ-space preconditioning is implemented by passing lr_vec directly to optax.sgd inside run_image_gd. This yields elementwise updates θ_{t+1} = θ_t − lr_vec ⊙ g_t regardless of the underlying parameterization (primitive vs eigen).
+Note: In v0, θ-space preconditioning is implemented by passing a per-parameter learning-rate vector to optax.sgd inside run_image_gd. The stored artifact records lr_scale, so lr_vec ≈ base_lr * lr_scale regardless of the underlying parameterization (primitive vs eigen).
 
 ### Blocks: an optional organizational layer (not a limitation)
 We may optionally define “blocks” of θ indices (slices or index lists) that correspond to conceptual parameter families:
@@ -262,7 +267,7 @@ We may optionally define “blocks” of θ indices (slices or index lists) that
 - wavefront blocks (primary.zernikes, secondary.zernikes)
 - eigenmodes (optionally subdivided by families)
 
-Blocks are not required to compute lr_vec (we can compute per-index LRs directly), but they are useful for:
+Blocks are not required to compute lr_scale (we can compute per-index scales directly), but they are useful for:
 - interpretability (human-readable mapping from θ indices to model meaning),
 - plotting/diagnostics (grouped summaries),
 - stability guardrails (clipping rules per family),
@@ -270,10 +275,10 @@ Blocks are not required to compute lr_vec (we can compute per-index LRs directly
 
 Blocks are tightly related to packing/unpacking and θ-mapping: the θ layout is defined there, so those utilities are the natural place to generate an IndexMap used by the optimizer and stored in metadata.
 
-Block semantics (e.g., ‘all primary Zernikes share one LR’) are implemented by using the IndexMap (ParamSpec subset + packing order) to construct a piecewise-constant lr_vec. We do not currently rely on optax.multi_transform in θ-space; instead, each block’s LR is baked into the vector.
+Block semantics (e.g., ‘all primary Zernikes share one LR’) are implemented by using the IndexMap (ParamSpec subset + packing order) to construct a piecewise-constant lr_scale. We do not currently rely on optax.multi_transform in θ-space; instead, each block’s scale is baked into the vector.
 
 ### Curvature sources for learning-rate construction
-We aim to derive lr_vec from a curvature proxy. We explicitly distinguish “what the optimizer needs” (a nonnegative vector of curvature magnitudes) from “what we call it” (Fisher, Hessian, Gauss–Newton, empirical Fisher).
+We aim to derive lr_scale from a curvature proxy. We explicitly distinguish “what the optimizer needs” (a nonnegative vector of curvature magnitudes) from “what we call it” (Fisher, Hessian, Gauss–Newton, empirical Fisher).
 
 When using FIM-based preconditioning, we compute the FIM via fim_theta(loss_fn, theta_ref), where loss_fn is the same θ-space loss used during optimization. This avoids misalignment between the FIM and the actual objective.
 
@@ -310,13 +315,14 @@ Candidate curvature definitions (diagonal-only preferred):
 We have not committed to one curvature definition yet. The strategy is to keep the interface flexible so we can start with a low-friction option (e.g., Hutchinson-diag(H) once at init), and later evolve toward empirical Fisher or GN-diagonal variants as needed.
 
 ### Learning-rate construction from diagonal curvature
-Once we have a nonnegative diagonal curvature vector curv_diag (length D), we define a per-index scaling. The default “physics-inspired” form is:
+Once we have a nonnegative diagonal curvature vector metric_diag (length D), we define a per-index scaling. The default “physics-inspired” form is:
 
-- precond_i = 1 / sqrt(curv_diag_i + eps)
+- precond_i = 1 / sqrt(metric_diag_i + eps)
 
 Then:
 
-- lr_vec_i = base_lr * precond_i
+- lr_scale_i = precond_i
+- lr_vec_i = base_lr * lr_scale_i
 
 Where:
 - base_lr is a global scale controlling overall step size
@@ -325,9 +331,9 @@ Where:
 Stability guardrails (strongly recommended):
 - Clip lr_vec to avoid extreme steps:
   - lr_vec_i = clip(lr_vec_i, lr_min, lr_max)
-- Optionally clip the preconditioner instead of lr_vec.
+- Optionally clip the preconditioner instead of lr_vec (equivalently, clip lr_scale).
 - Consider a “floor” on curvature:
-  - curv_diag_i = max(curv_diag_i, curv_floor)
+  - metric_diag_i = max(metric_diag_i, curv_floor)
 
 Optional enhancements (not required initially but worth recording):
 - Block-level scaling: base_lr can be replaced by base_lr[group(i)].
@@ -337,9 +343,9 @@ Optional enhancements (not required initially but worth recording):
 - Refresh cadence: recompute Hutchinson curvature every K steps and smooth with EMA.
 
 ### Current v0 implementation (Phase D)
-- Method: `ema_grad2` evaluated once at θ₀ (compute grad(θ₀), square for `curv_diag`).
-- Preconditioner: `precond = 1 / sqrt(curv_diag + eps)`; `lr_vec = base_lr * precond` with optional clipping.
-- Artifacts: when enabled in binder-backed GD, `precond.npz` stores `lr_vec` and `precond`; `curvature.npz` stores `curv_diag`.
+- Method: `ema_grad2` evaluated once at θ₀ (compute grad(θ₀), square for `metric_diag`).
+- Preconditioner: `precond = 1 / sqrt(metric_diag + eps)`; `lr_vec = base_lr * precond` with optional clipping; artifact stores `lr_scale = lr_vec / base_lr`.
+- Artifacts: when enabled in binder-backed GD, `metric.npz` stores `theta_ref`, `metric_diag`, `lr_scale` (and optional `precond`).
 - Metadata: `meta["optimizer"]["preconditioning"]` records the configuration (method, eps, lr_clip, curv_floor, refresh cadence, rng seed, base_lr).
 - Alignment: vectors are validated against θ dimension and IndexMap (last `stop` must equal `theta_dim`).
 
@@ -368,7 +374,7 @@ Potential evolution paths (optional):
 - These additions should remain optional to avoid forcing all objectives to change at once.
 
 ### Metadata to record for curvature-based learning rates
-To make runs reproducible and interpretable, meta.json should store enough information to reconstruct how lr_vec was produced.
+To make runs reproducible and interpretable, meta.json should store enough information to reconstruct how lr_scale was produced.
 
 Recommended metadata fields (draft; subject to refinement):
 - optimizer identity:
@@ -390,8 +396,8 @@ Recommended metadata fields (draft; subject to refinement):
   - this is especially helpful for debugging and future extensibility
 
 Optional artifacts (opt-in):
-- Save lr_vec and/or curv_diag arrays:
-  - `precond.npz` and/or `curvature.npz`
+- Save local-geometry/learning-rate outputs:
+  - `metric.npz`
 This can be invaluable for diagnosing “why did this run behave badly?” without bloating default run outputs.
 
 ### Output expectations for the advanced GD routine
@@ -581,8 +587,7 @@ A run directory contains the always-saved core artifacts plus optional diagnosti
       checkpoint_final.npz
       signals.npz
       diag_steps.jsonl
-      precond.npz
-      curvature.npz
+      metric.npz
       grads.npz
 
 Key principle: **Trace is minimal and generic**, while `meta.json` contains the information needed to interpret `theta` (including IndexMap) and the artifact manifest. Signals and diagnostics are optional.

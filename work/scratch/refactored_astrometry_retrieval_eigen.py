@@ -421,8 +421,12 @@ theta_final_opt, trace = run_shera_gd(
     runs_dir=DEFAULT_RESULTS_DIR,
     return_artifacts=False,
     theta_space=theta_space,
-    curvature=curvature_vec,
-    precond=precond_meta,
+    metric={
+        "theta_ref": np.asarray(theta0_opt),
+        "metric_diag": np.asarray(curvature_vec),
+        "lr_scale": np.asarray(lr_vec),
+    },
+    extra_meta={"optimizer": {"preconditioning": precond_meta}},
 )
 # trace carries the theta + loss trace used by build_signals
 # _artifacts is meant for on-disk logging.

@@ -399,6 +399,11 @@ def main(
 
     print("Running preconditioned gradient descent...")
     n_iter = FAST_ITER if fast else N_ITER
+    metric_payload = {
+        "theta_ref": np.asarray(theta0_opt),
+        "metric_diag": np.asarray(curvature_vec),
+        "lr_scale": np.asarray(lr_vec),
+    }
     theta_final_opt, trace = run_shera_gd(
         loss_fn=loss_opt,
         theta0=theta0_opt,
@@ -409,8 +414,8 @@ def main(
         run_dir=results_dir,
         return_artifacts=False,
         theta_space=theta_space,
-        curvature=curvature_vec,
-        precond=precond_meta,
+        metric=metric_payload,
+        extra_meta={"optimizer": {"preconditioning": precond_meta}},
     )
 
     if use_eigen:

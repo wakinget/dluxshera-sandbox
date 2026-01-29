@@ -62,8 +62,14 @@ def test_artifact_writing(tmp_path: Path):
     meta = {"theta": {"dim": 3}}
     summary = {}
 
-    precond = {"lr_vec": np.ones(3), "precond": np.full(3, 0.5)}
-    curvature = {"curv_diag": np.arange(3)}
+    base_lr = 0.5
+    precond = {"lr_vec": np.full(3, base_lr), "precond": np.full(3, 0.5)}
+    metric = {
+        "theta_ref": np.zeros(3),
+        "metric_diag": np.arange(3),
+        "lr_scale": precond["lr_vec"] / base_lr,
+        "precond": precond["precond"],
+    }
 
     save_run(
         run_dir,
@@ -71,16 +77,13 @@ def test_artifact_writing(tmp_path: Path):
         meta=meta,
         summary=summary,
         artifacts={
-            "precond": {"kind": "npz", "content": precond},
-            "curvature": {"kind": "npz", "content": curvature},
+            "metric": {"kind": "npz", "content": metric},
         },
     )
 
-    loaded_precond = load_npz_artifact(run_dir, "precond")
-    assert loaded_precond is not None
-    np.testing.assert_allclose(loaded_precond["lr_vec"], precond["lr_vec"])
-    np.testing.assert_allclose(loaded_precond["precond"], precond["precond"])
-
-    loaded_curvature = load_npz_artifact(run_dir, "curvature")
-    assert loaded_curvature is not None
-    np.testing.assert_allclose(loaded_curvature["curv_diag"], curvature["curv_diag"])
+    loaded_metric = load_npz_artifact(run_dir, "metric")
+    assert loaded_metric is not None
+    np.testing.assert_allclose(loaded_metric["theta_ref"], metric["theta_ref"])
+    np.testing.assert_allclose(loaded_metric["metric_diag"], metric["metric_diag"])
+    np.testing.assert_allclose(loaded_metric["lr_scale"], metric["lr_scale"])
+    np.testing.assert_allclose(loaded_metric["precond"], metric["precond"])

@@ -42,8 +42,7 @@ def test_save_and_load_required_artifacts(tmp_path: Path):
     # Optional artifacts should not be created when omitted.
     assert not (run_dir / "signals.npz").exists()
     assert not (run_dir / "grads.npz").exists()
-    assert not (run_dir / "curvature.npz").exists()
-    assert not (run_dir / "precond.npz").exists()
+    assert not (run_dir / "metric.npz").exists()
     assert not (run_dir / "diag_steps.jsonl").exists()
     assert not (run_dir / "checkpoint_best.npz").exists()
     assert not (run_dir / "checkpoint_final.npz").exists()
