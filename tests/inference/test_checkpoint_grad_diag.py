@@ -39,7 +39,7 @@ def test_compute_checkpoint_gradients(tmp_path: Path):
     theta_best = np.array([1.0, -2.0], dtype=float)
     np.savez_compressed(run_dir / "checkpoint_best.npz", theta_best=theta_best)
 
-    result = compute_checkpoint_gradients(run_dir, builder=quadratic_builder, compute_curvature=True)
+    result = compute_checkpoint_gradients(run_dir, builder=quadratic_builder, compute_metric=True)
 
     diag_path = run_dir / "diag" / "grad_at_best.npz"
     summary_path = run_dir / "diag" / "grad_summary.json"
@@ -50,5 +50,5 @@ def test_compute_checkpoint_gradients(tmp_path: Path):
 
     assert np.allclose(diag["grad"], theta_best)
     assert np.isclose(diag["grad_norm"], np.linalg.norm(theta_best))
-    assert "curv_diag" in diag and "lr_vec" in diag
+    assert "metric_diag" in diag and "lr_scale" in diag
     assert "block_grad_norms" in result

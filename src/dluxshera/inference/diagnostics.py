@@ -84,7 +84,7 @@ def compute_checkpoint_gradients(
     *,
     builder: str | Callable[..., Any],
     checkpoint: str = "best",
-    compute_curvature: bool = False,
+    compute_metric: bool = False,
 ) -> dict[str, Any]:
     """Compute and save gradients at a stored checkpoint.
 
@@ -98,9 +98,9 @@ def compute_checkpoint_gradients(
         ``meta`` and/or ``run_dir`` keyword arguments.
     checkpoint : str
         Which checkpoint to load (\"best\" or \"final\"). Defaults to \"best\".
-    compute_curvature : bool
-        When True, also compute a diagonal curvature proxy and learning-rate
-        vector using the Phase D preconditioning helper.
+    compute_metric : bool
+        When True, also compute a diagonal metric proxy and learning-rate
+        scale vector using the preconditioning helper.
 
     Returns
     -------
@@ -139,7 +139,7 @@ def compute_checkpoint_gradients(
     }
 
     curv_meta = None
-    if compute_curvature:
+    if compute_metric:
         optimizer_meta = meta.get("optimizer") if isinstance(meta, Mapping) else {}
         base_lr = None
         if isinstance(optimizer_meta, Mapping):
@@ -151,8 +151,12 @@ def compute_checkpoint_gradients(
             method_cfg=cfg,
             index_map=meta.get("theta", {}).get("index_map") if isinstance(meta, Mapping) else None,
         )
-        diag_payload["curv_diag"] = precond_outputs["curv_diag"]
-        diag_payload["lr_vec"] = precond_outputs["lr_vec"]
+        lr_scale = precond_outputs["lr_vec"]
+        if cfg.base_lr not in (None, 0.0):
+            lr_scale = lr_scale / cfg.base_lr
+        diag_payload["theta_ref"] = np.asarray(theta)
+        diag_payload["metric_diag"] = precond_outputs["curv_diag"]
+        diag_payload["lr_scale"] = lr_scale
         curv_meta = precond_outputs["config"]
 
     np.savez_compressed(npz_path, **diag_payload)
@@ -169,7 +173,7 @@ def compute_checkpoint_gradients(
         "builder": builder if isinstance(builder, str) else getattr(builder, "__name__", "callable"),
     }
     if curv_meta is not None:
-        summary_payload["curvature"] = curv_meta
+        summary_payload["metric"] = curv_meta
 
     json_path = diag_dir / "grad_summary.json"
     with json_path.open("w", encoding="utf-8") as f:

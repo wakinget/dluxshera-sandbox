@@ -7,6 +7,10 @@ from dluxshera.inference.optimization import (
     run_image_gd,
     run_simple_gd,
 )
+from dluxshera.inference.preconditioning import (
+    PreconditioningConfig,
+    compute_precond_vectors,
+)
 from dluxshera.inference.run_artifacts import (
     load_meta,
     load_npz_artifact,
@@ -144,6 +148,45 @@ def test_run_image_gd_writes_index_map_metadata(tmp_path: Path):
     summary = load_summary(run_dir)
     assert summary["status"] == "ok"
     assert summary["num_steps_completed"] == 3
+
+
+def test_run_simple_gd_writes_metric_artifact(tmp_path: Path):
+    theta0 = np.array([0.25, -0.5], dtype=float)
+
+    def loss_fn(theta: np.ndarray) -> np.ndarray:
+        return np.sum(theta**2)
+
+    cfg = PreconditioningConfig(base_lr=0.2)
+    precond_outputs = compute_precond_vectors(loss_fn=loss_fn, theta0=theta0, method_cfg=cfg)
+    metric_payload = {
+        "theta_ref": theta0,
+        "metric_diag": precond_outputs["curv_diag"],
+        "lr_scale": precond_outputs["lr_vec"] / cfg.base_lr,
+        "precond": precond_outputs["precond"],
+    }
+
+    run_dir = tmp_path / "metric_run"
+    run_simple_gd(
+        loss_fn,
+        theta0,
+        learning_rate=cfg.base_lr,
+        num_steps=3,
+        run_dir=run_dir,
+        artifact_metric=metric_payload,
+    )
+
+    meta = load_meta(run_dir)
+    summary = load_summary(run_dir)
+    assert "metric" in meta["manifest"]
+    assert "metric" in summary["manifest"]
+
+    metric = load_npz_artifact(run_dir, "metric")
+    assert metric is not None
+    assert {"theta_ref", "metric_diag", "lr_scale"} <= set(metric)
+    theta_dim = meta["theta"]["dim"]
+    assert metric["theta_ref"].shape == (theta_dim,)
+    assert metric["metric_diag"].shape == (theta_dim,)
+    assert metric["lr_scale"].shape == (theta_dim,)
 
 
 def test_run_simple_gd_in_memory_artifacts(tmp_path: Path):
