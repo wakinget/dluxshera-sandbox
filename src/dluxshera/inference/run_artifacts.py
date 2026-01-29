@@ -59,6 +59,25 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
         return {k: np.asarray(v) for k, v in npz.items()}
 
 
+def _load_json(path: Path) -> object:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_jsonl(path: Path) -> list[object]:
+    records: list[object] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                records.append(line)
+    return records
+
+
 def _get_git_info(run_path: Path) -> dict[str, object] | None:
     try:
         commit = subprocess.run(
@@ -199,13 +218,11 @@ def load_trace(run_dir: Path | str) -> dict[str, np.ndarray]:
 
 
 def load_meta(run_dir: Path | str):
-    with (Path(run_dir) / "meta.json").open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _load_json(Path(run_dir) / "meta.json")
 
 
 def load_summary(run_dir: Path | str):
-    with (Path(run_dir) / "summary.json").open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return _load_json(Path(run_dir) / "summary.json")
 
 
 def _load_manifest(run_dir: Path | str) -> Mapping[str, Mapping[str, object]] | None:
@@ -240,3 +257,31 @@ def load_checkpoint(run_dir: Path | str, which: str = "best") -> dict[str, np.nd
         return _load_npz(path)
     path = Path(run_dir) / f"{name}.npz"
     return _load_npz(path)
+
+
+def load_artifact(run_dir: Path | str, name: str) -> object | None:
+    manifest = _load_manifest(run_dir)
+    if not manifest or name not in manifest:
+        return None
+    entry = manifest[name]
+    filename = entry.get("filename")
+    kind = entry.get("kind")
+    if not filename or not kind:
+        return None
+    path = Path(run_dir) / str(filename)
+    if kind == "npz":
+        return _load_npz(path)
+    if kind == "json":
+        return _load_json(path)
+    if kind == "jsonl":
+        return _load_jsonl(path)
+    raise ValueError(f"Unknown artifact kind '{kind}' for '{name}'")
+
+
+def load_npz_artifact(run_dir: Path | str, name: str) -> dict[str, np.ndarray] | None:
+    payload = load_artifact(run_dir, name)
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"Artifact '{name}' is not a mapping")
+    return {k: np.asarray(v) for k, v in payload.items()}

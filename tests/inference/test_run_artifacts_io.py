@@ -6,6 +6,7 @@ import pytest
 from dluxshera.inference.run_artifacts import (
     load_checkpoint,
     load_meta,
+    load_npz_artifact,
     load_summary,
     load_trace,
     save_run,
@@ -90,8 +91,9 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
         },
     )
 
-    with np.load(run_dir / "signals.npz", allow_pickle=False) as npz:
-        np.testing.assert_allclose(npz["s1"], signals["s1"])
+    loaded_signals = load_npz_artifact(run_dir, "signals")
+    assert loaded_signals is not None
+    np.testing.assert_allclose(loaded_signals["s1"], signals["s1"])
 
     loaded_summary = load_summary(run_dir)
     for name in ("signals", "grads", "checkpoint_best", "checkpoint_final"):
