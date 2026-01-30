@@ -212,7 +212,7 @@ def _noise_model(
     rng_key, split_key = jr.split(rng_key)
     if np.min(np.asarray(data)) > 100:
         noisy = np.sqrt(np.asarray(data)) * jr.normal(split_key, data.shape) + data
-        return noisy, "gaussian", int(np.asarray(split_key)[0])
+        return noisy, "gaussian-approx", int(np.asarray(split_key)[0])
     noisy = jr.poisson(split_key, data)
     return noisy, "poisson", int(np.asarray(split_key)[0])
 
@@ -300,10 +300,9 @@ def main() -> None:
 
     cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG
     cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)))
+    cfg = cfg.replace(secondary_noll_indices=tuple(range(4, 12)))
     if args.exclude_secondary_zernikes:
-        cfg = cfg.replace(secondary_noll_indices=())
-    else:
-        cfg = cfg.replace(secondary_noll_indices=tuple(range(4, 12)))
+        cfg = cfg.replace(secondary_noll_indices=None)
 
     forward_spec = build_forward_spec_from_config(cfg)
     inference_spec = build_inference_spec_basic(cfg)
@@ -467,14 +466,14 @@ def main() -> None:
         "run_dir": str(run_dir),
         "config_id": cfg.design_name,
         "git_commit": _git_commit(),
-        "infer_keys": infer_keys,
-        "baseline_infer_values": baseline_infer,
+        "parameters": infer_keys,
+        "baseline_values": baseline_infer,
         "delta_policy": {
             "mode": args.delta_mode,
             "steps": steps,
             "step_sizes": step_sizes,
         },
-        "zernike_index_mapping": {
+        "zernike_noll_indices": {
             "primary": zernike_map["primary.zernike_coeffs_nm"],
             "secondary": zernike_map["secondary.zernike_coeffs_nm"],
         },
