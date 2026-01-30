@@ -279,9 +279,15 @@ def _write_fits(
     for key, value in header_data.items():
         if value is None:
             continue
-        header[key] = value
-    hdu = fits.PrimaryHDU(data=image, header=header)
-    hdu.writeto(output_path, overwrite=True)
+
+        # Allow (value, comment) tuples.
+        if isinstance(value, tuple) and len(value) == 2:
+            card_value, comment = value
+            header.set(str(key).upper(), card_value, comment=str(comment))
+        else:
+            header.set(str(key).upper(), value)
+
+    fits.PrimaryHDU(data=image, header=header).writeto(output_path, overwrite=True)
 
 
 def main() -> None:
@@ -521,7 +527,7 @@ def main() -> None:
         "config_id": cfg.design_name,
         "git_commit": _git_commit(),
         "parameters": infer_keys,
-        "baseline_values": baseline_infer,
+        "nominal_values": baseline_infer,
         "delta_policy": {
             "mode": args.delta_mode,
             "steps": steps,
@@ -562,6 +568,7 @@ def main() -> None:
         sample_tag = f"sample_{sample_id:06d}"
         fits_path = images_dir / f"{sample_tag}.fits"
         meta_path = images_dir / f"{sample_tag}.json"
+        nominal_plate_scale = float(np.asarray(binder.plate_scale_as_per_pix))
 
         model = binder.model(
             strip_structural(
@@ -571,16 +578,21 @@ def main() -> None:
         model_np = np.asarray(model)
 
         header_data = {
-            "SAMPLEID": sample_id,
-            "SWEEPKEY": param_key,
-            "COMPIDX": component_index,
-            "NOLL": noll_index,
-            "DELSIG": delta_sigma,
-            "DELVAL": delta_value,
-            "APPLVAL": applied_value,
-            "NOISE": bool(args.add_noise),
-            "SEED": args.seed,
-            "CFGID": cfg.design_name,
+            "BUNIT": ("photons", "Pixel values are photon counts"),
+            "XUNIT": ("arcsec", "X-axis units"),
+            "YUNIT": ("arcsec", "Y-axis units"),
+            "XSCALE": (nominal_plate_scale, "Arcsec per pixel (nominal)"),
+            "YSCALE": (nominal_plate_scale, "Arcsec per pixel (nominal)"),
+            "SAMPLEID": (sample_id, "Training dataset sample id"),
+            "SWEEPKEY": (param_key, "Swept parameter key"),
+            "COMPIDX": (component_index, "Vector component index (if applicable)"),
+            "NOLL": (noll_index, "Zernike Noll index (if applicable)"),
+            "DELSIG": (delta_sigma, "Delta in sigma units"),
+            "DELVAL": (delta_value, "Additive delta applied to nominal"),
+            "APPLVAL": (applied_value, "Nominal + delta"),
+            "NOISE": (bool(args.add_noise), "Noise added to image"),
+            "SEED": (args.seed, "Base RNG seed"),
+            "CFGID": (cfg.design_name, "Optics config id"),
         }
         _write_fits(output_path=fits_path, image=model_np, header_data=header_data)
 
@@ -593,12 +605,11 @@ def main() -> None:
                 "param_key": param_key,
                 "component_index": component_index,
                 "noll_index": noll_index,
-                "nominal_value": nominal_value,
-                "delta_sigma": delta_sigma,
-                "delta_value": delta_value,
-                "applied_value": applied_value,
+                "nominal": nominal_value,
+                "delta": delta_value,
+                "applied": applied_value,
             },
-            "infer_values": applied_infer,
+            "values": applied_infer,
             "noise": {
                 "enabled": bool(args.add_noise),
                 "mode": noise_mode,
