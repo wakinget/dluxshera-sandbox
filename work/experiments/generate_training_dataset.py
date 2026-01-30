@@ -69,6 +69,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import os
 import warnings
 from pathlib import Path
 from typing import Any, Iterable
@@ -338,7 +339,9 @@ def main() -> None:
 
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
+    repo_root = Path(__file__).resolve().parents[2]
     run_dir = _resolve_run_dir(args.outdir, args.run_name)
+    run_dir_relative = Path(os.path.relpath(run_dir, repo_root))
     prefix = "ml_training_dataset_"
     if args.run_name is not None:
         resolved_run_name = args.run_name
@@ -517,7 +520,7 @@ def main() -> None:
     baseline_infer = _infer_values(base_store, infer_keys)
     manifest = {
         "run_name": resolved_run_name,
-        "run_dir": str(run_dir),
+        "run_dir": str(run_dir_relative),
         "config_id": cfg.design_name,
         "git_commit": _git_commit(),
         "parameters": infer_keys,
