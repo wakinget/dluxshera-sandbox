@@ -11,11 +11,16 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Iterable, Literal, Mapping, Optional, TypedDict
+from typing import Any, Iterable, Literal, Mapping, Optional, TypedDict
 
 import numpy as np
 
 ArrayMapping = Mapping[str, object]
+
+try:  # pragma: no cover - optional dependency
+    import jax.numpy as jnp
+except Exception:  # pragma: no cover - jax not installed
+    jnp = None
 
 
 class ArtifactPayload(TypedDict, total=False):
@@ -33,6 +38,41 @@ def _normalize_arrays(mapping: ArrayMapping) -> dict[str, np.ndarray]:
     return {k: np.asarray(v) for k, v in mapping.items()}
 
 
+def _coerce_jsonable(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _coerce_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_jsonable(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        if value.size <= 16:
+            return value.tolist()
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
+    if jnp is not None and isinstance(value, jnp.ndarray):
+        if value.size <= 16:
+            return value.tolist()
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _validate_jsonable(value: Any, *, path: str = "root") -> None:
+    if isinstance(value, Mapping):
+        for key, entry in value.items():
+            _validate_jsonable(entry, path=f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, entry in enumerate(value):
+            _validate_jsonable(entry, path=f"{path}[{index}]")
+        return
+    try:
+        json.dumps(value)
+    except TypeError as exc:
+        raise TypeError(f"Non-serializable value at {path}: {type(value).__name__}") from exc
+
+
 def _save_npz(path: Path, data: ArrayMapping) -> None:
     arrays = _normalize_arrays(data)
     np.savez_compressed(path, **arrays)
@@ -40,7 +80,9 @@ def _save_npz(path: Path, data: ArrayMapping) -> None:
 
 def _write_json(path: Path, data: object) -> None:
     with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        payload = _coerce_jsonable(data)
+        _validate_jsonable(payload)
+        json.dump(payload, f, indent=2)
 
 
 def _write_jsonl(path: Path, records: Iterable[object]) -> None:
@@ -49,7 +91,9 @@ def _write_jsonl(path: Path, records: Iterable[object]) -> None:
             if isinstance(record, str):
                 line = record
             else:
-                line = json.dumps(record)
+                payload = _coerce_jsonable(record)
+                _validate_jsonable(payload)
+                line = json.dumps(payload)
             f.write(line)
             f.write("\n")
 
@@ -208,6 +252,9 @@ def save_run(
 
     meta_out["manifest"] = manifest_meta
     summary_out["manifest"] = manifest_summary
+
+    meta_out = _coerce_jsonable(meta_out)
+    summary_out = _coerce_jsonable(summary_out)
 
     _write_json(run_path / "meta.json", meta_out)
     _write_json(run_path / "summary.json", summary_out)
