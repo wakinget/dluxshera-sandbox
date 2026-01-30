@@ -25,15 +25,27 @@ Key behaviors
 
 Usage (examples)
 ---------------
-Generate a default dataset (FIM-scaled deltas, noiseless):
+Generate a default dataset (FIM-scaled deltas, noiseless). This writes to
+``Results/ml_training_dataset_<timestamp>``:
 
     python work/experiments/generate_training_dataset.py
 
-Specify a custom run name and output directory:
+Specify a custom run name (suffix) with the default base directory. This
+writes to ``Results/ml_training_dataset_sweep_v0``:
+
+    python work/experiments/generate_training_dataset.py --run-name sweep_v0
+
+Specify a custom run name and output base directory. When both are provided,
+the run name is used directly as the subdirectory (no default prefix):
 
     python work/experiments/generate_training_dataset.py \\
         --run-name sweep_v0 \\
-        --outdir Results/custom_run
+        --outdir Results/custom_runs
+
+Specify only an output base directory (timestamped subdirectory):
+
+    python work/experiments/generate_training_dataset.py \\
+        --outdir Results/custom_runs
 
 Use fixed-step deltas with a JSON override file:
 
@@ -168,13 +180,28 @@ def _load_steps_json(steps_json: str | None) -> dict[str, float | list[float]]:
 def _resolve_run_dir(outdir: str | None, run_name: str | None) -> Path:
     """Resolve the output directory for the sweep run.
 
+    Rules:
+      1) outdir is None and run_name is None:
+         repo_root/Results/ml_training_dataset_<timestamp>
+      2) outdir is None and run_name is provided:
+         repo_root/Results/ml_training_dataset_<run_name>
+      3) outdir is provided and run_name is None:
+         outdir/ml_training_dataset_<timestamp>
+      4) outdir is provided and run_name is provided:
+         outdir/<run_name>  (note: no default prefix)
+
     TODO: migrate to utils/io.py if other scripts adopt this pattern.
     """
     repo_root = Path(__file__).resolve().parents[2]
-    if outdir is not None:
-        return Path(outdir).expanduser().resolve()
-    suffix = run_name or dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    return repo_root / f"Results/ml_training_dataset_{suffix}"
+    prefix = "ml_training_dataset_"
+    if outdir is None:
+        suffix = run_name or dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        return repo_root / "Results" / f"{prefix}{suffix}"
+    base = Path(outdir).expanduser().resolve()
+    if run_name is None:
+        timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        return base / f"{prefix}{timestamp}"
+    return base / run_name
 
 
 def _git_commit() -> str | None:
@@ -262,8 +289,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a forward-model training dataset sweep.",
     )
-    parser.add_argument("--outdir", type=str, default=None)
-    parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument(
+        "--outdir",
+        type=str,
+        default=None,
+        help=(
+            "Optional base directory for outputs. When set, the run is written "
+            "to a subdirectory named by the run name or a timestamp."
+        ),
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help=(
+            "Optional run name. When outdir is unset, it replaces the default "
+            "timestamp suffix. When outdir is set, it becomes the subdirectory "
+            "name (no default prefix)."
+        ),
+    )
     parser.add_argument("--exclude-secondary-zernikes", action="store_true")
     parser.add_argument(
         "--delta-mode",
@@ -295,6 +339,16 @@ def main() -> None:
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
     run_dir = _resolve_run_dir(args.outdir, args.run_name)
+    prefix = "ml_training_dataset_"
+    if args.run_name is not None:
+        resolved_run_name = args.run_name
+    else:
+        # Derive from run_dir for cases that use a prefixed timestamp subdir.
+        resolved_run_name = (
+            run_dir.name[len(prefix) :]
+            if run_dir.name.startswith(prefix)
+            else run_dir.name
+        )
     images_dir = run_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -462,7 +516,7 @@ def main() -> None:
 
     baseline_infer = _infer_values(base_store, infer_keys)
     manifest = {
-        "run_name": args.run_name,
+        "run_name": resolved_run_name,
         "run_dir": str(run_dir),
         "config_id": cfg.design_name,
         "git_commit": _git_commit(),
@@ -532,7 +586,7 @@ def main() -> None:
 
         applied_infer = _infer_values(applied_store, infer_keys)
         sample_meta = {
-            "run_name": args.run_name,
+            "run_name": resolved_run_name,
             "config_id": cfg.design_name,
             "sample_id": sample_id,
             "sweep": {
