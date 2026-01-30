@@ -104,6 +104,11 @@ DEFAULT_FIXED_STEPS = {
     "primary.zernike_coeffs_nm": 5.0,
     "secondary.zernike_coeffs_nm": 5.0,
 }
+# Example steps.json payloads:
+# {
+#   "primary.zernike_coeffs_nm": 5.0,  # scalar expands to all components
+#   "secondary.zernike_coeffs_nm": [5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0]
+# }
 
 
 def _serialize_value(value: Any) -> Any:
@@ -135,7 +140,7 @@ def _parse_csv_levels(levels: str | None, default: Iterable[float]) -> list[floa
     return parsed
 
 
-def _load_steps_json(steps_json: str | None) -> dict[str, float]:
+def _load_steps_json(steps_json: str | None) -> dict[str, float | list[float]]:
     """Load a fixed-step override dictionary from JSON.
 
     TODO: migrate to utils/io.py if steps overrides are reused elsewhere.
@@ -151,7 +156,13 @@ def _load_steps_json(steps_json: str | None) -> dict[str, float]:
         payload = payload["steps"]
     if not isinstance(payload, dict):
         raise ValueError("steps-json must decode to a dict of key -> step size.")
-    return {str(key): float(val) for key, val in payload.items()}
+    parsed: dict[str, float | list[float]] = {}
+    for key, val in payload.items():
+        if isinstance(val, list):
+            parsed[str(key)] = [float(item) for item in val]
+        else:
+            parsed[str(key)] = float(val)
+    return parsed
 
 
 def _resolve_run_dir(outdir: str | None, run_name: str | None) -> Path:
@@ -338,7 +349,7 @@ def main() -> None:
 
     index_map = build_index_map(inference_subspec, base_store, theta=theta_ref)
 
-    delta_levels = _parse_csv_levels(
+    steps = _parse_csv_levels(
         args.delta_levels,
         default=(
             (-args.sigma_k, 0.0, args.sigma_k)
@@ -361,13 +372,43 @@ def main() -> None:
             return float(1.0 / math.sqrt(fim_diag[start + component_index]))
         raise KeyError(f"Missing FIM mapping for key {param_key}.")
 
-    def _step_for_key(param_key: str) -> float:
-        """Return fixed-step size for a key."""
-        if param_key not in fixed_steps:
-            raise KeyError(
-                f"Fixed-step mode requires a step size for {param_key}."
+    def _expand_fixed_step(
+        param_key: str,
+        baseline_value: Any,
+        step_value: float | list[float],
+    ) -> float | list[float]:
+        """Normalize fixed-step sizes to scalars or component-wise lists."""
+        baseline_array = np.asarray(baseline_value)
+        is_vector = baseline_array.shape != ()
+        if is_vector:
+            n_components = int(baseline_array.size)
+            if isinstance(step_value, list):
+                if len(step_value) != n_components:
+                    raise ValueError(
+                        f"Fixed-step override for {param_key} must have "
+                        f"{n_components} entries (got {len(step_value)})."
+                    )
+                return [float(item) for item in step_value]
+            return [float(step_value)] * n_components
+        if isinstance(step_value, list):
+            if len(step_value) == 1:
+                return float(step_value[0])
+            raise ValueError(
+                f"Fixed-step override for {param_key} must be a scalar "
+                "or a single-element list."
             )
-        return float(fixed_steps[param_key])
+        return float(step_value)
+
+    def _fixed_step_sizes() -> dict[str, float | list[float]]:
+        """Build normalized fixed step sizes for all inference keys."""
+        sizes: dict[str, float | list[float]] = {}
+        for key in infer_keys:
+            if key not in fixed_steps:
+                raise KeyError(
+                    f"Fixed-step mode requires a step size for {key}."
+                )
+            sizes[key] = _expand_fixed_step(key, base_store.get(key), fixed_steps[key])
+        return sizes
 
     def _infer_values(store: ParameterStore, keys: list[str]) -> dict[str, Any]:
         """Extract infer keys into a JSON-serializable dict."""
@@ -389,6 +430,37 @@ def main() -> None:
         "secondary.zernike_coeffs_nm": tuple(cfg.secondary_noll_indices),
     }
 
+    def _fim_step_sizes() -> dict[str, float | list[float]]:
+        """Build FIM-derived step sizes for all inference keys."""
+        sizes: dict[str, float | list[float]] = {}
+        for key in scalar_keys:
+            sizes[key] = _sigma_for_key_component(key, None)
+        for key in zernike_keys:
+            coeffs = np.asarray(base_store.get(key))
+            sizes[key] = [
+                _sigma_for_key_component(key, idx) for idx in range(coeffs.size)
+            ]
+        return sizes
+
+    if args.delta_mode == "fim_sigma":
+        step_sizes = _fim_step_sizes()
+    else:
+        step_sizes = _fixed_step_sizes()
+
+    def _fixed_step_for_component(
+        param_key: str,
+        component_index: int | None,
+    ) -> float:
+        """Return a fixed step size for a key/component from normalized sizes."""
+        step = step_sizes[param_key]
+        if isinstance(step, list):
+            if component_index is None:
+                raise ValueError(
+                    f"Fixed-step size for {param_key} requires a component index."
+                )
+            return float(step[component_index])
+        return float(step)
+
     baseline_infer = _infer_values(base_store, infer_keys)
     manifest = {
         "run_name": args.run_name,
@@ -399,9 +471,8 @@ def main() -> None:
         "baseline_infer_values": baseline_infer,
         "delta_policy": {
             "mode": args.delta_mode,
-            "delta_levels": delta_levels,
-            "sigma_k": args.sigma_k,
-            "fixed_steps": fixed_steps,
+            "steps": steps,
+            "step_sizes": step_sizes,
         },
         "zernike_index_mapping": {
             "primary": zernike_map["primary.zernike_coeffs_nm"],
@@ -504,13 +575,13 @@ def main() -> None:
 
     for key in scalar_keys:
         nominal = float(base_store.get(key))
-        for level in delta_levels:
+        for level in steps:
             if args.delta_mode == "fim_sigma":
                 sigma = _sigma_for_key_component(key, None)
                 delta_value = float(level) * sigma
                 delta_sigma = float(level)
             else:
-                step = _step_for_key(key)
+                step = _fixed_step_for_component(key, None)
                 delta_value = float(level) * step
                 delta_sigma = None
             applied = nominal + delta_value
@@ -531,13 +602,13 @@ def main() -> None:
         noll_indices = zernike_map.get(key, ())
         for idx in range(coeffs.size):
             nominal = float(coeffs[idx])
-            for level in delta_levels:
+            for level in steps:
                 if args.delta_mode == "fim_sigma":
                     sigma = _sigma_for_key_component(key, idx)
                     delta_value = float(level) * sigma
                     delta_sigma = float(level)
                 else:
-                    step = _step_for_key(key)
+                    step = _fixed_step_for_component(key, idx)
                     delta_value = float(level) * step
                     delta_sigma = None
                 updated = coeffs.copy()
