@@ -24,7 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out",
         type=str,
-        default="diffractive_pupil_phase_pi_rad.fits",
+        default="Results/diffractive_pupil_phase.fits",
         help="Output FITS path.",
     )
     parser.add_argument(
@@ -54,7 +54,7 @@ def main() -> None:
     if mask.ndim != 2:
         raise ValueError(f"Expected a 2D array, got shape={mask.shape}")
 
-    phase = (np.asarray(mask, dtype=np.float32) * np.pi).astype(np.float32)
+    phase = (np.asarray(mask, dtype=np.float64) * np.pi).astype(np.float64)
 
     repo_root = Path(__file__).resolve().parents[2]
     out_path = Path(args.out)
@@ -67,13 +67,11 @@ def main() -> None:
     header["NX"] = (int(phase.shape[1]), "Array size (cols)")
     header["DP_SRC"] = (
         _relative_path(dp_path, repo_root),
-        "Source .npy path (relative to repo when possible)",
+        "Source file path",
     )
-    header.add_comment("Original diffractive pupil stored as unitless grayscale mask in [0,1].")
-    header.add_comment("This FITS stores phase in radians using: phase_rad = mask * pi.")
-    header.add_comment(
-        "For OPD at wavelength lambda: opd_m = phase_rad / (2*pi) * lambda_m."
-    )
+    header.add_comment("Original was stored as mask in [0,1].")
+    header.add_comment("This FITS scales to rad: phase = mask * pi.")
+    header.add_comment("For OPD: opd_m = phase / (2*pi) * lambda_m.")
 
     hdu = fits.PrimaryHDU(data=phase, header=header)
     hdu.writeto(out_path, overwrite=bool(args.overwrite))
