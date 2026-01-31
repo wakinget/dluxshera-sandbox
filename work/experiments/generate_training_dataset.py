@@ -111,6 +111,7 @@ import datetime as dt
 import json
 import math
 import os
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Iterable
@@ -134,6 +135,15 @@ from dluxshera.systems.three_plane import (
 )
 
 JAX_ENABLE_X64 = True
+PRINT_EVERY = 10
+
+
+def _log(msg: str) -> None:
+    print(f"[generate_training_dataset] {msg}")
+
+
+def _log_section(title: str) -> None:
+    print(f"\n=== {title} ===")
 
 # =============================================================================
 # Section: Inference sweep defaults
@@ -320,6 +330,16 @@ def _validate_fim_diag(
             )
 
 
+def _summarize_indices(indices: Iterable[int], *, limit: int = 5) -> str:
+    values = [int(item) for item in indices]
+    if not values:
+        return "none"
+    if len(values) <= limit:
+        return ", ".join(str(item) for item in values)
+    head = ", ".join(str(item) for item in values[:limit])
+    return f"{head}, ... (min={min(values)}, max={max(values)})"
+
+
 # =============================================================================
 # Section: Emission helpers
 # =============================================================================
@@ -428,6 +448,10 @@ def main() -> None:
     images_dir = run_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
+    _log_section("Run setup")
+    _log(f"Run directory: {run_dir}")
+    _log(f"Run name: {resolved_run_name}")
+
     # =============================================================================
     # Section: Initialize config + binder + parameter stores
     # =============================================================================
@@ -468,6 +492,7 @@ def main() -> None:
     data = binder.model()
     data, noise_mode, noise_seed = _noise_model(rng_key, data, add_noise=args.add_noise)
     data_var = data
+    image_shape = tuple(np.asarray(data).shape)
 
     nll_loss_fn, theta0 = make_binder_nll_fn(
         binder=binder,
@@ -498,6 +523,24 @@ def main() -> None:
             else (-1.0, 0.0, 1.0)
         ),
     )
+
+    naxis1 = image_shape[1] if len(image_shape) > 1 else image_shape[0]
+    naxis2 = image_shape[0] if image_shape else 0
+    sweep_preview = ", ".join(infer_keys[:5])
+    if len(infer_keys) > 5:
+        sweep_preview = f"{sweep_preview}, ..."
+
+    _log_section("Configuration")
+    _log(f"Config id: {cfg.design_name}")
+    _log(f"Image size (NAXIS1, NAXIS2): ({naxis1}, {naxis2})")
+    _log(
+        "Noise: "
+        f"enabled={bool(args.add_noise)}, mode={noise_mode}, "
+        f"base_seed={args.seed}, realization_seed={noise_seed}"
+    )
+    _log(f"Sweep keys: {len(infer_keys)} [{sweep_preview}]")
+    _log(f"Delta mode: {args.delta_mode}")
+    _log(f"Delta levels: {steps}")
 
     step_overrides = _load_steps_json(args.steps_json)
     fixed_steps = {**DEFAULT_FIXED_STEPS, **step_overrides}
@@ -747,8 +790,39 @@ def main() -> None:
     # =============================================================================
     # Section: Dataset generation loop (nominal + perturbed images)
     # =============================================================================
+    total_expected = len(scalar_keys) * len(steps)
+    for key in zernike_keys:
+        total_expected += int(np.asarray(base_store.get(key)).size) * len(steps)
+
+    _log_section("Dataset generation")
+    _log(f"Starting sample emission (expected total: {total_expected})")
+    t0 = time.perf_counter()
+
+    def _maybe_log_progress(
+        *,
+        current_key: str,
+        applied_value: float,
+        delta_value: float,
+    ) -> None:
+        if sample_id % PRINT_EVERY != 0 and sample_id != total_expected:
+            return
+        elapsed = time.perf_counter() - t0
+        rate = sample_id / elapsed if elapsed > 0 else 0.0
+        _log(
+            "Progress: "
+            f"{sample_id}/{total_expected} | "
+            f"{current_key} | "
+            f"applied={applied_value:.6g} (delta={delta_value:.6g}) | "
+            f"{elapsed:.2f}s elapsed ({rate:.2f} samples/s)"
+        )
+
     for key in scalar_keys:
         nominal = float(base_store.get(key))
+        if key == "system.plate_scale_as_per_pix":
+            _log(
+                "Plate scale sweep: nominal/applied scales are recorded in headers; "
+                "grid scale remains nominal for differencing."
+            )
         for level in steps:
             if args.delta_mode == "fim_sigma":
                 sigma = _sigma_for_key_component(key, None)
@@ -771,10 +845,21 @@ def main() -> None:
                 applied_value=applied,
                 applied_store=store_delta,
             )
+            _maybe_log_progress(
+                current_key=key,
+                applied_value=applied,
+                delta_value=delta_value,
+            )
 
     for key in zernike_keys:
         coeffs = np.asarray(base_store.get(key))
         noll_indices = zernike_map.get(key, ())
+        group_name = "primary" if key.startswith("primary") else "secondary"
+        _log(
+            f"Zernike sweep ({group_name}): "
+            f"{coeffs.size} coefficients; "
+            f"noll indices: {_summarize_indices(noll_indices)}"
+        )
         for idx in range(coeffs.size):
             nominal = float(coeffs[idx])
             for level in steps:
@@ -805,11 +890,23 @@ def main() -> None:
                     applied_value=updated[idx],
                     applied_store=store_delta,
                 )
+                _maybe_log_progress(
+                    current_key=key,
+                    applied_value=updated[idx],
+                    delta_value=delta_value,
+                )
 
     # =============================================================================
     # Section: Final summary printouts / sanity checks
     # =============================================================================
-    # (No explicit summary printouts yet; intended for future enhancements.)
+    elapsed_total = time.perf_counter() - t0
+    _log_section("Run summary")
+    _log(f"Images directory: {images_dir}")
+    _log(f"Samples index: {samples_path}")
+    _log(f"Manifest: {run_dir / 'manifest.json'}")
+    _log(f"Total samples written: {sample_id}")
+    _log(f"Noise enabled: {bool(args.add_noise)}")
+    _log(f"Elapsed time: {elapsed_total:.2f}s")
 
 
 if __name__ == "__main__":
