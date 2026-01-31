@@ -1,6 +1,8 @@
 """
 Generate a forward-model training image sweep for Shera three-plane models.
 
+What this script does
+---------------------
 This script mirrors the explicit, top-to-bottom workflow in
 ``examples/recipes/canonical_astrometry.py`` while focusing on dataset
 generation for machine-learning workflows. It sweeps one inference-facing
@@ -11,6 +13,37 @@ dataset consisting of:
   configuration, and reproducibility metadata.
 - A line-oriented ``samples.jsonl`` file with one record per sample.
 - Paired FITS + JSON sidecars for each sample in ``images/``.
+
+Outputs (run directory layout)
+------------------------------
+- ``manifest.json``: run configuration and reproducibility metadata.
+- ``samples.jsonl``: one record per sample with sweep metadata and file paths.
+- ``images/``:
+  - ``sample_<id>.fits``: the model image for each sweep sample.
+  - ``sample_<id>.json``: a JSON sidecar with the same sweep metadata plus
+    nominal/applied parameter values.
+
+Data model summary
+------------------
+- ``sample_id``: monotonically increasing identifier assigned as samples emit.
+- ``sweepkey``: the parameter key being perturbed for a given sample.
+- ``delta_sigma``: the delta expressed in sigma units (only for ``fim_sigma``).
+- ``delta_value``: the numeric delta added to the nominal value.
+- ``applied_value``: nominal + delta_value (the actual value in the model).
+
+Scalar vs. component sweeps
+---------------------------
+- Scalar parameters (e.g., separation, plate scale) are swept directly.
+- Component parameters (Zernike coefficient vectors) are swept one component
+  at a time; the component index selects which coefficient is perturbed.
+
+Plate scale policy
+------------------
+The dataset is intended for direct differencing on a common pixel grid. When
+perturbing the system plate scale, it is assumed that the effective focal
+length changes but the detector grid does not. Perturbed images should be
+treated as living on the same X/Y axes as the nominal image and can therefore
+be directly differenced in post-processing.
 
 Key behaviors
 -------------
@@ -57,6 +90,14 @@ Enable shot noise (using canonical logic) and set seed:
 
     python work/experiments/generate_training_dataset.py --add-noise --seed 7
 
+File roadmap
+------------
+- Constants / defaults
+- I/O helpers
+- Sweep helpers
+- Emission helpers
+- main()
+
 Notes
 -----
 - This script is intentionally verbose and explicit to support auditability.
@@ -94,6 +135,9 @@ from dluxshera.systems.three_plane import (
 
 JAX_ENABLE_X64 = True
 
+# =============================================================================
+# Section: Inference sweep defaults
+# =============================================================================
 INFER_KEYS = (
     "binary.separation_as",
     "binary.position_angle_deg",
@@ -123,7 +167,9 @@ DEFAULT_FIXED_STEPS = {
 #   "secondary.zernike_coeffs_nm": [5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0]
 # }
 
-
+# =============================================================================
+# Section: I/O helpers
+# =============================================================================
 def _serialize_value(value: Any) -> Any:
     """Return JSON-serializable representations for metadata output.
 
@@ -145,6 +191,7 @@ def _parse_csv_levels(levels: str | None, default: Iterable[float]) -> list[floa
 
     TODO: migrate to a shared CLI parsing utility.
     """
+    # Default levels are supplied by the caller (fim sigma or fixed delta mode).
     if levels is None:
         return list(default)
     parsed = [float(item.strip()) for item in levels.split(",") if item.strip()]
@@ -158,6 +205,7 @@ def _load_steps_json(steps_json: str | None) -> dict[str, float | list[float]]:
 
     TODO: migrate to utils/io.py if steps overrides are reused elsewhere.
     """
+    # Accept either a JSON string or a path to a JSON file to keep the CLI terse.
     if steps_json is None:
         return {}
     path = Path(steps_json)
@@ -193,6 +241,7 @@ def _resolve_run_dir(outdir: str | None, run_name: str | None) -> Path:
 
     TODO: migrate to utils/io.py if other scripts adopt this pattern.
     """
+    # This is intentionally deterministic: same inputs always map to same path.
     repo_root = Path(__file__).resolve().parents[2]
     prefix = "ml_training_dataset_"
     if outdir is None:
@@ -225,6 +274,9 @@ def _git_commit() -> str | None:
     return result.stdout.strip() or None
 
 
+# =============================================================================
+# Section: Sweep helpers
+# =============================================================================
 def _noise_model(
     rng_key: jax.Array,
     data: jax.Array,
@@ -235,6 +287,7 @@ def _noise_model(
 
     TODO: migrate to a shared noise helper in inference/sim utils.
     """
+    # Keep noise logic mirrored to canonical_astrometry for reproducibility.
     if not add_noise:
         return data, "none", None
     rng_key, split_key = jr.split(rng_key)
@@ -254,6 +307,7 @@ def _validate_fim_diag(
 
     TODO: migrate to inference/optimization helpers if this becomes shared.
     """
+    # Guard against zero/negative/NaN sigmas before using 1/sqrt(F).
     for idx, val in enumerate(fim_diag):
         if not np.isfinite(val) or val <= 0:
             label = labels[idx] if idx < len(labels) else f"index {idx}"
@@ -266,6 +320,9 @@ def _validate_fim_diag(
             )
 
 
+# =============================================================================
+# Section: Emission helpers
+# =============================================================================
 def _write_fits(
     *,
     output_path: Path,
@@ -276,17 +333,30 @@ def _write_fits(
 
     TODO: migrate to utils/io.py for shared FITS output.
     """
+    # FITS headers ignore None-valued entries to keep headers compact.
     header = fits.Header()
     for key, value in header_data.items():
         if value is None:
             continue
-        header[key] = value
-    hdu = fits.PrimaryHDU(data=image, header=header)
-    hdu.writeto(output_path, overwrite=True)
+
+        # Allow (value, comment) tuples.
+        if isinstance(value, tuple) and len(value) == 2:
+            card_value, comment = value
+            header.set(str(key).upper(), card_value, comment=str(comment))
+        else:
+            header.set(str(key).upper(), value)
+
+    fits.PrimaryHDU(data=image, header=header).writeto(output_path, overwrite=True)
 
 
+# =============================================================================
+# Section: Main entrypoint
+# =============================================================================
 def main() -> None:
     """Run the forward-model training dataset sweep."""
+    # =============================================================================
+    # Section: Parse CLI args and set defaults
+    # =============================================================================
     parser = argparse.ArgumentParser(
         description="Generate a forward-model training dataset sweep.",
     )
@@ -340,6 +410,9 @@ def main() -> None:
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
     repo_root = Path(__file__).resolve().parents[2]
+    # =============================================================================
+    # Section: Resolve output directory and run naming policy
+    # =============================================================================
     run_dir = _resolve_run_dir(args.outdir, args.run_name)
     run_dir_relative = Path(os.path.relpath(run_dir, repo_root))
     prefix = "ml_training_dataset_"
@@ -355,6 +428,9 @@ def main() -> None:
     images_dir = run_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
+    # =============================================================================
+    # Section: Initialize config + binder + parameter stores
+    # =============================================================================
     cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG
     cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)))
     cfg = cfg.replace(secondary_noll_indices=tuple(range(4, 12)))
@@ -369,6 +445,9 @@ def main() -> None:
 
     binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
 
+    # =============================================================================
+    # Section: Define infer keys, sweep keys, and sweep schedule
+    # =============================================================================
     infer_keys = list(INFER_KEYS)
     if args.exclude_secondary_zernikes:
         infer_keys = [
@@ -381,6 +460,9 @@ def main() -> None:
         cfg=cfg,
     )
 
+    # =============================================================================
+    # Section: Noise configuration and seeding model
+    # =============================================================================
     rng_key = jr.PRNGKey(args.seed)
 
     data = binder.model()
@@ -405,6 +487,9 @@ def main() -> None:
 
     index_map = build_index_map(inference_subspec, base_store, theta=theta_ref)
 
+    # =============================================================================
+    # Section: Define infer keys, sweep keys, and sweep schedule (steps + sizes)
+    # =============================================================================
     steps = _parse_csv_levels(
         args.delta_levels,
         default=(
@@ -418,7 +503,11 @@ def main() -> None:
     fixed_steps = {**DEFAULT_FIXED_STEPS, **step_overrides}
 
     def _sigma_for_key_component(param_key: str, component_index: int | None) -> float:
-        """Compute sigma from the FIM diagonal for a key/component."""
+        """Compute sigma from the FIM diagonal for a key/component.
+
+        Component_index is None for scalar parameters; Zernike sweeps map
+        component indices into the flattened inference vector.
+        """
         for entry in index_map["entries"]:
             if entry["name"] != param_key:
                 continue
@@ -433,7 +522,10 @@ def main() -> None:
         baseline_value: Any,
         step_value: float | list[float],
     ) -> float | list[float]:
-        """Normalize fixed-step sizes to scalars or component-wise lists."""
+        """Normalize fixed-step sizes to scalars or component-wise lists.
+
+        Scalars remain scalars; vector parameters expand to per-component lists.
+        """
         baseline_array = np.asarray(baseline_value)
         is_vector = baseline_array.shape != ()
         if is_vector:
@@ -470,6 +562,7 @@ def main() -> None:
         """Extract infer keys into a JSON-serializable dict."""
         return {key: _serialize_value(store.get(key)) for key in keys}
 
+    # Split scalar keys vs. Zernike-vector keys to simplify sweep loops.
     scalar_keys = [
         key
         for key in infer_keys
@@ -481,6 +574,7 @@ def main() -> None:
         if key in ("primary.zernike_coeffs_nm", "secondary.zernike_coeffs_nm")
     ]
 
+    # Map each Zernike key to its Noll indices for metadata bookkeeping.
     zernike_map = {
         "primary.zernike_coeffs_nm": tuple(cfg.primary_noll_indices),
         "secondary.zernike_coeffs_nm": tuple(cfg.secondary_noll_indices),
@@ -517,6 +611,9 @@ def main() -> None:
             return float(step[component_index])
         return float(step)
 
+    # =============================================================================
+    # Section: Emitting artifacts (manifest + samples index)
+    # =============================================================================
     baseline_infer = _infer_values(base_store, infer_keys)
     manifest = {
         "run_name": resolved_run_name,
@@ -524,7 +621,7 @@ def main() -> None:
         "config_id": cfg.design_name,
         "git_commit": _git_commit(),
         "parameters": infer_keys,
-        "baseline_values": baseline_infer,
+        "nominal_values": baseline_infer,
         "delta_policy": {
             "mode": args.delta_mode,
             "steps": steps,
@@ -548,6 +645,9 @@ def main() -> None:
 
     sample_id = 0
 
+    # =============================================================================
+    # Section: Emission helpers (FITS, sidecar JSON, JSONL index)
+    # =============================================================================
     def _emit_sample(
         *,
         param_key: str,
@@ -565,6 +665,7 @@ def main() -> None:
         sample_tag = f"sample_{sample_id:06d}"
         fits_path = images_dir / f"{sample_tag}.fits"
         meta_path = images_dir / f"{sample_tag}.json"
+        nominal_plate_scale = float(np.asarray(binder.plate_scale_as_per_pix))
 
         model = binder.model(
             strip_structural(
@@ -573,17 +674,29 @@ def main() -> None:
         )
         model_np = np.asarray(model)
 
+        # FITS header conventions:
+        # - BUNIT: data units (photons)
+        # - XUNIT/YUNIT + XSCALE/YSCALE: physical units and pixel scale
+        # - COMPIDX/NOLL: component bookkeeping for vector sweeps (None if scalar)
+        # - NOISE/SEED: noise toggle + base seed (realization_seed in JSON only)
+        # Optional fields: FITS omits None-valued keys; JSON retains nulls for a
+        # stable schema across scalar vs component sweeps.
         header_data = {
-            "SAMPLEID": sample_id,
-            "SWEEPKEY": param_key,
-            "COMPIDX": component_index,
-            "NOLL": noll_index,
-            "DELSIG": delta_sigma,
-            "DELVAL": delta_value,
-            "APPLVAL": applied_value,
-            "NOISE": bool(args.add_noise),
-            "SEED": args.seed,
-            "CFGID": cfg.design_name,
+            "BUNIT": ("photons", "Pixel values are photon counts"),
+            "XUNIT": ("arcsec", "X-axis units"),
+            "YUNIT": ("arcsec", "Y-axis units"),
+            "XSCALE": (nominal_plate_scale, "Arcsec per pixel (nominal)"),
+            "YSCALE": (nominal_plate_scale, "Arcsec per pixel (nominal)"),
+            "SAMPLEID": (sample_id, "Training dataset sample id"),
+            "SWEEPKEY": (param_key, "Swept parameter key"),
+            "COMPIDX": (component_index, "Vector component index (if applicable)"),
+            "NOLL": (noll_index, "Zernike Noll index (if applicable)"),
+            "DELSIG": (delta_sigma, "Delta in sigma units"),
+            "DELVAL": (delta_value, "Additive delta applied to nominal"),
+            "APPLVAL": (applied_value, "Nominal + delta"),
+            "NOISE": (bool(args.add_noise), "Noise added to image"),
+            "SEED": (args.seed, "Base RNG seed"),
+            "CFGID": (cfg.design_name, "Optics config id"),
         }
         _write_fits(output_path=fits_path, image=model_np, header_data=header_data)
 
@@ -594,14 +707,16 @@ def main() -> None:
             "sample_id": sample_id,
             "sweep": {
                 "param_key": param_key,
+                # Scalars: component_index and noll_index remain null (not 0).
+                # Zernike sweeps: component_index is the coefficient index,
+                # and noll_index is the corresponding Noll label when known.
                 "component_index": component_index,
                 "noll_index": noll_index,
-                "nominal_value": nominal_value,
-                "delta_sigma": delta_sigma,
-                "delta_value": delta_value,
-                "applied_value": applied_value,
+                "nominal": nominal_value,
+                "delta": delta_value,
+                "applied": applied_value,
             },
-            "infer_values": applied_infer,
+            "values": applied_infer,
             "noise": {
                 "enabled": bool(args.add_noise),
                 "mode": noise_mode,
@@ -629,6 +744,9 @@ def main() -> None:
         with samples_path.open("a") as handle:
             handle.write(json.dumps(_serialize_value(record)) + "\n")
 
+    # =============================================================================
+    # Section: Dataset generation loop (nominal + perturbed images)
+    # =============================================================================
     for key in scalar_keys:
         nominal = float(base_store.get(key))
         for level in steps:
@@ -644,6 +762,7 @@ def main() -> None:
             store_delta = base_store.replace({key: applied}).refresh_derived(forward_spec)
             _emit_sample(
                 param_key=key,
+                # Scalars: component_index and noll_index are intentionally null.
                 component_index=None,
                 noll_index=None,
                 delta_sigma=delta_sigma,
@@ -672,6 +791,9 @@ def main() -> None:
                 store_delta = base_store.replace({key: updated}).refresh_derived(
                     forward_spec
                 )
+                # Zernikes: component_index refers to coefficient array index,
+                # while noll_index is the corresponding Noll label (if available).
+                # Use None instead of 0 for scalar sweeps to avoid ambiguity.
                 noll_index = int(noll_indices[idx]) if idx < len(noll_indices) else None
                 _emit_sample(
                     param_key=key,
@@ -683,6 +805,11 @@ def main() -> None:
                     applied_value=updated[idx],
                     applied_store=store_delta,
                 )
+
+    # =============================================================================
+    # Section: Final summary printouts / sanity checks
+    # =============================================================================
+    # (No explicit summary printouts yet; intended for future enhancements.)
 
 
 if __name__ == "__main__":
