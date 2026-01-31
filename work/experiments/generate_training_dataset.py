@@ -409,10 +409,10 @@ def main() -> None:
 
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    repo_root = Path(__file__).resolve().parents[2]
     # =============================================================================
     # Section: Resolve output directory and run naming policy
     # =============================================================================
+    repo_root = Path(__file__).resolve().parents[2]
     run_dir = _resolve_run_dir(args.outdir, args.run_name)
     run_dir_relative = Path(os.path.relpath(run_dir, repo_root))
     prefix = "ml_training_dataset_"
