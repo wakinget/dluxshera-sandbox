@@ -266,8 +266,8 @@ def main(
     loss0 = loss_fn(theta0)
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
-    theta_ref = theta_true
-    F = fim_theta(nll_loss_fn, theta_ref)
+    fim_point = theta_true
+    F = fim_theta(nll_loss_fn, fim_point)
     if save_plots:
         plot_fim(
             F,
@@ -287,6 +287,13 @@ def main(
                 f"{truncate_by_eigval}."
             )
 
+        # NOTE: theta_ref is the origin for the eigen coefficients (z). Truncation
+        # zeroes discarded components *relative to theta_ref*. If we set theta_ref
+        # to the truth, truncation snaps discarded directions back to truth and
+        # makes severe truncation look unrealistically powerful. Using the initial
+        # guess freezes discarded directions at their initial offsets, which is
+        # the intended pedagogical behavior for this recipe.
+        theta_ref = theta0
         eigen_map_full = EigenThetaMap.from_fim(F, theta_ref, whiten=whiten_basis)
         eigvals_full = (
             np.asarray(eigen_map_full.eigvals)
