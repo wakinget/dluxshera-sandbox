@@ -376,8 +376,8 @@ def main(
     loss_true = float(loss_fn(theta_true))
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
-    theta_ref = theta_true
-    F = fim_theta(nll_loss_fn, theta_ref)
+    fim_point = theta_true
+    F = fim_theta(nll_loss_fn, fim_point)
     if save_plots:
         plot_fim(
             F,
@@ -391,58 +391,6 @@ def main(
     fim_diag = jnp.diag(F)
 
     if use_eigen:
-        if truncate_k is not None and truncate_by_eigval is not None:
-            print(
-                "truncate_k is set; ignoring truncate_by_eigval="
-                f"{truncate_by_eigval}."
-            )
-
-        eigen_map_full = EigenThetaMap.from_fim(F, theta_ref, whiten=whiten_basis)
-        eigvals_full = (
-            np.asarray(eigen_map_full.eigvals)
-            if eigen_map_full.eigvals is not None
-            else None
-        )
-
-        if truncate_k is not None:
-            k = int(truncate_k)
-        elif truncate_by_eigval is not None and eigvals_full is not None:
-            k = int(np.sum(eigvals_full >= truncate_by_eigval))
-        else:
-            k = None
-
-        if k is not None:
-            if k <= 0:
-                print("truncate_by_eigval removed all modes; keeping top-1.")
-                k = 1
-            eigen_map = EigenThetaMap.from_fim(
-                F,
-                theta_ref,
-                truncate=k,
-                whiten=whiten_basis,
-            )
-        else:
-            eigen_map = eigen_map_full
-
-        eigvals_kept = (
-            np.asarray(eigen_map.eigvals)
-            if eigen_map.eigvals is not None
-            else np.array([])
-        )
-        k_kept = eigen_map.dim_eigen
-        if eigvals_kept.size > 0:
-            min_eval = float(np.min(eigvals_kept))
-            max_eval = float(np.max(eigvals_kept))
-        else:
-            min_eval = float("nan")
-            max_eval = float("nan")
-
-        print("\nEigenThetaMap summary:")
-        print(f"  N total dims: {eigen_map.dim_theta}")
-        print(f"  k kept dims : {k_kept}")
-        print(f"  eigenvalues : min={min_eval:.3e}, max={max_eval:.3e}")
-        print(f"  whiten_basis: {whiten_basis}")
-
         theta_space = "eigen"
         precond_meta_base = {
             "method": "eigen",
@@ -488,6 +436,72 @@ def main(
             reduce="sum",
             theta0_store=init_store,
         )
+
+        if use_eigen:
+            if truncate_k is not None and truncate_by_eigval is not None:
+                print(
+                    "truncate_k is set; ignoring truncate_by_eigval="
+                    f"{truncate_by_eigval}."
+                )
+
+            # NOTE: theta_ref is the origin for the eigen coefficients (z).
+            # Truncation zeroes discarded components *relative to theta_ref*.
+            # If we set theta_ref to the truth, truncation snaps discarded
+            # directions back to truth and makes severe truncation look
+            # unrealistically powerful. Using the initial guess freezes
+            # discarded directions at their initial offsets.
+            theta_ref = theta0
+            eigen_map_full = EigenThetaMap.from_fim(
+                F,
+                theta_ref,
+                whiten=whiten_basis,
+            )
+            eigvals_full = (
+                np.asarray(eigen_map_full.eigvals)
+                if eigen_map_full.eigvals is not None
+                else None
+            )
+
+            if truncate_k is not None:
+                k = int(truncate_k)
+            elif truncate_by_eigval is not None and eigvals_full is not None:
+                k = int(np.sum(eigvals_full >= truncate_by_eigval))
+            else:
+                k = None
+
+            if k is not None:
+                if k <= 0:
+                    print("truncate_by_eigval removed all modes; keeping top-1.")
+                    k = 1
+                eigen_map = EigenThetaMap.from_fim(
+                    F,
+                    theta_ref,
+                    truncate=k,
+                    whiten=whiten_basis,
+                )
+            else:
+                eigen_map = eigen_map_full
+
+            eigvals_kept = (
+                np.asarray(eigen_map.eigvals)
+                if eigen_map.eigvals is not None
+                else np.array([])
+            )
+            k_kept = eigen_map.dim_eigen
+            if eigvals_kept.size > 0:
+                min_eval = float(np.min(eigvals_kept))
+                max_eval = float(np.max(eigvals_kept))
+            else:
+                min_eval = float("nan")
+                max_eval = float("nan")
+
+            print("\nEigenThetaMap summary:")
+            print(f"  N total dims: {eigen_map.dim_theta}")
+            print(f"  k kept dims : {k_kept}")
+            print(f"  eigenvalues : min={min_eval:.3e}, max={max_eval:.3e}")
+            print(f"  whiten_basis: {whiten_basis}")
+        else:
+            eigen_map = None
 
         if use_eigen and eigen_map is not None:
             z0 = eigen_map.z_from_theta(theta0)
