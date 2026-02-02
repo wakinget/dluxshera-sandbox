@@ -76,6 +76,7 @@ from dluxshera.params.store import ParameterStore, strip_structural
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
+    plot_eigenvalue_spectrum,
     plot_fim,
     plot_parameter_history,
     plot_psf_comparison,
@@ -98,6 +99,7 @@ RNG_SEED = 42
 FAST_MODE = False
 ADD_NOISE = False
 SAVE_PLOTS = True
+PLOT_EIGEN_SPECTRUM = True
 
 # Telescope Config Selection (9cm testbed vs 22cm flight design)
 # Options: None, SHERA_TESTBED_CONFIG / SHERA_FLIGHT_CONFIG
@@ -268,6 +270,7 @@ def main(
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
     F = fim_theta(nll_loss_fn, fim_point)
+    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
     if save_plots:
         plot_fim(
             F,
@@ -275,6 +278,30 @@ def main(
             save_path=results_dir / "fim.png",
             vmin=4,
             vmax=14,
+            show=False,
+        )
+
+    if PLOT_EIGEN_SPECTRUM:
+        eigvals, eigvecs = np.linalg.eigh(np.asarray(F))
+        sort_idx = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[sort_idx]
+        eigvecs = eigvecs[:, sort_idx]
+
+        if truncate_k is not None:
+            spectrum_truncate_k = int(truncate_k)
+        elif truncate_by_eigval is not None:
+            spectrum_truncate_k = int(np.sum(eigvals >= truncate_by_eigval))
+            if spectrum_truncate_k <= 0:
+                spectrum_truncate_k = 1
+        else:
+            spectrum_truncate_k = None
+
+        plot_eigenvalue_spectrum(
+            eigvals,
+            eigvecs,
+            labels=fim_labels,
+            truncate_k=spectrum_truncate_k,
+            save_path=results_dir / "eigenvalue_spectrum.png" if save_plots else None,
             show=False,
         )
 
