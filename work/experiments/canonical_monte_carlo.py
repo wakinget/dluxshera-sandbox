@@ -247,9 +247,7 @@ def main(
 
     results_dir = results_dir or (
         REPO_ROOT
-        / "work"
-        / "experiments"
-        / "results"
+        / "Results"
         / "canonical_monte_carlo"
         / _timestamp_tag()
     )
