@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import numpy as np
 import pytest
@@ -142,3 +143,37 @@ def test_build_index_map_matches_pack_params(tmp_path: Path):
 
     layout_hash = index_map.get("layout_hash")
     assert isinstance(layout_hash, str) and len(layout_hash) == 64
+
+
+def test_save_run_sets_created_at_and_merges_labels(tmp_path: Path):
+    run_dir = tmp_path / "run_labels"
+    trace = {"loss": [1.0], "theta": [[0.0, 1.0, 2.0]]}
+    meta = {
+        "theta": {
+            "index_map": {
+                "entries": [
+                    {"name": "alpha", "start": 0, "stop": 1, "shape": [1]},
+                    {"name": "beta", "start": 1, "stop": 3, "shape": [2]},
+                ]
+            },
+            "labels_by_key": {
+                "alpha": "Alpha",
+                "beta": ["Beta-1", "Beta-2"],
+            },
+        }
+    }
+    summary = {}
+
+    save_run(run_dir, trace=trace, meta=meta, summary=summary)
+
+    loaded_meta = load_meta(run_dir)
+    loaded_summary = load_summary(run_dir)
+
+    created_at = loaded_meta.get("created_at")
+    assert created_at == loaded_summary.get("created_at")
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$", created_at)
+
+    entries = loaded_meta["theta"]["index_map"]["entries"]
+    assert entries[0]["label"] == "Alpha"
+    assert entries[1]["label"] == ["Beta-1", "Beta-2"]
+    assert "labels_by_key" not in loaded_meta["theta"]

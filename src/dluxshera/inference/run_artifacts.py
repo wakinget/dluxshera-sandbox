@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Optional, TypedDict
 
@@ -56,6 +57,10 @@ def _coerce_jsonable(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
+
+
+def _now_iso_local_ms() -> str:
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 def _validate_jsonable(value: Any, *, path: str = "root") -> None:
@@ -207,6 +212,32 @@ def save_run(
 
     meta_out = dict(meta)
     summary_out = dict(summary)
+
+    created_at = meta_out.get("created_at") or summary_out.get("created_at") or _now_iso_local_ms()
+    meta_out["created_at"] = created_at
+    summary_out["created_at"] = created_at
+
+    theta_meta = meta_out.get("theta")
+    if isinstance(theta_meta, Mapping):
+        labels_by_key = None
+        if "labels_by_key" in theta_meta and isinstance(theta_meta["labels_by_key"], Mapping):
+            labels_by_key = theta_meta["labels_by_key"]
+        index_map = theta_meta.get("index_map")
+        if labels_by_key is None and isinstance(index_map, Mapping):
+            if isinstance(index_map.get("labels_by_key"), Mapping):
+                labels_by_key = index_map["labels_by_key"]
+        if isinstance(index_map, Mapping) and isinstance(labels_by_key, Mapping):
+            entries = index_map.get("entries")
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    key = entry.get("name")
+                    if key in labels_by_key:
+                        entry["label"] = labels_by_key[key]
+            theta_meta.pop("labels_by_key", None)
+            if isinstance(index_map, Mapping):
+                index_map.pop("labels_by_key", None)
 
     manifest_meta: dict[str, dict[str, object]] = {}
     manifest_summary: dict[str, dict[str, object]] = {}

@@ -623,7 +623,7 @@ These allow downstream scripts to rehydrate the best/final θ state without re-r
 `meta.json` should answer: **“How do I interpret θ?”** The goal is not perfect reproducibility on day one, but enough structure to decode past runs without guessing.
 
 Minimum recommended fields (v0):
-- `run_id`, `created_at` (ISO-8601)
+- `run_id`, `created_at` (ISO-8601, local time with timezone offset and milliseconds)
 - `git`: `{commit, dirty}` (recommended; best-effort)
 - `manifest`: artifact manifest entries (see below)
 - `theta`:
@@ -646,9 +646,13 @@ Minimum recommended fields (v0):
 - identity: `run_id`, `created_at`, `git.commit`
 - `status`: `"ok"` or `"failed"` (and optional `message`)
 - step counts: `num_steps_completed`
-- loss summary: `loss_init`, `loss_final`, `loss_best`, `best_step`
+- loss summary: `loss_init`, `loss_final`
 - runtime: `runtime_total_s` (approximate is acceptable)
 - `manifest`: compact artifact manifest entries (see below)
+
+Notes:
+- The presence of optional artifacts (e.g., checkpoints or signals) should be inferred from the manifest.
+- “Best step” details belong in optional checkpoint artifacts (e.g., `checkpoint_best.npz`), not in `summary.json`.
 
 This schema may evolve, but these fields provide a stable baseline for run indexing and comparison.
 
