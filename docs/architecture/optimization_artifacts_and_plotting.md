@@ -721,6 +721,86 @@ The objective is to keep the system understandable while still making common wor
 
 ---
 
+## Experiment inputs vs outputs (v0.1 proposal)
+
+This project distinguishes **experiment inputs** (what to run) from **experiment outputs**
+(what was produced). The existing run-artifact schema (trace/meta/summary per run) remains the
+stable foundation. We add lightweight, optional “experiment input files” to make ensembles and
+sweeps reproducible and easy to define programmatically.
+
+### Files and responsibilities
+
+**Inputs (optional, recommended for ensembles):**
+- `prescription.json` (input)
+  - Experiment-wide defaults: config/design identifier, infer_keys, prior definitions, default
+    optimizer settings, default init policy (e.g., sample-from-prior), and default noise settings.
+  - Think: “global defaults / knobs.”
+
+- `plan.csv` (input)
+  - One row per run (or per sample), defining per-run overrides:
+    - truth overrides (for synthetic data generation)
+    - init overrides (explicit initial parameter values, or init mode flags)
+    - per-run algorithm knobs (e.g., eigen truncation thresholds)
+    - seeds (init/noise/optimizer)
+  - Think: “the run table.”
+
+**Outputs (always written by the experiment runner):**
+- `manifest.json` (output)
+  - The resolved, authoritative record of the experiment that actually ran:
+    - provenance (git, timestamp)
+    - the prescription used (inline copy or pointer + hash)
+    - the plan used (inline copy or pointer + hash)
+    - dataset identifiers and run counts
+  - This is the experiment-level “receipt”.
+
+- `runs/<run_id>/...` (output)
+  - Standard per-run artifacts: `trace.npz`, `meta.json`, `summary.json` (always) plus optional
+    diagnostics (`signals.npz`, `metric.npz`, etc.).
+
+- Aggregated tables (optional, output)
+  - `sweep.csv` (or Parquet): a lightweight table built primarily from `summary.json` plus selected
+    `meta.json` keys.
+  - `plan_results.csv` (optional): a merged table combining `plan.csv` columns and selected results
+    (e.g., status, losses, truth/init/final summaries). This supports “one file to analyze” without
+    mutating the input plan.
+
+### Single-run vs multi-run
+
+A “single run” is treated as a special case of an experiment with `n_runs = 1`.
+
+Recommended patterns:
+- For quick interactive use, a script may write directly to a single run directory (no `runs/`).
+- For consistency across tooling, scripts MAY instead always create an experiment directory with:
+    manifest.json
+    runs/<run_id>/{trace.npz, meta.json, summary.json}
+    (optional sweep table)
+
+The preferred default for canonical scripts is the experiment directory form, since it scales naturally
+from 1-run → N-run without changing downstream analysis code.
+
+### Init policy: sampled vs explicit
+
+Each row in `plan.csv` may specify either:
+- explicit init values (init.mode = "explicit" + init.<param> columns), or
+- sampled init values (init.mode = "prior" or "prior_near") using priors defined in prescription.
+
+Rule: any init.<param> fields present in the plan override the init mode for that parameter; missing
+fields fall back to the row’s init.mode behavior.
+
+### Relationship to dataset sweeps (generate_training_dataset.py)
+
+The training dataset generator follows the same scaffold:
+- experiment-level manifest for baseline values + policy + noise configuration
+- a per-sample index (e.g., JSONL) describing the applied perturbations
+- per-sample outputs (FITS + JSON sidecars)
+
+Monte Carlo experiments mirror this structure:
+- prescription + plan define what to run
+- per-run artifacts store detailed traces and metadata
+- aggregated tables provide analysis-friendly rows without loading traces
+
+
+---
 
 ## Open questions / decisions to revisit
 - Exact metadata schema v0 (which keys, how much provenance)
