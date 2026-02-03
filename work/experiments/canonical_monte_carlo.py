@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -34,7 +35,11 @@ from dluxshera.inference.optimization import (
     run_shera_gd,
 )
 from dluxshera.inference.prior import PriorSpec
-from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
+from dluxshera.inference.run_artifacts import (
+    _now_iso_local_ms,
+    build_param_summary,
+    patch_summary,
+)
 from dluxshera.inference.sweeps import write_sweep_csv
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -138,6 +143,17 @@ def _coerce_jsonable(value: Any) -> Any:
 # NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _mc_run_id(index: int, prefix: str = RUN_ID_PREFIX) -> str:
     return f"{prefix}_{index:04d}"
+
+
+# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
+def _repo_relative_path(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    resolved = Path(path).expanduser().resolve()
+    try:
+        return resolved.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return Path(os.path.relpath(resolved, REPO_ROOT)).as_posix()
 
 
 # NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
@@ -297,10 +313,20 @@ def main(
     }
     prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
+    experiment_created_at = _now_iso_local_ms()
+    config_payload = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else cfg
+    if isinstance(config_payload, dict) and "diffractive_pupil_path" in config_payload:
+        config_payload = {
+            **config_payload,
+            "diffractive_pupil_path": _repo_relative_path(
+                config_payload.get("diffractive_pupil_path")
+            ),
+        }
+
     manifest = {
         "script": "canonical_monte_carlo.py",
         "git": _git_info(),
-        "timestamp": datetime.datetime.now().isoformat(),
+        "created_at": experiment_created_at,
         "n_runs": n_runs,
         "rng_seed": rng_seed,
         "fast": fast,
@@ -311,7 +337,8 @@ def main(
         "truncate_by_eigval": truncate_by_eigval,
         "infer_keys": list(INFER_KEYS),
         "prior_info": _summarize_prior_info(prior_info),
-        "config": dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else cfg,
+        "diffractive_pupil_path": _repo_relative_path(cfg.diffractive_pupil_path),
+        "config": config_payload,
     }
     _write_json(results_dir / "manifest.json", _coerce_jsonable(manifest))
 
@@ -599,6 +626,7 @@ def main(
     )
 
     experiment_summary = {
+        "created_at": experiment_created_at,
         "n_runs": n_runs,
         "success_count": success_count,
         "failure_count": failure_count,
