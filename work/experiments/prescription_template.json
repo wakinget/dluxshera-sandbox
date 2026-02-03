@@ -1,0 +1,82 @@
+{
+  "experiment": {
+    "n_runs": 2,
+    "run_id_prefix": "mc",
+    "results_table_name": "results.csv"
+  },
+  "model": {
+    "config_id": "SHERA_TESTBED_CONFIG",
+    "diffractive_pupil_path": "data/diffractive_pupil.fits"
+  },
+  "infer_keys": [
+    "binary.separation_as",
+    "binary.position_angle_deg",
+    "binary.x_position_as",
+    "binary.y_position_as",
+    "binary.log_flux_total",
+    "binary.contrast",
+    "system.plate_scale_as_per_pix",
+    "primary.zernike_coeffs_nm",
+    "secondary.zernike_coeffs_nm"
+  ],
+  "priors": {
+    "binary.separation_as": {
+      "dist": "normal",
+      "sigma": 0.01
+    },
+    "binary.position_angle_deg": {
+      "dist": "normal",
+      "sigma": 1.0
+    },
+    "binary.x_position_as": {
+      "dist": "normal",
+      "sigma": 0.05
+    },
+    "binary.y_position_as": {
+      "dist": "normal",
+      "sigma": 0.05
+    },
+    "binary.log_flux_total": {
+      "dist": "normal",
+      "sigma": 0.2
+    },
+    "binary.contrast": {
+      "dist": "normal",
+      "sigma": 0.1
+    },
+    "system.plate_scale_as_per_pix": {
+      "dist": "normal",
+      "sigma": 0.001
+    },
+    "primary.zernike_coeffs_nm": {
+      "dist": "normal",
+      "sigma": 10.0
+    },
+    "secondary.zernike_coeffs_nm": {
+      "dist": "normal",
+      "sigma": 10.0
+    }
+  },
+  "defaults": {
+    "optimizer": {
+      "n_iter": 60,
+      "base_lr": 0.5
+    },
+    "eigen": {
+      "use_eigen": true,
+      "truncate_k": null,
+      "truncate_by_eigval": null
+    },
+    "init": {
+      "mode": "prior",
+      "seed": 123,
+      "binary": {
+        "x_position_as": null,
+        "y_position_as": null
+      }
+    },
+    "noise": {
+      "seed": 456
+    }
+  }
+}
