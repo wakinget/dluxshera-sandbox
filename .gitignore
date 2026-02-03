@@ -25,9 +25,13 @@ devtools/context_snapshot_*/**
 
 # My own example files to ignore
 Examples/*
-# BUT do not ignore the notebooks folder
+# BUT do not ignore these specific examples folder
 !Examples/notebooks/
 !Examples/notebooks/**
+!Examples/recipes/
+!Examples/recipes/**
+!Examples/runners/
+!Examples/runners/**
 !Examples/scripts/
 !Examples/scripts/**
 
@@ -196,3 +200,6 @@ cython_debug/
 
 # Results folder
 Results/
+
+# Mac folder files
+*.DS_Store
