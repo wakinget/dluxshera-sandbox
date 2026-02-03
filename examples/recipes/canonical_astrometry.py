@@ -132,7 +132,7 @@ INFER_KEYS = (
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry_{TIMESTAMP}")
+DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -302,6 +302,7 @@ def main(
             eigvecs,
             labels=fim_labels,
             truncate_k=spectrum_truncate_k,
+            label_boxes=False,
             save_path=results_dir / "eigenvalue_spectrum.png" if save_plots else None,
             show=False,
         )
