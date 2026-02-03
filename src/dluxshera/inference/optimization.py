@@ -6,7 +6,7 @@ import jax.numpy as np
 import jax.scipy.stats as jstats
 import numpy as onp
 from tqdm import tqdm
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import optax
 from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any, Mapping
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .losses import gaussian_image_nll
-from .run_artifacts import save_run
+from .run_artifacts import _now_iso_local_ms, save_run
 from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..systems.three_plane import SheraThreePlaneConfig
@@ -1019,7 +1019,7 @@ def run_gd_with_artifacts(
     resolved_run_id = run_id or "in-memory"
     if artifacts_enabled:
         resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
-    created_at = datetime.now(timezone.utc).isoformat()
+    created_at = _now_iso_local_ms()
 
     base_meta: Dict[str, Any] = {
         "run_id": resolved_run_id,
@@ -1060,11 +1060,6 @@ def run_gd_with_artifacts(
         "num_steps_completed": int(loss_array.size),
         "loss_init": loss_init,
         "loss_final": loss_final,
-        "loss_best": loss_best,
-        "best_step": best_idx,
-        "has_checkpoint_best": False,
-        "has_checkpoint_final": False,
-        "has_signals": False,
     }
 
     if extra_summary:
@@ -1084,8 +1079,6 @@ def run_gd_with_artifacts(
                 "final_loss": loss_final,
             },
         }
-        base_summary["has_checkpoint_best"] = True
-        base_summary["has_checkpoint_final"] = True
 
     artifact_metric = None
     if metric is not None:
@@ -1408,11 +1401,6 @@ def run_image_gd(
             )
 
         summary = artifact_payload["summary"]
-        if save_signals:
-            summary["has_signals"] = True
-        if save_plots:
-            summary["has_plots"] = bool(plots)
-
         if save_signals or save_plots:
             save_run(
                 artifact_payload["run_dir"],

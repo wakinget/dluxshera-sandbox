@@ -68,10 +68,12 @@ def test_run_simple_gd_writes_artifacts(tmp_path: Path):
     assert summary["num_steps_completed"] == 6
     assert summary["loss_init"] is not None
     assert summary["loss_final"] is not None
-    assert summary["loss_best"] is not None
-    assert summary["best_step"] is not None
-    assert summary["has_checkpoint_best"] is True
-    assert summary["has_checkpoint_final"] is True
+    assert summary["loss_init"] is not None
+    assert summary["loss_final"] is not None
+    assert "loss_best" not in summary
+    assert "best_step" not in summary
+    assert "has_checkpoint_best" not in summary
+    assert "has_checkpoint_final" not in summary
 
     checkpoint_best = load_npz_artifact(run_dir, "checkpoint_best")
     assert checkpoint_best is not None
