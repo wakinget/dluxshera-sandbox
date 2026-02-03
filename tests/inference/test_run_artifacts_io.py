@@ -5,11 +5,13 @@ import numpy as np
 import pytest
 
 from dluxshera.inference.run_artifacts import (
+    build_param_summary,
     load_checkpoint,
     load_meta,
     load_npz_artifact,
     load_summary,
     load_trace,
+    patch_summary,
     save_run,
 )
 from dluxshera.params.packing import build_index_map, pack_params
@@ -177,3 +179,47 @@ def test_save_run_sets_created_at_and_merges_labels(tmp_path: Path):
     assert entries[0]["label"] == "Alpha"
     assert entries[1]["label"] == ["Beta-1", "Beta-2"]
     assert "labels_by_key" not in loaded_meta["theta"]
+
+
+def test_build_param_summary_scalar_and_vector():
+    init = {"alpha": 1.0, "beta": np.array([1.0, 2.0])}
+    final = {"alpha": 1.5, "beta": np.array([2.5, 3.5])}
+    summary = build_param_summary(init, final)
+
+    assert summary["alpha"]["init"] == 1.0
+    assert summary["alpha"]["final"] == 1.5
+    assert "truth" not in summary["alpha"]
+
+    assert summary["beta"]["init"] == [1.0, 2.0]
+    assert summary["beta"]["final"] == [2.5, 3.5]
+    assert "truth" not in summary["beta"]
+
+
+def test_build_param_summary_with_truth():
+    init = {"alpha": 1.0, "beta": np.array([1.0, 2.0])}
+    final = {"alpha": 0.5, "beta": np.array([2.5, 1.5])}
+    truth = {"alpha": 1.25, "beta": np.array([0.5, 1.5])}
+    summary = build_param_summary(init, final, truth=truth)
+
+    assert summary["alpha"]["truth"] == 1.25
+    assert summary["alpha"]["init_delta"] == -0.25
+    assert summary["alpha"]["final_delta"] == -0.75
+
+    assert summary["beta"]["truth"] == [0.5, 1.5]
+    assert summary["beta"]["init_delta"] == [0.5, 0.5]
+    assert summary["beta"]["final_delta"] == [2.0, 0.0]
+
+
+def test_patch_summary_updates_existing_summary(tmp_path: Path):
+    run_dir = tmp_path / "run_patch"
+    trace = {"loss": [1.0], "theta": [[0.0]]}
+    meta = {"run_id": "run_patch"}
+    summary = {"status": "ok"}
+
+    save_run(run_dir, trace=trace, meta=meta, summary=summary)
+
+    patch_summary(run_dir, {"param_summary": {"alpha": {"init": 1.0, "final": 2.0}}})
+    loaded = load_summary(run_dir)
+
+    assert loaded["status"] == "ok"
+    assert loaded["param_summary"]["alpha"]["init"] == 1.0

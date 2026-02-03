@@ -34,6 +34,7 @@ from dluxshera.inference.optimization import (
     run_shera_gd,
 )
 from dluxshera.inference.prior import PriorSpec
+from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.sweeps import write_sweep_csv
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -155,44 +156,6 @@ def _summarize_prior_info(prior_info: Mapping[str, Mapping[str, Any]]) -> dict[s
 
 
 # NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
-def _summarize_run(
-    truth_store: ParameterStore,
-    init_store: ParameterStore,
-    final_store: ParameterStore,
-    *,
-    keys: tuple[str, ...],
-) -> dict[str, Any]:
-    def _summarize_delta(value: np.ndarray) -> dict[str, float]:
-        flat = np.asarray(value).ravel()
-        return {
-            "rms": float(np.sqrt(np.mean(flat**2))) if flat.size else float("nan"),
-            "max": float(np.max(np.abs(flat))) if flat.size else float("nan"),
-        }
-
-    summary: dict[str, Any] = {}
-    for key in keys:
-        truth = np.asarray(truth_store.get(key))
-        init = np.asarray(init_store.get(key))
-        final = np.asarray(final_store.get(key))
-        init_delta = init - truth
-        final_delta = final - truth
-        if truth.size == 1:
-            summary[key] = {
-                "truth": float(truth.ravel()[0]),
-                "init": float(init.ravel()[0]),
-                "final": float(final.ravel()[0]),
-                "init_delta": float(init_delta.ravel()[0]),
-                "final_delta": float(final_delta.ravel()[0]),
-            }
-        else:
-            summary[key] = {
-                "truth": {"shape": list(truth.shape)},
-                "init": _summarize_delta(init_delta),
-                "final": _summarize_delta(final_delta),
-            }
-    return summary
-
-
 # NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
     required = ["meta.json", "summary.json", "trace.npz"]
@@ -543,6 +506,13 @@ def main(
                 "lr_vec": np.asarray(lr_vec),
             }
 
+        labels_by_key = map_labels_to_keys(
+            INFER_KEYS,
+            fim_labels,
+            store=init_store if use_eigen else None,
+            index_map=None if use_eigen else index_map,
+        )
+
         print("Running preconditioned gradient descent...")
         theta_final_opt, trace, artifacts = run_shera_gd(
             loss_fn=loss_opt,
@@ -558,6 +528,7 @@ def main(
             metric=metric_payload,
             extra_meta={
                 "optimizer": {"preconditioning": precond_meta},
+                "theta": {"labels_by_key": labels_by_key},
                 "mc": {
                     "index": run_index,
                     "seed": int(rng_seed),
@@ -579,47 +550,36 @@ def main(
             strip_structural(final_store, structural_keys=binder.structural_store_keys())
         )
 
-        labels_by_key = map_labels_to_keys(
-            INFER_KEYS,
-            fim_labels,
-            store=init_store if use_eigen else None,
-            index_map=None if use_eigen else index_map,
-        )
-
         loss_init = float(loss_fn(theta0))
         loss_final = float(loss_fn(theta_final))
         improvement_ratio = loss_init / loss_final if loss_final != 0 else float("nan")
 
-        run_summary = {
-            "run_id": run_id,
-            "loss_true": loss_true,
-            "loss_init": loss_init,
-            "loss_final": loss_final,
-            "improvement_ratio": improvement_ratio,
-            "theta_labels": labels_by_key,
-            "param_summary": _summarize_run(
-                truth_store,
-                init_store,
-                final_store,
-                keys=INFER_KEYS,
-            ),
-        }
-
         if artifacts is not None:
             run_dir = Path(artifacts["run_dir"]) if artifacts.get("run_dir") else None
             if run_dir is not None:
-                _write_json(run_dir / "run_summary.json", _coerce_jsonable(run_summary))
+                truth_dict = {key: truth_store.get(key) for key in INFER_KEYS}
+                init_dict = {key: init_store.get(key) for key in INFER_KEYS}
+                final_dict = {key: final_store.get(key) for key in INFER_KEYS}
+                param_summary = build_param_summary(init_dict, final_dict, truth=truth_dict)
+                patch_summary(
+                    run_dir,
+                    {
+                        "param_summary": param_summary,
+                        "loss_true": loss_true,
+                        "improvement_ratio": improvement_ratio,
+                    },
+                )
                 _maybe_warn_missing_artifacts(run_dir)
 
         print(
             "Run summary: loss(true)={:.6g}, loss(init)={:.6g}, loss(final)={:.6g}".format(
                 loss_true,
-                run_summary["loss_init"],
-                run_summary["loss_final"],
+                loss_init,
+                loss_final,
             )
         )
 
-        if np.isfinite(run_summary["loss_final"]):
+        if np.isfinite(loss_final):
             success_count += 1
         else:
             failure_count += 1

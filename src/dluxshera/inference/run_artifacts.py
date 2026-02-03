@@ -156,6 +156,59 @@ def _get_git_info(run_path: Path) -> dict[str, object] | None:
     return {"commit": commit_sha, "dirty": dirty}
 
 
+def _to_numpy(value: Any) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        return value
+    if jnp is not None and isinstance(value, jnp.ndarray):
+        return np.asarray(value)
+    return np.asarray(value)
+
+
+def _coerce_param_value(value: Any) -> float | list[float] | list:
+    array = _to_numpy(value)
+    if array.shape == () or array.size == 1:
+        return float(array.reshape(-1)[0])
+    return array.tolist()
+
+
+def build_param_summary(
+    init: Mapping[str, Any],
+    final: Mapping[str, Any],
+    truth: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    truth_map = truth or {}
+    for key, init_value in init.items():
+        if key not in final:
+            raise KeyError(f"Missing final value for parameter '{key}'")
+        final_value = final[key]
+        entry: dict[str, Any] = {
+            "init": _coerce_param_value(init_value),
+            "final": _coerce_param_value(final_value),
+        }
+        if key in truth_map and truth_map[key] is not None:
+            truth_value = truth_map[key]
+            entry["truth"] = _coerce_param_value(truth_value)
+            entry["init_delta"] = _coerce_param_value(_to_numpy(init_value) - _to_numpy(truth_value))
+            entry["final_delta"] = _coerce_param_value(_to_numpy(final_value) - _to_numpy(truth_value))
+        summary[key] = entry
+    return summary
+
+
+def patch_summary(run_dir: Path | str, patch: Mapping[str, Any]) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    summary_path = run_path / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"summary.json not found in {run_path}")
+    summary = load_summary(run_path)
+    if not isinstance(summary, Mapping):
+        raise TypeError("summary.json must contain a JSON object")
+    updated = dict(summary)
+    updated.update(patch)
+    _write_json(summary_path, updated)
+    return updated
+
+
 def save_run(
     run_dir: Path | str,
     trace: ArrayMapping,
