@@ -630,7 +630,7 @@ Minimum recommended fields (v0):
   - `dim`
   - `theta_space`: `"primitive"` or `"eigen"`
   - `theta_map_hash` (recommended if `theta_space == "eigen"`)
-  - `index_map.entries` (IndexMap slices: `name/start/stop/shape/block`)
+  - `index_map.entries` (IndexMap slices: `name/start/stop/shape/block`, optional `label`)
 - `optimizer`:
   - `name`, `num_steps`, `base_lr`
   - optional `preconditioning` block if enabled (method, eps, lr_clip, refresh cadence)
@@ -648,11 +648,25 @@ Minimum recommended fields (v0):
 - step counts: `num_steps_completed`
 - loss summary: `loss_init`, `loss_final`
 - runtime: `runtime_total_s` (approximate is acceptable)
+- parameter summary: `param_summary` (full vectors; see below)
 - `manifest`: compact artifact manifest entries (see below)
 
 Notes:
 - The presence of optional artifacts (e.g., checkpoints or signals) should be inferred from the manifest.
 - “Best step” details belong in optional checkpoint artifacts (e.g., `checkpoint_best.npz`), not in `summary.json`.
+
+#### `param_summary` (final parameter states)
+
+`summary.json` includes a `param_summary` mapping for final parameter states. Each key stores full vectors (not reduced summaries):
+
+- Scalars:
+  - `init`, `final`
+  - `truth`, `init_delta`, `final_delta` (optional; omitted if truth is unavailable)
+- Vectors:
+  - `init`, `final` (full lists)
+  - `truth`, `init_delta`, `final_delta` (optional; omitted if truth is unavailable)
+
+Labels for parameters live in `meta.json` under `theta.index_map.entries[*].label`.
 
 This schema may evolve, but these fields provide a stable baseline for run indexing and comparison.
 

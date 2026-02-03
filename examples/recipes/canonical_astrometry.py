@@ -64,6 +64,7 @@ from dluxshera.inference.optimization import (
     run_shera_gd,
 )
 from dluxshera.inference.prior import PriorSpec
+from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -431,6 +432,13 @@ def main(
                     f"curv={c:.3e}  lr={l:.3e}"
                 )
 
+    labels_by_key = map_labels_to_keys(
+        INFER_KEYS,
+        fim_labels,
+        store=init_store if use_eigen else None,
+        index_map=None if use_eigen else index_map,
+    )
+
     print("Running preconditioned gradient descent...")
     n_iter = FAST_ITER if fast else N_ITER
     metric_payload = {
@@ -449,7 +457,10 @@ def main(
         return_artifacts=False,
         theta_space=theta_space,
         metric=metric_payload,
-        extra_meta={"optimizer": {"preconditioning": precond_meta}},
+        extra_meta={
+            "optimizer": {"preconditioning": precond_meta},
+            "theta": {"labels_by_key": labels_by_key},
+        },
     )
 
     if use_eigen:
@@ -460,13 +471,6 @@ def main(
     final_store = store_unpack_params(inference_subspec, theta_final, init_store)
     final_psf = binder.model(
         strip_structural(final_store, structural_keys=binder.structural_store_keys())
-    )
-
-    labels_by_key = map_labels_to_keys(
-        INFER_KEYS,
-        fim_labels,
-        store=init_store if use_eigen else None,
-        index_map=None if use_eigen else index_map,
     )
 
     print("\n==============================")
@@ -484,6 +488,8 @@ def main(
     summary_true = {k: truth_store.get(k) for k in INFER_KEYS}
     summary_init = {k: init_store.get(k) for k in INFER_KEYS}
     summary_final = {k: final_store.get(k) for k in INFER_KEYS}
+    param_summary = build_param_summary(summary_init, summary_final, truth=summary_true)
+    patch_summary(results_dir, {"param_summary": param_summary})
     print_optimization_summary(
         summary_true,
         summary_init,
