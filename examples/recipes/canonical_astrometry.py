@@ -132,7 +132,7 @@ INFER_KEYS = (
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry_recipe_{TIMESTAMP}")
+DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry_{TIMESTAMP}")
 
 # Plotting defaults
 _ = get_default_cmaps()
