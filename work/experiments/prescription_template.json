@@ -2,15 +2,15 @@
   "experiment": {
     "n_runs": 2,
     "run_id_prefix": "mc",
-    "results_table_name": "results.csv"
+    "results_filename": "results.csv"
   },
   "model": {
     "config_id": "SHERA_TESTBED_CONFIG",
     "overrides": {
-      "diffractive_pupil_path": "data/diffractive_pupil.fits",
-      "primary_noll_indices": [1, 2, 3, 4, 5],
-      "secondary_noll_indices": [1, 2, 3, 4, 5],
-      "dp_design_wavelength_m": null
+      "diffractive_pupil_path": "data/diffractive_pupil.npy",
+      "primary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
+      "secondary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
+      "dp_design_wavelength_m": 550e-9
     }
   },
   "infer_keys": [
