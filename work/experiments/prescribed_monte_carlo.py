@@ -11,6 +11,12 @@ Step 2 execution behavior
 - init.mode == "prior": sample around truth using priors, then apply explicit init overrides.
 - init.mode == "explicit": apply explicit init overrides only; missing values remain at the
   baseline store and derived values are refreshed after overrides.
+
+Experiment-level outputs (after completion)
+-------------------------------------------
+- Write manifest.json at the experiment root with provenance and per-run status.
+- Write results.csv as a wide, spreadsheet-friendly table that expands vector
+  parameters into component columns.
 """
 from __future__ import annotations
 
@@ -394,6 +400,389 @@ def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
         )
 
 
+def _load_json_dict(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise TypeError(f"Expected JSON object in {path}")
+    return payload
+
+
+def _get_run_created_at(summary: dict[str, Any] | None, meta: dict[str, Any] | None) -> str | None:
+    if summary:
+        return summary.get("created_at") or summary.get("run_created_at")
+    if meta:
+        return meta.get("created_at")
+    return None
+
+
+def _infer_vector_length(
+    value: Any,
+    *,
+    key: str,
+    field: str,
+    current_len: int | None,
+) -> int | None:
+    if isinstance(value, list):
+        length = len(value)
+        if current_len is None:
+            return length
+        if current_len != length:
+            raise ValueError(
+                f"Vector length mismatch for '{field}.{key}': {current_len} vs {length}"
+            )
+        return current_len
+    if current_len is not None:
+        raise ValueError(
+            f"Scalar/vector mismatch for '{field}.{key}' (expected length {current_len})"
+        )
+    return None
+
+
+def _collect_param_layout(
+    infer_keys: tuple[str, ...],
+    summaries: list[dict[str, Any] | None],
+) -> dict[str, dict[str, Any]]:
+    layout: dict[str, dict[str, Any]] = {}
+    for key in infer_keys:
+        vector_len: int | None = None
+        has_truth = False
+        for summary in summaries:
+            if not summary:
+                continue
+            param_summary = summary.get("param_summary") or {}
+            entry = param_summary.get(key)
+            if not isinstance(entry, dict):
+                continue
+            if "truth" in entry:
+                has_truth = True
+            for field in ("truth", "init", "final", "init_delta", "final_delta"):
+                if field in entry:
+                    vector_len = _infer_vector_length(
+                        entry[field],
+                        key=key,
+                        field=field,
+                        current_len=vector_len,
+                    )
+        layout[key] = {"vector_len": vector_len, "has_truth": has_truth}
+    return layout
+
+
+def _param_columns(infer_keys: tuple[str, ...], layout: dict[str, dict[str, Any]]) -> list[str]:
+    columns: list[str] = []
+    for key in infer_keys:
+        entry = layout.get(key, {})
+        vector_len = entry.get("vector_len")
+        has_truth = entry.get("has_truth", False)
+        fields = []
+        if has_truth:
+            fields.append("truth")
+        fields.extend(["init", "final"])
+        if has_truth:
+            fields.extend(["init_delta", "final_delta"])
+        for field in fields:
+            if vector_len is None:
+                columns.append(f"{field}.{key}")
+            else:
+                for index in range(vector_len):
+                    columns.append(f"{field}.{key}[{index}]")
+    return columns
+
+
+def _assign_param_values(
+    row: dict[str, Any],
+    *,
+    key: str,
+    field: str,
+    value: Any,
+    vector_len: int | None,
+) -> None:
+    if vector_len is None:
+        row[f"{field}.{key}"] = value
+        return
+    if value is None:
+        for index in range(vector_len):
+            row[f"{field}.{key}[{index}]"] = None
+        return
+    if not isinstance(value, list):
+        raise ValueError(f"Expected list for '{field}.{key}'")
+    if len(value) != vector_len:
+        raise ValueError(
+            f"Vector length mismatch for '{field}.{key}': {len(value)} vs {vector_len}"
+        )
+    for index, entry in enumerate(value):
+        row[f"{field}.{key}[{index}]"] = entry
+
+
+def _build_results_rows(
+    run_entries: list[dict[str, Any]],
+    infer_keys: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    summaries = [entry.get("summary") for entry in run_entries]
+    layout = _collect_param_layout(infer_keys, summaries)
+    columns = _param_columns(infer_keys, layout)
+
+    rows: list[dict[str, Any]] = []
+    for entry in run_entries:
+        run_id = entry["run_id"]
+        summary = entry.get("summary")
+        meta = entry.get("meta")
+        plan_label = entry.get("plan_label")
+
+        status = summary.get("status") if summary else "error"
+        loss_init = summary.get("loss_init") if summary else None
+        loss_final = summary.get("loss_final") if summary else None
+        loss_truth = None
+        if summary:
+            loss_truth = summary.get("loss_truth", summary.get("loss_true"))
+
+        improvement_ratio = None
+        if summary and "improvement_ratio" in summary:
+            improvement_ratio = summary.get("improvement_ratio")
+        elif loss_init is not None and loss_final not in (None, 0):
+            improvement_ratio = loss_init / loss_final
+
+        created_at = _get_run_created_at(summary, meta)
+        num_steps = summary.get("num_steps_completed") if summary else None
+
+        prescribed_meta = meta.get("prescribed") if meta else {}
+        optimizer_meta = meta.get("optimizer") if meta else {}
+        precond_meta = (
+            optimizer_meta.get("preconditioning") if optimizer_meta else {}
+        )
+        precond_method = precond_meta.get("method")
+
+        row: dict[str, Any] = {
+            "run_id": run_id,
+            "status": status,
+            "created_at": created_at,
+            "loss_init": loss_init,
+            "loss_final": loss_final,
+            "loss_truth": loss_truth,
+            "num_steps_completed": num_steps,
+            "improvement_ratio": improvement_ratio,
+            "plan_label": plan_label,
+            "seed": (
+                summary.get("run_seed")
+                if summary and summary.get("run_seed") is not None
+                else prescribed_meta.get("seed")
+            ),
+            "init.mode": prescribed_meta.get("init_mode"),
+            "optimizer.n_iter": optimizer_meta.get("num_steps"),
+            "optimizer.base_lr": optimizer_meta.get("learning_rate"),
+            "eigen.use_eigen": (
+                prescribed_meta.get("use_eigen")
+                if prescribed_meta.get("use_eigen") is not None
+                else (precond_method == "eigen" if precond_method else None)
+            ),
+            "eigen.whiten_basis": precond_meta.get("whiten_basis"),
+            "eigen.truncate_k": precond_meta.get("truncate_k"),
+            "eigen.truncate_by_eigval": precond_meta.get("truncate_by_eigval"),
+            "noise.add_noise": prescribed_meta.get("add_noise"),
+        }
+
+        param_summary = summary.get("param_summary") if summary else None
+        for key in infer_keys:
+            key_layout = layout.get(key, {})
+            vector_len = key_layout.get("vector_len")
+            has_truth = key_layout.get("has_truth", False)
+            entry_values = param_summary.get(key) if isinstance(param_summary, dict) else None
+
+            if has_truth:
+                truth_value = entry_values.get("truth") if isinstance(entry_values, dict) else None
+                _assign_param_values(
+                    row, key=key, field="truth", value=truth_value, vector_len=vector_len
+                )
+            init_value = entry_values.get("init") if isinstance(entry_values, dict) else None
+            final_value = entry_values.get("final") if isinstance(entry_values, dict) else None
+            _assign_param_values(row, key=key, field="init", value=init_value, vector_len=vector_len)
+            _assign_param_values(
+                row, key=key, field="final", value=final_value, vector_len=vector_len
+            )
+            if has_truth:
+                init_delta = entry_values.get("init_delta") if isinstance(entry_values, dict) else None
+                final_delta = entry_values.get("final_delta") if isinstance(entry_values, dict) else None
+                _assign_param_values(
+                    row,
+                    key=key,
+                    field="init_delta",
+                    value=init_delta,
+                    vector_len=vector_len,
+                )
+                _assign_param_values(
+                    row,
+                    key=key,
+                    field="final_delta",
+                    value=final_delta,
+                    vector_len=vector_len,
+                )
+
+        rows.append(row)
+
+    return rows, columns
+
+
+def _write_results_csv(
+    out_path: Path,
+    run_entries: list[dict[str, Any]],
+    infer_keys: tuple[str, ...],
+) -> list[str]:
+    rows, param_columns = _build_results_rows(run_entries, infer_keys)
+    base_columns = [
+        "run_id",
+        "status",
+        "created_at",
+        "loss_init",
+        "loss_final",
+        "loss_truth",
+        "num_steps_completed",
+        "improvement_ratio",
+        "plan_label",
+        "seed",
+        "init.mode",
+        "optimizer.n_iter",
+        "optimizer.base_lr",
+        "eigen.use_eigen",
+        "eigen.whiten_basis",
+        "eigen.truncate_k",
+        "eigen.truncate_by_eigval",
+        "noise.add_noise",
+    ]
+    columns = base_columns + param_columns
+    with out_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in columns})
+    return columns
+
+
+def _write_manifest(
+    out_path: Path,
+    *,
+    created_at: str,
+    script: str,
+    prescription_path: str | None,
+    plan_path: str | None,
+    config_id: str | None,
+    overrides_config_keys: list[str],
+    overrides_store_keys: list[str],
+    runs: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+) -> None:
+    manifest = {
+        "created_at": created_at,
+        "script": script,
+        "prescription_path": prescription_path,
+        "plan_path": plan_path,
+        "config_id": config_id,
+        "overrides": {
+            "config_keys": overrides_config_keys,
+            "store_keys": overrides_store_keys,
+        },
+        "runs_dir": "runs",
+        "runs": runs,
+        "artifacts": artifacts,
+    }
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+
+
+def _collect_run_entries(
+    runs_dir: Path,
+    plan_rows: list[dict[str, Any]],
+    run_specs: list[dict[str, Any]],
+    plan_labels: list[str | None],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for row, spec, label in zip(plan_rows, run_specs, plan_labels):
+        if not _row_enabled(row):
+            continue
+        run_id = spec.get("run_id")
+        if not run_id:
+            continue
+        run_dir = runs_dir / run_id
+        summary = _load_json_dict(run_dir / "summary.json")
+        meta = _load_json_dict(run_dir / "meta.json")
+        entries.append(
+            {
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "summary": summary,
+                "meta": meta,
+                "plan_label": label,
+            }
+        )
+    return entries
+
+
+def _build_manifest_runs(run_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manifest_runs: list[dict[str, Any]] = []
+    for entry in run_entries:
+        run_id = entry["run_id"]
+        summary = entry.get("summary")
+        run_dir = entry.get("run_dir")
+        status = summary.get("status") if summary else "error"
+        run_payload: dict[str, Any] = {
+            "run_id": run_id,
+            "path": f"runs/{run_id}",
+            "status": status,
+        }
+        if summary:
+            for key in ("loss_init", "loss_final", "num_steps_completed"):
+                if key in summary:
+                    run_payload[key] = summary.get(key)
+        else:
+            run_payload["message"] = f"summary.json missing in runs/{run_id}"
+        manifest_runs.append(run_payload)
+    return manifest_runs
+
+
+def _write_experiment_outputs(
+    *,
+    outdir: Path,
+    prescription: dict[str, Any],
+    prescription_path: Path,
+    plan_path: Path,
+    run_entries: list[dict[str, Any]],
+    infer_keys: tuple[str, ...],
+    repo_root: Path,
+) -> None:
+    experiment = prescription.get("experiment", {})
+    results_filename = (
+        experiment.get("results_filename")
+        or experiment.get("results_table_name")
+        or "results.csv"
+    )
+    results_path = outdir / results_filename
+    _write_results_csv(results_path, run_entries, infer_keys)
+
+    manifest_path = outdir / "manifest.json"
+    overrides = prescription.get("overrides", {})
+    config_keys = sorted((overrides.get("config") or {}).keys())
+    store_keys = sorted((overrides.get("store") or {}).keys())
+    manifest_runs = _build_manifest_runs(run_entries)
+
+    _write_manifest(
+        manifest_path,
+        created_at=_now_iso_local_ms(),
+        script=_repo_relative_path(Path(__file__), repo_root=repo_root)
+        or "work/experiments/prescribed_monte_carlo.py",
+        prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
+        plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
+        config_id=_get_nested(prescription, ["model", "config_id"]),
+        overrides_config_keys=config_keys,
+        overrides_store_keys=store_keys,
+        runs=manifest_runs,
+        artifacts=[
+            {"path": "manifest.json"},
+            {"path": results_filename},
+        ],
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prescribed Monte Carlo scaffold")
     parser.add_argument(
@@ -411,6 +800,12 @@ def main() -> None:
     parser.add_argument("--outdir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
+    parser.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        default=False,
+        help="Generate manifest + results.csv from existing runs without executing.",
+    )
     parser.add_argument("--num-preview", type=int, default=None)
 
     args = parser.parse_args()
@@ -509,12 +904,33 @@ def main() -> None:
     prior_info = prescription.get("priors", {})
     prior_spec = PriorSpec.from_info(base_store, prior_info)
 
-    outdir.mkdir(parents=True, exist_ok=True)
-    runs_dir = outdir / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    if args.aggregate_only:
+        if not outdir.exists():
+            raise FileNotFoundError(f"Output directory not found: {outdir}")
+        runs_dir = outdir / "runs"
+        if not runs_dir.exists():
+            raise FileNotFoundError(f"Runs directory not found: {runs_dir}")
+    else:
+        outdir.mkdir(parents=True, exist_ok=True)
+        runs_dir = outdir / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
 
     run_id_prefix = _get_nested(prescription, ["experiment", "run_id_prefix"]) or "run"
     run_counter = 0
+
+    if args.aggregate_only:
+        run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
+        _write_experiment_outputs(
+            outdir=outdir,
+            prescription=prescription,
+            prescription_path=args.prescription,
+            plan_path=args.plan,
+            run_entries=run_entries,
+            infer_keys=infer_keys,
+            repo_root=repo_root,
+        )
+        print(f"Wrote experiment manifest/results to: {outdir}")
+        return
 
     for index, (row, run_spec) in enumerate(zip(plan_rows, run_specs)):
         if not _row_enabled(row):
@@ -806,7 +1222,18 @@ def main() -> None:
             )
         )
 
+    run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
+    _write_experiment_outputs(
+        outdir=outdir,
+        prescription=prescription,
+        prescription_path=args.prescription,
+        plan_path=args.plan,
+        run_entries=run_entries,
+        infer_keys=infer_keys,
+        repo_root=repo_root,
+    )
     print(f"\nExecution complete. Wrote runs to: {runs_dir}")
+    print(f"Wrote experiment manifest/results to: {outdir}")
 
 if __name__ == "__main__":
     main()
