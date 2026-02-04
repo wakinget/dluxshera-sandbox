@@ -112,7 +112,11 @@ def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) ->
         run_id = f"{run_id_prefix}_{index:04d}"
     resolved["run_id"] = run_id
 
+    seed_override = structured_row.pop("seed", None)
+
     _deep_update(resolved, structured_row)
+
+    resolved["model"] = copy.deepcopy(presc.get("model", {}))
 
     resolved.setdefault("init", {})
     resolved.setdefault("noise", {})
@@ -120,6 +124,15 @@ def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) ->
     resolved.setdefault("truth", {})
     resolved.setdefault("optimizer", {})
     resolved.setdefault("model", {})
+
+    base_seed = presc.get("defaults", {}).get("seed")
+    if base_seed is None:
+        raise ValueError("Prescription defaults must include a base seed.")
+    resolved_seed = base_seed if seed_override is None else seed_override
+    resolved["seed"] = int(resolved_seed)
+    # TODO (Step 2): split resolved["seed"] via jax.random.split for init/noise streams.
+    # TODO (Step 2): enforce strict explicit init (init.mode == \"explicit\" and/or init.strict).
+    # TODO (Step 2): enforce model overrides experiment-wide only.
 
     return resolved
 
@@ -138,10 +151,10 @@ def _get_nested(payload: dict[str, Any], keys: list[str]) -> Any:
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:
     headers = [
         "run_id",
+        "seed",
         "init.mode",
-        "init.seed",
-        "noise.seed",
         "eigen.use_eigen",
+        "eigen.whiten_basis",
         "eigen.truncate_k",
         "eigen.truncate_by_eigval",
         "truth.x",
@@ -153,14 +166,14 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
     def cell(spec: dict[str, Any], key: str) -> str:
         if key == "run_id":
             value = spec.get("run_id")
+        elif key == "seed":
+            value = spec.get("seed")
         elif key == "init.mode":
             value = _get_nested(spec, ["init", "mode"])
-        elif key == "init.seed":
-            value = _get_nested(spec, ["init", "seed"])
-        elif key == "noise.seed":
-            value = _get_nested(spec, ["noise", "seed"])
         elif key == "eigen.use_eigen":
             value = _get_nested(spec, ["eigen", "use_eigen"])
+        elif key == "eigen.whiten_basis":
+            value = _get_nested(spec, ["eigen", "whiten_basis"])
         elif key == "eigen.truncate_k":
             value = _get_nested(spec, ["eigen", "truncate_k"])
         elif key == "eigen.truncate_by_eigval":
@@ -227,6 +240,20 @@ def main() -> None:
     prescription = _load_prescription(args.prescription)
     plan_rows = _load_plan_csv(args.plan)
 
+    for row in plan_rows:
+        forbidden = [key for key in row if key == "model" or key.startswith("model.")]
+        if forbidden:
+            raise ValueError(
+                "Plan rows cannot override model settings; remove: "
+                + ", ".join(sorted(forbidden))
+            )
+
+    model_config_id = _get_nested(prescription, ["model", "config_id"])
+    model_overrides = _get_nested(prescription, ["model", "overrides"]) or {}
+    override_keys = (
+        ", ".join(sorted(model_overrides.keys())) if model_overrides else "none"
+    )
+
     run_specs = [
         _resolve_run_spec(prescription, row, index + 1)
         for index, row in enumerate(plan_rows)
@@ -234,6 +261,8 @@ def main() -> None:
 
     outdir = _resolve_outdir(args.outdir, args.run_name)
     print(f"Resolved outdir: {outdir}")
+    print(f"Model config_id: {model_config_id}")
+    print(f"Model overrides: {override_keys}")
     print(f"Resolved {len(run_specs)} run(s). Preview:")
     _print_preview(run_specs, args.num_preview)
 

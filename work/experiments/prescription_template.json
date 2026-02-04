@@ -6,7 +6,12 @@
   },
   "model": {
     "config_id": "SHERA_TESTBED_CONFIG",
-    "diffractive_pupil_path": "data/diffractive_pupil.fits"
+    "overrides": {
+      "diffractive_pupil_path": "data/diffractive_pupil.fits",
+      "primary_noll_indices": [1, 2, 3, 4, 5],
+      "secondary_noll_indices": [1, 2, 3, 4, 5],
+      "dp_design_wavelength_m": null
+    }
   },
   "infer_keys": [
     "binary.separation_as",
@@ -58,25 +63,20 @@
     }
   },
   "defaults": {
+    "seed": 123,
     "optimizer": {
       "n_iter": 60,
       "base_lr": 0.5
     },
     "eigen": {
       "use_eigen": true,
+      "whiten_basis": true,
       "truncate_k": null,
       "truncate_by_eigval": null
     },
     "init": {
       "mode": "prior",
-      "seed": 123,
-      "binary": {
-        "x_position_as": null,
-        "y_position_as": null
-      }
-    },
-    "noise": {
-      "seed": 456
+      "strict": false
     }
   }
 }

@@ -1,6 +1,7 @@
 # Prescribed Monte Carlo plan template.
 # Use dotted paths to override nested keys in the prescription defaults.
 # Blank cells leave defaults unchanged; "null" clears a value explicitly.
-run_id,init.mode,init.seed,noise.seed,eigen.use_eigen,eigen.truncate_k,eigen.truncate_by_eigval,truth.binary.x_position_as,truth.binary.y_position_as,init.binary.x_position_as,init.binary.y_position_as
-mc_0001,prior,101,201,true,,0.01,0.12,-0.03,,
-mc_0002,explicit,102,202,false,5,,0.2,0.05,0.18,0.04
+# List-valued cells should be JSON arrays (e.g., [1, 2, 3]).
+seed,init.mode,eigen.use_eigen,eigen.whiten_basis,eigen.truncate_k,eigen.truncate_by_eigval,truth.binary.x_position_as,truth.binary.y_position_as,init.binary.x_position_as,init.binary.y_position_as
+101,prior,true,true,,0.01,0.12,-0.03,,
+102,explicit,false,false,5,,0.2,0.05,0.18,0.04
