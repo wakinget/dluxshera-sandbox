@@ -15,6 +15,7 @@
       "dp_design_wavelength_m": 550e-9
     },
     "store": {
+      "binary.x_position_as": 0.5,
       "imaging.exposure_time_s": 1800.0
     }
   },
@@ -31,44 +32,44 @@
   ],
   "priors": {
     "binary.separation_as": {
-      "dist": "normal",
-      "sigma": 0.01
+      "dist": "Normal",
+      "sigma": 1e-4
     },
     "binary.position_angle_deg": {
-      "dist": "normal",
-      "sigma": 1.0
+      "dist": "Uniform",
+      "sigma": 1e-2
     },
     "binary.x_position_as": {
-      "dist": "normal",
-      "sigma": 0.05
+      "dist": "Normal",
+      "sigma": 1e-3
     },
     "binary.y_position_as": {
-      "dist": "normal",
-      "sigma": 0.05
+      "dist": "Normal",
+      "sigma": 1e-3
     },
     "binary.log_flux_total": {
-      "dist": "normal",
-      "sigma": 0.2
+      "dist": "LogNormal",
+      "sigma": 1e-3
     },
     "binary.contrast": {
-      "dist": "normal",
-      "sigma": 0.1
+      "dist": "LogNormal",
+      "sigma": 1e-3
     },
     "system.plate_scale_as_per_pix": {
-      "dist": "normal",
-      "sigma": 0.001
+      "dist": "LogNormal",
+      "sigma": 1e-3
     },
     "primary.zernike_coeffs_nm": {
-      "dist": "normal",
-      "sigma": 10.0
+      "dist": "Normal",
+      "sigma": 1e0
     },
     "secondary.zernike_coeffs_nm": {
-      "dist": "normal",
-      "sigma": 10.0
+      "dist": "Normal",
+      "sigma": 1e0
     }
   },
   "defaults": {
-    "seed": 123,
+    "seed": 42,
     "optimizer": {
       "n_iter": 60,
       "base_lr": 0.5
