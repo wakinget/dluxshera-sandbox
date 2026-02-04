@@ -153,6 +153,16 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
     if header and header[0] == "key":
         reader = csv.reader(lines)
         header = next(reader)
+        empty_header_indices = [
+            idx
+            for idx, cell in enumerate(header)
+            if cell is None or not cell.strip()
+        ]
+        print(f"Plan CSV header length: {len(header)}")
+        print(
+            "Plan CSV empty header cells: "
+            f"{len(empty_header_indices)} at indices {empty_header_indices}"
+        )
         run_headers = header[1:]
         last_non_empty = None
         for idx, run_header in enumerate(run_headers):
@@ -166,6 +176,10 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
             for run_header in run_headers
             if run_header is not None and run_header.strip()
         ]
+        trimmed_run_columns = [
+            run_header.strip() if run_header is not None else "" for run_header in run_columns
+        ]
+        print(f"Plan CSV run columns after trimming: {trimmed_run_columns}")
         rows: list[dict[str, Any]] = []
         for run_col in run_columns:
             label = run_col.strip() if run_col is not None else ""
