@@ -1,7 +1,7 @@
 """Prescribed Monte Carlo experiment scaffold.
 
 Purpose: incubate the prescription/plan workflow in work/experiments.
-Local helpers are defined here for now (TODO: migrate to shared util).
+Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
 --------------
@@ -60,19 +60,35 @@ from dluxshera.systems.three_plane import (
     build_forward_spec_from_config,
 )
 
-# TODO: migrate to shared util
 def _timestamp_tag() -> str:
+    """Return a sortable timestamp string for labeling output directories.
+
+    Used by `_resolve_outdir` when no explicit output directory/run name is given,
+    providing consistent time-based naming in the main execution flow.
+    This helper is broadly reusable as a generic timestamp label utility.
+    """
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-# TODO: migrate to shared util
 def _load_prescription(path: Path) -> dict[str, Any]:
+    """Load a prescription JSON file from disk.
+
+    Called early in `main` to materialize the experiment recipe that drives run
+    spec resolution and defaults. This is generally reusable for JSON config
+    loading, but kept local because it assumes the specific prescription schema
+    expected by this script.
+    """
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
-# TODO: migrate to shared util
 def _parse_cell(value: str | None) -> Any:
+    """Parse a CSV cell value into a typed Python value.
+
+    Invoked by `_load_plan_csv` when interpreting plan rows, converting strings
+    to `None`, booleans, numbers, or JSON lists as needed. The parser is reusable
+    for plan-like CSV parsing but is tailored to this script's CSV conventions.
+    """
     if value is None:
         return None
     raw = value.strip()
@@ -99,9 +115,14 @@ def _parse_cell(value: str | None) -> Any:
         return raw
 
 
-# TODO: migrate to shared util
 def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
-    """Load plan rows from CSV in wide (runs-as-rows) or transposed (keys-as-rows) format."""
+    """Load plan rows from CSV in wide or transposed formats.
+
+    Called by `main` to read the optional plan file that overrides per-run
+    settings. It supports both runs-as-rows and keys-as-rows layouts and relies
+    on `_parse_cell` to coerce values. This helper is reusable for experiment
+    plan ingestion but is coupled to the specific plan format rules used here.
+    """
     with path.open("r", encoding="utf-8") as handle:
         lines = [line for line in handle if not line.lstrip().startswith("#") and line.strip()]
 
@@ -142,16 +163,26 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-# TODO: migrate to shared util
 def _set_nested(target: dict[str, Any], keys: list[str], value: Any) -> None:
+    """Set a nested key path within a dictionary.
+
+    Used by `_unflatten_row` to expand dotted keys into nested structures.
+    This is a generic dictionary utility and is a good candidate for shared
+    helpers if nested config handling is needed elsewhere.
+    """
     current = target
     for key in keys[:-1]:
         current = current.setdefault(key, {})
     current[keys[-1]] = value
 
 
-# TODO: migrate to shared util
 def _deep_update(target: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge `updates` into `target`, recursing over nested dicts.
+
+    Called by `_resolve_run_spec_with_id` to apply per-run overrides on top of
+    prescription defaults. This is a reusable merge utility, but it assumes dict
+    values are the only mergeable structures (no list merging).
+    """
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
             _deep_update(target[key], value)
@@ -160,8 +191,13 @@ def _deep_update(target: dict[str, Any], updates: dict[str, Any]) -> dict[str, A
     return target
 
 
-# TODO: migrate to shared util
 def _unflatten_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Expand dotted keys in a plan row into nested dictionaries.
+
+    Used in `_resolve_run_spec_with_id` to translate plan CSV columns into the
+    nested configuration structure expected by the prescription. This is
+    reusable for dot-notation configs but is coupled to the plan CSV layout.
+    """
     structured: dict[str, Any] = {}
     for key, value in row.items():
         if "." in key:
@@ -171,8 +207,13 @@ def _unflatten_row(row: dict[str, Any]) -> dict[str, Any]:
     return structured
 
 
-# TODO: migrate to shared util
 def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) -> dict[str, Any]:
+    """Resolve a run spec from a plan row using default run indexing.
+
+    This is a compatibility wrapper used for older call sites; in this script
+    `_resolve_run_spec_with_id` is used directly to accommodate disabled rows.
+    It is reusable only for the prescription schema defined here.
+    """
     return _resolve_run_spec_with_id(presc, row, index=index, run_id_index=index)
 
 
@@ -183,6 +224,13 @@ def _resolve_run_spec_with_id(
     index: int,
     run_id_index: int | None,
 ) -> dict[str, Any]:
+    """Build a fully resolved run specification from a plan row.
+
+    Called in `main` to combine prescription defaults with plan overrides,
+    generate run IDs, and ensure required sections/seed are present. This helper
+    is tightly coupled to the prescription schema and run ID conventions in
+    this script, so it is not intended as a general utility.
+    """
     defaults = copy.deepcopy(presc.get("defaults", {}))
     resolved = copy.deepcopy(defaults)
 
@@ -220,8 +268,13 @@ def _resolve_run_spec_with_id(
     return resolved
 
 
-# TODO: migrate to shared util
 def _get_nested(payload: dict[str, Any], keys: list[str]) -> Any:
+    """Safely fetch a nested value from a dictionary by key path.
+
+    Used throughout `main` and helpers like `_print_preview` to access optional
+    nested fields without raising `KeyError`. This is a generic utility that
+    could be shared across scripts.
+    """
     current: Any = payload
     for key in keys:
         if not isinstance(current, dict) or key not in current:
@@ -230,8 +283,13 @@ def _get_nested(payload: dict[str, Any], keys: list[str]) -> Any:
     return current
 
 
-# TODO: migrate to shared util
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:
+    """Print a tabular preview of resolved run specs to stdout.
+
+    Invoked in `main` after run resolution to show key fields before execution.
+    The logic depends on the specific nested keys in this script, so it is
+    tightly coupled and not ideal for a shared utility without customization.
+    """
     headers = [
         "run_id",
         "seed",
@@ -288,8 +346,14 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         print(" | ".join(value.ljust(width) for value, width in zip(row, widths)))
 
 
-# TODO: migrate to shared util
 def _resolve_outdir(outdir: str | None, run_name: str | None) -> Path:
+    """Resolve the experiment output directory based on CLI inputs.
+
+    Called in `main` to determine where runs and aggregate outputs are written,
+    falling back to a timestamped Results directory via `_timestamp_tag`. This
+    is a reusable pattern for experiment output naming, but naming conventions
+    are specific to this script.
+    """
     if outdir and run_name:
         return Path(outdir) / run_name
     if outdir:
@@ -300,6 +364,12 @@ def _resolve_outdir(outdir: str | None, run_name: str | None) -> Path:
 
 
 def _row_enabled(row: dict[str, Any]) -> bool:
+    """Determine whether a plan row is enabled for execution.
+
+    Used in `main` to skip disabled plan rows and in `_collect_run_entries` to
+    ignore runs when aggregating. This is reusable for boolean-like CSV fields,
+    though the accepted string values are tailored to this script.
+    """
     value = row.get("enabled")
     if value is None:
         return True
@@ -317,6 +387,12 @@ def _row_enabled(row: dict[str, Any]) -> bool:
 
 
 def _flatten_store_overrides(payload: dict[str, Any]) -> dict[str, Any]:
+    """Flatten nested store overrides into dotted key/value pairs.
+
+    Used in `main` to apply store overrides to `ParameterStore` and to build
+    truth/init overrides from run specs. This is reusable for nested dicts, but
+    it assumes dotted-key semantics aligned with this script's store API.
+    """
     flattened: dict[str, Any] = {}
 
     def _walk(prefix: str, value: Any) -> None:
@@ -332,6 +408,12 @@ def _flatten_store_overrides(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
+    """Resolve a config ID string into a concrete SheraThreePlaneConfig.
+
+    Called in `main` to translate the prescription's `model.config_id` into an
+    actual config object. This is tightly coupled to Shera configs and should
+    remain local to this script or a Shera-specific utility module.
+    """
     if not config_id:
         raise ValueError("Prescription must include model.config_id.")
     mapping = {
@@ -349,6 +431,12 @@ def _apply_config_overrides(
     cfg: SheraThreePlaneConfig,
     overrides: dict[str, Any],
 ) -> SheraThreePlaneConfig:
+    """Apply validated overrides to a SheraThreePlaneConfig.
+
+    Used in `main` after resolving the base config to enforce override keys and
+    normalize list fields. This is Shera-specific and not generally reusable
+    outside this experiment workflow.
+    """
     if not overrides:
         return cfg
     field_names = {field.name for field in dataclasses.fields(cfg)}
@@ -365,6 +453,12 @@ def _apply_config_overrides(
 
 
 def _repo_relative_path(path: str | Path | None, *, repo_root: Path) -> str | None:
+    """Return a repo-relative path string for reporting/manifest metadata.
+
+    Used by `_config_payload` and `_write_experiment_outputs` to make paths
+    reproducible in manifest outputs. This is reusable for any tooling that
+    wants stable paths relative to a repo root.
+    """
     if path is None:
         return None
     resolved = Path(path).expanduser().resolve()
@@ -375,6 +469,11 @@ def _repo_relative_path(path: str | Path | None, *, repo_root: Path) -> str | No
 
 
 def _config_payload(cfg: SheraThreePlaneConfig, *, repo_root: Path) -> dict[str, Any]:
+    """Serialize a SheraThreePlaneConfig and normalize path fields.
+
+    Called in `main` when recording run metadata for the optimizer artifacts.
+    It is tightly coupled to the Shera config schema and is not generic.
+    """
     payload = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else dict(cfg)
     if isinstance(payload, dict) and "diffractive_pupil_path" in payload:
         payload = {
@@ -387,6 +486,11 @@ def _config_payload(cfg: SheraThreePlaneConfig, *, repo_root: Path) -> dict[str,
 
 
 def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
+    """Warn if required run artifacts are missing from a run directory.
+
+    Used after patching run summaries in `main` to flag incomplete runs. This is
+    reusable for artifact validation but depends on this script's artifact list.
+    """
     required = ["meta.json", "summary.json", "trace.npz"]
     missing = [name for name in required if not (run_dir / name).exists()]
     if missing:
@@ -396,6 +500,11 @@ def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
 
 
 def _load_json_dict(path: Path) -> dict[str, Any] | None:
+    """Load a JSON file expected to contain an object, or return None if absent.
+
+    Used by `_collect_run_entries` when aggregating run metadata. This helper is
+    reusable for safe JSON object loading across scripts.
+    """
     if not path.exists():
         return None
     with path.open("r", encoding="utf-8") as handle:
@@ -406,6 +515,11 @@ def _load_json_dict(path: Path) -> dict[str, Any] | None:
 
 
 def _get_run_created_at(summary: dict[str, Any] | None, meta: dict[str, Any] | None) -> str | None:
+    """Find the run creation timestamp from summary/meta payloads.
+
+    Used by `_build_results_rows` to populate results.csv creation metadata.
+    This logic is tied to the fields emitted by this script's run artifacts.
+    """
     if summary:
         return summary.get("created_at") or summary.get("run_created_at")
     if meta:
@@ -420,6 +534,12 @@ def _infer_vector_length(
     field: str,
     current_len: int | None,
 ) -> int | None:
+    """Infer or validate vector length for parameter summaries.
+
+    Called by `_collect_param_layout` to ensure consistent vector lengths across
+    runs when building results columns. This helper is reusable for validating
+    vector/scalar consistency but depends on this script's summary schema.
+    """
     if isinstance(value, list):
         length = len(value)
         if current_len is None:
@@ -440,6 +560,12 @@ def _collect_param_layout(
     infer_keys: tuple[str, ...],
     summaries: list[dict[str, Any] | None],
 ) -> dict[str, dict[str, Any]]:
+    """Analyze parameter summaries to determine column layout.
+
+    Used in `_build_results_rows` to decide which parameters are vectors and
+    whether truth values exist. This is coupled to the summary schema produced
+    by this script's optimization artifacts.
+    """
     layout: dict[str, dict[str, Any]] = {}
     for key in infer_keys:
         vector_len: int | None = None
@@ -466,6 +592,11 @@ def _collect_param_layout(
 
 
 def _param_columns(infer_keys: tuple[str, ...], layout: dict[str, dict[str, Any]]) -> list[str]:
+    """Build the ordered list of parameter column names for results.csv.
+
+    Called by `_build_results_rows` to determine output columns based on the
+    inferred parameter layout. This is tightly coupled to the results schema.
+    """
     columns: list[str] = []
     for key in infer_keys:
         entry = layout.get(key, {})
@@ -494,6 +625,11 @@ def _assign_param_values(
     value: Any,
     vector_len: int | None,
 ) -> None:
+    """Write scalar or vector parameter values into a flat results row.
+
+    Used by `_build_results_rows` to emit per-parameter values in the expected
+    column shape. This helper is specialized to the results.csv schema here.
+    """
     if vector_len is None:
         row[f"{field}.{key}"] = value
         return
@@ -515,6 +651,12 @@ def _build_results_rows(
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    """Construct rows and column metadata for the aggregate results.csv file.
+
+    Called by `_write_results_csv` to transform run summaries into flat rows
+    while adding derived metrics. This is tightly coupled to the run artifacts
+    and results schema defined by this script.
+    """
     summaries = [entry.get("summary") for entry in run_entries]
     layout = _collect_param_layout(infer_keys, summaries)
     columns = _param_columns(infer_keys, layout)
@@ -624,6 +766,12 @@ def _write_results_csv(
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
 ) -> list[str]:
+    """Write the aggregate results.csv file for all runs.
+
+    Invoked by `_write_experiment_outputs` after runs complete or during
+    aggregation-only mode. This is a workflow-specific writer and not intended
+    for reuse outside this experiment layout.
+    """
     rows, param_columns = _build_results_rows(run_entries, infer_keys)
     base_columns = [
         "run_id",
@@ -667,6 +815,11 @@ def _write_manifest(
     runs: list[dict[str, Any]],
     artifacts: list[dict[str, Any]],
 ) -> None:
+    """Write the experiment manifest.json describing runs and outputs.
+
+    Called by `_write_experiment_outputs` to summarize run metadata and artifact
+    locations. This is specific to the prescribed Monte Carlo experiment format.
+    """
     manifest = {
         "created_at": created_at,
         "script": script,
@@ -691,6 +844,12 @@ def _collect_run_entries(
     run_specs: list[dict[str, Any]],
     plan_labels: list[str | None],
 ) -> list[dict[str, Any]]:
+    """Collect run metadata from on-disk artifacts for aggregation.
+
+    Used in `main` for aggregate-only mode and after execution to build entries
+    for results/manifest output. This is coupled to the run directory layout
+    and artifact filenames used by this script.
+    """
     entries: list[dict[str, Any]] = []
     for row, spec, label in zip(plan_rows, run_specs, plan_labels):
         if not _row_enabled(row):
@@ -714,6 +873,11 @@ def _collect_run_entries(
 
 
 def _build_manifest_runs(run_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize run entries for inclusion in manifest.json.
+
+    Called by `_write_experiment_outputs` to turn entries into compact manifest
+    records. This is tied to the manifest schema used by this script.
+    """
     manifest_runs: list[dict[str, Any]] = []
     for entry in run_entries:
         run_id = entry["run_id"]
@@ -745,6 +909,12 @@ def _write_experiment_outputs(
     infer_keys: tuple[str, ...],
     repo_root: Path,
 ) -> None:
+    """Write aggregated outputs (results.csv and manifest.json) for the run set.
+
+    Called in `main` after execution or in aggregate-only mode to produce
+    experiment-level artifacts. This is specific to the prescribed Monte Carlo
+    workflow and not intended as a generic utility.
+    """
     experiment = prescription.get("experiment", {})
     results_filename = (
         experiment.get("results_filename")
