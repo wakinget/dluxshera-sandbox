@@ -1126,6 +1126,15 @@ def main() -> None:
     # and the optional plan CSV that overrides per-run settings.
     prescription = _load_prescription(prescription_path)
     plan_rows = _load_plan_csv(plan_path)
+    n_runs = _get_nested(prescription, ["experiment", "n_runs"])
+    if n_runs is not None:
+        n_runs = int(n_runs)
+        if len(plan_rows) > n_runs:
+            print(
+                "WARNING: Plan has more columns than experiment.n_runs; "
+                f"limiting to first {n_runs} of {len(plan_rows)}."
+            )
+            plan_rows = plan_rows[:n_runs]
 
     for row in plan_rows:
         forbidden = [
