@@ -196,22 +196,35 @@ def _detect_prescription_plan_candidates(
     if not outdir.exists():
         return None, None
 
-    prescription_candidates = sorted(outdir.rglob("prescription.json"))
-    plan_candidates = sorted(outdir.rglob("plan.csv"))
+    prescription_candidates = sorted(
+        candidate
+        for candidate in outdir.rglob("*.json")
+        if "prescription" in candidate.name.lower()
+    )
+    plan_candidates = sorted(
+        (candidate for candidate in outdir.rglob("*.csv") if "plan" in candidate.name.lower()),
+        key=lambda candidate: (
+            candidate.name.lower() != "plan.csv",
+            candidate.name.lower() == "plan_wide.csv",
+            str(candidate),
+        ),
+    )
+
+    if len(prescription_candidates) > 1:
+        joined = "\n".join(f"- {candidate}" for candidate in prescription_candidates)
+        raise ValueError(
+            "Multiple prescription candidates found in "
+            f"{outdir}. Provide --prescription to disambiguate:\n{joined}"
+        )
+    if len(plan_candidates) > 1:
+        joined = "\n".join(f"- {candidate}" for candidate in plan_candidates)
+        raise ValueError(
+            "Multiple plan candidates found in "
+            f"{outdir}. Provide --plan to disambiguate:\n{joined}"
+        )
 
     prescription_path = prescription_candidates[0] if prescription_candidates else None
     plan_path = plan_candidates[0] if plan_candidates else None
-
-    if prescription_candidates and len(prescription_candidates) > 1:
-        print(
-            "WARNING: Multiple prescription.json candidates found; using "
-            f"{prescription_path}"
-        )
-    if plan_candidates and len(plan_candidates) > 1:
-        print(
-            "WARNING: Multiple plan.csv candidates found; using "
-            f"{plan_path}"
-        )
 
     return prescription_path, plan_path
 
@@ -233,15 +246,17 @@ def _resolve_prescription_and_plan(
             plan_path = detected_plan
 
     if prescription_path is None:
+        outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
-            "WARNING: No prescription path provided/detected; "
-            f"falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
+            "WARNING: No prescription path provided/detected (no prescription JSON "
+            f"{outdir_label}); falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
         )
         prescription_path = DEFAULT_PRESCRIPTION_PATH
     if plan_path is None:
+        outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
-            "WARNING: No plan path provided/detected; "
-            f"falling back to template at {DEFAULT_PLAN_PATH}"
+            "WARNING: No plan path provided/detected (no plan CSV "
+            f"{outdir_label}); falling back to template at {DEFAULT_PLAN_PATH}"
         )
         plan_path = DEFAULT_PLAN_PATH
 

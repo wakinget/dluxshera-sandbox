@@ -7,7 +7,6 @@ Prescribed Monte Carlo in this repo means an experiment-wide **prescription** pl
 A template directory contains:
 - `prescription.json`
 - `plan.csv` (transposed matrix format; **keys-as-rows, runs-as-columns**)
-- Optional notes file (e.g., `NOTES.md` or `notes.txt`)
 
 Outputs go to an experiment output directory:
 - `manifest.json` (run metadata and configuration used)
@@ -62,7 +61,14 @@ python work/experiments/prescribed_monte_carlo.py \
 - `Results/my_experiment/manifest.json` for the resolved configuration and plan
 
 ## Plan formats (brief)
-The default template uses the **transposed** format (keys-as-rows, runs-as-columns). The script also supports a **wide legacy** format (if you keep a `plan_wide.csv` or similar around), but prefer the transposed format for new work.
+The default template uses the **transposed** format (keys-as-rows, runs-as-columns). The legacy wide format is no longer part of the templates.
+
+## Auto-discovery
+When you pass `--outdir` without explicit `--prescription` or `--plan`, the script scans the output directory for:
+- **Prescription candidates**: JSON files whose names contain `prescription` (case-insensitive).
+- **Plan candidates**: CSV files whose names contain `plan` (case-insensitive), with `plan.csv` treated as the preferred naming convention.
+
+If multiple candidates are found, you must disambiguate by passing explicit paths. If none are found, the script falls back to these templates and prints a warning.
 
 ## Key semantics / policies
 - Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the plan.
