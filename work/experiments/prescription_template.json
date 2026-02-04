@@ -5,12 +5,17 @@
     "results_filename": "results.csv"
   },
   "model": {
-    "config_id": "SHERA_TESTBED_CONFIG",
-    "overrides": {
+    "config_id": "SHERA_TESTBED_CONFIG"
+  },
+  "overrides": {
+    "config": {
       "diffractive_pupil_path": "data/diffractive_pupil.npy",
       "primary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
       "secondary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
       "dp_design_wavelength_m": 550e-9
+    },
+    "store": {
+      "imaging.exposure_time_s": 1800.0
     }
   },
   "infer_keys": [
@@ -75,8 +80,10 @@
       "truncate_by_eigval": null
     },
     "init": {
-      "mode": "prior",
-      "strict": false
+      "mode": "prior"
+    },
+    "noise": {
+      "add_noise": false
     }
   }
 }

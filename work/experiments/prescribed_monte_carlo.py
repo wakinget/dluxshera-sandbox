@@ -241,7 +241,14 @@ def main() -> None:
     plan_rows = _load_plan_csv(args.plan)
 
     for row in plan_rows:
-        forbidden = [key for key in row if key == "model" or key.startswith("model.")]
+        forbidden = [
+            key
+            for key in row
+            if key == "model"
+            or key.startswith("model.")
+            or key == "overrides"
+            or key.startswith("overrides.")
+        ]
         if forbidden:
             raise ValueError(
                 "Plan rows cannot override model settings; remove: "
@@ -249,9 +256,13 @@ def main() -> None:
             )
 
     model_config_id = _get_nested(prescription, ["model", "config_id"])
-    model_overrides = _get_nested(prescription, ["model", "overrides"]) or {}
-    override_keys = (
-        ", ".join(sorted(model_overrides.keys())) if model_overrides else "none"
+    config_overrides = _get_nested(prescription, ["overrides", "config"]) or {}
+    store_overrides = _get_nested(prescription, ["overrides", "store"]) or {}
+    config_override_keys = (
+        ", ".join(sorted(config_overrides.keys())) if config_overrides else "none"
+    )
+    store_override_keys = (
+        ", ".join(sorted(store_overrides.keys())) if store_overrides else "none"
     )
 
     run_specs = [
@@ -262,7 +273,8 @@ def main() -> None:
     outdir = _resolve_outdir(args.outdir, args.run_name)
     print(f"Resolved outdir: {outdir}")
     print(f"Model config_id: {model_config_id}")
-    print(f"Model overrides: {override_keys}")
+    print(f"Config overrides: {config_override_keys}")
+    print(f"Store overrides: {store_override_keys}")
     print(f"Resolved {len(run_specs)} run(s). Preview:")
     _print_preview(run_specs, args.num_preview)
 
