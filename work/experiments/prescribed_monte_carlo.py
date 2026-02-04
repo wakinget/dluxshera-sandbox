@@ -184,9 +184,16 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
         for run_col in run_columns:
             label = run_col.strip() if run_col is not None else ""
             rows.append({"_plan_label": label or None})
-        for row in reader:
+        for row_idx, row in enumerate(reader, start=2):
             if not row:
                 continue
+            if len(row) != len(header):
+                trailing_cells = row[len(header):] if len(row) > len(header) else []
+                print(
+                    "Warning: Plan CSV row "
+                    f"{row_idx} length {len(row)} differs from header length "
+                    f"{len(header)}; trailing cells: {trailing_cells}"
+                )
             key = row[0].strip() if len(row) > 0 and row[0] is not None else ""
             if not key:
                 continue
