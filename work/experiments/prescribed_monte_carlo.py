@@ -1152,6 +1152,12 @@ def main() -> None:
     # and the optional plan CSV that overrides per-run settings.
     prescription = _load_prescription(prescription_path)
     plan_rows = _load_plan_csv(plan_path)
+    seed_preview_rows = plan_rows[:5]
+    seed_preview = [row.get("seed") for row in seed_preview_rows if "seed" in row]
+    if seed_preview:
+        print(
+            f"Plan seed preview (first {len(seed_preview_rows)} rows): {seed_preview}"
+        )
     n_runs = _get_nested(prescription, ["experiment", "n_runs"])
     if n_runs is not None:
         n_runs = int(n_runs)
