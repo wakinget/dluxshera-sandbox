@@ -12,6 +12,19 @@ Execution flow
 - Run optimization in eigen space (FIM-based) or primitive parameter space.
 - Write run artifacts under runs/<run_id>/..., including summaries and logs.
 - Aggregate manifest.json and results.csv across runs at the experiment root.
+
+CLI arguments (mirrors `main`)
+------------------------------
+- --prescription: JSON experiment recipe (default: work/experiments/prescription_templates/prescription.json).
+- --plan: optional CSV plan that overrides per-run settings (default: work/experiments/prescription_templates/plan.csv).
+- --outdir: root output directory for the experiment. If omitted, the output
+  directory is derived from `--run-name` or a timestamp.
+- --run-name: optional name segment used to build the output directory when
+  `--outdir` is not provided. If both are omitted, a timestamp tag is used.
+- --dry-run: resolve and preview run specs without executing optimization.
+- --aggregate-only: skip execution and only build manifest.json/results.csv from
+  existing run artifacts inside `--outdir`.
+- --num-preview: limit how many resolved run specs are printed during preview.
 """
 from __future__ import annotations
 
@@ -949,6 +962,28 @@ def _write_experiment_outputs(
 
 
 def main() -> None:
+    """Run the prescribed Monte Carlo experiment pipeline.
+
+    Args:
+        --prescription: Path to the JSON experiment recipe. This file sets the
+            experiment defaults, model config, and per-run seed rules.
+        --plan: Optional CSV plan that overrides per-run settings. Plan rows
+            cannot override model or overrides.* settings; they only mutate
+            run-level fields.
+        --outdir: Root output directory for the experiment. When supplied, all
+            run artifacts (runs/<run_id>/...), manifest.json, and results.csv
+            are written underneath this directory.
+        --run-name: Optional name segment used to construct the output
+            directory when --outdir is omitted. If both are omitted, a
+            timestamp-based directory name is used. Providing both uses
+            --outdir verbatim and ignores --run-name.
+        --dry-run: Resolve run specs and print previews without executing the
+            optimization runs or writing run artifacts.
+        --aggregate-only: Skip execution and only aggregate manifest.json and
+            results.csv from existing run artifacts inside the resolved outdir.
+        --num-preview: Limit the number of resolved run specs shown in preview
+            output (useful with large plans).
+    """
     parser = argparse.ArgumentParser(description="Prescribed Monte Carlo scaffold")
     parser.add_argument(
         "--prescription",
