@@ -975,6 +975,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Plan/prescription parsing and run spec resolution: load the JSON recipe
+    # and the optional plan CSV that overrides per-run settings.
     prescription = _load_prescription(args.prescription)
     plan_rows = _load_plan_csv(args.plan)
 
@@ -1011,6 +1013,8 @@ def main() -> None:
         enabled = _row_enabled(row)
         if enabled:
             run_id_index += 1
+            # Resolve each run spec by merging defaults + row overrides and
+            # assigning an indexed run_id for enabled rows.
             resolved = _resolve_run_spec_with_id(
                 prescription,
                 row,
@@ -1018,6 +1022,7 @@ def main() -> None:
                 run_id_index=run_id_index,
             )
         else:
+            # Disabled rows keep the resolved fields but do not receive a run_id.
             resolved = _resolve_run_spec_with_id(
                 prescription,
                 row,
@@ -1061,6 +1066,9 @@ def main() -> None:
         cfg=cfg,
     )
 
+    # Store overrides and derived refresh steps: apply nested overrides via
+    # dotted keys, then recompute any derived parameters to keep the store
+    # self-consistent for forward/inference use.
     base_store = ParameterStore.from_spec_defaults(forward_spec)
     if store_overrides:
         base_store = base_store.replace(_flatten_store_overrides(store_overrides))
@@ -1115,6 +1123,8 @@ def main() -> None:
         rng_key, init_key = jr.split(rng_key)
         rng_key, noise_key = jr.split(rng_key)
 
+        # Synthetic data generation + noise handling: build the "truth" store,
+        # refresh derived values, then forward-model data and inject noise.
         truth_overrides = _flatten_store_overrides(run_spec.get("truth", {}))
         truth_store = base_store.replace(truth_overrides)
         truth_store = truth_store.refresh_derived(forward_spec)
@@ -1127,6 +1137,7 @@ def main() -> None:
             add_noise_value = _get_nested(prescription, ["defaults", "noise", "add_noise"])
         add_noise = bool(add_noise_value)
         if add_noise:
+            # Use Gaussian noise for large-count regimes, Poisson for low-count.
             if np.min(data) > 100:
                 data = np.sqrt(data) * jr.normal(noise_key, data.shape) + data
             else:
@@ -1145,6 +1156,8 @@ def main() -> None:
         fim_labels = generate_fim_labels(infer_keys, cfg=cfg, store=truth_store)
         loss_fn = nll_loss_fn
 
+        # FIM computation and eigen preconditioning flow: pack_params converts
+        # a structured ParameterStore into a flat vector for optimization/FIM.
         theta_true = pack_params(inference_subspec, truth_store)
         loss_true = float(loss_fn(theta_true))
 
@@ -1167,6 +1180,8 @@ def main() -> None:
         truncate_by_eigval = eigen_cfg.get("truncate_by_eigval")
 
         if use_eigen:
+            # Switch to eigen theta_space when preconditioning in FIM eigenbasis.
+            # EigenThetaMap encapsulates z<->theta transforms and truncation.
             theta_space = "eigen"
             precond_meta_base = {
                 "method": "eigen",
@@ -1222,6 +1237,7 @@ def main() -> None:
                 )
 
             theta_ref = theta0
+            # Build full eigen map and optionally truncate modes (k or eigval).
             eigen_map_full = EigenThetaMap.from_fim(
                 F,
                 theta_ref,
@@ -1259,6 +1275,8 @@ def main() -> None:
                 else np.array([])
             )
 
+            # Transform theta into z coordinates for the optimizer when in
+            # eigen space; theta_space controls how run_shera_gd logs artifacts.
             z0 = eigen_map.z_from_theta(theta0)
             if whiten_basis:
                 lr_vec = np.ones_like(z0)
@@ -1268,6 +1286,8 @@ def main() -> None:
                 curvature_vec = eigvals_kept
 
             index_map = build_eigen_index_map(eigen_map)
+            # loss_opt maps optimizer z -> physical theta so the loss stays
+            # defined in the original parameter space.
             loss_opt = lambda z: loss_fn(eigen_map.theta_from_z(z))
             theta0_opt = z0
             metric_payload = {
@@ -1280,6 +1300,8 @@ def main() -> None:
                 "lr_vec": np.asarray(lr_vec),
             }
         else:
+            # Primitive theta_space keeps parameters untransformed and applies
+            # a diagonal preconditioner from the FIM.
             index_map = build_index_map(inference_subspec, init_store, theta=theta0)
             lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
             curvature_vec = fim_diag
@@ -1312,6 +1334,8 @@ def main() -> None:
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
 
+        # Loss function setup and optimization execution: run_shera_gd consumes
+        # the chosen theta_space, preconditioner, and metadata for artifacts.
         config_payload = _config_payload(cfg, repo_root=repo_root)
         theta_final_opt, trace, artifacts = run_shera_gd(
             loss_fn=loss_opt,
@@ -1343,11 +1367,14 @@ def main() -> None:
             },
         )
 
+        # Convert back to physical theta if we optimized in eigen z-space.
         if use_eigen and eigen_map is not None:
             theta_final = eigen_map.theta_from_z(theta_final_opt)
         else:
             theta_final = theta_final_opt
 
+        # Rehydrate structured parameters after optimization: unpack_params
+        # restores the ParameterStore layout for reporting and artifacts.
         final_store = store_unpack_params(inference_subspec, theta_final, init_store)
         _ = binder.model(
             strip_structural(final_store, structural_keys=binder.structural_store_keys())
@@ -1387,6 +1414,8 @@ def main() -> None:
             )
         )
 
+    # Artifact/manifest/results aggregation: collect per-run metadata and write
+    # experiment-level manifest + results tables.
     run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
     _write_experiment_outputs(
         outdir=outdir,
