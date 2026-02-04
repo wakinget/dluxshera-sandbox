@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "n_runs": 2,
+    "n_runs": 15,
     "run_id_prefix": "mc",
     "results_filename": "results.csv"
   },
