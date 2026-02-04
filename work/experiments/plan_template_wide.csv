@@ -1,0 +1,9 @@
+# Prescribed Monte Carlo plan template (legacy wide format, runs-as-rows).
+# Dotted paths override nested keys in the prescription defaults.
+# Blank cells leave defaults unchanged; the string "null" clears a value explicitly.
+# Vector-valued cells must be JSON arrays (e.g., [1, 2, 3]).
+# Structural overrides (model.* or overrides.config.*) are experiment-wide and should NOT appear in plan rows.
+# Run IDs are optional; when omitted they are auto-generated from experiment.run_id_prefix + index.
+run_id,enabled,note,seed,init.mode,optimizer.n_iter,optimizer.base_lr,eigen.use_eigen,eigen.whiten_basis,eigen.truncate_k,eigen.truncate_by_eigval,noise.add_noise,truth.binary.separation_as,truth.binary.position_angle_deg,truth.binary.x_position_as,truth.binary.y_position_as,truth.binary.log_flux_total,truth.binary.contrast,truth.system.plate_scale_as_per_pix,truth.primary.zernike_coeffs_nm,truth.secondary.zernike_coeffs_nm,init.binary.separation_as,init.binary.position_angle_deg,init.binary.x_position_as,init.binary.y_position_as,init.binary.log_flux_total,init.binary.contrast,init.system.plate_scale_as_per_pix,init.primary.zernike_coeffs_nm,init.secondary.zernike_coeffs_nm
+,,,101,prior,,,,true,true,,0.01,,,,0.12,-0.03,,,,,,,,,,,,,,
+run_002,,,102,explicit,,,,false,false,5,,,,,0.20,0.05,,,,,,,,0.18,0.04,,,,

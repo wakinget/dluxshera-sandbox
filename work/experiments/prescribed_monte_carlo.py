@@ -55,8 +55,35 @@ def _parse_cell(value: str | None) -> Any:
 
 # TODO: migrate to shared util
 def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
+    """Load plan rows from CSV in wide (runs-as-rows) or transposed (keys-as-rows) format."""
     with path.open("r", encoding="utf-8") as handle:
         lines = [line for line in handle if not line.lstrip().startswith("#") and line.strip()]
+
+    if not lines:
+        return []
+
+    header = next(csv.reader([lines[0]]))
+    if header and header[0] == "key":
+        reader = csv.reader(lines)
+        header = next(reader)
+        run_columns = header[1:]
+        rows: list[dict[str, Any]] = []
+        for run_col in run_columns:
+            label = run_col.strip() if run_col is not None else ""
+            rows.append({"_plan_label": label or None})
+        for row in reader:
+            if not row:
+                continue
+            key = row[0].strip() if len(row) > 0 and row[0] is not None else ""
+            if not key:
+                continue
+            for idx, _ in enumerate(run_columns):
+                value = row[idx + 1] if len(row) > idx + 1 else ""
+                if value is None or value.strip() == "":
+                    continue
+                rows[idx][key] = _parse_cell(value)
+        return rows
+
     reader = csv.DictReader(lines)
     rows: list[dict[str, Any]] = []
     for row in reader:
@@ -106,6 +133,8 @@ def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) ->
     experiment = presc.get("experiment", {})
     run_id_prefix = experiment.get("run_id_prefix", "run")
 
+    row = dict(row)
+    row.pop("_plan_label", None)
     structured_row = _unflatten_row(row)
     run_id = structured_row.pop("run_id", None)
     if not run_id:
@@ -244,6 +273,7 @@ def main() -> None:
         forbidden = [
             key
             for key in row
+            if not key.startswith("_")
             if key == "model"
             or key.startswith("model.")
             or key == "overrides"
@@ -265,6 +295,7 @@ def main() -> None:
         ", ".join(sorted(store_overrides.keys())) if store_overrides else "none"
     )
 
+    plan_labels = [row.get("_plan_label") for row in plan_rows]
     run_specs = [
         _resolve_run_spec(prescription, row, index + 1)
         for index, row in enumerate(plan_rows)
@@ -275,6 +306,11 @@ def main() -> None:
     print(f"Model config_id: {model_config_id}")
     print(f"Config overrides: {config_override_keys}")
     print(f"Store overrides: {store_override_keys}")
+    if any(label is not None for label in plan_labels):
+        print("Plan column labels -> run_id mapping:")
+        for label, spec in zip(plan_labels, run_specs):
+            label_display = label or "(auto)"
+            print(f"  {label_display} -> {spec.get('run_id')}")
     print(f"Resolved {len(run_specs)} run(s). Preview:")
     _print_preview(run_specs, args.num_preview)
 
