@@ -17,10 +17,12 @@ CLI arguments (mirrors `main`)
 ------------------------------
 - --prescription: JSON experiment recipe (defaults to template when omitted).
 - --plan: optional CSV plan that overrides per-run settings (defaults to template when omitted).
-- --outdir: root output directory for the experiment. If omitted, the output
-  directory is derived from `--run-name` or a timestamp.
-- --run-name: optional name segment used to build the output directory when
+- --outdir: root output directory for the experiment (experiment root). If
+  omitted, the output directory is derived from `--run-name` or a timestamp.
+- --run-name: optional name segment used to build Results/<run-name> when
   `--outdir` is not provided. If both are omitted, a timestamp tag is used.
+  This remains as a convenience for quick naming when you do not want to type
+  a full `--outdir` path, rather than being deprecated.
 - --dry-run: resolve and preview run specs without executing optimization.
 - --aggregate-only: skip execution and only build manifest.json/results.csv from
   existing run artifacts inside `--outdir`.
@@ -433,14 +435,13 @@ def _resolve_outdir(outdir: str | None, run_name: str | None) -> Path:
     """Resolve the experiment output directory based on CLI inputs.
 
     Called in `main` to determine where runs and aggregate outputs are written,
-    falling back to a timestamped Results directory via `_timestamp_tag`. This
-    is a reusable pattern for experiment output naming, but naming conventions
-    are specific to this script.
+    falling back to a timestamped Results directory via `_timestamp_tag` when
+    neither an explicit outdir nor run name is supplied. This is a reusable
+    pattern for experiment output naming, but naming conventions are specific
+    to this script.
     """
-    if outdir and run_name:
-        return Path(outdir) / run_name
     if outdir:
-        return Path(outdir) / f"prescribed_mc_{_timestamp_tag()}"
+        return Path(outdir)
     if run_name:
         return Path("Results") / run_name
     return Path("Results") / f"prescribed_mc_{_timestamp_tag()}"
@@ -1040,13 +1041,14 @@ def main() -> None:
         --plan: Optional CSV plan that overrides per-run settings. Plan rows
             cannot override model or overrides.* settings; they only mutate
             run-level fields.
-        --outdir: Root output directory for the experiment. When supplied, all
-            run artifacts (runs/<run_id>/...), manifest.json, and results.csv
-            are written underneath this directory.
-        --run-name: Optional name segment used to construct the output
-            directory when --outdir is omitted. If both are omitted, a
-            timestamp-based directory name is used. Providing both uses
-            --outdir verbatim and ignores --run-name.
+        --outdir: Root output directory for the experiment. When supplied, this
+            is treated as the experiment root, and all run artifacts
+            (runs/<run_id>/...), manifest.json, and results.csv are written
+            underneath this directory.
+        --run-name: Optional name segment used to construct Results/<run-name>
+            when --outdir is omitted. If both are omitted, a timestamp-based
+            directory name is used. Supplying both uses --outdir verbatim and
+            ignores --run-name.
         --dry-run: Resolve run specs and print previews without executing the
             optimization runs or writing run artifacts.
         --aggregate-only: Skip execution and only aggregate manifest.json and
@@ -1067,8 +1069,18 @@ def main() -> None:
         default=None,
         help="Path to plan CSV (defaults to template if omitted)",
     )
-    parser.add_argument("--outdir", type=str, default=None)
-    parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument(
+        "--outdir",
+        type=str,
+        default=None,
+        help="Experiment root directory (no auto-suffix when provided).",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Convenience name for Results/<run-name> when --outdir is omitted.",
+    )
     parser.add_argument("--dry-run", action="store_true", default=False)
     parser.add_argument(
         "--aggregate-only",
