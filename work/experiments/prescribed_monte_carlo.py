@@ -1,22 +1,17 @@
-"""Prescribed Monte Carlo experiment scaffold (Step 2: execution loop).
+"""Prescribed Monte Carlo experiment scaffold.
 
 Purpose: incubate the prescription/plan workflow in work/experiments.
 Local helpers are defined here for now (TODO: migrate to shared util).
 
-Step 2 execution behavior
--------------------------
-- Resolve experiment-wide config/store overrides once (config_id + overrides.config/store).
-- For each enabled run: resolve truth/init stores, generate synthetic data (+ optional noise),
-  run optimization, and write run-level artifacts under runs/<run_id>/...
-- init.mode == "prior": sample around truth using priors, then apply explicit init overrides.
-- init.mode == "explicit": apply explicit init overrides only; missing values remain at the
-  baseline store and derived values are refreshed after overrides.
-
-Experiment-level outputs (after completion)
--------------------------------------------
-- Write manifest.json at the experiment root with provenance and per-run status.
-- Write results.csv as a wide, spreadsheet-friendly table that expands vector
-  parameters into component columns.
+Execution flow
+--------------
+- Load the prescription JSON and optional plan CSV.
+- Resolve run specs and seeds, plus experiment-wide config/store overrides.
+- Build truth/init stores for each run, then generate synthetic observations with
+  optional noise.
+- Run optimization in eigen space (FIM-based) or primitive parameter space.
+- Write run artifacts under runs/<run_id>/..., including summaries and logs.
+- Aggregate manifest.json and results.csv across runs at the experiment root.
 """
 from __future__ import annotations
 
