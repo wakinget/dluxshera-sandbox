@@ -1118,9 +1118,14 @@ def main() -> None:
     parser.add_argument("--num-preview", type=int, default=None)
 
     args = parser.parse_args()
+    repo_root = Path(__file__).resolve().parents[2]
 
     outdir_hint = Path(args.outdir) if args.outdir else None
     prescription_path, plan_path = _resolve_prescription_and_plan(args, outdir_hint)
+    resolved_prescription = _repo_relative_path(prescription_path, repo_root=repo_root)
+    resolved_plan = _repo_relative_path(plan_path, repo_root=repo_root)
+    print(f"Resolved prescription path: {resolved_prescription or prescription_path}")
+    print(f"Resolved plan path: {resolved_plan or plan_path}")
 
     # Plan/prescription parsing and run spec resolution: load the JSON recipe
     # and the optional plan CSV that overrides per-run settings.
@@ -1204,7 +1209,6 @@ def main() -> None:
         print("Dry run enabled; exiting before optimization.")
         return
 
-    repo_root = Path(__file__).resolve().parents[2]
     jax.config.update("jax_enable_x64", True)
 
     cfg = _resolve_config_id(model_config_id)
