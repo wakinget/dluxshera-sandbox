@@ -153,7 +153,19 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
     if header and header[0] == "key":
         reader = csv.reader(lines)
         header = next(reader)
-        run_columns = header[1:]
+        run_headers = header[1:]
+        last_non_empty = None
+        for idx, run_header in enumerate(run_headers):
+            if run_header is not None and run_header.strip():
+                last_non_empty = idx
+        if last_non_empty is not None:
+            run_headers = run_headers[: last_non_empty + 1]
+        # Avoid Excel-generated trailing columns by skipping empty headers.
+        run_columns = [
+            run_header
+            for run_header in run_headers
+            if run_header is not None and run_header.strip()
+        ]
         rows: list[dict[str, Any]] = []
         for run_col in run_columns:
             label = run_col.strip() if run_col is not None else ""
