@@ -953,13 +953,13 @@ def main() -> None:
     parser.add_argument(
         "--prescription",
         type=Path,
-        default=Path("work/experiments/prescription_template.json"),
+        default=Path("work/experiments/prescription_templates/prescription.json"),
         help="Path to prescription JSON",
     )
     parser.add_argument(
         "--plan",
         type=Path,
-        default=Path("work/experiments/plan_template.csv"),
+        default=Path("work/experiments/prescription_templates/plan.csv"),
         help="Path to plan CSV",
     )
     parser.add_argument("--outdir", type=str, default=None)
