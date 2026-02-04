@@ -144,7 +144,18 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
     plan ingestion but is coupled to the specific plan format rules used here.
     """
     with path.open("r", encoding="utf-8") as handle:
-        lines = [line for line in handle if not line.lstrip().startswith("#") and line.strip()]
+        lines = []
+        for line in handle:
+            stripped = line.lstrip()
+            if (
+                stripped.startswith("#")
+                or stripped.startswith('"#')
+                or stripped.startswith("'#")
+            ):
+                continue
+            if not stripped.strip():
+                continue
+            lines.append(line)
 
     if not lines:
         return []
