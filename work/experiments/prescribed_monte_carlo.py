@@ -15,8 +15,8 @@ Execution flow
 
 CLI arguments (mirrors `main`)
 ------------------------------
-- --prescription: JSON experiment recipe (default: work/experiments/prescription_templates/prescription.json).
-- --plan: optional CSV plan that overrides per-run settings (default: work/experiments/prescription_templates/plan.csv).
+- --prescription: JSON experiment recipe (defaults to template when omitted).
+- --plan: optional CSV plan that overrides per-run settings (defaults to template when omitted).
 - --outdir: root output directory for the experiment. If omitted, the output
   directory is derived from `--run-name` or a timestamp.
 - --run-name: optional name segment used to build the output directory when
@@ -72,6 +72,11 @@ from dluxshera.systems.three_plane import (
     SheraThreePlaneBinder,
     build_forward_spec_from_config,
 )
+
+DEFAULT_PRESCRIPTION_PATH = Path(
+    "work/experiments/prescription_templates/prescription.json"
+)
+DEFAULT_PLAN_PATH = Path("work/experiments/prescription_templates/plan.csv")
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -174,6 +179,71 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
             parsed[key] = _parse_cell(value)
         rows.append(parsed)
     return rows
+
+
+def _detect_prescription_plan_candidates(
+    outdir: Path,
+) -> tuple[Path | None, Path | None]:
+    """Scan an output directory for candidate prescription/plan files.
+
+    This is a best-effort helper for `main` when `--prescription` or `--plan` is
+    omitted but an output directory is provided. Detection rules are intentionally
+    conservative; update this helper when additional filename conventions are
+    introduced in prescribed Monte Carlo workflows.
+    """
+    if not outdir.exists():
+        return None, None
+
+    prescription_candidates = sorted(outdir.rglob("prescription.json"))
+    plan_candidates = sorted(outdir.rglob("plan.csv"))
+
+    prescription_path = prescription_candidates[0] if prescription_candidates else None
+    plan_path = plan_candidates[0] if plan_candidates else None
+
+    if prescription_candidates and len(prescription_candidates) > 1:
+        print(
+            "WARNING: Multiple prescription.json candidates found; using "
+            f"{prescription_path}"
+        )
+    if plan_candidates and len(plan_candidates) > 1:
+        print(
+            "WARNING: Multiple plan.csv candidates found; using "
+            f"{plan_path}"
+        )
+
+    return prescription_path, plan_path
+
+
+def _resolve_prescription_and_plan(
+    args: argparse.Namespace, outdir: Path | None
+) -> tuple[Path, Path]:
+    """Resolve prescription/plan paths from CLI args and optional outdir scan."""
+    prescription_path = args.prescription
+    plan_path = args.plan
+
+    if (prescription_path is None or plan_path is None) and outdir is not None:
+        detected_prescription, detected_plan = _detect_prescription_plan_candidates(
+            outdir
+        )
+        if prescription_path is None and detected_prescription is not None:
+            prescription_path = detected_prescription
+        if plan_path is None and detected_plan is not None:
+            plan_path = detected_plan
+
+    if prescription_path is None:
+        print(
+            "WARNING: No prescription path provided/detected; "
+            f"falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
+        )
+        prescription_path = DEFAULT_PRESCRIPTION_PATH
+    if plan_path is None:
+        print(
+            "WARNING: No plan path provided/detected; "
+            f"falling back to template at {DEFAULT_PLAN_PATH}"
+        )
+        plan_path = DEFAULT_PLAN_PATH
+
+    return Path(prescription_path), Path(plan_path)
 
 
 def _set_nested(target: dict[str, Any], keys: list[str], value: Any) -> None:
@@ -988,14 +1058,14 @@ def main() -> None:
     parser.add_argument(
         "--prescription",
         type=Path,
-        default=Path("work/experiments/prescription_templates/prescription.json"),
-        help="Path to prescription JSON",
+        default=None,
+        help="Path to prescription JSON (defaults to template if omitted)",
     )
     parser.add_argument(
         "--plan",
         type=Path,
-        default=Path("work/experiments/prescription_templates/plan.csv"),
-        help="Path to plan CSV",
+        default=None,
+        help="Path to plan CSV (defaults to template if omitted)",
     )
     parser.add_argument("--outdir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
@@ -1010,10 +1080,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    outdir_hint = Path(args.outdir) if args.outdir else None
+    prescription_path, plan_path = _resolve_prescription_and_plan(args, outdir_hint)
+
     # Plan/prescription parsing and run spec resolution: load the JSON recipe
     # and the optional plan CSV that overrides per-run settings.
-    prescription = _load_prescription(args.prescription)
-    plan_rows = _load_plan_csv(args.plan)
+    prescription = _load_prescription(prescription_path)
+    plan_rows = _load_plan_csv(plan_path)
 
     for row in plan_rows:
         forbidden = [
@@ -1131,8 +1204,8 @@ def main() -> None:
         _write_experiment_outputs(
             outdir=outdir,
             prescription=prescription,
-            prescription_path=args.prescription,
-            plan_path=args.plan,
+            prescription_path=prescription_path,
+            plan_path=plan_path,
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
@@ -1455,8 +1528,8 @@ def main() -> None:
     _write_experiment_outputs(
         outdir=outdir,
         prescription=prescription,
-        prescription_path=args.prescription,
-        plan_path=args.plan,
+        prescription_path=prescription_path,
+        plan_path=plan_path,
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
