@@ -274,18 +274,28 @@ def main(
     binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
-    data = binder.model()
+    data_psf = binder.model()
 
+    # Optionally add noise to the data
     if add_noise:
         rng_key, split_key = jr.split(rng_key)
-        if np.min(data) > 100:
-            data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
+        if np.min(data_psf) > 100:
+            # Use gaussian approximation to shot noise if image is bright enough
+            data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
         else:
-            data = jr.poisson(split_key, data)
+            # Otherwise use poisson statistics
+            data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
+            # Casting back to float is important for the optimization
+    else: # No noise
+        data = data_psf
 
-    data_var = data
+    # Define data variance = data_psf -> Shot noise dominated
+    # Add a minimum variance floor to avoid any division by zero
+    data_var = jnp.maximum(data_psf, 1.0)
 
-    np.savez(results_dir / "data.npz", data=np.asarray(data), data_var=np.asarray(data_var))
+    # Save the data to an npz file for later use
+    np.savez(results_dir / "data.npz", noise=add_noise,
+             data_psf=np.asarray(data_psf), data=np.asarray(data), data_var=np.asarray(data_var))
 
     print("Configuring Inference...")
     inference_subspec = make_inference_subspec(
