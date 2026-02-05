@@ -1380,6 +1380,18 @@ def main() -> None:
         theta_true = pack_params(inference_subspec, truth_store)
         loss_true = float(loss_fn(theta_true))
 
+        fim_cfg = run_spec.get("fim", {})
+        reuse_fim_value = fim_cfg.get("reuse_fim")
+        if reuse_fim_value is None:
+            reuse_fim_value = _get_nested(run_spec, ["eigen", "reuse_fim"])
+        if reuse_fim_value is None:
+            reuse_fim_value = _get_nested(run_spec, ["optimizer", "reuse_fim"])
+        if reuse_fim_value is None:
+            reuse_fim_value = run_spec.get("reuse_fim")
+        if reuse_fim_value is None:
+            reuse_fim_value = _get_nested(prescription, ["defaults", "fim", "reuse_fim"])
+        reuse_fim = True if reuse_fim_value is None else bool(reuse_fim_value)
+
         fim_point = theta_true
         cache_key_payload = {
             "infer_keys": infer_keys,
@@ -1394,16 +1406,21 @@ def main() -> None:
             "reduce": reduce,
         }
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
-        cache_entry = fim_cache.get(cache_key)
+        cache_entry = fim_cache.get(cache_key) if reuse_fim else None
         if cache_entry is not None:
             F = cache_entry["F"]
             fim_diag = cache_entry["fim_diag"]
+            fim_cache_hit = True
             print("FIM cache hit; reusing cached FIM.")
         else:
             F = fim_theta(nll_loss_fn, fim_point)
             fim_diag = jnp.diag(F)
-            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
-            print("FIM cache miss; computed and cached FIM.")
+            fim_cache_hit = False
+            if reuse_fim:
+                fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
+                print("FIM cache miss; computed and cached FIM.")
+            else:
+                print("FIM cache bypassed; recomputed FIM.")
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
@@ -1603,6 +1620,8 @@ def main() -> None:
                     "init_mode": init_mode,
                     "add_noise": add_noise,
                     "use_eigen": use_eigen,
+                    "reuse_fim": reuse_fim,
+                    "fim_cache_hit": fim_cache_hit,
                 },
             },
         )
