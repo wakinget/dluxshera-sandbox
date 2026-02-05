@@ -113,7 +113,7 @@ TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
 # Inference settings
-N_ITER = 50
+N_ITER = 40
 FAST_ITER = 30
 BASE_LR = 0.5
 
@@ -188,7 +188,7 @@ def main(
             "binary.position_angle_deg": 90.0,
             "binary.x_position_as": 0.0,
             "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1.0,
+            "imaging.exposure_time_s": 1800.,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
@@ -196,33 +196,36 @@ def main(
     binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
-    data = binder.model()
+    data_psf = binder.model()
 
-    print("Pre-Noise:")
-    print(f"Data type: {type(data)}")
-    print(f"Data min: {np.min(data)}")
-    print(f"Data max: {np.max(data)}")
+    # Optionally add noise to the data
     if add_noise:
         rng_key, split_key = jr.split(rng_key)
-        if np.min(data) > 100:
-            data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
+        if np.min(data_psf) > 100:
+            # Use gaussian approximation to shot noise if image is bright enough
+            data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
         else:
-            data = jr.poisson(split_key, data)
+            # Otherwise use poisson statistics
+            data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
+            # Casting back to float is important for the optimization
+    else: # No noise
+        data = data_psf
 
-    print("Post-Noise:")
-    print(f"Data type: {type(data)}")
-    print(f"Data min: {np.min(data)}")
-    print(f"Data max: {np.max(data)}")
-
-    data_var = data
+    # Define data variance = data_psf -> Shot noise dominated
+    # Add a minimum variance floor to avoid any division by zero
+    data_var = jnp.maximum(data_psf, 1.0)
 
     print("Configuring Inference...")
+    # We create a subspec here because the user may have
+    # removed one or more keys from the complete list
     inference_subspec = make_inference_subspec(
         base_spec=inference_spec,
         infer_keys=INFER_KEYS,
         cfg=cfg,
     )
 
+    # prior_info defines our initial knowledge of each parameter,
+    # and determines the amplitude of the random perturbation applied to the model
     prior_info = {
         "binary.separation_as":          {"sigma": 1e-4, "dist": "Normal"},
         "binary.position_angle_deg":     {"sigma": 1e-3, "dist": "Uniform"},
@@ -245,6 +248,9 @@ def main(
     print("Drawing starting point from priors...")
     rng_key, split_key = jr.split(rng_key)
     init_store = prior_spec.sample(rng_key=split_key, keys=INFER_KEYS)
+    # Apply the randomly drawn perturbations to the model and produce an image
+    # We use strip_structural() here to remove any structural parameters present in the store
+    # Otherwise, the presence of structural parameters requires rebuilding the model
     init_psf = binder.model(
         strip_structural(init_store, structural_keys=binder.structural_store_keys())
     )
