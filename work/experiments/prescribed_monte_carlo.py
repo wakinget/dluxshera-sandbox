@@ -1348,18 +1348,29 @@ def main() -> None:
 
         binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
 
-        data = binder.model()
+        # Generate the synthetic data
+        data_psf = binder.model()
+
+        # Optionally add noise to the data
         add_noise_value = _get_nested(run_spec, ["noise", "add_noise"])
         if add_noise_value is None:
             add_noise_value = _get_nested(prescription, ["defaults", "noise", "add_noise"])
         add_noise = bool(add_noise_value)
         if add_noise:
-            # Use Gaussian noise for large-count regimes, Poisson for low-count.
-            if np.min(data) > 100:
-                data = np.sqrt(data) * jr.normal(noise_key, data.shape) + data
+            rng_key, split_key = jr.split(rng_key)
+            if np.min(data_psf) > 100:
+                # Use gaussian approximation to shot noise if image is bright enough
+                data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
             else:
-                data = jr.poisson(noise_key, data)
-        data_var = data
+                # Otherwise use poisson statistics
+                data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
+                # Casting back to float is important for the optimization
+        else:  # No noise
+            data = data_psf
+
+        # Define data variance = data_psf -> Shot noise dominated
+        # Add a minimum variance floor to avoid any division by zero
+        data_var = jnp.maximum(data_psf, 1.0)
 
         noise_model = "gaussian"
         reduce = "sum"
