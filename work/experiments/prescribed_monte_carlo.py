@@ -1280,7 +1280,10 @@ def main() -> None:
             raise FileNotFoundError(f"Output directory not found: {outdir}")
         runs_dir = outdir / "runs"
         if not runs_dir.exists():
-            raise FileNotFoundError(f"Runs directory not found: {runs_dir}")
+            print(
+                "WARNING: Runs directory not found for aggregate-only mode; "
+                f"continuing with empty run artifacts: {runs_dir}"
+            )
     else:
         outdir.mkdir(parents=True, exist_ok=True)
         runs_dir = outdir / "runs"
