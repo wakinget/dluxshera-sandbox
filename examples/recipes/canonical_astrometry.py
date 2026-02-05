@@ -113,7 +113,7 @@ TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
 # Inference settings
-N_ITER = 60
+N_ITER = 50
 FAST_ITER = 30
 BASE_LR = 0.5
 
@@ -188,7 +188,7 @@ def main(
             "binary.position_angle_deg": 90.0,
             "binary.x_position_as": 0.0,
             "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1800.0,
+            "imaging.exposure_time_s": 1.0,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
