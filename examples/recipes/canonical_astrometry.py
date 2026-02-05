@@ -98,7 +98,7 @@ from dluxshera.systems.three_plane import (
 JAX_ENABLE_X64 = True
 RNG_SEED = 42
 FAST_MODE = False
-ADD_NOISE = False
+ADD_NOISE = True
 SAVE_PLOTS = True
 PLOT_EIGEN_SPECTRUM = True
 
@@ -198,12 +198,21 @@ def main(
     print("Generating synthetic data...")
     data = binder.model()
 
+    print("Pre-Noise:")
+    print(f"Data type: {type(data)}")
+    print(f"Data min: {np.min(data)}")
+    print(f"Data max: {np.max(data)}")
     if add_noise:
         rng_key, split_key = jr.split(rng_key)
         if np.min(data) > 100:
             data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
         else:
             data = jr.poisson(split_key, data)
+
+    print("Post-Noise:")
+    print(f"Data type: {type(data)}")
+    print(f"Data min: {np.min(data)}")
+    print(f"Data max: {np.max(data)}")
 
     data_var = data
 
