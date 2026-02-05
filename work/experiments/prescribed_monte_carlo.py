@@ -1401,9 +1401,15 @@ def main() -> None:
             reuse_fim_value = run_spec.get("reuse_fim")
         if reuse_fim_value is None:
             reuse_fim_value = _get_nested(prescription, ["defaults", "fim", "reuse_fim"])
-        reuse_fim = True if reuse_fim_value is None else bool(reuse_fim_value)
+        reuse_fim = bool(reuse_fim_value) if reuse_fim_value is not None else False
 
         fim_point = theta_true
+        # FIM cache key notes:
+        # - Default behavior is strict: reuse is disabled unless reuse_fim=True
+        #   is set in the prescription or plan, and a cache hit still records
+        #   fim_cache_hit in run metadata.
+        # - Safe reuse inputs include full theta_true, infer_keys, cfg/forward_spec
+        #   identifiers, data/data_var hashes, and noise_model (all must match).
         cache_key_payload = {
             "infer_keys": infer_keys,
             "model_config_id": model_config_id,
