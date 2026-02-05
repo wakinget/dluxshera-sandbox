@@ -36,6 +36,7 @@ import csv
 import datetime
 import dataclasses
 import json
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -1275,6 +1276,21 @@ def main() -> None:
     prior_info = prescription.get("priors", {})
     prior_spec = PriorSpec.from_info(base_store, prior_info)
 
+    fim_cache: dict[str, dict[str, Any]] = {}
+
+    def _stable_hash(payload: Any) -> str:
+        if dataclasses.is_dataclass(payload):
+            payload = dataclasses.asdict(payload)
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _hash_array(value: Any) -> str:
+        array = np.asarray(value)
+        return hashlib.sha256(array.tobytes()).hexdigest()
+
+    cfg_hash = _stable_hash(cfg)
+    forward_spec_hash = _stable_hash(forward_spec)
+
     if args.aggregate_only:
         if not outdir.exists():
             raise FileNotFoundError(f"Output directory not found: {outdir}")
@@ -1345,13 +1361,15 @@ def main() -> None:
                 data = jr.poisson(noise_key, data)
         data_var = data
 
+        noise_model = "gaussian"
+        reduce = "sum"
         nll_loss_fn, _ = make_binder_nll_fn(
             binder=binder,
             infer_keys=infer_keys,
             data=data,
             var=data_var,
-            noise_model="gaussian",
-            reduce="sum",
+            noise_model=noise_model,
+            reduce=reduce,
             theta0_store=truth_store,
         )
         fim_labels = generate_fim_labels(infer_keys, cfg=cfg, store=truth_store)
@@ -1363,8 +1381,29 @@ def main() -> None:
         loss_true = float(loss_fn(theta_true))
 
         fim_point = theta_true
-        F = fim_theta(nll_loss_fn, fim_point)
-        fim_diag = jnp.diag(F)
+        cache_key_payload = {
+            "infer_keys": infer_keys,
+            "model_config_id": model_config_id,
+            "cfg_hash": cfg_hash,
+            "forward_spec_hash": forward_spec_hash,
+            "theta_true_hash": _hash_array(theta_true),
+            "add_noise": add_noise,
+            "data_hash": _hash_array(data),
+            "data_var_hash": _hash_array(data_var),
+            "noise_model": noise_model,
+            "reduce": reduce,
+        }
+        cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
+        cache_entry = fim_cache.get(cache_key)
+        if cache_entry is not None:
+            F = cache_entry["F"]
+            fim_diag = cache_entry["fim_diag"]
+            print("FIM cache hit; reusing cached FIM.")
+        else:
+            F = fim_theta(nll_loss_fn, fim_point)
+            fim_diag = jnp.diag(F)
+            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
+            print("FIM cache miss; computed and cached FIM.")
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
