@@ -18,6 +18,7 @@ eigen.whiten_basis,true,true
 eigen.truncate_k,,
 eigen.truncate_by_eigval,,
 noise.add_noise,,
+fim.reuse_fim,,
 truth.imaging.exposure_time_s,,
 truth.binary.separation_as,,
 truth.binary.position_angle_deg,,

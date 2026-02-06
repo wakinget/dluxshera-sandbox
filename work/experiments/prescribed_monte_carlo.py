@@ -1277,6 +1277,7 @@ def main() -> None:
     prior_spec = PriorSpec.from_info(base_store, prior_info)
 
     fim_cache: dict[str, dict[str, Any]] = {}
+    fim_cache_last: dict[str, Any] | None = None
 
     def _stable_hash(payload: Any) -> str:
         if dataclasses.is_dataclass(payload):
@@ -1405,9 +1406,9 @@ def main() -> None:
 
         fim_point = theta_true
         # FIM cache key notes:
-        # - Default behavior is strict: reuse is disabled unless reuse_fim=True
-        #   is set in the prescription or plan, and a cache hit still records
-        #   fim_cache_hit in run metadata.
+        # - Default behavior is strict: reuse uses only exact cache matches unless
+        #   reuse_fim=True is set in the prescription or plan. When reuse_fim=True,
+        #   a cache miss can still reuse the last cached FIM with a warning.
         # - Safe reuse inputs include full theta_true, infer_keys, cfg/forward_spec
         #   identifiers, data/data_var hashes, and noise_model (all must match).
         cache_key_payload = {
@@ -1424,21 +1425,31 @@ def main() -> None:
         }
         fim_cache_key = _stable_hash(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
-        cache_entry = fim_cache.get(cache_key) if reuse_fim else None
+        cache_entry = fim_cache.get(cache_key)
         if cache_entry is not None:
             F = cache_entry["F"]
             fim_diag = cache_entry["fim_diag"]
             fim_cache_hit = True
+            fim_cache_last = cache_entry
             print("FIM cache hit; reusing cached FIM.")
+        elif reuse_fim and fim_cache_last is not None:
+            F = fim_cache_last["F"]
+            fim_diag = fim_cache_last["fim_diag"]
+            fim_cache_hit = False
+            print(
+                "WARNING: FIM cache miss for strict key; reusing previous cached FIM "
+                "because reuse_fim=True. Inputs may be misaligned."
+            )
         else:
             F = fim_theta(nll_loss_fn, fim_point)
             fim_diag = jnp.diag(F)
             fim_cache_hit = False
+            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
+            fim_cache_last = fim_cache[cache_key]
             if reuse_fim:
-                fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
                 print("FIM cache miss; computed and cached FIM.")
             else:
-                print("FIM cache bypassed; recomputed FIM.")
+                print("FIM cache miss; computed and cached FIM (strict reuse only).")
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")

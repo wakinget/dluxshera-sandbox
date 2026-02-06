@@ -24,6 +24,9 @@
     },
     "noise": {
       "add_noise": false
+    },
+    "fim": {
+      "reuse_fim": false
     }
   },
   "overrides": {
