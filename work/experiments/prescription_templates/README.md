@@ -29,6 +29,7 @@ Key sections you will typically touch:
 - `infer_keys`
 - `priors`
 - `defaults`
+  - `defaults.fim.reuse_fim` controls whether FIM reuse is forced even when the strict cache key misses.
 
 3) **Edit `plan.csv`** (per-run inputs)
 
@@ -76,6 +77,9 @@ If multiple candidates are found, you must disambiguate by passing explicit path
 - `init.mode`:
   - `prior`: samples around truth using priors.
   - `explicit`: only uses explicitly provided init values; missing values follow normal resolution/derived refresh.
+- `fim.reuse_fim`:
+  - `false` (default): reuse only when the strict FIM cache key matches.
+  - `true`: reuse the most recent cached FIM even when the strict cache key misses (with a warning).
 - Paths like `diffractive_pupil_path` are **repo-root-relative**.
 - Vector cells in `plan.csv` must be **JSON arrays**.
 
