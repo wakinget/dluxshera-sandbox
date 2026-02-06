@@ -1422,6 +1422,7 @@ def main() -> None:
             "noise_model": noise_model,
             "reduce": reduce,
         }
+        fim_cache_key = _stable_hash(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
         cache_entry = fim_cache.get(cache_key) if reuse_fim else None
         if cache_entry is not None:
@@ -1638,6 +1639,7 @@ def main() -> None:
                     "add_noise": add_noise,
                     "use_eigen": use_eigen,
                     "reuse_fim": reuse_fim,
+                    "fim_cache_key": fim_cache_key,
                     "fim_cache_hit": fim_cache_hit,
                 },
             },
