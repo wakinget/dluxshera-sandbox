@@ -352,6 +352,15 @@ def _resolve_prescription_and_plan(
         if plan_path is None and detected_plan is not None:
             plan_path = detected_plan
 
+    if plan_path is not None and prescription_path is None:
+        plan_label = plan_path if plan_path is not None else "unknown"
+        outdir_label = f"{outdir}" if outdir is not None else "no outdir provided"
+        raise ValueError(
+            "Plan path was provided or detected "
+            f"({plan_label}, outdir scan: {outdir_label}) but no prescription was "
+            "provided or detected. Pass --prescription explicitly."
+        )
+
     if prescription_path is None:
         outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
