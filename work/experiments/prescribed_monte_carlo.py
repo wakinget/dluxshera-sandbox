@@ -412,6 +412,118 @@ def _unflatten_row(row: dict[str, Any]) -> dict[str, Any]:
     return structured
 
 
+def _extract_prior_overrides(
+    row: dict[str, Any],
+    *,
+    prefix: str = "prior",
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Extract per-run prior overrides from a flat plan row.
+
+    This helper runs before `_unflatten_row` so plan keys like
+    `prior.<infer_key>.<field>` are parsed without being incorrectly nested.
+    """
+    row_clean: dict[str, Any] = {}
+    overrides: dict[str, dict[str, Any]] = {}
+    prefix_token = f"{prefix}."
+    for key, value in row.items():
+        if not key.startswith(prefix_token):
+            row_clean[key] = value
+            continue
+        tokens = key.split(".")
+        if len(tokens) < 3:
+            print(f"WARNING: Invalid prior override key '{key}'; skipping.")
+            continue
+        field = tokens[-1]
+        infer_key = ".".join(tokens[1:-1])
+        if not infer_key:
+            print(f"WARNING: Invalid prior override key '{key}'; missing infer key.")
+            continue
+        if field == "std":
+            field = "sigma"
+        if field not in {"sigma", "dist"}:
+            print(
+                f"WARNING: Unsupported prior override field '{field}' in '{key}'; skipping."
+            )
+            continue
+        if value is None:
+            print(
+                f"WARNING: prior override '{key}' set to null; ignoring this override."
+            )
+            continue
+        overrides.setdefault(infer_key, {})[field] = value
+    return row_clean, overrides
+
+
+def _normalize_sigma_override(
+    value: Any,
+    *,
+    base_sigma: Any,
+    store_value: Any,
+    infer_key: str,
+) -> Any:
+    """Normalize a sigma override, broadcasting scalars for vector parameters."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (int, float, np.floating)):
+        scalar = float(value)
+        length = None
+        if isinstance(base_sigma, (list, tuple, np.ndarray)):
+            length = len(base_sigma)
+        elif store_value is not None:
+            try:
+                store_array = np.asarray(store_value)
+                if store_array.size > 1:
+                    length = store_array.size
+            except Exception:
+                length = None
+        if length:
+            return [scalar] * length
+        return scalar
+    print(
+        f"WARNING: prior override sigma for '{infer_key}' should be numeric or list; "
+        f"got {type(value).__name__}."
+    )
+    return value
+
+
+def _apply_prior_overrides(
+    base_prior_info: dict[str, Any],
+    overrides: dict[str, dict[str, Any]],
+    *,
+    infer_keys: tuple[str, ...],
+    base_store: ParameterStore | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Merge per-run overrides into a deep-copied prior info payload."""
+    merged = copy.deepcopy(base_prior_info)
+    applied: list[str] = []
+    for infer_key, fields in overrides.items():
+        if infer_key not in infer_keys:
+            print(
+                f"WARNING: prior override for unknown infer key '{infer_key}'; skipping."
+            )
+            continue
+        if infer_key not in merged:
+            print(
+                f"WARNING: prior override for '{infer_key}' ignored because no base prior "
+                "is defined."
+            )
+            continue
+        entry = dict(merged.get(infer_key, {}))
+        for field, value in fields.items():
+            if field == "sigma":
+                entry["sigma"] = _normalize_sigma_override(
+                    value,
+                    base_sigma=entry.get("sigma"),
+                    store_value=base_store.get(infer_key) if base_store else None,
+                    infer_key=infer_key,
+                )
+            elif field == "dist":
+                entry["dist"] = value
+        merged[infer_key] = entry
+        applied.append(infer_key)
+    return merged, applied
+
+
 def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) -> dict[str, Any]:
     """Resolve a run spec from a plan row using default run indexing.
 
@@ -444,7 +556,10 @@ def _resolve_run_spec_with_id(
 
     row = dict(row)
     row.pop("_plan_label", None)
-    structured_row = _unflatten_row(row)
+    # prior.<infer_key>.<field> overrides must be extracted before unflattening
+    # so dotted infer keys are preserved rather than nested.
+    row_clean, prior_overrides = _extract_prior_overrides(row)
+    structured_row = _unflatten_row(row_clean)
     run_id = structured_row.pop("run_id", None)
     if run_id:
         resolved["run_id"] = run_id
@@ -469,6 +584,9 @@ def _resolve_run_spec_with_id(
         raise ValueError("Prescription defaults must include a base seed.")
     resolved_seed = base_seed if seed_override is None else seed_override
     resolved["seed"] = int(resolved_seed)
+
+    if prior_overrides:
+        resolved["prior_overrides"] = prior_overrides
 
     return resolved
 
@@ -1326,6 +1444,28 @@ def main() -> None:
     print(f"Resolved {len(run_specs)} run(s). Preview:")
     _print_preview(run_specs, args.num_preview)
 
+    runs_with_prior_overrides = [
+        spec
+        for spec in run_specs
+        if spec.get("prior_overrides")
+    ]
+    if runs_with_prior_overrides:
+        print(
+            "Prior overrides: "
+            f"{len(runs_with_prior_overrides)} run(s) include per-run prior overrides."
+        )
+        for spec in runs_with_prior_overrides[:5]:
+            run_id = spec.get("run_id") or "(disabled)"
+            overrides = spec.get("prior_overrides", {})
+            flattened = [
+                f"{infer_key}.{field}"
+                for infer_key, fields in overrides.items()
+                for field in fields
+            ]
+            print(f"  {run_id}: {', '.join(flattened)}")
+    else:
+        print("Prior overrides: 0 runs include per-run prior overrides.")
+
     if args.dry_run:
         print("Dry run enabled; exiting before optimization.")
         return
@@ -1357,6 +1497,7 @@ def main() -> None:
 
     prior_info = prescription.get("priors", {})
     prior_spec = PriorSpec.from_info(base_store, prior_info)
+    prior_spec_cache: dict[str, PriorSpec] = {}
 
     fim_cache: dict[str, dict[str, Any]] = {}
     fim_cache_last: dict[str, Any] | None = None
@@ -1570,9 +1711,45 @@ def main() -> None:
             key: value for key, value in init_cfg.items() if key != "mode"
         }
         init_overrides_flat = _flatten_store_overrides(init_overrides)
+        prior_overrides = run_spec.get("prior_overrides") or {}
 
         if init_mode == "prior":
-            init_store = prior_spec.sample_near(
+            # Per-run prior overrides only affect prior sampling and do not
+            # change init.mode semantics.
+            run_prior_spec = prior_spec
+            if prior_overrides:
+                run_prior_info, applied_keys = _apply_prior_overrides(
+                    prior_info,
+                    prior_overrides,
+                    infer_keys=infer_keys,
+                    base_store=base_store,
+                )
+                if applied_keys:
+                    cache_key = _stable_hash(run_prior_info)
+                    run_prior_spec = prior_spec_cache.get(cache_key)
+                    if run_prior_spec is None:
+                        run_prior_spec = PriorSpec.from_info(base_store, run_prior_info)
+                        prior_spec_cache[cache_key] = run_prior_spec
+                    applied_entries = []
+                    for infer_key in applied_keys:
+                        entry = run_prior_info.get(infer_key, {})
+                        override_fields = prior_overrides.get(infer_key, {})
+                        for field in override_fields:
+                            if field in {"sigma", "dist"} and field in entry:
+                                applied_entries.append(
+                                    f"{infer_key}.{field}={entry[field]}"
+                                )
+                    if applied_entries:
+                        print(
+                            "Applying prior overrides: "
+                            + ", ".join(applied_entries)
+                        )
+                else:
+                    print(
+                        "WARNING: prior overrides were provided but none were applied; "
+                        "using base priors."
+                    )
+            init_store = run_prior_spec.sample_near(
                 center_store=truth_store,
                 rng_key=init_key,
                 keys=infer_keys,
@@ -1583,6 +1760,11 @@ def main() -> None:
             init_store = truth_store
             if init_overrides_flat:
                 init_store = init_store.replace(init_overrides_flat)
+            if prior_overrides:
+                print(
+                    f"Note: prior overrides provided for run_id={run_id} but "
+                    f"init.mode={init_mode}; ignoring prior overrides."
+                )
         else:
             raise ValueError(f"Unknown init.mode '{init_mode}'")
         init_store = init_store.refresh_derived(forward_spec)

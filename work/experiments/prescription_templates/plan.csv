@@ -2,6 +2,7 @@
 # Dotted paths override nested keys in the prescription defaults.
 # Blank cells leave defaults unchanged; the string "null" clears a value explicitly.
 # Vector-valued cells must be JSON arrays (e.g., [1, 2, 3]).
+# Prior overrides use keys like prior.<infer_key>.sigma or prior.<infer_key>.dist.
 # Structural overrides (model.* or overrides.config.*) are experiment-wide and should NOT appear in the plan.
 # Run IDs: if a run_id override is provided below it will be used; otherwise run IDs are auto-generated
 # from experiment.run_id_prefix + index (so you can change the prefix without editing this template).
@@ -39,3 +40,6 @@ init.binary.contrast,,3.0003
 init.system.plate_scale_as_per_pix,,
 init.primary.zernike_coeffs_nm,,[0.001, 0, 0, 0, 0, 0, 0, 0]
 init.secondary.zernike_coeffs_nm,,[-0.001, 0, 0, 0, 0, 0, 0, 0]
+prior.binary.x_position_as.sigma,,
+prior.primary.zernike_coeffs_nm.sigma,,"[1, 1, 1, 1, 1, 1, 1, 1]"
+prior.binary.contrast.dist,,

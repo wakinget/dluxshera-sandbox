@@ -81,6 +81,16 @@ If multiple candidates are found, you must disambiguate by passing explicit path
 - `init.mode`:
   - `prior`: samples around truth using priors.
   - `explicit`: only uses explicitly provided init values; missing values follow normal resolution/derived refresh.
+- Per-run prior overrides (plan.csv):
+  - Use keys `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the
+    prescription priors for a single run without changing `init.mode`.
+  - These overrides apply **only** when `init.mode` resolves to `prior`.
+  - Vector-valued sigmas should be JSON arrays. Scalar sigmas will broadcast
+    across vector-valued parameters.
+  - Examples:
+    - Scalar sigma: `prior.binary.x_position_as.sigma = 0.05`
+    - Vector sigma: `prior.primary.zernike_coeffs_nm.sigma = [1, 1, 1, 1, 1, 1, 1, 1]`
+    - Dist override: `prior.binary.contrast.dist = LogNormal`
 - `fim.reuse_fim`:
   - `false` (default): reuse only when the strict FIM cache key matches.
   - `true`: reuse the most recent cached FIM even when the strict cache key misses (with a warning).
