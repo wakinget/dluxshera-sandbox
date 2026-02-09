@@ -74,6 +74,10 @@ If multiple candidates are found, you must disambiguate by passing explicit path
 ## Key semantics / policies
 - Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the plan.
 - Each run gets **one seed**; JAX splits it internally for stochastic components.
+- `experiment.n_runs` is **authoritative** when set:
+  - If the plan defines fewer runs, the remaining runs execute with prescription defaults (no per-run overrides).
+  - If the plan defines more runs, extra plan-defined runs are ignored.
+  - `--dry-run` prints the resolved run set (after padding/truncation).
 - `init.mode`:
   - `prior`: samples around truth using priors.
   - `explicit`: only uses explicitly provided init values; missing values follow normal resolution/derived refresh.

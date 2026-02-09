@@ -228,6 +228,66 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _apply_experiment_n_runs(
+    plan_rows: list[dict[str, Any]],
+    n_runs: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, int | None]]:
+    """Apply experiment.n_runs precedence to the plan-defined run rows.
+
+    When experiment.n_runs is set, it becomes authoritative: the plan is padded
+    with default-only rows or truncated as needed so downstream previews and run
+    execution operate on the resolved run count. When experiment.n_runs is not
+    set, the plan length defines the run count and an empty plan is rejected.
+    """
+    plan_rows_copy = [row.copy() for row in plan_rows]
+    plan_runs = len(plan_rows_copy)
+
+    if n_runs is None:
+        if plan_runs == 0:
+            raise ValueError(
+                "Unable to resolve run count: experiment.n_runs is not set and "
+                "plan.csv defines 0 runs."
+            )
+        return (
+            plan_rows_copy,
+            {
+                "plan_runs": plan_runs,
+                "resolved_runs": plan_runs,
+                "padded_runs": 0,
+                "truncated_runs": 0,
+                "n_runs": None,
+            },
+        )
+
+    try:
+        resolved_n_runs = int(n_runs)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("experiment.n_runs must be an integer.") from exc
+
+    if resolved_n_runs <= 0:
+        raise ValueError("experiment.n_runs must be a positive integer.")
+
+    padded = 0
+    truncated = 0
+    if plan_runs > resolved_n_runs:
+        truncated = plan_runs - resolved_n_runs
+        plan_rows_copy = plan_rows_copy[:resolved_n_runs]
+    elif plan_runs < resolved_n_runs:
+        padded = resolved_n_runs - plan_runs
+        plan_rows_copy.extend({"_plan_label": None} for _ in range(padded))
+
+    return (
+        plan_rows_copy,
+        {
+            "plan_runs": plan_runs,
+            "resolved_runs": len(plan_rows_copy),
+            "padded_runs": padded,
+            "truncated_runs": truncated,
+            "n_runs": resolved_n_runs,
+        },
+    )
+
+
 def _detect_prescription_plan_candidates(
     outdir: Path,
 ) -> tuple[Path | None, Path | None]:
@@ -1164,21 +1224,43 @@ def main() -> None:
     # and the optional plan CSV that overrides per-run settings.
     prescription = _load_prescription(prescription_path)
     plan_rows = _load_plan_csv(plan_path)
+    n_runs = _get_nested(prescription, ["experiment", "n_runs"])
+    # experiment.n_runs is authoritative: it pads or truncates the plan so
+    # previews and run execution operate on the resolved run count.
+    plan_rows, run_policy = _apply_experiment_n_runs(plan_rows, n_runs)
+    enabled_count = sum(1 for row in plan_rows if _row_enabled(row))
+    disabled_count = len(plan_rows) - enabled_count
+    if run_policy["n_runs"] is None:
+        print(
+            "Run count policy: experiment.n_runs not set; "
+            f"plan defines {run_policy['plan_runs']} run(s)."
+        )
+    else:
+        print(
+            "Run count policy: experiment.n_runs="
+            f"{run_policy['n_runs']} (plan defines {run_policy['plan_runs']}) "
+            f"-> resolved {run_policy['resolved_runs']} run(s)."
+        )
+        if run_policy["padded_runs"]:
+            print(
+                "  Added "
+                f"{run_policy['padded_runs']} default-only run(s) to match experiment.n_runs."
+            )
+        if run_policy["truncated_runs"]:
+            print(
+                "WARNING: experiment.n_runs is authoritative; truncated "
+                f"{run_policy['truncated_runs']} plan-defined run(s)."
+            )
+    print(
+        f"Run enablement: {enabled_count} enabled, {disabled_count} disabled."
+    )
+
     seed_preview_rows = plan_rows[:5]
     seed_preview = [row.get("seed") for row in seed_preview_rows if "seed" in row]
     if seed_preview:
         print(
             f"Plan seed preview (first {len(seed_preview_rows)} rows): {seed_preview}"
         )
-    n_runs = _get_nested(prescription, ["experiment", "n_runs"])
-    if n_runs is not None:
-        n_runs = int(n_runs)
-        if len(plan_rows) > n_runs:
-            print(
-                "WARNING: Plan has more columns than experiment.n_runs; "
-                f"limiting to first {n_runs} of {len(plan_rows)}."
-            )
-            plan_rows = plan_rows[:n_runs]
 
     for row in plan_rows:
         forbidden = [
