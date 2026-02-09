@@ -582,7 +582,15 @@ def _resolve_run_spec_with_id(
     base_seed = presc.get("defaults", {}).get("seed")
     if base_seed is None:
         raise ValueError("Prescription defaults must include a base seed.")
-    resolved_seed = base_seed if seed_override is None else seed_override
+    if seed_override is None:
+        # Derive a per-run seed from the default base seed so runs remain
+        # reproducible without explicit overrides.
+        seed_index = run_id_index if run_id_index is not None else index
+        base_key = jr.PRNGKey(int(base_seed))
+        run_key = jr.fold_in(base_key, int(seed_index))
+        resolved_seed = int(np.asarray(run_key)[0])
+    else:
+        resolved_seed = seed_override
     resolved["seed"] = int(resolved_seed)
 
     if prior_overrides:
