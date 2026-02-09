@@ -74,6 +74,9 @@ If multiple candidates are found, you must disambiguate by passing explicit path
 ## Key semantics / policies
 - Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the plan.
 - Each run gets **one seed**; JAX splits it internally for stochastic components.
+  - If a plan row does **not** specify `seed`, the runner derives a per-run seed
+    by folding the run index into the prescription default seed (deterministic
+    and reproducible across runs).
 - `experiment.n_runs` is **authoritative** when set:
   - If the plan defines fewer runs, the remaining runs execute with prescription defaults (no per-run overrides).
   - If the plan defines more runs, extra plan-defined runs are ignored.
