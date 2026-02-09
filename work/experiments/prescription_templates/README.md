@@ -69,7 +69,13 @@ When you pass `--outdir` without explicit `--prescription` or `--plan`, the scri
 - **Prescription candidates**: JSON files whose names contain `prescription` (case-insensitive).
 - **Plan candidates**: CSV files whose names contain `plan` (case-insensitive), with `plan.csv` treated as the preferred naming convention.
 
-If multiple candidates are found, you must disambiguate by passing explicit paths. If none are found, the script falls back to these templates and prints a warning.
+If multiple candidates are found, you must disambiguate by passing explicit paths.
+
+Resolution behavior:
+- If a prescription is found but no plan is found, the run proceeds with **no plan overrides** (no template plan fallback).
+- If a plan is found but no prescription is found, the script raises an error.
+- If neither is found, the script warns and falls back to **both** templates.
+- Supplying `--prescription` without `--plan` explicitly also runs with no plan overrides.
 
 ## Key semantics / policies
 - Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the plan.
