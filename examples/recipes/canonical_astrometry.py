@@ -227,19 +227,19 @@ def main(
     # prior_info defines our initial knowledge of each parameter,
     # and determines the amplitude of the random perturbation applied to the model
     prior_info = {
-        "binary.separation_as":          {"sigma": 1e-4, "dist": "Normal"},
-        "binary.position_angle_deg":     {"sigma": 1e-3, "dist": "Uniform"},
-        "binary.x_position_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.y_position_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.log_flux_total":         {"sigma": 1e-3, "dist": "LogNormal"},
-        "binary.contrast":               {"sigma": 1e-3, "dist": "LogNormal"},
-        "system.plate_scale_as_per_pix": {"sigma": 1e-5, "dist": "LogNormal"},
+        "binary.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
+        "binary.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"}, # 1.67e-2 deg = 1 arcmin
+        "binary.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "binary.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "binary.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"}, # 4.3e-3 log-flux -> 1% flux cal
+        "binary.contrast":               {"sigma": 6e-3, "dist": "LogNormal"}, # 6e-3 log-contrast -> indep. 1% star cal
+        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"}, # 4.3e-3 log-platescale -> 1% cal
         "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),5),
+            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),2),
             "dist": "Normal",
         },
         "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),5),
+            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),2),
             "dist": "Normal",
         },
     }

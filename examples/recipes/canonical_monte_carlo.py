@@ -305,19 +305,19 @@ def main(
     )
 
     prior_info = {
-        "binary.separation_as": {"sigma": 1e-4, "dist": "Normal"},
-        "binary.position_angle_deg": {"sigma": 1e-3, "dist": "Uniform"},
-        "binary.x_position_as": {"sigma": 1e-3, "dist": "Normal"},
-        "binary.y_position_as": {"sigma": 1e-3, "dist": "Normal"},
-        "binary.log_flux_total": {"sigma": 1e-3, "dist": "LogNormal"},
-        "binary.contrast": {"sigma": 1e-3, "dist": "LogNormal"},
-        "system.plate_scale_as_per_pix": {"sigma": 1e-5, "dist": "LogNormal"},
+        "binary.separation_as": {"sigma": 1e-3, "dist": "Normal"},
+        "binary.position_angle_deg": {"sigma": 1.67e-2, "dist": "Uniform"},
+        "binary.x_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "binary.y_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "binary.log_flux_total": {"sigma": 4.3e-3, "dist": "Normal"},
+        "binary.contrast": {"sigma": 6e-3, "dist": "LogNormal"},
+        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"},
         "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"), 5),
+            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"), 2),
             "dist": "Normal",
         },
         "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"), 5),
+            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"), 2),
             "dist": "Normal",
         },
     }
