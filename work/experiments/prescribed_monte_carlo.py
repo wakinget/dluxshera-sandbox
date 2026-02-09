@@ -336,10 +336,11 @@ def _detect_prescription_plan_candidates(
 
 def _resolve_prescription_and_plan(
     args: argparse.Namespace, outdir: Path | None
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     """Resolve prescription/plan paths from CLI args and optional outdir scan."""
     prescription_path = args.prescription
     plan_path = args.plan
+    explicit_prescription = prescription_path is not None
 
     if (prescription_path is None or plan_path is None) and outdir is not None:
         detected_prescription, detected_plan = _detect_prescription_plan_candidates(
@@ -347,6 +348,7 @@ def _resolve_prescription_and_plan(
         )
         if prescription_path is None and detected_prescription is not None:
             prescription_path = detected_prescription
+            explicit_prescription = True
         if plan_path is None and detected_plan is not None:
             plan_path = detected_plan
 
@@ -357,7 +359,7 @@ def _resolve_prescription_and_plan(
             f"{outdir_label}); falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
         )
         prescription_path = DEFAULT_PRESCRIPTION_PATH
-    if plan_path is None:
+    if plan_path is None and not explicit_prescription:
         outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
             "WARNING: No plan path provided/detected (no plan CSV "
@@ -365,7 +367,7 @@ def _resolve_prescription_and_plan(
         )
         plan_path = DEFAULT_PLAN_PATH
 
-    return Path(prescription_path), Path(plan_path)
+    return Path(prescription_path), Path(plan_path) if plan_path is not None else None
 
 
 def _set_nested(target: dict[str, Any], keys: list[str], value: Any) -> None:
@@ -1234,7 +1236,7 @@ def _write_experiment_outputs(
     outdir: Path,
     prescription: dict[str, Any],
     prescription_path: Path,
-    plan_path: Path,
+    plan_path: Path | None,
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
     repo_root: Path,
@@ -1344,12 +1346,18 @@ def main() -> None:
     resolved_prescription = _repo_relative_path(prescription_path, repo_root=repo_root)
     resolved_plan = _repo_relative_path(plan_path, repo_root=repo_root)
     print(f"Resolved prescription path: {resolved_prescription or prescription_path}")
-    print(f"Resolved plan path: {resolved_plan or plan_path}")
+    if plan_path is None:
+        print("Resolved plan path: None (plan overrides disabled)")
+    else:
+        print(f"Resolved plan path: {resolved_plan or plan_path}")
 
     # Plan/prescription parsing and run spec resolution: load the JSON recipe
     # and the optional plan CSV that overrides per-run settings.
     prescription = _load_prescription(prescription_path)
-    plan_rows = _load_plan_csv(plan_path)
+    if plan_path is None:
+        plan_rows = []
+    else:
+        plan_rows = _load_plan_csv(plan_path)
     n_runs = _get_nested(prescription, ["experiment", "n_runs"])
     # experiment.n_runs is authoritative: it pads or truncates the plan so
     # previews and run execution operate on the resolved run count.
