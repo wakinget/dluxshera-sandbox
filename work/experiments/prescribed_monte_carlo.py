@@ -81,6 +81,7 @@ DEFAULT_PRESCRIPTION_PATH = Path(
     "work/experiments/prescription_templates/prescription.json"
 )
 DEFAULT_OVERRIDES_PATH = Path("work/experiments/prescription_templates/overrides.csv")
+PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -135,6 +136,19 @@ def _parse_cell(value: str | None) -> Any:
         return float(raw)
     except ValueError:
         return raw
+
+
+def _parse_plan_value(key: str, value: str | None) -> Any:
+    """Parse a plan CSV value with key-aware handling for free-text fields."""
+    normalized_key = key.strip().lower()
+    if normalized_key in PLAN_FREE_TEXT_COLUMNS:
+        if value is None:
+            return None
+        raw = value.strip()
+        if raw == "" or raw.lower() in {"null", "none"}:
+            return None
+        return raw
+    return _parse_cell(value)
 
 
 def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
@@ -212,9 +226,12 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
                 continue
             for idx, _ in enumerate(run_columns):
                 value = row[idx + 1] if len(row) > idx + 1 else ""
-                if value is None or value.strip() == "":
+                if (
+                    (value is None or value.strip() == "")
+                    and key.strip().lower() not in PLAN_FREE_TEXT_COLUMNS
+                ):
                     continue
-                rows[idx][key] = _parse_cell(value)
+                rows[idx][key] = _parse_plan_value(key, value)
         return rows
 
     reader = csv.DictReader(lines)
@@ -222,9 +239,12 @@ def _load_plan_csv(path: Path) -> list[dict[str, Any]]:
     for row in reader:
         parsed: dict[str, Any] = {}
         for key, value in row.items():
-            if value is None or value.strip() == "":
+            if (
+                (value is None or value.strip() == "")
+                and key.strip().lower() not in PLAN_FREE_TEXT_COLUMNS
+            ):
                 continue
-            parsed[key] = _parse_cell(value)
+            parsed[key] = _parse_plan_value(key, value)
         rows.append(parsed)
     return rows
 
