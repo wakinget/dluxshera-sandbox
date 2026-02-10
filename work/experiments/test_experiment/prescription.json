@@ -2,7 +2,8 @@
   "experiment": {
     "n_runs": 15,
     "run_id_prefix": "mc",
-    "results_filename": "results.csv"
+    "results_filename": "results.csv",
+    "notes": "Test experiment note for aggregate manifest validation."
   },
   "model": {
     "config_id": "SHERA_TESTBED_CONFIG"

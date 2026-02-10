@@ -16,7 +16,8 @@ Outputs go to an experiment output directory:
 ### Aggregate schema notes
 - `results.csv` includes run metadata columns such as `run_id`, `status`, `created_at`,
   `run_note`, `plan_label`, and `seed` before optimizer/noise fields and parameter columns.
-- `manifest.json` includes one record per run under `runs[]`; when a run summary contains
+- `manifest.json` includes top-level `notes` from `experiment.notes` (aliases accepted: `experiment.note`, `experiment.comment`, `experiment.comments`).
+- `manifest.json` also includes one record per run under `runs[]`; when a run summary contains
   `run_note`, it is surfaced in that run record for quick annotation lookups.
 
 ## Quick start
@@ -90,6 +91,9 @@ Resolution behavior:
   - If a plan row does **not** specify `seed`, the runner derives a per-run seed
     by folding the run index into the prescription default seed (deterministic
     and reproducible across runs).
+- Notes fields:
+  - **Experiment-level note**: put this in `experiment.notes` (recommended) in `prescription.json`; aliases `experiment.note`, `experiment.comment`, and `experiment.comments` are accepted for compatibility. This is persisted once in `manifest.json` as top-level `notes`.
+  - **Per-run note**: put `note` / `notes` / `comment` / `comments` in `overrides.csv`; these are persisted per run as `run_note` in summaries, `results.csv`, and `manifest.json.runs[]`.
 - `experiment.n_runs` is **authoritative** when set:
   - If the plan defines fewer runs, the remaining runs execute with prescription defaults (no per-run overrides).
   - If the plan defines more runs, extra plan-defined runs are ignored.

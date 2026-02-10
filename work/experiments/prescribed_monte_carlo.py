@@ -13,6 +13,15 @@ Execution flow
 - Write run artifacts under runs/<run_id>/..., including summaries and logs.
 - Aggregate manifest.json and results.csv across runs at the experiment root.
 
+Notes behavior
+--------------
+- Experiment-level note: set `experiment.notes` in the prescription (aliases:
+  `experiment.note`, `experiment.comment`, `experiment.comments`). This value
+  is written once to top-level `manifest.json["notes"]`.
+- Per-run note: set `note`/`notes`/`comment`/`comments` in overrides rows.
+  The resolved value is stored as `run_note` in run summaries and aggregate
+  outputs.
+
 CLI arguments (mirrors `main`)
 ------------------------------
 - --prescription: JSON experiment recipe (defaults to template when omitted).
@@ -82,6 +91,7 @@ DEFAULT_PRESCRIPTION_PATH = Path(
 )
 DEFAULT_OVERRIDES_PATH = Path("work/experiments/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
+EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -646,6 +656,17 @@ def _get_nested(payload: dict[str, Any], keys: list[str]) -> Any:
     return current
 
 
+def _first_present_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """Return the first non-empty string value found for candidate keys."""
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+    return None
+
+
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:
     """Print a tabular preview of resolved run specs to stdout.
 
@@ -1208,6 +1229,7 @@ def _write_manifest(
     prescription_path: str | None,
     plan_path: str | None,
     config_id: str | None,
+    notes: str | None,
     overrides_config_keys: list[str],
     overrides_store_keys: list[str],
     runs: list[dict[str, Any]],
@@ -1224,6 +1246,7 @@ def _write_manifest(
         "prescription_path": prescription_path,
         "plan_path": plan_path,
         "config_id": config_id,
+        "notes": notes,
         "overrides": {
             "config_keys": overrides_config_keys,
             "store_keys": overrides_store_keys,
@@ -1330,6 +1353,7 @@ def _write_experiment_outputs(
     config_keys = sorted((overrides.get("config") or {}).keys())
     store_keys = sorted((overrides.get("store") or {}).keys())
     manifest_runs = _build_manifest_runs(run_entries)
+    experiment_notes = _first_present_string(experiment, EXPERIMENT_NOTE_KEYS)
 
     _write_manifest(
         manifest_path,
@@ -1337,8 +1361,9 @@ def _write_experiment_outputs(
         script=_repo_relative_path(Path(__file__), repo_root=repo_root)
         or "work/experiments/prescribed_monte_carlo.py",
         prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
-plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
+        plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
         config_id=_get_nested(prescription, ["model", "config_id"]),
+        notes=experiment_notes,
         overrides_config_keys=config_keys,
         overrides_store_keys=store_keys,
         runs=manifest_runs,
@@ -1354,10 +1379,14 @@ def main() -> None:
 
     Args:
         --prescription: Path to the JSON experiment recipe. This file sets the
-            experiment defaults, model config, and per-run seed rules.
+            experiment defaults, model config, and per-run seed rules, and may
+            include an experiment-level note (`experiment.notes`; aliases
+            `experiment.note`/`experiment.comment`/`experiment.comments`) that
+            is persisted once in top-level manifest.json `notes`.
         --overrides: Optional CSV of per-run overrides. Rows
             cannot override model or overrides.* settings; they only mutate
-            run-level fields.
+            run-level fields. Per-run notes come from
+            note/notes/comment/comments fields and are persisted as `run_note`.
         --outdir: Root output directory for the experiment. When supplied, this
             is treated as the experiment root, and all run artifacts
             (runs/<run_id>/...), manifest.json, and results.csv are written
