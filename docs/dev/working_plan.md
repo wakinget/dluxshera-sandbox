@@ -1,5 +1,5 @@
 # dLuxShera Working Plan & Notes (dev-facing)
-_Last updated: 2026-01-15_
+_Last updated: 2026-02-10_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
@@ -13,6 +13,13 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 - **Section 22:** Merge strategy and near-term focus for V1.0.
 - **Sections 23–25:** Documentation housekeeping, implementation follow-through notes, and the parking lot/backlog.
 - **Historical context:** For narrative history and ADR-style rationale, see `docs/archive/REFACTOR_HISTORY.md` and `docs/architecture/adr/0001-core-architecture-foundations.md`.
+
+## Progress refresh (2026-02)
+
+- Roadmap priorities are largely stable this cycle; no major theme reprioritization is needed.
+- Experiment workflows have advanced: prescribed Monte Carlo now has a maintained recipe entry point plus templates in `examples/recipes/prescription_templates/`.
+- Experiment metadata tracking improved: experiment-level notes and per-run notes now propagate into manifest/aggregate outputs.
+- Near-term focus remains optimizer robustness, regression depth, and doc/tutorial cleanup rather than major architecture rewrites.
 
 ---
 
@@ -202,6 +209,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ Binder-first loss wiring (Binder NLL helpers using `gaussian_image_nll`) and binder namespace UX (Task 1A–1E).  
 - ✅ SystemGraph single-node scaffold (removed from mainline; retained in archive history).  
 - ✅ Binder NLL stationary-point regression landed; follow-on scenarios pending (multi-wavelength/multi-PSF).  
+- ✅ Prescribed Monte Carlo workflow promoted into examples with maintained templates and updated naming (`overrides.csv` semantics, notes propagation).
+- ✅ Aggregation metadata improvements landed (`run_note` plus experiment-level notes in manifests/results summaries).
 
 **P0 — Current focus**  
 - ✅ **Optimization artifacts & logging**: Phase A scaffold (`run_artifacts.py`) is in place and Phase B wiring now emits required artifacts from `run_simple_gd` and binder-backed `run_image_gd` when opt-in flags are provided. Integration smoke tests cover end-to-end writes and metadata (trace/meta/summary + optional checkpoints).  
@@ -212,7 +221,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **P1 — Next up**  
 - ⏳ **Profiles/IO and serialization**: YAML/JSON profiles and richer serialization once primitives-only policy remains stable.  
-- ⏳ **Documentation and example polish**: README quickstart, additional tutorials, and aligning examples/README.md with the new optimization artifact flow.  
+- ⚠️ **Documentation and example polish**: canonical and prescribed Monte Carlo docs improved, but README quickstart and tutorial cross-links are still incomplete.
 - ⏳ **Expanded transform coverage**: Broaden registry coverage for additional systems (two-/future four-plane) as specs land.
 
 **P2 — Variants & ergonomics**  
@@ -842,3 +851,12 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
 - **Run directory identity:** adopt a deterministic `run_id` strategy (timestamp vs. UUID vs. caller-provided) and whether to embed git hash automatically or gate on availability.
 - **Truth availability for signals:** for demos/tests, define how truth is surfaced to signal builders (pass through optimizer API vs. loaded alongside data) to avoid coupling to specific demos.
 - **Checkpoint contents:** decide minimal checkpoint schema (θ only vs. θ + optimizer state) while keeping restart support lightweight for optax-based loops.
+
+
+## 27) Known Issues (lightweight tracker)
+
+Use this section as a quick in-doc ledger for active issues that are worth tracking between formal GitHub issue triage passes.
+
+- **Preconditioning is still partially implemented.** `ema_grad2`-based paths are available, but first-class FIM-derived preconditioning in the main configuration flow is still incomplete.
+- **Loss regression breadth is still partial.** Multi-wavelength and multi-PSF inference cases need deeper explicit regression coverage.
+- **Profiles/IO consistency across workflows is incomplete.** Prescription/override flows are strong for experiment runners, but a unified YAML/JSON profile experience across all entry points is still pending.
