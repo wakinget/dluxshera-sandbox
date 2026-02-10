@@ -38,6 +38,7 @@ import dataclasses
 import json
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1571,6 +1572,8 @@ def main() -> None:
         print(f"Wrote experiment manifest/results to: {outdir}")
         return
 
+    t0_experiment = time.time()
+
     for index, (row, run_spec) in enumerate(zip(plan_rows, run_specs)):
         if not _row_enabled(row):
             continue
@@ -1580,6 +1583,7 @@ def main() -> None:
         run_spec["run_id"] = run_id
 
         print(f"\n--- Run {run_counter} ({run_id}) ---")
+        t0_run = time.time()
 
         seed_value = run_spec.get("seed")
         if seed_value is None:
@@ -1983,11 +1987,13 @@ def main() -> None:
                 )
                 _maybe_warn_missing_artifacts(run_dir)
 
+        t1_run = time.time()
         print(
-            "Run summary: loss(true)={:.6g}, loss(init)={:.6g}, loss(final)={:.6g}".format(
+            "Run summary: loss(true)={:.6g}, loss(init)={:.6g}, loss(final)={:.6g}, time={:.3f} sec".format(
                 loss_true,
                 loss_init,
                 loss_final,
+                t1_run - t0_run,
             )
         )
 
@@ -2003,7 +2009,13 @@ def main() -> None:
         infer_keys=infer_keys,
         repo_root=repo_root,
     )
-    print(f"\nExecution complete. Wrote runs to: {runs_dir}")
+    t1_experiment = time.time()
+    print(
+        "\nExecution complete in {:.3f} sec. Wrote runs to: {}".format(
+            t1_experiment - t0_experiment,
+            runs_dir,
+        )
+    )
     print(f"Wrote experiment manifest/results to: {outdir}")
 
 if __name__ == "__main__":
