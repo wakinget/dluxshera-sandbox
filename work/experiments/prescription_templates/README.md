@@ -13,6 +13,12 @@ Outputs go to an experiment output directory:
 - `results.csv` (summary of run outputs)
 - `runs/<run_id>/...` (per-run meta/summary/trace artifacts)
 
+### Aggregate schema notes
+- `results.csv` includes run metadata columns such as `run_id`, `status`, `created_at`,
+  `run_note`, `plan_label`, and `seed` before optimizer/noise fields and parameter columns.
+- `manifest.json` includes one record per run under `runs[]`; when a run summary contains
+  `run_note`, it is surfaced in that run record for quick annotation lookups.
+
 ## Quick start
 1) **Copy a template directory**
 

@@ -1087,6 +1087,7 @@ def _build_results_rows(
             "run_id": run_id,
             "status": status,
             "created_at": created_at,
+            "run_note": summary.get("run_note") if summary else None,
             "loss_init": loss_init,
             "loss_final": loss_final,
             "chi2_init": chi2_init,
@@ -1171,6 +1172,7 @@ def _write_results_csv(
         "run_id",
         "status",
         "created_at",
+        "run_note",
         "loss_init",
         "loss_final",
         "chi2_init",
@@ -1289,6 +1291,9 @@ def _build_manifest_runs(run_entries: list[dict[str, Any]]) -> list[dict[str, An
             for key in ("loss_init", "loss_final", "num_steps_completed"):
                 if key in summary:
                     run_payload[key] = summary.get(key)
+            run_note = summary.get("run_note")
+            if run_note is not None:
+                run_payload["run_note"] = run_note
         else:
             run_payload["message"] = f"summary.json missing in runs/{run_id}"
         manifest_runs.append(run_payload)
