@@ -827,6 +827,34 @@ def _config_payload(cfg: SheraThreePlaneConfig, *, repo_root: Path) -> dict[str,
     return payload
 
 
+def _reduced_chi2_between_images(
+    data_image: Any,
+    model_image: Any,
+    *,
+    variance_image: Any,
+) -> float:
+    """Compute reduced chi-squared between data and model PSF images.
+
+    Used in `main` to report image-space fit quality for the seeded initial
+    model and optimized final model in each run summary. The computation mirrors
+    `plot_psf_comparison` by building a z-score image from residuals and
+    variance, then averaging squared z values by image degrees of freedom.
+
+    This helper is a good candidate for migration into a shared utility module
+    if additional experiment scripts need the same image-comparison metric.
+    """
+    data_arr = np.asarray(data_image, dtype=float)
+    model_arr = np.asarray(model_image, dtype=float)
+    var_arr = np.asarray(variance_image, dtype=float)
+
+    safe_var = np.where(var_arr > 0.0, var_arr, np.nan)
+    z_score = (data_arr - model_arr) / np.sqrt(safe_var)
+    dof = data_arr.size
+    if dof <= 0:
+        return float("nan")
+    return float(np.nansum(z_score**2) / dof)
+
+
 def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
     """Warn if required run artifacts are missing from a run directory.
 
@@ -1013,6 +1041,8 @@ def _build_results_rows(
         status = summary.get("status") if summary else "error"
         loss_init = summary.get("loss_init") if summary else None
         loss_final = summary.get("loss_final") if summary else None
+        chi2_init = summary.get("chi2_init") if summary else None
+        chi2_final = summary.get("chi2_final") if summary else None
         loss_truth = None
         if summary:
             loss_truth = summary.get("loss_truth", summary.get("loss_true"))
@@ -1039,6 +1069,8 @@ def _build_results_rows(
             "created_at": created_at,
             "loss_init": loss_init,
             "loss_final": loss_final,
+            "chi2_init": chi2_init,
+            "chi2_final": chi2_final,
             "loss_truth": loss_truth,
             "num_steps_completed": num_steps,
             "improvement_ratio": improvement_ratio,
@@ -1121,6 +1153,8 @@ def _write_results_csv(
         "created_at",
         "loss_init",
         "loss_final",
+        "chi2_init",
+        "chi2_final",
         "loss_truth",
         "num_steps_completed",
         "improvement_ratio",
@@ -1957,12 +1991,25 @@ def main() -> None:
         # Rehydrate structured parameters after optimization: unpack_params
         # restores the ParameterStore layout for reporting and artifacts.
         final_store = store_unpack_params(inference_subspec, theta_final, init_store)
-        _ = binder.model(
+        init_psf = binder.model(
+            strip_structural(init_store, structural_keys=binder.structural_store_keys())
+        )
+        final_psf = binder.model(
             strip_structural(final_store, structural_keys=binder.structural_store_keys())
         )
 
         loss_init = float(loss_fn(theta0))
         loss_final = float(loss_fn(theta_final))
+        chi2_init = _reduced_chi2_between_images(
+            data,
+            init_psf,
+            variance_image=data_var,
+        )
+        chi2_final = _reduced_chi2_between_images(
+            data,
+            final_psf,
+            variance_image=data_var,
+        )
         improvement_ratio = loss_init / loss_final if loss_final != 0 else float("nan")
 
         if artifacts is not None:
@@ -1979,6 +2026,8 @@ def main() -> None:
                     {
                         "param_summary": param_summary,
                         "loss_true": loss_true,
+                        "chi2_init": chi2_init,
+                        "chi2_final": chi2_final,
                         "improvement_ratio": improvement_ratio,
                         "run_note": run_spec.get("note"),
                         "run_seed": seed,
@@ -1989,10 +2038,13 @@ def main() -> None:
 
         t1_run = time.time()
         print(
-            "Run summary: loss(true)={:.6g}, loss(init)={:.6g}, loss(final)={:.6g}, time={:.3f} sec".format(
+            "Run summary: loss(true)={:.6g}, loss(init)={:.6g}, loss(final)={:.6g}, "
+            "chi2(init)={:.6g}, chi2(final)={:.6g}, time={:.3f} sec".format(
                 loss_true,
                 loss_init,
                 loss_final,
+                chi2_init,
+                chi2_final,
                 t1_run - t0_run,
             )
         )
