@@ -5,7 +5,7 @@ Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
 --------------
-- Load the prescription JSON and optional plan CSV.
+- Load the prescription JSON and optional per-run overrides CSV.
 - Resolve run specs and seeds, plus experiment-wide config/store overrides.
 - Build truth/init stores for each run, then generate synthetic observations with
   optional noise.
@@ -16,7 +16,7 @@ Execution flow
 CLI arguments (mirrors `main`)
 ------------------------------
 - --prescription: JSON experiment recipe (defaults to template when omitted).
-- --plan: optional CSV plan that overrides per-run settings (defaults to template when omitted).
+- --overrides: optional CSV of per-run overrides (defaults to template when omitted).
 - --outdir: root output directory for the experiment (experiment root). If
   omitted, the output directory is derived from `--run-name` or a timestamp.
 - --run-name: optional name segment used to build Results/<run-name> when
@@ -80,7 +80,7 @@ from dluxshera.systems.three_plane import (
 DEFAULT_PRESCRIPTION_PATH = Path(
     "work/experiments/prescription_templates/prescription.json"
 )
-DEFAULT_PLAN_PATH = Path("work/experiments/prescription_templates/plan.csv")
+DEFAULT_OVERRIDES_PATH = Path("work/experiments/prescription_templates/overrides.csv")
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -247,7 +247,7 @@ def _apply_experiment_n_runs(
         if plan_runs == 0:
             raise ValueError(
                 "Unable to resolve run count: experiment.n_runs is not set and "
-                "plan.csv defines 0 runs."
+                "overrides.csv defines 0 runs."
             )
         return (
             plan_rows_copy,
@@ -289,12 +289,12 @@ def _apply_experiment_n_runs(
     )
 
 
-def _detect_prescription_plan_candidates(
+def _detect_prescription_overrides_candidates(
     outdir: Path,
 ) -> tuple[Path | None, Path | None]:
-    """Scan an output directory for candidate prescription/plan files.
+    """Scan an output directory for candidate prescription/overrides files.
 
-    This is a best-effort helper for `main` when `--prescription` or `--plan` is
+    This is a best-effort helper for `main` when `--prescription` or `--overrides` is
     omitted but an output directory is provided. Detection rules are intentionally
     conservative; update this helper when additional filename conventions are
     introduced in prescribed Monte Carlo workflows.
@@ -307,11 +307,11 @@ def _detect_prescription_plan_candidates(
         for candidate in outdir.rglob("*.json")
         if "prescription" in candidate.name.lower()
     )
-    plan_candidates = sorted(
-        (candidate for candidate in outdir.rglob("*.csv") if "plan" in candidate.name.lower()),
+    overrides_candidates = sorted(
+        (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
         key=lambda candidate: (
-            candidate.name.lower() != "plan.csv",
-            candidate.name.lower() == "plan_wide.csv",
+            candidate.name.lower() != "overrides.csv",
+            candidate.name.lower() == "overrides_wide.csv",
             str(candidate),
         ),
     )
@@ -322,43 +322,43 @@ def _detect_prescription_plan_candidates(
             "Multiple prescription candidates found in "
             f"{outdir}. Provide --prescription to disambiguate:\n{joined}"
         )
-    if len(plan_candidates) > 1:
-        joined = "\n".join(f"- {candidate}" for candidate in plan_candidates)
+    if len(overrides_candidates) > 1:
+        joined = "\n".join(f"- {candidate}" for candidate in overrides_candidates)
         raise ValueError(
-            "Multiple plan candidates found in "
-            f"{outdir}. Provide --plan to disambiguate:\n{joined}"
+            "Multiple overrides candidates found in "
+            f"{outdir}. Provide --overrides to disambiguate:\n{joined}"
         )
 
     prescription_path = prescription_candidates[0] if prescription_candidates else None
-    plan_path = plan_candidates[0] if plan_candidates else None
+    overrides_path = overrides_candidates[0] if overrides_candidates else None
 
-    return prescription_path, plan_path
+    return prescription_path, overrides_path
 
 
-def _resolve_prescription_and_plan(
+def _resolve_prescription_and_overrides(
     args: argparse.Namespace, outdir: Path | None
 ) -> tuple[Path, Path | None]:
-    """Resolve prescription/plan paths from CLI args and optional outdir scan."""
+    """Resolve prescription/overrides paths from CLI args and optional outdir scan."""
     prescription_path = args.prescription
-    plan_path = args.plan
+    overrides_path = args.overrides
     explicit_prescription = prescription_path is not None
 
-    if (prescription_path is None or plan_path is None) and outdir is not None:
-        detected_prescription, detected_plan = _detect_prescription_plan_candidates(
+    if (prescription_path is None or overrides_path is None) and outdir is not None:
+        detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
             outdir
         )
         if prescription_path is None and detected_prescription is not None:
             prescription_path = detected_prescription
             explicit_prescription = True
-        if plan_path is None and detected_plan is not None:
-            plan_path = detected_plan
+        if overrides_path is None and detected_overrides is not None:
+            overrides_path = detected_overrides
 
-    if plan_path is not None and prescription_path is None:
-        plan_label = plan_path if plan_path is not None else "unknown"
+    if overrides_path is not None and prescription_path is None:
+        overrides_label = overrides_path if overrides_path is not None else "unknown"
         outdir_label = f"{outdir}" if outdir is not None else "no outdir provided"
         raise ValueError(
-            "Plan path was provided or detected "
-            f"({plan_label}, outdir scan: {outdir_label}) but no prescription was "
+            "Overrides path was provided or detected "
+            f"({overrides_label}, outdir scan: {outdir_label}) but no prescription was "
             "provided or detected. Pass --prescription explicitly."
         )
 
@@ -369,15 +369,15 @@ def _resolve_prescription_and_plan(
             f"{outdir_label}); falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
         )
         prescription_path = DEFAULT_PRESCRIPTION_PATH
-    if plan_path is None and not explicit_prescription:
+    if overrides_path is None and not explicit_prescription:
         outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
-            "WARNING: No plan path provided/detected (no plan CSV "
-            f"{outdir_label}); falling back to template at {DEFAULT_PLAN_PATH}"
+            "WARNING: No overrides path provided/detected (no overrides CSV "
+            f"{outdir_label}); falling back to template at {DEFAULT_OVERRIDES_PATH}"
         )
-        plan_path = DEFAULT_PLAN_PATH
+        overrides_path = DEFAULT_OVERRIDES_PATH
 
-    return Path(prescription_path), Path(plan_path) if plan_path is not None else None
+    return Path(prescription_path), Path(overrides_path) if overrides_path is not None else None
 
 
 def _set_nested(target: dict[str, Any], keys: list[str], value: Any) -> None:
@@ -1312,7 +1312,7 @@ def _write_experiment_outputs(
         script=_repo_relative_path(Path(__file__), repo_root=repo_root)
         or "work/experiments/prescribed_monte_carlo.py",
         prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
-        plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
+plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
         config_id=_get_nested(prescription, ["model", "config_id"]),
         overrides_config_keys=config_keys,
         overrides_store_keys=store_keys,
@@ -1330,7 +1330,7 @@ def main() -> None:
     Args:
         --prescription: Path to the JSON experiment recipe. This file sets the
             experiment defaults, model config, and per-run seed rules.
-        --plan: Optional CSV plan that overrides per-run settings. Plan rows
+        --overrides: Optional CSV of per-run overrides. Rows
             cannot override model or overrides.* settings; they only mutate
             run-level fields.
         --outdir: Root output directory for the experiment. When supplied, this
@@ -1356,10 +1356,10 @@ def main() -> None:
         help="Path to prescription JSON (defaults to template if omitted)",
     )
     parser.add_argument(
-        "--plan",
+        "--overrides",
         type=Path,
         default=None,
-        help="Path to plan CSV (defaults to template if omitted)",
+        help="Path to per-run overrides CSV (defaults to template if omitted)",
     )
     parser.add_argument(
         "--outdir",
@@ -1389,22 +1389,22 @@ def main() -> None:
     output_metric = False
 
     outdir_hint = Path(args.outdir) if args.outdir else None
-    prescription_path, plan_path = _resolve_prescription_and_plan(args, outdir_hint)
+    prescription_path, overrides_path = _resolve_prescription_and_overrides(args, outdir_hint)
     resolved_prescription = _repo_relative_path(prescription_path, repo_root=repo_root)
-    resolved_plan = _repo_relative_path(plan_path, repo_root=repo_root)
+    resolved_overrides = _repo_relative_path(overrides_path, repo_root=repo_root)
     print(f"Resolved prescription path: {resolved_prescription or prescription_path}")
-    if plan_path is None:
-        print("Resolved plan path: None (plan overrides disabled)")
+    if overrides_path is None:
+        print("Resolved overrides path: None (per-run overrides disabled)")
     else:
-        print(f"Resolved plan path: {resolved_plan or plan_path}")
+        print(f"Resolved overrides path: {resolved_overrides or overrides_path}")
 
     # Plan/prescription parsing and run spec resolution: load the JSON recipe
-    # and the optional plan CSV that overrides per-run settings.
+    # and the optional overrides CSV that mutates per-run settings.
     prescription = _load_prescription(prescription_path)
-    if plan_path is None:
+    if overrides_path is None:
         plan_rows = []
     else:
-        plan_rows = _load_plan_csv(plan_path)
+        plan_rows = _load_plan_csv(overrides_path)
     n_runs = _get_nested(prescription, ["experiment", "n_runs"])
     # experiment.n_runs is authoritative: it pads or truncates the plan so
     # previews and run execution operate on the resolved run count.
@@ -1601,7 +1601,7 @@ def main() -> None:
             outdir=outdir,
             prescription=prescription,
             prescription_path=prescription_path,
-            plan_path=plan_path,
+            plan_path=overrides_path,
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
@@ -2063,7 +2063,7 @@ def main() -> None:
         outdir=outdir,
         prescription=prescription,
         prescription_path=prescription_path,
-        plan_path=plan_path,
+        plan_path=overrides_path,
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,

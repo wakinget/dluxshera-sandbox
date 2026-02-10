@@ -1,12 +1,12 @@
 # Prescribed Monte Carlo Templates
 
 ## Purpose
-Prescribed Monte Carlo in this repo means an experiment-wide **prescription** plus a per-run **plan** that drives repeated optimizations. You define a single `prescription.json` for the experiment and a `plan.csv` that enumerates the run-specific inputs. The runner then executes each run with consistent model/config defaults and per-run overrides.
+Prescribed Monte Carlo in this repo means an experiment-wide **prescription** plus a per-run **plan** that drives repeated optimizations. You define a single `prescription.json` for the experiment and an `overrides.csv` that enumerates the run-specific inputs. The runner then executes each run with consistent model/config defaults and per-run overrides.
 
 ## Template layout
 A template directory contains:
 - `prescription.json`
-- `plan.csv` (transposed matrix format; **keys-as-rows, runs-as-columns**)
+- `overrides.csv` (transposed matrix format; **keys-as-rows, runs-as-columns**)
 
 Outputs go to an experiment output directory:
 - `manifest.json` (run metadata and configuration used)
@@ -31,7 +31,7 @@ Key sections you will typically touch:
 - `defaults`
   - `defaults.fim.reuse_fim` controls whether FIM reuse is forced even when the strict cache key misses.
 
-3) **Edit `plan.csv`** (per-run inputs)
+3) **Edit `overrides.csv`** (per-run inputs)
 
 - Transposed format: **first column = keys**, each remaining column = a run.
 - Blank cells mean “no override for this run.”
@@ -43,7 +43,7 @@ Key sections you will typically touch:
 ```bash
 python work/experiments/prescribed_monte_carlo.py \
   --prescription work/experiments/my_experiment/prescription.json \
-  --plan work/experiments/my_experiment/plan.csv \
+  --overrides work/experiments/my_experiment/overrides.csv \
   --dry-run
 ```
 
@@ -52,7 +52,7 @@ python work/experiments/prescribed_monte_carlo.py \
 ```bash
 python work/experiments/prescribed_monte_carlo.py \
   --prescription work/experiments/my_experiment/prescription.json \
-  --plan work/experiments/my_experiment/plan.csv \
+  --overrides work/experiments/my_experiment/overrides.csv \
   --outdir Results/my_experiment
 ```
 
@@ -65,17 +65,17 @@ python work/experiments/prescribed_monte_carlo.py \
 The default template uses the **transposed** format (keys-as-rows, runs-as-columns). The legacy wide format is no longer part of the templates.
 
 ## Auto-discovery
-When you pass `--outdir` without explicit `--prescription` or `--plan`, the script scans the output directory for:
+When you pass `--outdir` without explicit `--prescription` or `--overrides`, the script scans the output directory for:
 - **Prescription candidates**: JSON files whose names contain `prescription` (case-insensitive).
-- **Plan candidates**: CSV files whose names contain `plan` (case-insensitive), with `plan.csv` treated as the preferred naming convention.
+- **Overrides candidates**: CSV files whose names contain `overrides` (case-insensitive), with `overrides.csv` treated as the preferred naming convention.
 
 If multiple candidates are found, you must disambiguate by passing explicit paths.
 
 Resolution behavior:
-- If a prescription is found but no plan is found, the run proceeds with **no plan overrides** (no template plan fallback).
-- If a plan is found but no prescription is found, the script raises an error.
+- If a prescription is found but no overrides file is found, the run proceeds with **no per-run overrides** (no template overrides fallback).
+- If an overrides file is found but no prescription is found, the script raises an error.
 - If neither is found, the script warns and falls back to **both** templates.
-- Supplying `--prescription` without `--plan` explicitly also runs with no plan overrides.
+- Supplying `--prescription` without `--overrides` explicitly also runs with no per-run overrides.
 
 ## Key semantics / policies
 - Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the plan.
@@ -90,7 +90,7 @@ Resolution behavior:
 - `init.mode`:
   - `prior`: samples around truth using priors.
   - `explicit`: only uses explicitly provided init values; missing values follow normal resolution/derived refresh.
-- Per-run prior overrides (plan.csv):
+- Per-run prior overrides (overrides.csv):
   - Use keys `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the
     prescription priors for a single run without changing `init.mode`.
   - These overrides apply **only** when `init.mode` resolves to `prior`.
@@ -104,12 +104,12 @@ Resolution behavior:
   - `false` (default): reuse only when the strict FIM cache key matches.
   - `true`: reuse the most recent cached FIM even when the strict cache key misses (with a warning).
 - Paths like `diffractive_pupil_path` are **repo-root-relative**.
-- Vector cells in `plan.csv` must be **JSON arrays**.
+- Vector cells in `overrides.csv` must be **JSON arrays**.
 
 ## Troubleshooting
 - **Strict config validation**: a typo in any override key will error out.
 - **Malformed JSON arrays**: ensure vector cells are valid JSON (e.g., `[1, 2, 3]`).
-- **Forbidden plan keys**: `model.*` or `overrides.config.*` in the plan are rejected.
+- **Forbidden overrides keys**: `model.*` or `overrides.config.*` in the overrides file are rejected.
 - **Zernike length mismatches**: ensure vector lengths match configured Noll indices.
 
 ## Future note
