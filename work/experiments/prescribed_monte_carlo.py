@@ -1384,6 +1384,9 @@ def main() -> None:
 
     args = parser.parse_args()
     repo_root = Path(__file__).resolve().parents[2]
+    # Local toggle for writing per-run metric artifacts (metric.npz).
+    # Default off to avoid extra artifact I/O unless explicitly needed.
+    output_metric = False
 
     outdir_hint = Path(args.outdir) if args.outdir else None
     prescription_path, plan_path = _resolve_prescription_and_plan(args, outdir_hint)
@@ -1902,11 +1905,13 @@ def main() -> None:
             # defined in the original parameter space.
             loss_opt = lambda z: loss_fn(eigen_map.theta_from_z(z))
             theta0_opt = z0
-            metric_payload = {
-                "theta_ref": np.asarray(theta0_opt),
-                "metric_diag": np.asarray(curvature_vec),
-                "lr_scale": np.asarray(lr_vec),
-            }
+            metric_payload = None
+            if output_metric:
+                metric_payload = {
+                    "theta_ref": np.asarray(theta0_opt),
+                    "metric_diag": np.asarray(curvature_vec),
+                    "lr_scale": np.asarray(lr_vec),
+                }
             precond_meta = {
                 **precond_meta_base,
                 "lr_vec": np.asarray(lr_vec),
@@ -1919,11 +1924,13 @@ def main() -> None:
             curvature_vec = fim_diag
             loss_opt = loss_fn
             theta0_opt = theta0
-            metric_payload = {
-                "theta_ref": np.asarray(theta0_opt),
-                "metric_diag": np.asarray(curvature_vec),
-                "lr_scale": np.asarray(lr_vec),
-            }
+            metric_payload = None
+            if output_metric:
+                metric_payload = {
+                    "theta_ref": np.asarray(theta0_opt),
+                    "metric_diag": np.asarray(curvature_vec),
+                    "lr_scale": np.asarray(lr_vec),
+                }
             precond_meta = {
                 **precond_meta_base,
                 "lr_vec": np.asarray(lr_vec),
