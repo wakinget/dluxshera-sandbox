@@ -1589,6 +1589,7 @@ def main() -> None:
         rng_key, init_key = jr.split(rng_key)
         rng_key, noise_key = jr.split(rng_key)
 
+        print(f"Generating synthetic data...")
         # Synthetic data generation + noise handling: build the "truth" store,
         # refresh derived values, then forward-model data and inject noise.
         truth_overrides = _flatten_store_overrides(run_spec.get("truth", {}))
@@ -1675,29 +1676,27 @@ def main() -> None:
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
         cache_entry = fim_cache.get(cache_key)
         if cache_entry is not None:
+            print("FIM cache hit; reusing cached FIM.")
             F = cache_entry["F"]
             fim_diag = cache_entry["fim_diag"]
             fim_cache_hit = True
             fim_cache_last = cache_entry
-            print("FIM cache hit; reusing cached FIM.")
         elif reuse_fim and fim_cache_last is not None:
-            F = fim_cache_last["F"]
-            fim_diag = fim_cache_last["fim_diag"]
-            fim_cache_hit = False
             print(
                 "WARNING: FIM cache miss for strict key; reusing previous cached FIM "
                 "because reuse_fim=True. Inputs may be misaligned."
             )
+            F = fim_cache_last["F"]
+            fim_diag = fim_cache_last["fim_diag"]
+            fim_cache_hit = False
         else:
+            print("FIM cache miss; computing new FIM...")
             F = fim_theta(nll_loss_fn, fim_point)
             fim_diag = jnp.diag(F)
             fim_cache_hit = False
             fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
             fim_cache_last = fim_cache[cache_key]
-            if reuse_fim:
-                print("FIM cache miss; computed and cached FIM.")
-            else:
-                print("FIM cache miss; computed and cached FIM (strict reuse only).")
+            print("FIM computed and cached for later.")
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
