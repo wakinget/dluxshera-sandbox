@@ -36,7 +36,8 @@ Key sections you will typically touch:
 - Transposed format: **first column = keys**, each remaining column = a run.
 - Blank cells mean “no override for this run.”
 - Use `null` (literal text) to set an explicit JSON null.
-- Vector-valued cells must be **JSON arrays** (e.g., `[0.1, 0.2, 0.3]`).
+- Vector-valued cells must be **JSON arrays inside quoted CSV cells** (e.g., `"[0.1, 0.2, 0.3]"`).
+  - Why: CSV uses commas as delimiters, so unquoted arrays can be split across multiple columns.
 
 4) **Dry-run preview**
 
@@ -94,7 +95,7 @@ Resolution behavior:
   - Use keys `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the
     prescription priors for a single run without changing `init.mode`.
   - These overrides apply **only** when `init.mode` resolves to `prior`.
-  - Vector-valued sigmas should be JSON arrays. Scalar sigmas will broadcast
+- Vector-valued sigmas should be quoted JSON arrays (e.g., `"[1, 1, 1]"`). Scalar sigmas will broadcast
     across vector-valued parameters.
   - Examples:
     - Scalar sigma: `prior.binary.x_position_as.sigma = 0.05`
@@ -104,7 +105,14 @@ Resolution behavior:
   - `false` (default): reuse only when the strict FIM cache key matches.
   - `true`: reuse the most recent cached FIM even when the strict cache key misses (with a warning).
 - Paths like `diffractive_pupil_path` are **repo-root-relative**.
-- Vector cells in `overrides.csv` must be **JSON arrays**.
+- Vector cells in `overrides.csv` must be **quoted JSON arrays**.
+
+### CSV + JSON array nuance (important)
+- The plan parser accepts JSON arrays for vector overrides, but CSV parsing happens first.
+- If you write an unquoted array like `[1, 2, 3]` in a CSV cell, commas may be interpreted as column separators.
+- Always quote vector arrays so the full JSON value stays in a single cell:
+  - ✅ Correct: `"[1, 2, 3]"`
+  - ❌ Risky: `[1, 2, 3]`
 
 ## Troubleshooting
 - **Strict config validation**: a typo in any override key will error out.
