@@ -1,9 +1,9 @@
-# Prescribed Monte Carlo plan template (transposed format, keys-as-rows).
+# Prescribed Monte Carlo overrides template (transposed format, keys-as-rows).
 # Dotted paths override nested keys in the prescription defaults.
 # Blank cells leave defaults unchanged; the string "null" clears a value explicitly.
 # Vector-valued cells must be JSON arrays (e.g., [1, 2, 3]).
 # Prior overrides use keys like prior.<infer_key>.sigma or prior.<infer_key>.dist.
-# Structural overrides (model.* or overrides.config.*) are experiment-wide and should NOT appear in the plan.
+# Structural overrides (model.* or overrides.config.*) are experiment-wide and should NOT appear in the overrides file.
 # Run IDs: if a run_id override is provided below it will be used; otherwise run IDs are auto-generated
 # from experiment.run_id_prefix + index (so you can change the prefix without editing this template).
 key,run_001,run_002
