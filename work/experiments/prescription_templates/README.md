@@ -6,7 +6,7 @@ Prescribed Monte Carlo in this repo means an experiment-wide **prescription** pl
 ## Template layout
 A template directory contains:
 - `prescription.json`
-- `overrides.csv` (transposed matrix format; **keys-as-rows, runs-as-columns**)
+- `overrides.csv` (keys defined down rows, each run as a column)
 
 Outputs go to an experiment output directory:
 - `manifest.json` (run metadata and configuration used)
@@ -69,8 +69,6 @@ python work/experiments/prescribed_monte_carlo.py \
 - `Results/my_experiment/runs/<run_id>/` for per-run artifacts
 - `Results/my_experiment/manifest.json` for the resolved configuration and plan
 
-## Plan formats (brief)
-The default template uses the **transposed** format (keys-as-rows, runs-as-columns). The legacy wide format is no longer part of the templates.
 
 ## Auto-discovery
 When you pass `--outdir` without explicit `--prescription` or `--overrides`, the script scans the output directory for:
@@ -83,10 +81,10 @@ Resolution behavior:
 - If a prescription is found but no overrides file is found, the run proceeds with **no per-run overrides** (no template overrides fallback).
 - If an overrides file is found but no prescription is found, the script raises an error.
 - If neither is found, the script warns and falls back to **both** templates.
-- Supplying `--prescription` without `--overrides` explicitly also runs with no per-run overrides.
+- Supplying `--prescription` without `--overrides` runs with no per-run overrides.
 
 ## Key semantics / policies
-- Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the plan.
+- Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the overrides.
 - Each run gets **one seed**; JAX splits it internally for stochastic components.
   - If a plan row does **not** specify `seed`, the runner derives a per-run seed
     by folding the run index into the prescription default seed (deterministic
@@ -104,18 +102,18 @@ Resolution behavior:
 - Per-run prior overrides (overrides.csv):
   - Use keys `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the
     prescription priors for a single run without changing `init.mode`.
-  - These overrides apply **only** when `init.mode` resolves to `prior`.
-- Vector-valued sigmas should be quoted JSON arrays (e.g., `"[1, 1, 1]"`). Scalar sigmas will broadcast
+    - These overrides apply **only** when `init.mode` resolves to `prior`.
+  - Vector-valued sigmas should be **quoted** JSON arrays. Scalar sigmas will broadcast
     across vector-valued parameters.
-  - Examples:
-    - Scalar sigma: `prior.binary.x_position_as.sigma = 0.05`
-    - Vector sigma: `prior.primary.zernike_coeffs_nm.sigma = [1, 1, 1, 1, 1, 1, 1, 1]`
-    - Dist override: `prior.binary.contrast.dist = LogNormal`
+    - Examples:
+      - Scalar sigma: `prior.binary.x_position_as.sigma = 0.05`
+      - Vector sigma: `prior.primary.zernike_coeffs_nm.sigma = "[1, 1, 1, 1, 1, 1, 1, 1]"`
+      - Dist override: `prior.binary.contrast.dist = LogNormal`
 - `fim.reuse_fim`:
   - `false` (default): reuse only when the strict FIM cache key matches.
   - `true`: reuse the most recent cached FIM even when the strict cache key misses (with a warning).
 - Paths like `diffractive_pupil_path` are **repo-root-relative**.
-- Vector cells in `overrides.csv` must be **quoted JSON arrays**.
+- Vector cells in `overrides.csv` must be **quoted** JSON arrays.
 
 ### CSV + JSON array nuance (important)
 - The plan parser accepts JSON arrays for vector overrides, but CSV parsing happens first.
