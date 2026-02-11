@@ -115,16 +115,19 @@ Resolution behavior:
   - `note`: Individual note field for each run, saved in the aggregated results file.
   - `seed`: Specific seed to be used in each run. Seeds are incremented automatically by default unless explicitly set.
   - `init.mode`: Used to override the init mode for any particular run. Used to force explicit init values that would otherwise be drawn from priors, or conversely to draw init values from priors when they would otherwise be set explicitly.
+    - `explicit`: All init values are set explicitly. Any parameters left blank default to the truth store value.
+    - `prior`: Init values are drawn from priors, except where explicitly set.
   - `optimizer.n_iter`:
   - `optimizer.base_lr`:
   - `eigen.use_eigen`:
   - `eigen.truncate_k`:
   - `eigen.truncate_by_eigval`:
-  - `noise.add_noise`
+  - `noise.add_noise`:
   - `fim.reuse_fim`: Configures FIM reuse behavior. The FIM is calculated and cached for potential reuse.
     - `false` (default): Recomputes FIM if any key differs from previously cached FIM (cache miss). If all inputs are constant, the cache will 'hit' and the cached FIM is reused.
     - `true`: Always reuses the most recent cached FIM even when the strict cache key misses (issues a warning for clarity).
   - `truth.*`: Used to override the true data value for any particular run.
+    - Certain keys may depend on each other and can possibly conflict if both ar overridden. `imaging.exposure_time_s` and `binary.log_flux_total` are good examples. Setting the exposure time scales the log flux, but if the log flux is explicitly set, it wins over the exposure time.
   - `init.*`: Used to override the initial value in the model for any particular run.
   - `prior.*`: Used to override default priors for any particular run.
     - Use `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the default priors for a single run without changing `init.mode`.
