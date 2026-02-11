@@ -890,6 +890,7 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
 
 Use this section as a quick in-doc ledger for active issues that are worth tracking between formal GitHub issue triage passes.
 
-- **Preconditioning is still partially implemented.** `ema_grad2`-based paths are available, but first-class FIM-derived preconditioning in the main configuration flow is still incomplete.
-- **Loss regression breadth is still partial.** Multi-wavelength and multi-PSF inference cases need deeper explicit regression coverage.
+- **Config and Store Documentation is lacking** a complete list of parameters. Users should have easy-to-find documentation for all parameters present in the configs and in the stores, which parameters are treated as structural, etc.
+- **Source parameters are treated as structural.** The `wavelength_m`, `bandwidth_m`, and `n_lambda` source settings are currently carried in the config object and are treated as structural in the structural parameter set. Because the AlphaCen source is built at model evaluation time and is not cached, the `forward_store` can carry these instead, which simplifies the call signature to `build_alpha_cen_source()`. If we eventually move to a more complicated source model, we may end up caching the source object and then re-defining a structural subset anyway, in which case we might end up where we started. Until then, though, I think it makes sense to consolidate these source settings into the forward_store with the other source settings ("binary.x_position_as", "binary.y_position_as", etc.) to reduce some mental overhead.
+- **`imaging.throughput` might not be modelled** We set a value in the store, but it's unclear if anything in the model actually applies the throughput.
 - **Profiles/IO consistency across workflows is incomplete.** Prescription/override flows are strong for experiment runners, but a unified YAML/JSON profile experience across all entry points is still pending.

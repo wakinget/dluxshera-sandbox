@@ -1,6 +1,6 @@
-"""Prescribed Monte Carlo experiment scaffold.
+"""Prescribed Monte Carlo experiment.
 
-Purpose: incubate the prescription/plan workflow in work/experiments.
+Purpose: provide a robust way to define and run monte carlo experiments
 Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
@@ -87,9 +87,9 @@ from dluxshera.systems.three_plane import (
 )
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "work/experiments/prescription_templates/prescription.json"
+    "examples/recipes/prescription_templates/prescription.json"
 )
-DEFAULT_OVERRIDES_PATH = Path("work/experiments/prescription_templates/overrides.csv")
+DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 
@@ -107,12 +107,33 @@ def _load_prescription(path: Path) -> dict[str, Any]:
     """Load a prescription JSON file from disk.
 
     Called early in `main` to materialize the experiment recipe that drives run
-    spec resolution and defaults. This is generally reusable for JSON config
-    loading, but kept local because it assumes the specific prescription schema
-    expected by this script.
+    spec resolution and defaults. Keys that start with `_` are treated as
+    private annotations/disabled fields and are recursively stripped from the
+    loaded object before any downstream parsing/validation runs. This is
+    generally reusable for JSON config loading, but kept local because it
+    assumes the specific prescription schema expected by this script.
     """
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return _strip_private_keys(json.load(handle))
+
+
+def _strip_private_keys(obj: Any) -> Any:
+    """Recursively remove keys prefixed with `_` from nested JSON-like objects.
+
+    This keeps template comments/disabled example fields out of runtime parsing
+    so strict validators only see active prescription content.
+    """
+    if isinstance(obj, dict):
+        return {
+            key: _strip_private_keys(value)
+            for key, value in obj.items()
+            if not key.startswith("_")
+        }
+    if isinstance(obj, list):
+        return [_strip_private_keys(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(_strip_private_keys(item) for item in obj)
+    return obj
 
 
 def _parse_cell(value: str | None) -> Any:
@@ -125,6 +146,11 @@ def _parse_cell(value: str | None) -> Any:
     if value is None:
         return None
     raw = value.strip()
+    # CSV cells that include embedded JSON are sometimes exported as a quoted
+    # JSON string literal (e.g. '"[1, 2, 3]"'). Peel wrapping quotes so vector
+    # values continue through the normal JSON parsing path below.
+    while len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"\"", "'"}:
+        raw = raw[1:-1].strip()
     if raw == "" or raw.lower() in {"null", "none"}:
         return None
     if raw.lower() in {"true", "false"}:
@@ -676,6 +702,7 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
     """
     headers = [
         "run_id",
+        "enabled",
         "seed",
         "init.mode",
         "eigen.use_eigen",
@@ -691,6 +718,8 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
     def cell(spec: dict[str, Any], key: str) -> str:
         if key == "run_id":
             value = spec.get("run_id")
+        elif key == "enabled":
+            value = _row_enabled(spec)
         elif key == "seed":
             value = spec.get("seed")
         elif key == "init.mode":
@@ -788,6 +817,30 @@ def _flatten_store_overrides(payload: dict[str, Any]) -> dict[str, Any]:
 
     _walk("", payload)
     return flattened
+
+
+def _partition_overrides_by_kind(
+    overrides_flat: dict[str, Any],
+    forward_spec: Any,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Split flattened overrides into primitive, derived, and unknown keys."""
+    primitive_overrides: dict[str, Any] = {}
+    derived_overrides: dict[str, Any] = {}
+    unknown_overrides: dict[str, Any] = {}
+
+    for key, value in overrides_flat.items():
+        if key not in forward_spec:
+            unknown_overrides[key] = value
+            continue
+        kind = forward_spec.get(key).kind
+        if kind == "primitive":
+            primitive_overrides[key] = value
+        elif kind == "derived":
+            derived_overrides[key] = value
+        else:
+            unknown_overrides[key] = value
+
+    return primitive_overrides, derived_overrides, unknown_overrides
 
 
 def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
@@ -1359,7 +1412,7 @@ def _write_experiment_outputs(
         manifest_path,
         created_at=_now_iso_local_ms(),
         script=_repo_relative_path(Path(__file__), repo_root=repo_root)
-        or "work/experiments/prescribed_monte_carlo.py",
+        or "examples/recipes/prescribed_monte_carlo.py",
         prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
         plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
         config_id=_get_nested(prescription, ["model", "config_id"]),
@@ -1753,19 +1806,14 @@ def main() -> None:
         # - Default behavior is strict: reuse uses only exact cache matches unless
         #   reuse_fim=True is set in the prescription or plan. When reuse_fim=True,
         #   a cache miss can still reuse the last cached FIM with a warning.
-        # - Safe reuse inputs include full theta_true, infer_keys, cfg/forward_spec
-        #   identifiers, data/data_var hashes, and noise_model (all must match).
+        # - Safe reuse inputs include full theta_true, infer_keys, and cfg/forward_spec
+        #   identifiers (all must match for FIM reuse).
         cache_key_payload = {
             "infer_keys": infer_keys,
             "model_config_id": model_config_id,
             "cfg_hash": cfg_hash,
             "forward_spec_hash": forward_spec_hash,
             "theta_true_hash": _hash_array(theta_true),
-            "add_noise": add_noise,
-            "data_hash": _hash_array(data),
-            "data_var_hash": _hash_array(data_var),
-            "noise_model": noise_model,
-            "reduce": reduce,
         }
         fim_cache_key = _stable_hash(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
@@ -1876,9 +1924,58 @@ def main() -> None:
             if init_overrides_flat:
                 init_store = init_store.replace(init_overrides_flat)
         elif init_mode == "explicit":
+            # Explicit init precedence for coupled exposure/log-flux fields:
+            # 1) `imaging.exposure_time_s` only -> `refresh_derived` recomputes
+            #    `binary.log_flux_total` from primitives.
+            # 2) `binary.log_flux_total` only -> explicit value is used.
+            # 3) both provided -> explicit `binary.log_flux_total` wins because
+            #    derived keys are re-applied after `refresh_derived`.
             init_store = truth_store
             if init_overrides_flat:
-                init_store = init_store.replace(init_overrides_flat)
+                (
+                    init_primitive_overrides,
+                    init_derived_overrides,
+                    init_unknown_overrides,
+                ) = _partition_overrides_by_kind(init_overrides_flat, forward_spec)
+                if init_unknown_overrides:
+                    print(
+                        "WARNING: explicit init overrides include keys that are not "
+                        "declared as primitive/derived in forward_spec; applying "
+                        "them as direct overrides: "
+                        + ", ".join(sorted(init_unknown_overrides))
+                    )
+
+                if init_primitive_overrides:
+                    init_store = init_store.replace(init_primitive_overrides)
+                init_store = init_store.refresh_derived(forward_spec)
+
+                if init_derived_overrides:
+                    infer_derived_keys = [
+                        key
+                        for key in infer_keys
+                        if key in init_derived_overrides
+                    ]
+                    init_store = init_store.replace(init_derived_overrides)
+                    print(
+                        "Init explicit precedence: explicit derived overrides are "
+                        "authoritative after refresh"
+                        + (
+                            f" (infer keys: {', '.join(infer_derived_keys)})."
+                            if infer_derived_keys
+                            else "."
+                        )
+                    )
+                elif init_primitive_overrides:
+                    print(
+                        "Init explicit precedence: no explicit derived overrides; "
+                        "derived values (e.g., binary.log_flux_total) come from "
+                        "forward transforms after primitive overrides."
+                    )
+
+                if init_unknown_overrides:
+                    init_store = init_store.replace(init_unknown_overrides)
+            else:
+                init_store = init_store.refresh_derived(forward_spec)
             if prior_overrides:
                 print(
                     f"Note: prior overrides provided for run_id={run_id} but "
@@ -1886,7 +1983,8 @@ def main() -> None:
                 )
         else:
             raise ValueError(f"Unknown init.mode '{init_mode}'")
-        init_store = init_store.refresh_derived(forward_spec)
+        if init_mode == "prior":
+            init_store = init_store.refresh_derived(forward_spec)
 
         _, theta0 = make_binder_nll_fn(
             binder=binder,

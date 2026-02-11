@@ -8,13 +8,20 @@ import pytest
 
 def _load_prescribed_module():
     repo_root = Path(__file__).resolve().parents[2]
-    module_path = repo_root / "work" / "experiments" / "prescribed_monte_carlo.py"
-    spec = importlib.util.spec_from_file_location("prescribed_monte_carlo", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Unable to load prescribed_monte_carlo module.")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    candidate_paths = [
+        repo_root / "work" / "experiments" / "prescribed_monte_carlo.py",
+        repo_root / "examples" / "recipes" / "prescribed_monte_carlo.py",
+    ]
+    for module_path in candidate_paths:
+        if not module_path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location("prescribed_monte_carlo", module_path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise RuntimeError("Unable to load prescribed_monte_carlo module.")
 
 
 def test_apply_experiment_n_runs_pads_defaults():
@@ -69,3 +76,18 @@ def test_apply_experiment_n_runs_rejects_non_positive():
 
     with pytest.raises(ValueError, match="positive"):
         module._apply_experiment_n_runs(plan_rows, 0)
+
+
+def test_print_preview_includes_enabled_column(capsys):
+    module = _load_prescribed_module()
+    run_specs = [
+        {"run_id": "run_0001", "enabled": True, "seed": 1},
+        {"enabled": False, "seed": 2},
+    ]
+
+    module._print_preview(run_specs)
+
+    output = capsys.readouterr().out
+    assert "enabled" in output.splitlines()[0]
+    assert "True" in output
+    assert "False" in output

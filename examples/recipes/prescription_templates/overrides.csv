@@ -1,46 +1,49 @@
-# Prescribed Monte Carlo overrides template (transposed format, keys-as-rows).
-# Dotted paths override nested keys in the prescription defaults.
-# Blank cells leave defaults unchanged; the string "null" clears a value explicitly.
-# Vector-valued cells must be JSON arrays wrapped in CSV quotes (e.g., "[1, 2, 3]").
-# In CSV, unquoted commas split columns; quoting keeps the whole JSON array in one cell.
-# Prior overrides use keys like prior.<infer_key>.sigma or prior.<infer_key>.dist.
-# Structural overrides (model.* or overrides.config.*) are experiment-wide and should NOT appear in the overrides file.
-# Run IDs: if a run_id override is provided below it will be used; otherwise run IDs are auto-generated
-# from experiment.run_id_prefix + index (so you can change the prefix without editing this template).
-key,run_001,run_002
-run_id,,
-enabled,true,true
-note,,
-seed,0,1
-init.mode,prior,explicit
-optimizer.n_iter,,
-optimizer.base_lr,,
-eigen.use_eigen,true,true
-eigen.whiten_basis,true,true
-eigen.truncate_k,,
-eigen.truncate_by_eigval,,
-noise.add_noise,,
-fim.reuse_fim,,
-truth.imaging.exposure_time_s,,
-truth.binary.separation_as,,
-truth.binary.position_angle_deg,,
-truth.binary.x_position_as,,
-truth.binary.y_position_as,,
-truth.binary.log_flux_total,,
-truth.binary.contrast,,
-truth.system.plate_scale_as_per_pix,,
-truth.primary.zernike_coeffs_nm,,
-truth.secondary.zernike_coeffs_nm,,
-init.imaging.exposure_time_s,,
-init.binary.separation_as,,10.001
-init.binary.position_angle_deg,,89.99
-init.binary.x_position_as,,0.07
-init.binary.y_position_as,,-0.10
-init.binary.log_flux_total,,
-init.binary.contrast,,3.0003
-init.system.plate_scale_as_per_pix,,
-init.primary.zernike_coeffs_nm,,"[0.001, 0, 0, 0, 0, 0, 0, 0]"
-init.secondary.zernike_coeffs_nm,,"[-0.001, 0, 0, 0, 0, 0, 0, 0]"
-prior.binary.x_position_as.sigma,,
-prior.primary.zernike_coeffs_nm.sigma,,"[1, 1, 1, 1, 1, 1, 1, 1]"
-prior.binary.contrast.dist,,
+# Prescribed Monte Carlo overrides template (transposed format, keys-as-rows).,,,,
+# Dotted paths override nested keys in the prescription defaults.,,,,,
+"# Blank cells leave defaults unchanged; the string ""null"" clears a value explicitly.",,,,,
+# Vector-valued cells must be JSON arrays wrapped in CSV quotes (e.g.," ""[1",2," 3]"").",,
+# In CSV, unquoted commas split columns; quoting keeps the whole JSON array in one cell.,,,,
+# Prior overrides use keys like prior.<infer_key>.sigma or prior.<infer_key>.dist.,,,,,
+# Structural overrides (model.* or overrides.config.*) are experiment-wide and should NOT appear in the overrides file.,,,,,
+# Run IDs: if a run_id override is provided below it will be used; otherwise run IDs are auto-generated,,,,,
+# from experiment.run_id_prefix + index (so you can change the prefix without editing this template).,,,,,
+key,run_001,run_002,run_003,run_004,run_005
+run_id,first-run,,,,last-run
+enabled,TRUE,,,FALSE,
+note,note-1,,note-3,,note-5
+seed,,,0,,0
+init.mode,,,explicit,,
+optimizer.n_iter,40,,,,
+optimizer.base_lr,,,,,
+eigen.use_eigen,,,,FALSE,
+eigen.whiten_basis,,,,,
+eigen.truncate_k,,15,,,
+eigen.truncate_by_eigval,,,,,
+noise.add_noise,FALSE,,,,
+fim.reuse_fim,,,,,TRUE
+truth.imaging.exposure_time_s,60,60,1800,,
+truth.binary.separation_as,,,,,
+truth.binary.position_angle_deg,,,,,
+truth.binary.x_position_as,2,2,,,
+truth.binary.y_position_as,-1,-1,,,
+truth.binary.log_flux_total,,,,,
+truth.binary.contrast,,,,,
+truth.system.plate_scale_as_per_pix,,,,,
+truth.primary.zernike_coeffs_nm,"""[3, -5, 2, -2, -3, 1, 0, 1]""","""[3, -5, 2, -2, -3, 1, 0, 1]""","""[0, 0, 0, 0, 10, 0, 0, 0]""",,
+truth.secondary.zernike_coeffs_nm,"""[1, -1, 1, -1, 1, -1, 1, -1]""","""[1, -1, 1, -1, 1, -1, 1, -1]""","""[0, -0.5, 0.5, -0.5, 0, 0.25, -0.25, 0.5]""",,
+init.imaging.exposure_time_s,,,1800.1,,
+init.binary.separation_as,,10.00001,10.00001,,
+init.binary.position_angle_deg,,44.8,89.999,,
+init.binary.x_position_as,,-0.01,0.007,,
+init.binary.y_position_as,,0.005,0.011,,
+init.binary.log_flux_total,,,,,
+init.binary.contrast,,,2.997,,
+init.system.plate_scale_as_per_pix,,,,,
+init.primary.zernike_coeffs_nm,,,"""[0.1, 0.2, 0.3, 0.4, 10.5, -0.2, -0.3, -0.4]""",,
+init.secondary.zernike_coeffs_nm,,,"""[0.1, -0.2, 0.3, -0.4, -0.1, 0.2, -0.3, 0.4]""",,
+prior.binary.x_position_as.sigma,1.00E-03,1.00E-02,,,
+prior.binary.y_position_as.sigma,1.00E-03,1.00E-02,,,
+prior.primary.zernike_coeffs_nm.sigma,,"""[1, 5, 5, 5, 5, 2, 2, 1]""",,,
+prior.secondary.zernike_coeffs_nm.sigma,,1,,,
+prior.binary.x_position_as.dist,Uniform,,,,
+prior.binary.y_position_as.dist,Uniform,,,,

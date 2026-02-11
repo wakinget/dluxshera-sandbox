@@ -87,6 +87,7 @@ For a runnable, canonical example of building specs, creating a store, and refre
 
 ## Gotchas / FAQ
 - “I tried to set a derived key directly; why did it change later?” Derived values are recomputed by `refresh_derived`, so direct edits are overwritten.
+  More precisely, “store wins” is only true for keys treated as primitives in the active spec passed to `refresh_derived`. If a key is marked derived in that spec, refresh recomputes and overwrites it; to keep an explicit value, re-apply it after refresh. For example, setting only `imaging.exposure_time_s` updates derived `binary.log_flux_total`, setting only `binary.log_flux_total` uses that explicit value, and setting both still resolves to explicit `binary.log_flux_total` when it is re-applied after refresh.
 - “Why does my transform fail?” Check for missing primitives, incorrect dependency lists, wrong `system_id`, or dependency cycles.
 - “When do I refresh derived?” Typically right after store updates and before building binders or computing losses.
 
