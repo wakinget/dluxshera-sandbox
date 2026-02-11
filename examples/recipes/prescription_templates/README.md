@@ -98,6 +98,7 @@ Resolution behavior:
 - Notes fields:
   - **Experiment-level note**: put this in `experiment.notes` (recommended) in `prescription.json`; aliases `experiment.note`, `experiment.comment`, and `experiment.comments` are accepted for compatibility. This is persisted once in `manifest.json` as top-level `notes`.
   - **Per-run note**: put `note` / `notes` / `comment` / `comments` in `overrides.csv`; these are persisted per run as `run_note` in summaries, `results.csv`, and `manifest.json.runs[]`.
+- Paths like `diffractive_pupil_path` are **relative to the repo-root**.
 - `experiment.n_runs` is **authoritative** when set:
   - If the plan defines fewer runs, the remaining runs execute with prescription defaults (no per-run overrides).
   - If the plan defines more runs, extra plan-defined runs are ignored.
@@ -105,34 +106,47 @@ Resolution behavior:
 - `init.mode`:
   - `prior`: samples around truth using priors.
   - `explicit`: only uses explicitly provided init values; missing values follow normal resolution/derived refresh.
-- Per-run prior overrides (overrides.csv):
-  - Use keys `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the
-    prescription priors for a single run without changing `init.mode`.
-    - These overrides apply **only** when `init.mode` resolves to `prior`.
-  - Vector-valued sigmas should be **quoted** JSON arrays. Scalar sigmas will broadcast
-    across vector-valued parameters.
-    - Examples:
-      - Scalar sigma: `prior.binary.x_position_as.sigma = 0.05`
-      - Vector sigma: `prior.primary.zernike_coeffs_nm.sigma = "[1, 1, 1, 1, 1, 1, 1, 1]"`
-      - Dist override: `prior.binary.contrast.dist = LogNormal`
-- `fim.reuse_fim`:
-  - `false` (default): reuse only when the strict FIM cache key matches.
-  - `true`: reuse the most recent cached FIM even when the strict cache key misses (with a warning).
-- Paths like `diffractive_pupil_path` are **repo-root-relative**.
-- Vector cells in `overrides.csv` must be **quoted** JSON arrays.
+- **Per-run prior overrides (overrides.csv):**
+  - Vector cells in `overrides.csv` must be **quoted** JSON arrays.
+  - First row: `key, run_001, run_002, run_003, etc.`
+    - The first row 
+  - `run_id`: Overrides for the name of each run directory. If not specified, a `run_id` is auto-generated using the prescription's `run_id_prefix`
+  - `enabled`: True/False flag for disabling particular runs. Defaults to True (enabled) if blank or missing.
+  - `note`: Individual note field for each run, saved in the aggregated results file.
+  - `seed`: Specific seed to be used in each run. Seeds are incremented automatically by default unless explicitly set.
+  - `init.mode`: Used to override the init mode for any particular run. Used to force explicit init values that would otherwise be drawn from priors, or conversely to draw init values from priors when they would otherwise be set explicitly.
+  - `optimizer.n_iter`:
+  - `optimizer.base_lr`:
+  - `eigen.use_eigen`:
+  - `eigen.truncate_k`:
+  - `eigen.truncate_by_eigval`:
+  - `noise.add_noise`
+  - `fim.reuse_fim`: Configures FIM reuse behavior. The FIM is calculated and cached for potential reuse.
+    - `false` (default): Recomputes FIM if any key differs from previously cached FIM (cache miss). If all inputs are constant, the cache will 'hit' and the cached FIM is reused.
+    - `true`: Always reuses the most recent cached FIM even when the strict cache key misses (issues a warning for clarity).
+  - `truth.*`: Used to override the true data value for any particular run.
+  - `init.*`: Used to override the initial value in the model for any particular run.
+  - `prior.*`: Used to override default priors for any particular run.
+    - Use `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the default priors for a single run without changing `init.mode`.
+    - These overrides apply **only** when `init.mode` resolves to `prior` (otherwise init values are set explicitly).
+    - Vector-valued sigmas should be **quoted** JSON arrays. Scalar sigmas will broadcast across vector-valued parameters.
+      - Examples (single comma separated pair):
+        - Scalar sigma: `prior.binary.x_position_as.sigma, 1e-2`
+        - Scalar sigma (broadcast to length of vector): `prior.primary.zernike_coeffs_nm.sigma, 1.0`
+        - Vector sigma (note the quotes): `prior.primary.zernike_coeffs_nm.sigma, "[1, 2, 3, 4, 1, 2, 3, 4]"`
+        - Dist override: `prior.binary.contrast.dist, LogNormal`
 
-### CSV + JSON array nuance (important)
+### CSV + JSON Array Nuance
 - The plan parser accepts JSON arrays for vector overrides, but CSV parsing happens first.
-- If you write an unquoted array like `[1, 2, 3]` in a CSV cell, commas may be interpreted as column separators.
-- Always quote vector arrays so the full JSON value stays in a single cell:
-  - ✅ Correct: `"[1, 2, 3]"`
-  - ❌ Risky: `[1, 2, 3]`
+- In the `overrides.csv`, you must wrap arrays with quotes like `"[1, 2, 3]"`, otherwise commas may be interpreted as column separators.
+- Annoyingly, the `prescription.json` file *only* accepts bare arrays like `[1, 2, 3]`, and quoted arrays will error.
+- CSV Files:
+  - ✅ `"[1, 2, 3]"`
+- JSON Files:
+  - ✅ `[1, 2, 3]`
 
 ## Troubleshooting
 - **Strict config validation**: a typo in any override key will error out.
 - **Malformed JSON arrays**: ensure vector cells are valid JSON (e.g., `[1, 2, 3]`).
 - **Forbidden overrides keys**: `model.*` or `overrides.config.*` in the overrides file are rejected.
 - **Zernike length mismatches**: ensure vector lengths match configured Noll indices.
-
-## Future note
-This workflow may later move from `work/experiments` to `examples/recipes`, but the copy/edit/run pattern will remain.
