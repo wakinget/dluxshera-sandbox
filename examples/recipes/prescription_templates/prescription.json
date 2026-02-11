@@ -1,17 +1,18 @@
 {
   "experiment": {
-    "n_runs": 2,
+    "n_runs": 5,
     "run_id_prefix": "mc",
     "results_filename": "results.csv",
-    "notes": "Template experiment-level note. Stored once in manifest.json notes."
+    "notes": "Experiment-level notes. Briefly describe the experiment."
   },
   "model": {
-    "config_id": "SHERA_TESTBED_CONFIG"
+    "config_id": "SHERA_TESTBED_CONFIG",
+    "_comment": "Options: SHERA_TESTBED_CONFIG | SHERA_FLIGHT_CONFIG"
   },
   "defaults": {
     "seed": 42,
     "optimizer": {
-      "n_iter": 60,
+      "n_iter": 50,
       "base_lr": 0.5
     },
     "eigen": {
@@ -21,10 +22,11 @@
       "truncate_by_eigval": null
     },
     "init": {
-      "mode": "prior"
+      "mode": "prior",
+      "_comment": "Options: prior | explicit"
     },
     "noise": {
-      "add_noise": false
+      "add_noise": true
     },
     "fim": {
       "reuse_fim": false
@@ -32,14 +34,29 @@
   },
   "overrides": {
     "config": {
-      "diffractive_pupil_path": "data/diffractive_pupil.npy",
-      "primary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
-      "secondary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
-      "dp_design_wavelength_m": 550e-9
+      "_comment": "Config parameters are generally structural and require rebuilding the model. These may not be overriden later.",
+      "_ignored": "Any keys starting with underscores are ignored during parsing.",
+      "_pupil_npix": 256,
+      "_psf_npix": 256,
+      "_wavelength_m": 550e-9,
+      "_bandwidth_m": 110e-9,
+      "_n_lambda": 3,
+      "_pixel_pitch_m": 6.5e-6,
+      "_primary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
+      "_secondary_noll_indices": [4, 5, 6, 7, 8, 9, 10, 11],
+      "_diffractive_pupil_path": "data/diffractive_pupil.npy",
+      "_dp_design_wavelength_m": 550e-9
     },
     "store": {
-      "binary.x_position_as": 0.5,
-      "imaging.exposure_time_s": 1800.0
+      "_comment": "Store parameters are not structural and may be overridden, these control the default data starting point (truth) experiment-wide.",
+      "_binary.x_position_as": 0.0,
+      "_binary.y_position_as": 0.0,
+      "_binary.position_angle_deg": 90.0,
+      "_binary.separation_as": 10.0,
+      "_binary.contrast": 3.0,
+      "_imaging.exposure_time_s": 1800.0,
+      "_primary.zernike_coeffs_nm": [0, 0, 0, 0, 0, 0, 0, 0],
+      "_secondary.zernike_coeffs_nm": [0, 0, 0, 0, 0, 0, 0, 0]
     }
   },
   "infer_keys": [
@@ -54,6 +71,7 @@
     "secondary.zernike_coeffs_nm"
   ],
   "priors": {
+    "_comment": "These control default priors for each parameter. These may be overridden per-run",
     "binary.separation_as": {
       "dist": "Normal",
       "sigma": 1e-4
