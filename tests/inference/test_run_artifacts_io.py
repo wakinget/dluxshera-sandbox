@@ -1,13 +1,17 @@
 from pathlib import Path
+import re
 
 import numpy as np
 import pytest
 
 from dluxshera.inference.run_artifacts import (
+    build_param_summary,
     load_checkpoint,
     load_meta,
+    load_npz_artifact,
     load_summary,
     load_trace,
+    patch_summary,
     save_run,
 )
 from dluxshera.params.packing import build_index_map, pack_params
@@ -27,14 +31,21 @@ def test_save_and_load_required_artifacts(tmp_path: Path):
     np.testing.assert_allclose(loaded_trace["loss"], np.asarray(trace["loss"]))
     np.testing.assert_allclose(loaded_trace["theta"], np.asarray(trace["theta"]))
 
-    assert load_meta(run_dir) == meta
-    assert load_summary(run_dir) == summary
+    loaded_meta = load_meta(run_dir)
+    loaded_summary = load_summary(run_dir)
+
+    assert loaded_meta["run_id"] == meta["run_id"]
+    assert loaded_meta["theta"] == meta["theta"]
+    assert loaded_summary["final_loss"] == summary["final_loss"]
+
+    for name in ("trace", "meta", "summary"):
+        assert name in loaded_meta["manifest"]
+        assert name in loaded_summary["manifest"]
 
     # Optional artifacts should not be created when omitted.
     assert not (run_dir / "signals.npz").exists()
     assert not (run_dir / "grads.npz").exists()
-    assert not (run_dir / "curvature.npz").exists()
-    assert not (run_dir / "precond.npz").exists()
+    assert not (run_dir / "metric.npz").exists()
     assert not (run_dir / "diag_steps.jsonl").exists()
     assert not (run_dir / "checkpoint_best.npz").exists()
     assert not (run_dir / "checkpoint_final.npz").exists()
@@ -49,12 +60,12 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
     signals = {"s1": np.array([0.1, 0.2, 0.3])}
     grads = {"g1": np.array([1.0])}
     checkpoints = {
-        "best": {
+        "checkpoint_best": {
             "theta_best": np.array([1.0, 2.0]),
             "best_step": 1,
             "best_loss": 0.5,
         },
-        "final": {
+        "checkpoint_final": {
             "theta_final": np.array([3.0, 4.0]),
             "final_step": 2,
             "final_loss": 0.25,
@@ -66,23 +77,44 @@ def test_optional_artifacts_and_checkpoints(tmp_path: Path):
         trace=trace,
         meta=meta,
         summary=summary,
-        signals=signals,
-        grads=grads,
-        checkpoints=checkpoints,
+        artifacts={
+            "signals": {"kind": "npz", "content": signals},
+            "grads": {"kind": "npz", "content": grads},
+            "checkpoint_best": {
+                "kind": "npz",
+                "content": checkpoints["checkpoint_best"],
+                "filename": "best_model.npz",
+            },
+            "checkpoint_final": {
+                "kind": "npz",
+                "content": checkpoints["checkpoint_final"],
+                "filename": "final_model.npz",
+            },
+        },
     )
 
-    with np.load(run_dir / "signals.npz", allow_pickle=False) as npz:
-        np.testing.assert_allclose(npz["s1"], signals["s1"])
+    loaded_signals = load_npz_artifact(run_dir, "signals")
+    assert loaded_signals is not None
+    np.testing.assert_allclose(loaded_signals["s1"], signals["s1"])
+
+    loaded_summary = load_summary(run_dir)
+    for name in ("signals", "grads", "checkpoint_best", "checkpoint_final"):
+        assert name in loaded_summary["manifest"]
+
+    assert (run_dir / "best_model.npz").exists()
+    assert (run_dir / "final_model.npz").exists()
+    assert not (run_dir / "checkpoint_best.npz").exists()
+    assert not (run_dir / "checkpoint_final.npz").exists()
 
     best = load_checkpoint(run_dir, "best")
-    np.testing.assert_allclose(best["theta_best"], checkpoints["best"]["theta_best"])
-    assert best["best_step"] == checkpoints["best"]["best_step"]
-    assert best["best_loss"] == checkpoints["best"]["best_loss"]
+    np.testing.assert_allclose(best["theta_best"], checkpoints["checkpoint_best"]["theta_best"])
+    assert best["best_step"] == checkpoints["checkpoint_best"]["best_step"]
+    assert best["best_loss"] == checkpoints["checkpoint_best"]["best_loss"]
 
     final = load_checkpoint(run_dir, "final")
-    np.testing.assert_allclose(final["theta_final"], checkpoints["final"]["theta_final"])
-    assert final["final_step"] == checkpoints["final"]["final_step"]
-    assert final["final_loss"] == checkpoints["final"]["final_loss"]
+    np.testing.assert_allclose(final["theta_final"], checkpoints["checkpoint_final"]["theta_final"])
+    assert final["final_step"] == checkpoints["checkpoint_final"]["final_step"]
+    assert final["final_loss"] == checkpoints["checkpoint_final"]["final_loss"]
 
 
 def test_build_index_map_matches_pack_params(tmp_path: Path):
@@ -113,3 +145,81 @@ def test_build_index_map_matches_pack_params(tmp_path: Path):
 
     layout_hash = index_map.get("layout_hash")
     assert isinstance(layout_hash, str) and len(layout_hash) == 64
+
+
+def test_save_run_sets_created_at_and_merges_labels(tmp_path: Path):
+    run_dir = tmp_path / "run_labels"
+    trace = {"loss": [1.0], "theta": [[0.0, 1.0, 2.0]]}
+    meta = {
+        "theta": {
+            "index_map": {
+                "entries": [
+                    {"name": "alpha", "start": 0, "stop": 1, "shape": [1]},
+                    {"name": "beta", "start": 1, "stop": 3, "shape": [2]},
+                ]
+            },
+            "labels_by_key": {
+                "alpha": "Alpha",
+                "beta": ["Beta-1", "Beta-2"],
+            },
+        }
+    }
+    summary = {}
+
+    save_run(run_dir, trace=trace, meta=meta, summary=summary)
+
+    loaded_meta = load_meta(run_dir)
+    loaded_summary = load_summary(run_dir)
+
+    created_at = loaded_meta.get("created_at")
+    assert created_at == loaded_summary.get("created_at")
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$", created_at)
+
+    entries = loaded_meta["theta"]["index_map"]["entries"]
+    assert entries[0]["label"] == "Alpha"
+    assert entries[1]["label"] == ["Beta-1", "Beta-2"]
+    assert "labels_by_key" not in loaded_meta["theta"]
+
+
+def test_build_param_summary_scalar_and_vector():
+    init = {"alpha": 1.0, "beta": np.array([1.0, 2.0])}
+    final = {"alpha": 1.5, "beta": np.array([2.5, 3.5])}
+    summary = build_param_summary(init, final)
+
+    assert summary["alpha"]["init"] == 1.0
+    assert summary["alpha"]["final"] == 1.5
+    assert "truth" not in summary["alpha"]
+
+    assert summary["beta"]["init"] == [1.0, 2.0]
+    assert summary["beta"]["final"] == [2.5, 3.5]
+    assert "truth" not in summary["beta"]
+
+
+def test_build_param_summary_with_truth():
+    init = {"alpha": 1.0, "beta": np.array([1.0, 2.0])}
+    final = {"alpha": 0.5, "beta": np.array([2.5, 1.5])}
+    truth = {"alpha": 1.25, "beta": np.array([0.5, 1.5])}
+    summary = build_param_summary(init, final, truth=truth)
+
+    assert summary["alpha"]["truth"] == 1.25
+    assert summary["alpha"]["init_delta"] == -0.25
+    assert summary["alpha"]["final_delta"] == -0.75
+
+    assert summary["beta"]["truth"] == [0.5, 1.5]
+    assert summary["beta"]["init_delta"] == [0.5, 0.5]
+    assert summary["beta"]["final_delta"] == [2.0, 0.0]
+
+
+def test_patch_summary_updates_existing_summary(tmp_path: Path):
+    run_dir = tmp_path / "run_patch"
+    trace = {"loss": [1.0], "theta": [[0.0]]}
+    meta = {"run_id": "run_patch"}
+    summary = {"status": "ok"}
+
+    save_run(run_dir, trace=trace, meta=meta, summary=summary)
+
+    patch_summary(run_dir, {"param_summary": {"alpha": {"init": 1.0, "final": 2.0}}})
+    loaded = load_summary(run_dir)
+
+    assert loaded["status"] == "ok"
+    assert loaded["param_summary"]["alpha"]["init"] == 1.0

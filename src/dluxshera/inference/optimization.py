@@ -6,7 +6,7 @@ import jax.numpy as np
 import jax.scipy.stats as jstats
 import numpy as onp
 from tqdm import tqdm
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import optax
 from typing import Optional, Literal, Callable, Sequence, Tuple, Dict, Any, Mapping
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .losses import gaussian_image_nll
-from .run_artifacts import save_run
+from .run_artifacts import _now_iso_local_ms, save_run
 from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..systems.three_plane import SheraThreePlaneConfig
@@ -30,6 +30,32 @@ from ..params.packing import (
 if TYPE_CHECKING:
     from ..systems.three_plane import SheraThreePlaneBinder
     from ..systems.two_plane import SheraTwoPlaneBinder
+
+
+def _build_artifacts_mapping(
+    *,
+    checkpoints: Optional[Mapping[str, Mapping[str, np.ndarray]]] = None,
+    metric: Optional[Mapping[str, np.ndarray]] = None,
+    signals: Optional[Mapping[str, np.ndarray]] = None,
+) -> Optional[dict[str, dict[str, object]]]:
+    artifacts: dict[str, dict[str, object]] = {}
+
+    if signals is not None:
+        artifacts["signals"] = {"kind": "npz", "content": signals}
+
+    if metric is not None:
+        artifacts["metric"] = {"kind": "npz", "content": metric}
+
+    if checkpoints is not None:
+        for name, payload in checkpoints.items():
+            artifact_name = f"checkpoint_{name}"
+            artifacts[artifact_name] = {
+                "kind": "npz",
+                "content": payload,
+                "filename": f"{artifact_name}.npz",
+            }
+
+    return artifacts or None
 
 ############################
 # Exports
@@ -606,7 +632,7 @@ def _resolve_run_dir(
     if runs_dir is None:
         raise ValueError("Either run_dir or runs_dir must be provided when enabling artifacts.")
 
-    resolved_run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    resolved_run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
     resolved = Path(runs_dir) / resolved_run_id
     return resolved, resolved_run_id
 
@@ -726,8 +752,7 @@ def run_simple_gd(
     artifact_meta: Optional[Mapping[str, Any]] = None,
     artifact_summary: Optional[Mapping[str, Any]] = None,
     artifact_theta_space: Optional[str] = None,
-    artifact_curvature: Optional[Mapping[str, np.ndarray]] = None,
-    artifact_precond: Optional[Mapping[str, np.ndarray]] = None,
+    artifact_metric: Optional[Mapping[str, np.ndarray]] = None,
     return_artifacts: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
@@ -767,13 +792,10 @@ def run_simple_gd(
     artifact_theta_space :
         Optional label for the θ space recorded in meta (e.g., "primitive" or
         "eigen"). Defaults to "primitive".
-    artifact_curvature :
-        Optional mapping containing curvature vectors (typically
-        ``{"curv_diag": array}``) to be saved in ``curvature.npz`` when
-        artifacts are enabled.
-    artifact_precond :
-        Optional mapping containing preconditioning vectors (e.g.,
-        ``{"lr_vec": ..., "precond": ...}``) to be saved in ``precond.npz``.
+    artifact_metric :
+        Optional mapping containing metric/preconditioning outputs (e.g.,
+        ``{"theta_ref": ..., "metric_diag": ..., "lr_scale": ...}``) to be
+        saved in ``metric.npz`` when artifacts are enabled.
     return_artifacts :
         When ``True``, return a third element containing an in-memory artifact
         payload (or ``None`` if artifacts are explicitly disabled). When
@@ -812,8 +834,7 @@ def run_simple_gd(
         or save_checkpoints
         or artifact_meta is not None
         or artifact_summary is not None
-        or artifact_curvature is not None
-        or artifact_precond is not None
+        or artifact_metric is not None
         or return_artifacts
     )
 
@@ -836,12 +857,6 @@ def run_simple_gd(
 
         return theta, history
 
-    curvature_array = None
-    if artifact_curvature is not None:
-        curvature_array = artifact_curvature.get("curv_diag")
-
-    precond_mapping = artifact_precond
-
     theta, history, artifact_payload = run_gd_with_artifacts(
         loss_fn=loss_fn,
         theta0=theta0,
@@ -854,8 +869,7 @@ def run_simple_gd(
         run_id=run_id,
         save_checkpoints=save_checkpoints,
         theta_space=artifact_theta_space or "primitive",
-        curvature=curvature_array,
-        precond=precond_mapping,
+        metric=artifact_metric,
         extra_meta=artifact_meta,
         extra_summary=artifact_summary,
         return_artifacts=True,
@@ -881,8 +895,7 @@ def run_gd_with_artifacts(
     run_id: Optional[str] = None,
     save_checkpoints: bool = False,
     theta_space: str = "primitive",
-    curvature: Optional[np.ndarray] = None,
-    precond: Optional[Mapping[str, np.ndarray]] = None,
+    metric: Optional[Mapping[str, np.ndarray]] = None,
     extra_meta: Optional[Mapping[str, Any]] = None,
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
@@ -941,12 +954,10 @@ def run_gd_with_artifacts(
     theta_space :
         Label describing the θ parameterization (e.g., ``"primitive"``,
         ``"eigen"``) stored in metadata.
-    curvature :
-        Optional curvature vector of shape ``(D,)`` (e.g., diagonal Fisher or
-        Hessian proxy). Saved as ``curvature.npz`` under ``{"curv_diag": ...}``.
-    precond :
-        Optional mapping of preconditioning vectors (e.g., ``{"lr_vec": ...,
-        "precond": ...}``) saved as ``precond.npz``.
+    metric :
+        Optional mapping of metric/preconditioning outputs (e.g.,
+        ``{"theta_ref": ..., "metric_diag": ..., "lr_scale": ...}``) saved as
+        ``metric.npz``.
     extra_meta :
         Extra metadata to merge into ``meta.json``. Keys ``"theta"`` and
         ``"optimizer"`` are merged into their respective sub-dicts.
@@ -967,8 +978,8 @@ def run_gd_with_artifacts(
     artifacts :
         Only returned when ``return_artifacts`` is ``True``. The payload is a
         dictionary with keys ``run_dir``, ``run_id``, ``trace``, ``meta``,
-        ``summary``, ``checkpoints``, ``curvature``, and ``precond``. This
-        mirrors the files written by the artifact system.
+        ``summary``, ``checkpoints``, and ``metric``. This mirrors the files
+        written by the artifact system.
 
     See Also
     --------
@@ -1008,10 +1019,9 @@ def run_gd_with_artifacts(
     resolved_run_id = run_id or "in-memory"
     if artifacts_enabled:
         resolved_run_dir, resolved_run_id = _resolve_run_dir(run_dir, runs_dir, run_id)
-    created_at = datetime.now(timezone.utc).isoformat()
+    created_at = _now_iso_local_ms()
 
     base_meta: Dict[str, Any] = {
-        "artifact_schema": "dluxshera-run-v0",
         "run_id": resolved_run_id,
         "created_at": created_at,
         "theta": {
@@ -1050,13 +1060,6 @@ def run_gd_with_artifacts(
         "num_steps_completed": int(loss_array.size),
         "loss_init": loss_init,
         "loss_final": loss_final,
-        "loss_best": loss_best,
-        "best_step": best_idx,
-        "has_checkpoint_best": False,
-        "has_checkpoint_final": False,
-        "has_signals": False,
-        "has_precond": precond is not None,
-        "has_curvature": curvature is not None,
     }
 
     if extra_summary:
@@ -1076,16 +1079,10 @@ def run_gd_with_artifacts(
                 "final_loss": loss_final,
             },
         }
-        base_summary["has_checkpoint_best"] = True
-        base_summary["has_checkpoint_final"] = True
 
-    artifact_curvature = None
-    if curvature is not None:
-        artifact_curvature = {"curv_diag": curvature}
-
-    artifact_precond = None
-    if precond is not None:
-        artifact_precond = dict(precond)
+    artifact_metric = None
+    if metric is not None:
+        artifact_metric = dict(metric)
 
     artifact_payload = None
     if return_artifacts or artifacts_enabled:
@@ -1096,8 +1093,7 @@ def run_gd_with_artifacts(
             "meta": base_meta,
             "summary": base_summary,
             "checkpoints": checkpoints,
-            "curvature": artifact_curvature,
-            "precond": artifact_precond,
+            "metric": artifact_metric,
         }
 
     if artifacts_enabled:
@@ -1106,9 +1102,10 @@ def run_gd_with_artifacts(
             trace=trace,
             meta=base_meta,
             summary=base_summary,
-            checkpoints=checkpoints,
-            curvature=artifact_curvature,
-            precond=artifact_precond,
+            artifacts=_build_artifacts_mapping(
+                checkpoints=checkpoints,
+                metric=artifact_metric,
+            ),
         )
 
     if return_artifacts:
@@ -1130,8 +1127,7 @@ def run_shera_gd(
     run_id: Optional[str] = None,
     save_checkpoints: bool = False,
     theta_space: str = "primitive",
-    curvature: Optional[np.ndarray] = None,
-    precond: Optional[Mapping[str, np.ndarray]] = None,
+    metric: Optional[Mapping[str, np.ndarray]] = None,
     extra_meta: Optional[Mapping[str, Any]] = None,
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
@@ -1175,11 +1171,9 @@ def run_shera_gd(
     theta_space :
         Label describing the θ parameterization (e.g., ``"primitive"``,
         ``"eigen"``) stored in metadata.
-    curvature :
-        Optional curvature vector (e.g., diagonal Fisher proxy) saved in
-        ``curvature.npz`` when artifacts are enabled.
-    precond :
-        Optional mapping of preconditioning vectors saved in ``precond.npz``.
+    metric :
+        Optional mapping of metric/preconditioning outputs saved in
+        ``metric.npz``.
     extra_meta / extra_summary :
         Optional metadata merged into the saved ``meta.json`` / ``summary.json``
         (useful for Shera-specific run identifiers or config IDs).
@@ -1224,8 +1218,7 @@ def run_shera_gd(
         run_id=run_id,
         save_checkpoints=save_checkpoints,
         theta_space=theta_space,
-        curvature=curvature,
-        precond=precond,
+        metric=metric,
         extra_meta=extra_meta,
         extra_summary=extra_summary,
         return_artifacts=return_artifacts,
@@ -1276,7 +1269,7 @@ def run_image_gd(
     enable_precond / precond_cfg :
         When enabled, compute a per-parameter learning-rate vector and related
         diagonal curvature summaries at the start of the run and save them to
-        ``precond.npz`` / ``curvature.npz`` via the artifact writer.
+        ``metric.npz`` via the artifact writer.
     lr_vec :
         Optional per-parameter learning-rate vector for θ-space updates. When
         provided, the optimizer uses element-wise SGD with this vector.
@@ -1318,8 +1311,7 @@ def run_image_gd(
             },
         }
 
-    artifact_curvature = None
-    artifact_precond = None
+    artifact_metric = None
     precond_meta = None
     if precond_enabled:
         cfg_dict = dict(precond_cfg) if precond_cfg is not None else {}
@@ -1332,9 +1324,16 @@ def run_image_gd(
             index_map=index_map,
         )
 
-        artifact_curvature = {"curv_diag": precond_outputs["curv_diag"]}
-        artifact_precond = {
-            "lr_vec": precond_outputs["lr_vec"],
+        base_lr = method_cfg.base_lr if method_cfg.base_lr is not None else learning_rate
+        lr_scale = (
+            precond_outputs["lr_vec"] / base_lr
+            if base_lr not in (None, 0.0)
+            else precond_outputs["lr_vec"]
+        )
+        artifact_metric = {
+            "theta_ref": np.asarray(theta0),
+            "metric_diag": precond_outputs["curv_diag"],
+            "lr_scale": lr_scale,
             "precond": precond_outputs["precond"],
         }
         precond_meta = precond_outputs["config"]
@@ -1365,8 +1364,7 @@ def run_image_gd(
         save_checkpoints=save_checkpoints,
         artifact_meta=artifact_meta,
         artifact_theta_space="primitive",
-        artifact_curvature=artifact_curvature,
-        artifact_precond=artifact_precond,
+        artifact_metric=artifact_metric,
         return_artifacts=needs_artifact_payload,
     )
     theta_final, history = gd_result[:2]
@@ -1403,21 +1401,17 @@ def run_image_gd(
             )
 
         summary = artifact_payload["summary"]
-        if save_signals:
-            summary["has_signals"] = True
-        if save_plots:
-            summary["has_plots"] = bool(plots)
-
         if save_signals or save_plots:
             save_run(
                 artifact_payload["run_dir"],
                 trace=artifact_payload["trace"],
                 meta=artifact_payload["meta"],
                 summary=summary,
-                checkpoints=artifact_payload["checkpoints"],
-                signals=signals if save_signals else None,
-                curvature=artifact_payload.get("curvature"),
-                precond=artifact_payload.get("precond"),
+                artifacts=_build_artifacts_mapping(
+                    checkpoints=artifact_payload["checkpoints"],
+                    metric=artifact_payload.get("metric"),
+                    signals=signals if save_signals else None,
+                ),
             )
 
     # Map final θ back into a ParameterStore

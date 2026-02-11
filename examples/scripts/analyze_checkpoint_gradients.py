@@ -66,9 +66,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--compute-curvature",
+        "--compute-metric",
         action="store_true",
-        help="Also compute diagonal curvature and learning-rate vectors.",
+        help="Also compute diagonal metric and learning-rate scale vectors.",
     )
     return parser.parse_args()
 
@@ -80,7 +80,7 @@ def main() -> None:
         args.run_dir,
         builder=args.builder,
         checkpoint=args.checkpoint,
-        compute_curvature=bool(args.compute_curvature),
+        compute_metric=bool(args.compute_metric),
     )
     artifact = summary.get("artifact")
     print(f"Saved gradient diagnostics to {artifact}")

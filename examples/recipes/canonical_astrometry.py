@@ -64,6 +64,7 @@ from dluxshera.inference.optimization import (
     run_shera_gd,
 )
 from dluxshera.inference.prior import PriorSpec
+from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -76,6 +77,7 @@ from dluxshera.params.store import ParameterStore, strip_structural
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
+    plot_eigenvalue_spectrum,
     plot_fim,
     plot_parameter_history,
     plot_psf_comparison,
@@ -96,8 +98,9 @@ from dluxshera.systems.three_plane import (
 JAX_ENABLE_X64 = True
 RNG_SEED = 42
 FAST_MODE = False
-ADD_NOISE = False
+ADD_NOISE = True
 SAVE_PLOTS = True
+PLOT_EIGEN_SPECTRUM = True
 
 # Telescope Config Selection (9cm testbed vs 22cm flight design)
 # Options: None, SHERA_TESTBED_CONFIG / SHERA_FLIGHT_CONFIG
@@ -110,7 +113,7 @@ TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
 # Inference settings
-N_ITER = 60
+N_ITER = 40
 FAST_ITER = 30
 BASE_LR = 0.5
 
@@ -128,7 +131,8 @@ INFER_KEYS = (
 
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-DEFAULT_RESULTS_DIR = Path(f"Results/canonical_astrometry_recipe_{TIMESTAMP}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -184,7 +188,7 @@ def main(
             "binary.position_angle_deg": 90.0,
             "binary.x_position_as": 0.0,
             "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1800.0,
+            "imaging.exposure_time_s": 1800.,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
@@ -192,38 +196,50 @@ def main(
     binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
-    data = binder.model()
+    data_psf = binder.model()
 
+    # Optionally add noise to the data
     if add_noise:
         rng_key, split_key = jr.split(rng_key)
-        if np.min(data) > 100:
-            data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
+        if np.min(data_psf) > 100:
+            # Use gaussian approximation to shot noise if image is bright enough
+            data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
         else:
-            data = jr.poisson(split_key, data)
+            # Otherwise use poisson statistics
+            data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
+            # Casting back to float is important for the optimization
+    else: # No noise
+        data = data_psf
 
-    data_var = data
+    # Define data variance = data_psf -> Shot noise dominated
+    # Add a minimum variance floor to avoid any division by zero
+    data_var = jnp.maximum(data_psf, 1.0)
 
     print("Configuring Inference...")
+    # We create a subspec here because the user may have
+    # removed one or more keys from the complete list
     inference_subspec = make_inference_subspec(
         base_spec=inference_spec,
         infer_keys=INFER_KEYS,
         cfg=cfg,
     )
 
+    # prior_info defines our initial knowledge of each parameter,
+    # and determines the amplitude of the random perturbation applied to the model
     prior_info = {
-        "binary.separation_as":          {"sigma": 1e-4, "dist": "Normal"},
-        "binary.position_angle_deg":     {"sigma": 1e-3, "dist": "Uniform"},
-        "binary.x_position_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.y_position_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.log_flux_total":         {"sigma": 1e-3, "dist": "LogNormal"},
-        "binary.contrast":               {"sigma": 1e-3, "dist": "LogNormal"},
-        "system.plate_scale_as_per_pix": {"sigma": 1e-5, "dist": "LogNormal"},
+        "binary.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
+        "binary.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"}, # 1.67e-2 deg = 1 arcmin
+        "binary.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "binary.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "binary.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"}, # 4.3e-3 log-flux -> 1% flux cal
+        "binary.contrast":               {"sigma": 6e-3, "dist": "LogNormal"}, # 6e-3 log-contrast -> indep. 1% star cal
+        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"}, # 4.3e-3 log-platescale -> 1% cal
         "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),5),
+            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),2),
             "dist": "Normal",
         },
         "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),5),
+            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),2),
             "dist": "Normal",
         },
     }
@@ -232,6 +248,9 @@ def main(
     print("Drawing starting point from priors...")
     rng_key, split_key = jr.split(rng_key)
     init_store = prior_spec.sample(rng_key=split_key, keys=INFER_KEYS)
+    # Apply the randomly drawn perturbations to the model and produce an image
+    # We use strip_structural() here to remove any structural parameters present in the store
+    # Otherwise, the presence of structural parameters requires rebuilding the model
     init_psf = binder.model(
         strip_structural(init_store, structural_keys=binder.structural_store_keys())
     )
@@ -265,8 +284,9 @@ def main(
     loss0 = loss_fn(theta0)
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
-    theta_ref = theta_true
-    F = fim_theta(nll_loss_fn, theta_ref)
+    fim_point = theta_true
+    F = fim_theta(nll_loss_fn, fim_point)
+    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
     if save_plots:
         plot_fim(
             F,
@@ -274,6 +294,31 @@ def main(
             save_path=results_dir / "fim.png",
             vmin=4,
             vmax=14,
+            show=False,
+        )
+
+    if PLOT_EIGEN_SPECTRUM:
+        eigvals, eigvecs = np.linalg.eigh(np.asarray(F))
+        sort_idx = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[sort_idx]
+        eigvecs = eigvecs[:, sort_idx]
+
+        if truncate_k is not None:
+            spectrum_truncate_k = int(truncate_k)
+        elif truncate_by_eigval is not None:
+            spectrum_truncate_k = int(np.sum(eigvals >= truncate_by_eigval))
+            if spectrum_truncate_k <= 0:
+                spectrum_truncate_k = 1
+        else:
+            spectrum_truncate_k = None
+
+        plot_eigenvalue_spectrum(
+            eigvals,
+            eigvecs,
+            labels=fim_labels,
+            truncate_k=spectrum_truncate_k,
+            label_boxes=False,
+            save_path=results_dir / "eigenvalue_spectrum.png" if save_plots else None,
             show=False,
         )
 
@@ -286,6 +331,13 @@ def main(
                 f"{truncate_by_eigval}."
             )
 
+        # NOTE: theta_ref is the origin for the eigen coefficients (z). Truncation
+        # zeroes discarded components *relative to theta_ref*. If we set theta_ref
+        # to the truth, truncation snaps discarded directions back to truth and
+        # makes severe truncation look unrealistically powerful. Using the initial
+        # guess freezes discarded directions at their initial offsets, which is
+        # the intended pedagogical behavior for this recipe.
+        theta_ref = theta0
         eigen_map_full = EigenThetaMap.from_fim(F, theta_ref, whiten=whiten_basis)
         eigvals_full = (
             np.asarray(eigen_map_full.eigvals)
@@ -396,8 +448,20 @@ def main(
                     f"curv={c:.3e}  lr={l:.3e}"
                 )
 
+    labels_by_key = map_labels_to_keys(
+        INFER_KEYS,
+        fim_labels,
+        store=init_store if use_eigen else None,
+        index_map=None if use_eigen else index_map,
+    )
+
     print("Running preconditioned gradient descent...")
     n_iter = FAST_ITER if fast else N_ITER
+    metric_payload = {
+        "theta_ref": np.asarray(theta0_opt),
+        "metric_diag": np.asarray(curvature_vec),
+        "lr_scale": np.asarray(lr_vec),
+    }
     theta_final_opt, trace = run_shera_gd(
         loss_fn=loss_opt,
         theta0=theta0_opt,
@@ -405,11 +469,14 @@ def main(
         learning_rate=BASE_LR,
         lr_vec=lr_vec,
         num_steps=n_iter,
-        runs_dir=results_dir,
+        run_dir=results_dir,
         return_artifacts=False,
         theta_space=theta_space,
-        curvature=curvature_vec,
-        precond=precond_meta,
+        metric=metric_payload,
+        extra_meta={
+            "optimizer": {"preconditioning": precond_meta},
+            "theta": {"labels_by_key": labels_by_key},
+        },
     )
 
     if use_eigen:
@@ -420,13 +487,6 @@ def main(
     final_store = store_unpack_params(inference_subspec, theta_final, init_store)
     final_psf = binder.model(
         strip_structural(final_store, structural_keys=binder.structural_store_keys())
-    )
-
-    labels_by_key = map_labels_to_keys(
-        INFER_KEYS,
-        fim_labels,
-        store=init_store if use_eigen else None,
-        index_map=None if use_eigen else index_map,
     )
 
     print("\n==============================")
@@ -444,6 +504,8 @@ def main(
     summary_true = {k: truth_store.get(k) for k in INFER_KEYS}
     summary_init = {k: init_store.get(k) for k in INFER_KEYS}
     summary_final = {k: final_store.get(k) for k in INFER_KEYS}
+    param_summary = build_param_summary(summary_init, summary_final, truth=summary_true)
+    patch_summary(results_dir, {"param_summary": param_summary})
     print_optimization_summary(
         summary_true,
         summary_init,

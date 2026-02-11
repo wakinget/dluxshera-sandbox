@@ -175,15 +175,30 @@ class PriorSpec:
         for subkey, key in zip(subkeys, selected_keys):
             field = self.fields[key]
             field._assert_supported()
-            mean = jnp.asarray(center_store.get(key) if center_store is not None else field.mean)
+            mean = jnp.asarray(
+                center_store.get(key) if center_store is not None else field.mean
+            )
             sigma = jnp.asarray(field.sigma)
+            sample_dtype = jnp.result_type(mean, sigma, jnp.float32)
+            mean = mean.astype(sample_dtype)
+            sigma = sigma.astype(sample_dtype)
             if field.dist == "Normal":
-                noise = jax.random.normal(subkey, shape=mean.shape, dtype=mean.dtype)
+                noise = jax.random.normal(
+                    subkey, shape=mean.shape, dtype=sample_dtype
+                )
                 updates[key] = mean + sigma * noise
             elif field.dist == "Uniform":
-                updates[key] = jax.random.uniform(subkey, shape=mean.shape, dtype=mean.dtype, minval=mean - sigma, maxval=mean + sigma)
+                updates[key] = jax.random.uniform(
+                    subkey,
+                    shape=mean.shape,
+                    dtype=sample_dtype,
+                    minval=mean - sigma,
+                    maxval=mean + sigma,
+                )
             elif field.dist == "LogNormal":
-                updates[key] = mean * jax.random.lognormal(subkey, sigma=sigma, shape=mean.shape, dtype=mean.dtype)
+                updates[key] = mean * jax.random.lognormal(
+                    subkey, sigma=sigma, shape=mean.shape, dtype=sample_dtype
+                )
                 # NOTE: Lognormal sampling — sigma is the std dev in *log-space*.
                 # This matches NumPyro's LogNormal(loc, scale) with:
                 #   JAX:     mean * jax.random.lognormal(key, sigma)
@@ -222,20 +237,25 @@ class PriorSpec:
             field._assert_supported()
             mean = jnp.asarray(field.mean)
             sigma = jnp.asarray(field.sigma)
+            sample_dtype = jnp.result_type(mean, sigma, jnp.float32)
+            mean = mean.astype(sample_dtype)
+            sigma = sigma.astype(sample_dtype)
             if field.dist == "Normal":
-                noise = jax.random.normal(subkey, shape=mean.shape, dtype=mean.dtype)
+                noise = jax.random.normal(
+                    subkey, shape=mean.shape, dtype=sample_dtype
+                )
                 updates[key] = mean + sigma * noise
             elif field.dist == "Uniform":
                 updates[key] = jax.random.uniform(
                     subkey,
                     shape=mean.shape,
-                    dtype=mean.dtype,
+                    dtype=sample_dtype,
                     minval=mean - sigma,
                     maxval=mean + sigma,
                 )
             elif field.dist == "LogNormal":
                 updates[key] = mean * jax.random.lognormal(
-                    subkey, sigma=sigma, shape=mean.shape, dtype=mean.dtype
+                    subkey, sigma=sigma, shape=mean.shape, dtype=sample_dtype
                 )
                 # NOTE: Lognormal sampling — sigma is the std dev in *log-space*.
                 # This matches NumPyro's LogNormal(loc, scale) with:

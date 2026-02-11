@@ -44,6 +44,15 @@ Priority levels are intentionally coarse:
 
 (These priorities are expected to change.)
 
+## Progress Snapshot (2026-02)
+
+Roadmap priorities are intentionally coarse and mostly unchanged from the previous cycle, but current repository progress has moved several implementation details forward:
+
+- Optimization artifact/logging infrastructure is now broadly wired into gradient-descent flows and demos, reducing ad hoc run bookkeeping.
+- Experiment orchestration has improved with promoted prescribed Monte Carlo recipe(s), maintained template assets, and clearer override semantics.
+- Experiment metadata capture has improved (experiment-level notes and per-run notes), which supports comparison and reporting workflows.
+- Remaining active gaps are mostly depth/completeness issues (e.g., broader regression matrices, fuller profiles/IO, and richer preconditioning options) rather than missing foundational architecture.
+
 ---
 
 ## Themes
@@ -429,6 +438,16 @@ Items may move:
 - from Working Plan → Roadmap when deferred or re-scoped
 
 Neither document is expected to be perfectly up to date at all times.
+
+---
+
+## Known Issues (convenience tracker)
+
+This roadmap is theme-level, so keep this list intentionally short and high-signal; use `docs/dev/working_plan.md` for the more operational issue ledger.
+
+- Optimizer preconditioning remains incomplete (FIM-first pathways are not yet the default workflow).
+- Regression breadth for richer inference regimes (multi-wavelength / multi-PSF) remains an active hardening area.
+- Profiles/IO consistency across scripts and demos is improving but not yet standardized end-to-end.
 
 ---
 

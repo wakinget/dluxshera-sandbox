@@ -7,7 +7,7 @@ from dluxshera.inference.preconditioning import (
     PreconditioningConfig,
     compute_precond_vectors,
 )
-from dluxshera.inference.run_artifacts import save_run
+from dluxshera.inference.run_artifacts import load_npz_artifact, save_run
 
 
 def test_quadratic_precond_vectors_shapes_and_values():
@@ -62,21 +62,28 @@ def test_artifact_writing(tmp_path: Path):
     meta = {"theta": {"dim": 3}}
     summary = {}
 
-    precond = {"lr_vec": np.ones(3), "precond": np.full(3, 0.5)}
-    curvature = {"curv_diag": np.arange(3)}
+    base_lr = 0.5
+    precond = {"lr_vec": np.full(3, base_lr), "precond": np.full(3, 0.5)}
+    metric = {
+        "theta_ref": np.zeros(3),
+        "metric_diag": np.arange(3),
+        "lr_scale": precond["lr_vec"] / base_lr,
+        "precond": precond["precond"],
+    }
 
     save_run(
         run_dir,
         trace=trace,
         meta=meta,
         summary=summary,
-        precond=precond,
-        curvature=curvature,
+        artifacts={
+            "metric": {"kind": "npz", "content": metric},
+        },
     )
 
-    with np.load(run_dir / "precond.npz", allow_pickle=False) as npz:
-        np.testing.assert_allclose(npz["lr_vec"], precond["lr_vec"])
-        np.testing.assert_allclose(npz["precond"], precond["precond"])
-
-    with np.load(run_dir / "curvature.npz", allow_pickle=False) as npz:
-        np.testing.assert_allclose(npz["curv_diag"], curvature["curv_diag"])
+    loaded_metric = load_npz_artifact(run_dir, "metric")
+    assert loaded_metric is not None
+    np.testing.assert_allclose(loaded_metric["theta_ref"], metric["theta_ref"])
+    np.testing.assert_allclose(loaded_metric["metric_diag"], metric["metric_diag"])
+    np.testing.assert_allclose(loaded_metric["lr_scale"], metric["lr_scale"])
+    np.testing.assert_allclose(loaded_metric["precond"], metric["precond"])

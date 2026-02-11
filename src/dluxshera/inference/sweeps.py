@@ -22,14 +22,7 @@ DEFAULT_COLUMNS: tuple[str, ...] = (
     "preconditioning.method",
     "loss_init",
     "loss_final",
-    "loss_best",
-    "best_step",
     "runtime_total_s",
-    "has_checkpoint_best",
-    "has_checkpoint_final",
-    "has_signals",
-    "has_precond",
-    "has_curvature",
 )
 
 
@@ -45,6 +38,23 @@ def _safe_load_summary(run_dir: Path) -> Mapping[str, Any]:
         return load_summary(run_dir)
     except FileNotFoundError:
         return {}
+
+
+def get_manifest(summary: Mapping[str, Any]) -> Mapping[str, Any]:
+    manifest = summary.get("manifest")
+    if isinstance(manifest, Mapping):
+        return manifest
+    return {}
+
+
+def has_artifact(summary: Mapping[str, Any], name: str) -> bool:
+    manifest = get_manifest(summary)
+    return name in manifest
+
+
+def list_artifacts(summary: Mapping[str, Any]) -> list[str]:
+    manifest = get_manifest(summary)
+    return sorted(manifest)
 
 
 def _get_nested(mapping: Mapping[str, Any], path: str) -> Any:
@@ -115,14 +125,7 @@ def load_run_row(run_dir: Path) -> dict[str, Any]:
         else None,
         "loss_init": summary.get("loss_init"),
         "loss_final": summary.get("loss_final"),
-        "loss_best": summary.get("loss_best"),
-        "best_step": summary.get("best_step"),
         "runtime_total_s": summary.get("runtime_total_s"),
-        "has_checkpoint_best": summary.get("has_checkpoint_best"),
-        "has_checkpoint_final": summary.get("has_checkpoint_final"),
-        "has_signals": summary.get("has_signals"),
-        "has_precond": summary.get("has_precond"),
-        "has_curvature": summary.get("has_curvature"),
     }
 
     return row

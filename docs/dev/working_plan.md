@@ -1,5 +1,5 @@
 # dLuxShera Working Plan & Notes (dev-facing)
-_Last updated: 2026-01-15_
+_Last updated: 2026-02-10_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
@@ -13,6 +13,13 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 - **Section 22:** Merge strategy and near-term focus for V1.0.
 - **Sections 23–25:** Documentation housekeeping, implementation follow-through notes, and the parking lot/backlog.
 - **Historical context:** For narrative history and ADR-style rationale, see `docs/archive/REFACTOR_HISTORY.md` and `docs/architecture/adr/0001-core-architecture-foundations.md`.
+
+## Progress refresh (2026-02)
+
+- Roadmap priorities are largely stable this cycle; no major theme reprioritization is needed.
+- Experiment workflows have advanced: prescribed Monte Carlo now has a maintained recipe entry point plus templates in `examples/recipes/prescription_templates/`.
+- Experiment metadata tracking improved: experiment-level notes and per-run notes now propagate into manifest/aggregate outputs.
+- Near-term focus remains optimizer robustness, regression depth, and doc/tutorial cleanup rather than major architecture rewrites.
 
 ---
 
@@ -202,6 +209,8 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 - ✅ Binder-first loss wiring (Binder NLL helpers using `gaussian_image_nll`) and binder namespace UX (Task 1A–1E).  
 - ✅ SystemGraph single-node scaffold (removed from mainline; retained in archive history).  
 - ✅ Binder NLL stationary-point regression landed; follow-on scenarios pending (multi-wavelength/multi-PSF).  
+- ✅ Prescribed Monte Carlo workflow promoted into examples with maintained templates and updated naming (`overrides.csv` semantics, notes propagation).
+- ✅ Aggregation metadata improvements landed (`run_note` plus experiment-level notes in manifests/results summaries).
 
 **P0 — Current focus**  
 - ✅ **Optimization artifacts & logging**: Phase A scaffold (`run_artifacts.py`) is in place and Phase B wiring now emits required artifacts from `run_simple_gd` and binder-backed `run_image_gd` when opt-in flags are provided. Integration smoke tests cover end-to-end writes and metadata (trace/meta/summary + optional checkpoints).  
@@ -212,7 +221,7 @@ Legend: ✅ Implemented · ⚠️ Partial · ⏳ Not implemented
 
 **P1 — Next up**  
 - ⏳ **Profiles/IO and serialization**: YAML/JSON profiles and richer serialization once primitives-only policy remains stable.  
-- ⏳ **Documentation and example polish**: README quickstart, additional tutorials, and aligning examples/README.md with the new optimization artifact flow.  
+- ⚠️ **Documentation and example polish**: canonical and prescribed Monte Carlo docs improved, but README quickstart and tutorial cross-links are still incomplete.
 - ⏳ **Expanded transform coverage**: Broaden registry coverage for additional systems (two-/future four-plane) as specs land.
 
 **P2 — Variants & ergonomics**  
@@ -734,6 +743,39 @@ Status: implemented; historical context
 - High-level model design / capabilities documentation describing what the Shera-style model does (optical/astrometric forward model, main outputs, supported questions) and its key assumptions/approximations, written for proposal and systems-engineering consumers rather than just implementers.
 - Model–error-budget interface and parameter dependency mapping: lightweight docs/figures that show how model outputs and sensitivities map onto specific error-budget terms, and how primitives vs. derived parameters (ParamSpec → Store → transforms) relate to those terms for traceability.
 
+### 25.1 Detector roadmap: pixel grid offsets (dx/dy) and calibration-driven detector layers
+
+**Overview**
+
+We currently use a minimal detector path (single Downsample layer with `kernel_size = cfg.oversample`). The next detector-model expansion is a per-pixel offset layer that applies measured pixel-center shifts (`dx`, `dy`) before final detector sampling. This gives us a clear way to include detector metrology in the forward model while keeping detector calibration/product handling separate from low-level layer mechanics.
+
+**Decisions (recorded)**
+
+- **Units:** `dx`/`dy` are expressed in detector pixel units on the final (post-downsample) detector grid.
+- **Oversampled operation:** the pixel-offset layer runs on the oversampled image and scales offsets internally by `oversample` (so supplied calibration maps stay in detector-pixel units).
+- **Sign convention:** (`dx`, `dy`) represent where the *actual* pixel center sits relative to the ideal grid in detector coordinates. Positive `dx` means the pixel center is to the right (sample at larger `x`); positive `dy` means the center is at larger `y`.
+- **Responsibility split:** the layer is intentionally “dumb” (apply offsets only). Calibration ingestion/selection/synthesis belongs to a separate provider component.
+
+**Calibration products & provider concept**
+
+- Calibration products may be partial maps in the near term (e.g., 100×100 or 200×200 regions) and may evolve to full-frame maps later.
+- Near-term strategy: provide ROI-local `dx`/`dy` arrays directly to the detector layer path.
+- Future strategy: add explicit detector-coordinate anchoring (e.g., ROI origin/global index mapping) so the same provider API can serve arbitrary subarrays from global products.
+- Synthetic offset generation (for testing/what-if studies) should plug into the same provider interface used by measured maps or stitched mosaics.
+
+**Repository organization (planned)**
+
+- `src/dluxshera/layers/detector_layers.py`: custom detector layers (pixel offsets first; later fill-factor, diffusion, and related effects).
+- `src/dluxshera/components/detectors.py`: named detector model/spec definitions and calibration metadata hookups.
+- `src/dluxshera/builders/detector.py`: builder wiring that selects a detector model, resolves calibration products, and assembles the `LayeredDetector` pipeline.
+- Placeholder naming is acceptable for now (e.g., `ApplyPixelOffsets`, name TBD); avoid locking in final class names until implementation.
+
+**Config naming guidance (non-binding)**
+
+- Prefer a model-selector key such as `cfg.detector_model` for camera/detector choice.
+- Optionally add a separate calibration selector (e.g., `cfg.detector_calibration_id`) for product/version choice.
+- Keep detector noise parameters as detector-model metadata for likelihood/simulation usage for now; do not force them into forward-model layers yet.
+
 ## 26) Implementation Plan — Optimization Artifacts + Signals + I/O (v0)
 
 ### 26.1 Current state (survey)
@@ -842,3 +884,12 @@ Now that artifact emission (Phase B) is wired, this phase focuses on decoding tr
 - **Run directory identity:** adopt a deterministic `run_id` strategy (timestamp vs. UUID vs. caller-provided) and whether to embed git hash automatically or gate on availability.
 - **Truth availability for signals:** for demos/tests, define how truth is surfaced to signal builders (pass through optimizer API vs. loaded alongside data) to avoid coupling to specific demos.
 - **Checkpoint contents:** decide minimal checkpoint schema (θ only vs. θ + optimizer state) while keeping restart support lightweight for optax-based loops.
+
+
+## 27) Known Issues (lightweight tracker)
+
+Use this section as a quick in-doc ledger for active issues that are worth tracking between formal GitHub issue triage passes.
+
+- **Preconditioning is still partially implemented.** `ema_grad2`-based paths are available, but first-class FIM-derived preconditioning in the main configuration flow is still incomplete.
+- **Loss regression breadth is still partial.** Multi-wavelength and multi-PSF inference cases need deeper explicit regression coverage.
+- **Profiles/IO consistency across workflows is incomplete.** Prescription/override flows are strong for experiment runners, but a unified YAML/JSON profile experience across all entry points is still pending.

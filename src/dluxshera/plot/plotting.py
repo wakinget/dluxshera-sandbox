@@ -44,6 +44,7 @@ __all__ = [
     "choose_subplot_grid",
     "plot_parameter_sweeps",
     "plot_fim",
+    "plot_eigenvalue_spectrum",
     "plot_signals_panels",
     "plot_signals_grid",
 ]
@@ -148,10 +149,6 @@ def _maybe_save(fig, save_path: Optional[Union[str, Path]], dpi: int = 300) -> N
     fig.savefig(path, dpi=dpi)
 
 
-def _ensure_plots_dir(out_dir: Path) -> Path:
-    plots_dir = Path(out_dir) / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    return plots_dir
 
 
 def _plot_lines_on_ax(
@@ -438,7 +435,7 @@ def plot_signals_panels(
     signals:
         Mapping from signal names to numpy arrays.
     out_dir:
-        Run directory; plots are written to ``out_dir / 'plots'``.
+        Run directory; plots are written to ``out_dir``.
     title_prefix:
         Optional prefix applied to each panel title.
     include_zernike_rms:
@@ -451,7 +448,6 @@ def plot_signals_panels(
     """
 
 
-    plots_dir = _ensure_plots_dir(Path(out_dir))
     x = onp.arange(next(iter(signals.values())).shape[0])
     saved: PanelPaths = []
 
@@ -461,7 +457,7 @@ def plot_signals_panels(
         title_prefix=title_prefix,
         include_zernike_rms=include_zernike_rms,
     ):
-        path = plots_dir / panel["filename"]
+        path = Path(out_dir / panel["filename"] )
         _plot_lines(x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"], path)
         saved.append(path)
 
@@ -470,12 +466,11 @@ def plot_signals_panels(
 
 def plot_signals_grid(
     signals: Mapping[str, ArrayLike],
-    out_dir: Path,
+    out_dir: Optional[Union[str, Path]] = None,
     *,
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
     figsize: Optional[Tuple[float, float]] = None,
-    save_path: Optional[Union[str, Path]] = None,
     show: bool = False,
     close: bool = True,
 ):
@@ -487,16 +482,13 @@ def plot_signals_grid(
     signals:
         Mapping from signal names to numpy arrays.
     out_dir:
-        Run directory; plots are written to ``out_dir / 'plots'`` when
-        ``save_path`` is not supplied.
+        Optional output directory; plots are written to ``out_dir`` when provided
     title_prefix:
         Optional prefix applied to each panel title.
     include_zernike_rms:
         Whether to include M1/M2 Zernike RMS panels (default False).
     figsize:
         Optional explicit figure size.
-    save_path:
-        If provided, save the figure to this path.
     show:
         Whether to call ``plt.show()`` at the end.
     close:
@@ -535,11 +527,10 @@ def plot_signals_grid(
 
     fig.tight_layout()
 
-    if save_path is None:
-        plots_dir = _ensure_plots_dir(Path(out_dir))
-        save_path = plots_dir / "signals_grid.png"
+    if out_dir is not None:
+        out_dir = Path(out_dir / "signals_grid.png" )
 
-    _maybe_save(fig, save_path)
+    _maybe_save(fig, out_dir)
 
     if show:
         plt.show()
@@ -930,6 +921,7 @@ def plot_fim(
     vmin=None,
     vmax=None,
     cmap: str = "viridis",
+    cbar_label: Optional[str] = None,
     figsize=(8, 6),
     eps: float = 1e-20,
     ax=None,
@@ -952,6 +944,8 @@ def plot_fim(
         Optional explicit color scaling for imshow.
     cmap : str
         Colormap for the heatmap.
+    cbar_label : str | None
+        Optional label for the colorbar, overrides automatic labels if provided.
     figsize : tuple
         Figure size when creating a new figure.
     eps : float
@@ -974,10 +968,12 @@ def plot_fim(
     fim_array = onp.array(fim)
     if log_scale:
         data = onp.log10(onp.abs(fim_array) + eps)
-        cbar_label = r"$\log_{10}(|\mathrm{FIM}| + \epsilon)$"
+        if cbar_label is None:
+            cbar_label = r"$\log_{10}(|\mathrm{FIM}| + \epsilon)$"
     else:
         data = fim_array
-        cbar_label = "FIM"
+        if cbar_label is None:
+            cbar_label = "FIM"
 
     if vmin is None:
         vmin = onp.nanmin(data)
@@ -1003,6 +999,79 @@ def plot_fim(
 
     fig.tight_layout()
 
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, ax
+
+
+def plot_eigenvalue_spectrum(
+    eigvals: ArrayLike,
+    eigvecs: Optional[ArrayLike] = None,
+    labels: Optional[Sequence[str]] = None,
+    truncate_k: Optional[int] = None,
+    label_top_k: Optional[int] = None,
+    label_fontsize: int = 9,
+    label_boxes: bool = True,
+    alternate_updn: bool = True,
+    ax=None,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot eigenvalue spectrum with optional dominant-parameter annotations."""
+
+    eigvals_arr = onp.asarray(eigvals)
+    x = onp.arange(len(eigvals_arr))
+
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
+    ax.semilogy(x, eigvals_arr, marker="o")
+    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+    ax.set_xlabel("Eigenmode Index")
+    ax.set_ylabel("Eigenvalue (log scale)")
+
+    if eigvecs is not None and labels is not None:
+        eigvecs_arr = onp.asarray(eigvecs)
+        dom_idx = onp.argmax(onp.abs(eigvecs_arr), axis=0)
+        label_limit = len(x) if label_top_k is None else min(len(x), int(label_top_k))
+        bbox = dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8) if label_boxes else None
+
+        for k in range(label_limit):
+            dy = 10
+            if alternate_updn:
+                dy = 12 if k % 2 == 0 else -14
+            ax.annotate(
+                labels[int(dom_idx[k])],
+                xy=(x[k], eigvals_arr[k]),
+                xytext=(0, dy),
+                textcoords="offset points",
+                ha="center",
+                va="bottom" if dy >= 0 else "top",
+                fontsize=label_fontsize,
+                bbox=bbox,
+            )
+
+    if truncate_k is not None:
+        ax.axvline(truncate_k - 0.5, linestyle="--", color="k", alpha=0.6)
+        _, y_max = ax.get_ylim()
+        ax.text(
+            truncate_k - 0.5,
+            y_max * 0.9,
+            f"k={truncate_k}",
+            ha="right",
+            va="top",
+            fontsize=label_fontsize,
+        )
+
+    fig.tight_layout()
     _maybe_save(fig, save_path)
 
     if show:

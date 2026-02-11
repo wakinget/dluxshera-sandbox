@@ -35,4 +35,6 @@ def test_collect_and_write_csv(tmp_path: Path):
     header = contents[0].split(",")
     assert "run_id" in header
     assert "optimizer.name" in header
-    assert "has_checkpoint_best" in header
+    assert "loss_final" in header
+    assert "has_precond" not in header
+    assert "has_curvature" not in header

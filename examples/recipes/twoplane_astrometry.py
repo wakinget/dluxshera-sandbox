@@ -129,7 +129,8 @@ INFER_KEYS = (
 
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-DEFAULT_RESULTS_DIR = Path(f"Results/twoplane_astrometry_recipe_{TIMESTAMP}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/twoplane_astrometry_recipe_{TIMESTAMP}")
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -193,16 +194,24 @@ def main(
     binder = SheraTwoPlaneBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
-    data = binder.model()
+    data_psf = binder.model()
 
+    # Optionally add noise to the data
     if add_noise:
         rng_key, split_key = jr.split(rng_key)
-        if np.min(data) > 100:
-            data = np.sqrt(data) * jr.normal(split_key, data.shape) + data
+        if np.min(data_psf) > 100:
+            # Use gaussian approximation to shot noise if image is bright enough
+            data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
         else:
-            data = jr.poisson(split_key, data)
+            # Otherwise use poisson statistics
+            data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
+            # Casting back to float is important for the optimization
+    else: # No noise
+        data = data_psf
 
-    data_var = data
+    # Define data variance = data_psf -> Shot noise dominated
+    # Add a minimum variance floor to avoid any division by zero
+    data_var = jnp.maximum(data_psf, 1.0)
 
     print("Configuring Inference...")
     inference_subspec = make_inference_subspec(
@@ -212,13 +221,13 @@ def main(
     )
 
     prior_info = {
-        "binary.separation_as":          {"sigma": 1e-4, "dist": "Normal"},
-        "binary.position_angle_deg":     {"sigma": 1e-3, "dist": "Uniform"},
-        "binary.x_position_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.y_position_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.log_flux_total":         {"sigma": 1e-3, "dist": "LogNormal"},
-        "binary.contrast":               {"sigma": 1e-3, "dist": "LogNormal"},
-        "system.plate_scale_as_per_pix": {"sigma": 1e-5, "dist": "LogNormal"},
+        "binary.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
+        "binary.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"},
+        "binary.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "binary.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "binary.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"},
+        "binary.contrast":               {"sigma": 6e-3, "dist": "LogNormal"},
+        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"},
         "primary.zernike_coeffs_nm": {
             "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"), 5),
             "dist": "Normal",
@@ -395,6 +404,11 @@ def main(
 
     print("Running preconditioned gradient descent...")
     n_iter = FAST_ITER if fast else N_ITER
+    metric_payload = {
+        "theta_ref": np.asarray(theta0_opt),
+        "metric_diag": np.asarray(curvature_vec),
+        "lr_scale": np.asarray(lr_vec),
+    }
     theta_final_opt, trace = run_shera_gd(
         loss_fn=loss_opt,
         theta0=theta0_opt,
@@ -405,8 +419,8 @@ def main(
         runs_dir=results_dir,
         return_artifacts=False,
         theta_space=theta_space,
-        curvature=curvature_vec,
-        precond=precond_meta,
+        metric=metric_payload,
+        extra_meta={"optimizer": {"preconditioning": precond_meta}},
     )
 
     if use_eigen:
