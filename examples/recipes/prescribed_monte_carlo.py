@@ -1806,19 +1806,14 @@ def main() -> None:
         # - Default behavior is strict: reuse uses only exact cache matches unless
         #   reuse_fim=True is set in the prescription or plan. When reuse_fim=True,
         #   a cache miss can still reuse the last cached FIM with a warning.
-        # - Safe reuse inputs include full theta_true, infer_keys, cfg/forward_spec
-        #   identifiers, data/data_var hashes, and noise_model (all must match).
+        # - Safe reuse inputs include full theta_true, infer_keys, and cfg/forward_spec
+        #   identifiers (all must match for FIM reuse).
         cache_key_payload = {
             "infer_keys": infer_keys,
             "model_config_id": model_config_id,
             "cfg_hash": cfg_hash,
             "forward_spec_hash": forward_spec_hash,
             "theta_true_hash": _hash_array(theta_true),
-            "add_noise": add_noise,
-            "data_hash": _hash_array(data),
-            "data_var_hash": _hash_array(data_var),
-            "noise_model": noise_model,
-            "reduce": reduce,
         }
         fim_cache_key = _stable_hash(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
