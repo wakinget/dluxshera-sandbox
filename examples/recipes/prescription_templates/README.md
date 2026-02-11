@@ -28,7 +28,7 @@ Call the script using prescription templates (dry run). Calling the script witho
 python examples/recipes/prescribed_monte_carlo.py --dry-run
 ```
 
-You can specify that you want to use a specific prescription file with the `--prescription` argument:
+You can specify that you want to use a specific prescription file with the `--prescription` argument. This will run the experiment with **no overrides**, relying only on the default values within `prescription.json`.
 
 ```bash
 python examples/recipes/prescribed_monte_carlo.py \
@@ -42,6 +42,16 @@ You can additionally specify any per-run overrides that you want to use with the
 python examples/recipes/prescribed_monte_carlo.py \
   --prescription examples/recipes/prescription_templates/prescription.json \
   --overrides examples/recipes/prescription_templates/overrides.csv \
+  --dry-run
+```
+
+Finally, you can also specify an explicit `--outdir` for the saved results:
+
+```bash
+python examples/recipes/prescribed_monte_carlo.py \
+  --prescription examples/recipes/prescription_templates/prescription.json \
+  --overrides examples/recipes/prescription_templates/overrides.csv \
+  --outdir Results/my_experiment \
   --dry-run
 ```
 
@@ -135,7 +145,8 @@ Resolution behavior:
 - Notes fields:
   - **Experiment-level note**: put this in `experiment.notes` (recommended) in `prescription.json`; aliases `experiment.note`, `experiment.comment`, and `experiment.comments` are accepted for compatibility. This is persisted once in `manifest.json` as top-level `notes`.
   - **Per-run note**: put `note` / `notes` / `comment` / `comments` in `overrides.csv`; these are persisted per run as `run_note` in summaries, `results.csv`, and `manifest.json.runs[]`.
-- Paths like `diffractive_pupil_path` are **relative to the repo-root**.
+- Paths are usually specified **relative to the repo-root**.
+  - `examples/recipes/prescribed_monte_carlo.py`
 - `experiment.n_runs` is **authoritative** when set:
   - If the plan defines fewer runs, the remaining runs execute with prescription defaults (no per-run overrides).
   - If the plan defines more runs, extra plan-defined runs are ignored.
