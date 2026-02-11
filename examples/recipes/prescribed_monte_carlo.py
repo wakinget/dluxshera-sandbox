@@ -1921,6 +1921,12 @@ def main() -> None:
             if init_overrides_flat:
                 init_store = init_store.replace(init_overrides_flat)
         elif init_mode == "explicit":
+            # Explicit init precedence for coupled exposure/log-flux fields:
+            # 1) `imaging.exposure_time_s` only -> `refresh_derived` recomputes
+            #    `binary.log_flux_total` from primitives.
+            # 2) `binary.log_flux_total` only -> explicit value is used.
+            # 3) both provided -> explicit `binary.log_flux_total` wins because
+            #    derived keys are re-applied after `refresh_derived`.
             init_store = truth_store
             if init_overrides_flat:
                 (
