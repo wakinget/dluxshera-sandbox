@@ -84,6 +84,12 @@ Resolution behavior:
 - Supplying `--prescription` without `--overrides` runs with no per-run overrides.
 
 ## Key semantics / policies
+- Prescription JSON supports **private keys** that start with `_` anywhere in the object tree.
+  - Private keys are recursively stripped immediately after `json.load`, so runtime parsing/validation never sees them.
+  - Use `_comment` freely for inline template notes.
+  - Use underscore-prefixed keys (for example `_bandwidth_m` or `_binary.x_position_as`) to keep optional overrides in place but disabled by default.
+  - Only a **leading** underscore is special; regular keys like `run_id_prefix` remain active.
+  - JSON does not allow meaningful duplicate keys in the same object (parsers keep only the last one), so do not rely on repeated `_comment` keys side-by-side.
 - Structural config overrides are **experiment-wide**. Do **not** put `model.*` or `overrides.config.*` in the overrides.
 - Each run gets **one seed**; JAX splits it internally for stochastic components.
   - If a plan row does **not** specify `seed`, the runner derives a per-run seed
