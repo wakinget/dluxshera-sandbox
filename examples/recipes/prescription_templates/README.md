@@ -20,14 +20,40 @@ Outputs go to an experiment output directory:
 - `manifest.json` also includes one record per run under `runs[]`; when a run summary contains
   `run_note`, it is surfaced in that run record for quick annotation lookups.
 
-## Quick start
-1) **Copy a template directory**
+## Quick Start
+
+Call the script using prescription templates (dry run). Calling the script without any additional arguments defaults to using the template prescription and overrides files. The `--dry-run` argument is used to parse the inputs, and display a preview, but halts the script before running the experiment.
 
 ```bash
-cp -R work/experiments/prescription_templates work/experiments/my_experiment
+python examples/recipes/prescribed_monte_carlo.py --dry-run
 ```
 
-2) **Edit `prescription.json`** (experiment-wide settings)
+You can specify that you want to use a specific prescription file with the `--prescription` argument:
+
+```bash
+python examples/recipes/prescribed_monte_carlo.py \
+  --prescription examples/recipes/prescription_templates/prescription.json \
+  --dry-run
+```
+
+You can additionally specify any per-run overrides that you want to use with the `--overrides` argument:
+
+```bash
+python examples/recipes/prescribed_monte_carlo.py \
+  --prescription examples/recipes/prescription_templates/prescription.json \
+  --overrides examples/recipes/prescription_templates/overrides.csv \
+  --dry-run
+```
+
+## Creating your own experiment
+
+### 1) Copy the templates to a new experiment directory
+
+```bash
+cp -R examples/recipes/prescription_templates Results/my_experiment
+```
+
+### 2) Edit `prescription.json` (experiment-wide settings)
 
 Key sections you will typically touch:
 - `model` / `config` (base model/config for all runs)
@@ -36,35 +62,46 @@ Key sections you will typically touch:
 - `infer_keys`
 - `priors`
 - `defaults`
-  - `defaults.fim.reuse_fim` controls whether FIM reuse is forced even when the strict cache key misses.
+  - `defaults.fim.reuse_fim` controls forced FIM reuse even when the cache doesn't match.
 
-3) **Edit `overrides.csv`** (per-run inputs)
+### 3) Edit `overrides.csv` (per-run inputs)
 
 - Transposed format: **first column = keys**, each remaining column = a run.
 - Blank cells mean “no override for this run.”
-- Use `null` (literal text) to set an explicit JSON null.
-- Vector-valued cells must be **JSON arrays inside quoted CSV cells** (e.g., `"[0.1, 0.2, 0.3]"`).
-  - Why: CSV uses commas as delimiters, so unquoted arrays can be split across multiple columns.
+- Use `null` (literal text) to set an explicit JSON null (resolves to `None` in python)
+- Vector-valued cells in CSV files must be **quoted JSON arrays** (e.g., `"[0.1, 0.2, 0.3]"`).
+  - CSV uses commas as delimiters, so unquoted arrays can be split across multiple columns.
 
-4) **Dry-run preview**
+### 4) Dry-run preview
 
+Use the `--dry-run` argument to ensure that the input files load correctly. Prescription and override files can be auto-discovered if present within the provided `--outdir`.
+
+Using auto-discovery:
 ```bash
-python work/experiments/prescribed_monte_carlo.py \
-  --prescription work/experiments/my_experiment/prescription.json \
-  --overrides work/experiments/my_experiment/overrides.csv \
+python examples/recipes/prescribed_monte_carlo.py \
+  --outdir Results/my_experiment \
   --dry-run
 ```
 
-5) **Run for real**
+Using explicit prescription/overrides files:
+```bash
+python examples/recipes/prescribed_monte_carlo.py \
+  --prescription Results/my_experiment/prescription.json \
+  --overrides Results/my_experiment/overrides.csv \
+  --dry-run
+```
+An output directory is automatically generated if `--outdir` isn't provided.
+
+### 5) Run for real
+
+Just remove the `--dry-run` argument (either syntax from above should work):
 
 ```bash
-python work/experiments/prescribed_monte_carlo.py \
-  --prescription work/experiments/my_experiment/prescription.json \
-  --overrides work/experiments/my_experiment/overrides.csv \
+python examples/recipes/prescribed_monte_carlo.py \
   --outdir Results/my_experiment
 ```
 
-6) **Inspect outputs**
+### 6) **Inspect outputs**
 - `Results/my_experiment/results.csv` for run-level summaries
 - `Results/my_experiment/runs/<run_id>/` for per-run artifacts
 - `Results/my_experiment/manifest.json` for the resolved configuration and plan
