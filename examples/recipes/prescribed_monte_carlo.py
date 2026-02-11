@@ -1,6 +1,6 @@
-"""Prescribed Monte Carlo experiment scaffold.
+"""Prescribed Monte Carlo experiment.
 
-Purpose: incubate the prescription/plan workflow in work/experiments.
+Purpose: provide a robust way to define and run monte carlo experiments
 Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
@@ -87,9 +87,9 @@ from dluxshera.systems.three_plane import (
 )
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "work/experiments/prescription_templates/prescription.json"
+    "examples/recipes/prescription_templates/prescription.json"
 )
-DEFAULT_OVERRIDES_PATH = Path("work/experiments/prescription_templates/overrides.csv")
+DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 
@@ -1407,7 +1407,7 @@ def _write_experiment_outputs(
         manifest_path,
         created_at=_now_iso_local_ms(),
         script=_repo_relative_path(Path(__file__), repo_root=repo_root)
-        or "work/experiments/prescribed_monte_carlo.py",
+        or "examples/recipes/prescribed_monte_carlo.py",
         prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
         plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
         config_id=_get_nested(prescription, ["model", "config_id"]),
