@@ -124,12 +124,18 @@ Resolution behavior:
   - `init.mode`: Used to override the init mode for any particular run. Used to force explicit init values that would otherwise be drawn from priors, or conversely to draw init values from priors when they would otherwise be set explicitly.
     - `explicit`: All init values are set explicitly. Any parameters left blank default to the truth store value.
     - `prior`: Init values are drawn from priors, except where explicitly set.
-  - `optimizer.n_iter`:
-  - `optimizer.base_lr`:
-  - `eigen.use_eigen`:
-  - `eigen.truncate_k`:
-  - `eigen.truncate_by_eigval`:
-  - `noise.add_noise`:
+  - `optimizer.n_iter`: Per-run override for optimizer iteration count.
+    - Use this to shorten exploratory runs or extend convergence for selected runs without changing experiment-wide defaults.
+  - `optimizer.base_lr`: Per-run override for optimizer learning rate.
+    - Useful for quick sweeps over step size to assess stability or convergence speed.
+  - `eigen.use_eigen`: Per-run True/False toggle for eigen-truncation behavior in the optimizer/preconditioner path.
+    - Set `false` to run without eigen truncation for comparison runs.
+  - `eigen.truncate_k`: Per-run override for fixed-rank eigen truncation.
+    - Typically an integer rank; leave blank to use the prescription default.
+  - `eigen.truncate_by_eigval`: Per-run threshold for eigenvalue-based truncation.
+    - Use this instead of `eigen.truncate_k` when you want value-threshold truncation rather than a fixed rank.
+  - `noise.add_noise`: Per-run True/False toggle for simulated noise injection.
+    - Useful when pairing noisy and noise-free runs under otherwise identical settings.
   - `fim.reuse_fim`: Configures FIM reuse behavior. The FIM is calculated and cached for potential reuse.
     - `false` (default): Recomputes FIM if any key differs from previously cached FIM (cache miss). If all inputs are constant, the cache will 'hit' and the cached FIM is reused.
     - `true`: Always reuses the most recent cached FIM even when the strict cache key misses (issues a warning for clarity).
