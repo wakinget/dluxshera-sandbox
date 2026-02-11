@@ -811,6 +811,30 @@ def _flatten_store_overrides(payload: dict[str, Any]) -> dict[str, Any]:
     return flattened
 
 
+def _partition_overrides_by_kind(
+    overrides_flat: dict[str, Any],
+    forward_spec: Any,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Split flattened overrides into primitive, derived, and unknown keys."""
+    primitive_overrides: dict[str, Any] = {}
+    derived_overrides: dict[str, Any] = {}
+    unknown_overrides: dict[str, Any] = {}
+
+    for key, value in overrides_flat.items():
+        if key not in forward_spec:
+            unknown_overrides[key] = value
+            continue
+        kind = forward_spec.get(key).kind
+        if kind == "primitive":
+            primitive_overrides[key] = value
+        elif kind == "derived":
+            derived_overrides[key] = value
+        else:
+            unknown_overrides[key] = value
+
+    return primitive_overrides, derived_overrides, unknown_overrides
+
+
 def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
     """Resolve a config ID string into a concrete SheraThreePlaneConfig.
 
@@ -1899,7 +1923,50 @@ def main() -> None:
         elif init_mode == "explicit":
             init_store = truth_store
             if init_overrides_flat:
-                init_store = init_store.replace(init_overrides_flat)
+                (
+                    init_primitive_overrides,
+                    init_derived_overrides,
+                    init_unknown_overrides,
+                ) = _partition_overrides_by_kind(init_overrides_flat, forward_spec)
+                if init_unknown_overrides:
+                    print(
+                        "WARNING: explicit init overrides include keys that are not "
+                        "declared as primitive/derived in forward_spec; applying "
+                        "them as direct overrides: "
+                        + ", ".join(sorted(init_unknown_overrides))
+                    )
+
+                if init_primitive_overrides:
+                    init_store = init_store.replace(init_primitive_overrides)
+                init_store = init_store.refresh_derived(forward_spec)
+
+                if init_derived_overrides:
+                    infer_derived_keys = [
+                        key
+                        for key in infer_keys
+                        if key in init_derived_overrides
+                    ]
+                    init_store = init_store.replace(init_derived_overrides)
+                    print(
+                        "Init explicit precedence: explicit derived overrides are "
+                        "authoritative after refresh"
+                        + (
+                            f" (infer keys: {', '.join(infer_derived_keys)})."
+                            if infer_derived_keys
+                            else "."
+                        )
+                    )
+                elif init_primitive_overrides:
+                    print(
+                        "Init explicit precedence: no explicit derived overrides; "
+                        "derived values (e.g., binary.log_flux_total) come from "
+                        "forward transforms after primitive overrides."
+                    )
+
+                if init_unknown_overrides:
+                    init_store = init_store.replace(init_unknown_overrides)
+            else:
+                init_store = init_store.refresh_derived(forward_spec)
             if prior_overrides:
                 print(
                     f"Note: prior overrides provided for run_id={run_id} but "
@@ -1907,7 +1974,8 @@ def main() -> None:
                 )
         else:
             raise ValueError(f"Unknown init.mode '{init_mode}'")
-        init_store = init_store.refresh_derived(forward_spec)
+        if init_mode == "prior":
+            init_store = init_store.refresh_derived(forward_spec)
 
         _, theta0 = make_binder_nll_fn(
             binder=binder,
