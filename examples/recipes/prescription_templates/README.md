@@ -106,6 +106,13 @@ Resolution behavior:
 - `init.mode`:
   - `prior`: samples around truth using priors.
   - `explicit`: only uses explicitly provided init values; missing values follow normal resolution/derived refresh.
+  - In `explicit` mode, precedence for the common `imaging.exposure_time_s` / `binary.log_flux_total` pair is:
+
+    | Inputs provided in `init.*` | Resolved `binary.log_flux_total` |
+    | --- | --- |
+    | `imaging.exposure_time_s` only | Recomputed by transform from primitives (updates with exposure time). |
+    | `binary.log_flux_total` only | Uses the explicit `binary.log_flux_total` value. |
+    | Both | Explicit `binary.log_flux_total` wins (applied after `refresh_derived`). |
 - **Per-run prior overrides (overrides.csv):**
   - Vector cells in `overrides.csv` must be **quoted** JSON arrays.
   - First row: `key, run_001, run_002, run_003, etc.`
@@ -127,7 +134,7 @@ Resolution behavior:
     - `false` (default): Recomputes FIM if any key differs from previously cached FIM (cache miss). If all inputs are constant, the cache will 'hit' and the cached FIM is reused.
     - `true`: Always reuses the most recent cached FIM even when the strict cache key misses (issues a warning for clarity).
   - `truth.*`: Used to override the true data value for any particular run.
-    - Certain keys may depend on each other and can possibly conflict if both ar overridden. `imaging.exposure_time_s` and `binary.log_flux_total` are good examples. Setting the exposure time scales the log flux, but if the log flux is explicitly set, it wins over the exposure time.
+    - Certain keys may depend on each other and can conflict if both are overridden. `imaging.exposure_time_s` and `binary.log_flux_total` are good examples. The overwrite behavior depends on the spec used by `refresh_derived`: if `binary.log_flux_total` is derived in that active spec it is recomputed from primitives, but if you explicitly set `truth.binary.log_flux_total` after refresh that explicit value wins.
   - `init.*`: Used to override the initial value in the model for any particular run.
   - `prior.*`: Used to override default priors for any particular run.
     - Use `prior.<infer_key>.sigma` or `prior.<infer_key>.dist` to override the default priors for a single run without changing `init.mode`.
