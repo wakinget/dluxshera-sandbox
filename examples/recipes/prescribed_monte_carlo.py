@@ -146,6 +146,11 @@ def _parse_cell(value: str | None) -> Any:
     if value is None:
         return None
     raw = value.strip()
+    # CSV cells that include embedded JSON are sometimes exported as a quoted
+    # JSON string literal (e.g. '"[1, 2, 3]"'). Peel wrapping quotes so vector
+    # values continue through the normal JSON parsing path below.
+    while len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"\"", "'"}:
+        raw = raw[1:-1].strip()
     if raw == "" or raw.lower() in {"null", "none"}:
         return None
     if raw.lower() in {"true", "false"}:
