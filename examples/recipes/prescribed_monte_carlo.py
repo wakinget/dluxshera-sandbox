@@ -697,6 +697,7 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
     """
     headers = [
         "run_id",
+        "enabled",
         "seed",
         "init.mode",
         "eigen.use_eigen",
@@ -712,6 +713,8 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
     def cell(spec: dict[str, Any], key: str) -> str:
         if key == "run_id":
             value = spec.get("run_id")
+        elif key == "enabled":
+            value = _row_enabled(spec)
         elif key == "seed":
             value = spec.get("seed")
         elif key == "init.mode":

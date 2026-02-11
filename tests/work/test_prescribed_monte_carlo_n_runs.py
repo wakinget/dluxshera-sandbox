@@ -76,3 +76,18 @@ def test_apply_experiment_n_runs_rejects_non_positive():
 
     with pytest.raises(ValueError, match="positive"):
         module._apply_experiment_n_runs(plan_rows, 0)
+
+
+def test_print_preview_includes_enabled_column(capsys):
+    module = _load_prescribed_module()
+    run_specs = [
+        {"run_id": "run_0001", "enabled": True, "seed": 1},
+        {"enabled": False, "seed": 2},
+    ]
+
+    module._print_preview(run_specs)
+
+    output = capsys.readouterr().out
+    assert "enabled" in output.splitlines()[0]
+    assert "True" in output
+    assert "False" in output
