@@ -6,13 +6,20 @@ from pathlib import Path
 
 def _load_prescribed_module():
     repo_root = Path(__file__).resolve().parents[2]
-    module_path = repo_root / "work" / "experiments" / "prescribed_monte_carlo.py"
-    spec = importlib.util.spec_from_file_location("prescribed_monte_carlo", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Unable to load prescribed_monte_carlo module.")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    candidate_paths = [
+        repo_root / "work" / "experiments" / "prescribed_monte_carlo.py",
+        repo_root / "examples" / "recipes" / "prescribed_monte_carlo.py",
+    ]
+    for module_path in candidate_paths:
+        if not module_path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location("prescribed_monte_carlo", module_path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise RuntimeError("Unable to load prescribed_monte_carlo module.")
 
 
 def test_extract_prior_override_sigma():
@@ -69,3 +76,74 @@ def test_apply_prior_override_unknown_infer_key_warns_and_skips(capsys):
     assert applied == []
     captured = capsys.readouterr()
     assert "unknown infer key" in captured.out.lower()
+
+
+def test_strip_private_keys_recursively_removes_leading_underscore_keys():
+    module = _load_prescribed_module()
+
+    payload = {
+        "_comment": "top-level",
+        "experiment": {
+            "run_id_prefix": "mc",
+            "_disabled": True,
+        },
+        "overrides": {
+            "config": {
+                "bandwidth_m": 1.1e-7,
+                "_bandwidth_m": 9.9e-7,
+            },
+            "store": {
+                "binary": {
+                    "x_position_as": 0.01,
+                    "_x_position_as": 99.0,
+                },
+            },
+        },
+        "nested_list": [
+            {"_comment": "ignored", "active": 1},
+            {"k": [{"_x": 1, "y": 2}]},
+        ],
+    }
+
+    stripped = module._strip_private_keys(payload)
+
+    assert "_comment" not in stripped
+    assert stripped["experiment"] == {"run_id_prefix": "mc"}
+    assert stripped["overrides"]["config"] == {"bandwidth_m": 1.1e-7}
+    assert stripped["overrides"]["store"] == {"binary": {"x_position_as": 0.01}}
+    assert stripped["nested_list"] == [{"active": 1}, {"k": [{"y": 2}]}]
+
+
+def test_load_prescription_strips_private_keys_before_overrides_validation(tmp_path):
+    module = _load_prescribed_module()
+
+    prescription_path = tmp_path / "prescription.json"
+    prescription_path.write_text(
+        """{
+  "_comment": "top-level note",
+  "model": {"config_id": "SHERA_TESTBED_CONFIG"},
+  "overrides": {
+    "config": {
+      "bandwidth_m": 1.1e-7,
+      "_bandwidth_m": 9.9e-7
+    },
+    "store": {
+      "binary.x_position_as": 0.123,
+      "_binary.x_position_as": 0.999
+    }
+  }
+}
+""",
+        encoding="utf-8",
+    )
+
+    prescription = module._load_prescription(prescription_path)
+
+    assert "_comment" not in prescription
+    assert prescription["overrides"]["config"] == {"bandwidth_m": 1.1e-7}
+    assert prescription["overrides"]["store"] == {"binary.x_position_as": 0.123}
+
+    cfg = module._resolve_config_id(prescription["model"]["config_id"])
+    updated = module._apply_config_overrides(cfg, prescription["overrides"]["config"])
+
+    assert updated.bandwidth_m == 1.1e-7

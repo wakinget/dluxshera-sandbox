@@ -107,12 +107,33 @@ def _load_prescription(path: Path) -> dict[str, Any]:
     """Load a prescription JSON file from disk.
 
     Called early in `main` to materialize the experiment recipe that drives run
-    spec resolution and defaults. This is generally reusable for JSON config
-    loading, but kept local because it assumes the specific prescription schema
-    expected by this script.
+    spec resolution and defaults. Keys that start with `_` are treated as
+    private annotations/disabled fields and are recursively stripped from the
+    loaded object before any downstream parsing/validation runs. This is
+    generally reusable for JSON config loading, but kept local because it
+    assumes the specific prescription schema expected by this script.
     """
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return _strip_private_keys(json.load(handle))
+
+
+def _strip_private_keys(obj: Any) -> Any:
+    """Recursively remove keys prefixed with `_` from nested JSON-like objects.
+
+    This keeps template comments/disabled example fields out of runtime parsing
+    so strict validators only see active prescription content.
+    """
+    if isinstance(obj, dict):
+        return {
+            key: _strip_private_keys(value)
+            for key, value in obj.items()
+            if not key.startswith("_")
+        }
+    if isinstance(obj, list):
+        return [_strip_private_keys(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(_strip_private_keys(item) for item in obj)
+    return obj
 
 
 def _parse_cell(value: str | None) -> Any:
