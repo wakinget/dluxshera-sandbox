@@ -743,6 +743,39 @@ Status: implemented; historical context
 - High-level model design / capabilities documentation describing what the Shera-style model does (optical/astrometric forward model, main outputs, supported questions) and its key assumptions/approximations, written for proposal and systems-engineering consumers rather than just implementers.
 - Model–error-budget interface and parameter dependency mapping: lightweight docs/figures that show how model outputs and sensitivities map onto specific error-budget terms, and how primitives vs. derived parameters (ParamSpec → Store → transforms) relate to those terms for traceability.
 
+### 25.1 Detector roadmap: pixel grid offsets (dx/dy) and calibration-driven detector layers
+
+**Overview**
+
+We currently use a minimal detector path (single Downsample layer with `kernel_size = cfg.oversample`). The next detector-model expansion is a per-pixel offset layer that applies measured pixel-center shifts (`dx`, `dy`) before final detector sampling. This gives us a clear way to include detector metrology in the forward model while keeping detector calibration/product handling separate from low-level layer mechanics.
+
+**Decisions (recorded)**
+
+- **Units:** `dx`/`dy` are expressed in detector pixel units on the final (post-downsample) detector grid.
+- **Oversampled operation:** the pixel-offset layer runs on the oversampled image and scales offsets internally by `oversample` (so supplied calibration maps stay in detector-pixel units).
+- **Sign convention:** (`dx`, `dy`) represent where the *actual* pixel center sits relative to the ideal grid in detector coordinates. Positive `dx` means the pixel center is to the right (sample at larger `x`); positive `dy` means the center is at larger `y`.
+- **Responsibility split:** the layer is intentionally “dumb” (apply offsets only). Calibration ingestion/selection/synthesis belongs to a separate provider component.
+
+**Calibration products & provider concept**
+
+- Calibration products may be partial maps in the near term (e.g., 100×100 or 200×200 regions) and may evolve to full-frame maps later.
+- Near-term strategy: provide ROI-local `dx`/`dy` arrays directly to the detector layer path.
+- Future strategy: add explicit detector-coordinate anchoring (e.g., ROI origin/global index mapping) so the same provider API can serve arbitrary subarrays from global products.
+- Synthetic offset generation (for testing/what-if studies) should plug into the same provider interface used by measured maps or stitched mosaics.
+
+**Repository organization (planned)**
+
+- `src/dluxshera/layers/detector_layers.py`: custom detector layers (pixel offsets first; later fill-factor, diffusion, and related effects).
+- `src/dluxshera/components/detectors.py`: named detector model/spec definitions and calibration metadata hookups.
+- `src/dluxshera/builders/detector.py`: builder wiring that selects a detector model, resolves calibration products, and assembles the `LayeredDetector` pipeline.
+- Placeholder naming is acceptable for now (e.g., `ApplyPixelOffsets`, name TBD); avoid locking in final class names until implementation.
+
+**Config naming guidance (non-binding)**
+
+- Prefer a model-selector key such as `cfg.detector_model` for camera/detector choice.
+- Optionally add a separate calibration selector (e.g., `cfg.detector_calibration_id`) for product/version choice.
+- Keep detector noise parameters as detector-model metadata for likelihood/simulation usage for now; do not force them into forward-model layers yet.
+
 ## 26) Implementation Plan — Optimization Artifacts + Signals + I/O (v0)
 
 ### 26.1 Current state (survey)
