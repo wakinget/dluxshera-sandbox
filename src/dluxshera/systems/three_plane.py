@@ -71,6 +71,9 @@ class SheraThreePlaneConfig(BaseConfig):
     between different point designs (e.g., 'shera_testbed', 'shera_flight').
     """
 
+    detector_model: Optional[str] = None
+    """Detector model selector used by the detector builder metadata lookup."""
+
     # ------------------------------------------------------------------
     # Pupil & PSF grids
     # ------------------------------------------------------------------
@@ -668,6 +671,7 @@ def build_forward_spec_from_config(cfg: SheraThreePlaneConfig) -> ParamSpec:
 
 SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
     design_name="shera_testbed",
+    detector_model="GSENSE2020BSI",
 
     # --- system geometry ---
     m1_diameter_m=0.09,
@@ -703,6 +707,7 @@ SHERA_TESTBED_CONFIG = SheraThreePlaneConfig(
 
 SHERA_FLIGHT_CONFIG = SheraThreePlaneConfig(
     design_name="shera_flight",
+    detector_model="HWK4123",
 
     # --- system geometry ---
     m1_diameter_m=0.22,

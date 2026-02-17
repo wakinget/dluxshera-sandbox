@@ -9,6 +9,12 @@ import jax.numpy as jnp
 
 from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse
 
+from ..components.detectors import (
+    GSENSE2020BSI_SPEC,
+    HWK4123_SPEC,
+    DetectorSpec,
+    SheraDetector,
+)
 from ..layers.detector_layers import ApplyPixelOffsets
 
 
@@ -73,7 +79,26 @@ def _condition_detector_map(
     return conditioned
 
 
-def build_detector(cfg) -> dl.LayeredDetector:
+def _resolve_detector_spec(cfg) -> DetectorSpec:
+    """Resolve detector metadata from config, defaulting to the testbed model."""
+    detector_model = getattr(cfg, "detector_model", None)
+    if detector_model is None:
+        return GSENSE2020BSI_SPEC
+
+    model_to_spec = {
+        GSENSE2020BSI_SPEC.model_name: GSENSE2020BSI_SPEC,
+        HWK4123_SPEC.model_name: HWK4123_SPEC,
+    }
+    try:
+        return model_to_spec[detector_model]
+    except KeyError as exc:
+        known = ", ".join(sorted(model_to_spec))
+        raise ValueError(
+            f"Unknown detector_model={detector_model!r}. Expected one of: {known}."
+        ) from exc
+
+
+def build_detector(cfg) -> SheraDetector:
     """Construct the baseline detector for a Shera system."""
     psf_npix = int(cfg.psf_npix)
     target_shape = (psf_npix, psf_npix)
@@ -93,20 +118,22 @@ def build_detector(cfg) -> dl.LayeredDetector:
     jitter_sigma = float(getattr(cfg, "jitter_sigma", 1e-12))
     jitter_kernel_size = int(getattr(cfg, "jitter_kernel_size", 10))
 
+    spec = _resolve_detector_spec(cfg)
+
     layers = [
         ("downsample", dl.Downsample(cfg.oversample)),
         ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_order=1)),
         ("pixel_response", ApplyPixelResponse(pixel_response)),
         ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel_size)),
     ]
-    return dl.LayeredDetector(layers=layers)
+    return SheraDetector(layers=layers, spec=spec)
 
 
 def apply_runtime_bindings(
-    detector: dl.LayeredDetector,
+    detector: SheraDetector,
     store,
     bindings: tuple[tuple[str, str], ...] = DETECTOR_RUNTIME_BINDINGS,
-) -> dl.LayeredDetector:
+) -> SheraDetector:
     """Apply runtime ParameterStore overrides onto a cached detector."""
 
     if store is None:
