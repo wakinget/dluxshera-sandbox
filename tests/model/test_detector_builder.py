@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
+import jax
 import pytest
 
 from dluxshera.builders.detector import build_detector
+from dluxshera.components.detectors import GSENSE2020BSI_SPEC, HWK4123_SPEC, SheraDetector
 
 
 def test_build_detector_has_explicit_v1_layer_order():
@@ -59,3 +61,30 @@ def test_build_detector_uses_zero_offset_maps_when_unset():
     assert dy.shape == (6, 6)
     assert float(dx.sum()) == 0.0
     assert float(dy.sum()) == 0.0
+
+
+def test_build_detector_returns_shera_detector_with_spec_access():
+    cfg = SimpleNamespace(psf_npix=8, oversample=1, detector_model="HWK4123")
+
+    detector = build_detector(cfg)
+
+    assert isinstance(detector, SheraDetector)
+    assert detector.spec == HWK4123_SPEC
+    assert detector.spec.model_name == "HWK4123"
+
+
+def test_detector_spec_is_not_part_of_pytree_leaves():
+    cfg = SimpleNamespace(psf_npix=8, oversample=1, detector_model="GSENSE2020BSI")
+
+    detector = build_detector(cfg)
+
+    leaves = jax.tree_util.tree_leaves(detector)
+    assert detector.spec == GSENSE2020BSI_SPEC
+    assert detector.spec not in leaves
+
+
+def test_build_detector_rejects_unknown_model_name():
+    cfg = SimpleNamespace(psf_npix=8, oversample=1, detector_model="UNKNOWN")
+
+    with pytest.raises(ValueError, match="Unknown detector_model"):
+        build_detector(cfg)
