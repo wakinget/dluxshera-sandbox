@@ -51,7 +51,7 @@ class ApplyPixelOffsets(DetectorLayer):
         self: DetectorLayer,
         dx_map: Array,
         dy_map: Array,
-        interp_method: str = "linear",
+        interp_method: str = "cubic2",
         clip_nonnegative: bool = False,
     ):
         super().__init__()
