@@ -98,13 +98,11 @@ def _resolve_detector_spec(cfg) -> DetectorSpec:
 
 def build_detector(cfg) -> SheraDetector:
     """Construct the baseline detector for a Shera system."""
-
-    pixel_offset_interp_method = "cubic2"
-
     psf_npix = int(cfg.psf_npix)
     target_shape = (psf_npix, psf_npix)
-    dx_map_raw = getattr(cfg, "dx_map", None)
-    dy_map_raw = getattr(cfg, "dy_map", None)
+    dx_map_raw = getattr(cfg, "ppu_dx_path", None)
+    dy_map_raw = getattr(cfg, "ppu_dy_path", None)
+    interp_method = getattr(cfg, "ppu_interp_method", "cubic2")
 
     if dx_map_raw is None:
         dx_map_raw = jnp.zeros(target_shape, dtype=float)
@@ -114,17 +112,17 @@ def build_detector(cfg) -> SheraDetector:
     dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
     dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
 
-    pixel_response = getattr(cfg, "pixel_response", jnp.ones(target_shape, dtype=float))
+    pixel_response = getattr(cfg, "prf_path", jnp.ones(target_shape, dtype=float))
     jitter_sigma = float(getattr(cfg, "jitter_sigma", 1e-12))
-    jitter_kernel_size = int(getattr(cfg, "jitter_kernel_size", 10))
+    jitter_kernel = int(getattr(cfg, "jitter_kernel_size", 3))
 
     spec = _resolve_detector_spec(cfg)
 
     layers = [
         ("downsample", Downsample(cfg.oversample)),
-        ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=pixel_offset_interp_method)),
+        ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method)),
         ("pixel_response", ApplyPixelResponse(pixel_response)),
-        ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel_size)),
+        ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
     ]
     return SheraDetector(layers=layers, spec=spec)
 
