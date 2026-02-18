@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import warnings
 
-import dLux as dl
 import jax.numpy as jnp
-
-from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse
 
 from ..components.detectors import (
     GSENSE2020BSI_SPEC,
@@ -16,6 +13,7 @@ from ..components.detectors import (
     SheraDetector,
 )
 from ..layers.detector_layers import ApplyPixelOffsets
+from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse, Downsample
 
 
 DETECTOR_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
@@ -100,9 +98,11 @@ def _resolve_detector_spec(cfg) -> DetectorSpec:
 
 def build_detector(cfg) -> SheraDetector:
     """Construct the baseline detector for a Shera system."""
+
+    pixel_offset_interp_method = "cubic2"
+
     psf_npix = int(cfg.psf_npix)
     target_shape = (psf_npix, psf_npix)
-
     dx_map_raw = getattr(cfg, "dx_map", None)
     dy_map_raw = getattr(cfg, "dy_map", None)
 
@@ -121,8 +121,8 @@ def build_detector(cfg) -> SheraDetector:
     spec = _resolve_detector_spec(cfg)
 
     layers = [
-        ("downsample", dl.Downsample(cfg.oversample)),
-        ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_order=1)),
+        ("downsample", Downsample(cfg.oversample)),
+        ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=pixel_offset_interp_method)),
         ("pixel_response", ApplyPixelResponse(pixel_response)),
         ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel_size)),
     ]
