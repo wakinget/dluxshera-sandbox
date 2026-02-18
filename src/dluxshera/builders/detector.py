@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import warnings
-
+from pathlib import Path
 import jax.numpy as jnp
+import numpy as np
 
 from ..components.detectors import (
     GSENSE2020BSI_SPEC,
@@ -96,13 +97,56 @@ def _resolve_detector_spec(cfg) -> DetectorSpec:
         ) from exc
 
 
+def _find_repo_root(start: Path) -> Path:
+    """Walk parents until we find a repo marker. Fallback to start if none found."""
+    start = start.resolve()
+    for p in [start, *start.parents]:
+        if (p / ".git").exists() or (p / "pyproject.toml").exists() or (p / "setup.cfg").exists():
+            return p
+    return start
+
+
+_REPO_ROOT = _find_repo_root(Path(__file__).resolve())
+
+
+def _resolve_repo_path(path: str | Path | None) -> Path | None:
+    """Resolve a path that may be repo-root-relative."""
+    if path is None:
+        return None
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return p
+    return (_REPO_ROOT / p).resolve()
+
+
+def _load_array(path: Path) -> jnp.ndarray:
+    """Load a calibration array from .npy or .npz."""
+    if path.suffix == ".npy":
+        arr = np.load(path)
+        return jnp.asarray(arr, dtype=float)
+
+    if path.suffix == ".npz":
+        with np.load(path) as z:
+            # Prefer common keys if present; otherwise take the first array.
+            for key in ("data", "arr_0", "dx", "dy", "prf", "pixel_response"):
+                if key in z.files:
+                    return jnp.asarray(z[key], dtype=float)
+            return jnp.asarray(z[z.files[0]], dtype=float)
+
+    raise ValueError(f"Unsupported calibration file type: {path} (expected .npy or .npz)")
+
 def build_detector(cfg) -> SheraDetector:
     """Construct the baseline detector for a Shera system."""
     psf_npix = int(cfg.psf_npix)
     target_shape = (psf_npix, psf_npix)
-    dx_map_raw = getattr(cfg, "ppu_dx_path", None)
-    dy_map_raw = getattr(cfg, "ppu_dy_path", None)
+
+    # --- Pixel offsets (PPU) ---
+    ppu_dx_path = _resolve_repo_path(getattr(cfg, "ppu_dx_path", None))
+    ppu_dy_path = _resolve_repo_path(getattr(cfg, "ppu_dy_path", None))
     interp_method = getattr(cfg, "ppu_interp_method", "cubic2")
+
+    dx_map_raw = _load_array(ppu_dx_path) if ppu_dx_path is not None else None
+    dy_map_raw = _load_array(ppu_dy_path) if ppu_dy_path is not None else None
 
     if dx_map_raw is None:
         dx_map_raw = jnp.zeros(target_shape, dtype=float)
@@ -112,7 +156,18 @@ def build_detector(cfg) -> SheraDetector:
     dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
     dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
 
-    pixel_response = getattr(cfg, "prf_path", jnp.ones(target_shape, dtype=float))
+    # --- Pixel response (PRF) ---
+    prf_path = _resolve_repo_path(getattr(cfg, "prf_path", None))
+    if prf_path is None:
+        pixel_response_raw = jnp.ones(target_shape, dtype=float)
+    else:
+        pixel_response_raw = _load_array(prf_path)
+
+    pixel_response = _condition_detector_map(
+        pixel_response_raw, map_name="pixel_response", target_shape=target_shape
+    )
+
+    # --- Jitter ---
     jitter_sigma = float(getattr(cfg, "jitter_sigma", 1e-12))
     jitter_kernel = int(getattr(cfg, "jitter_kernel_size", 3))
 
