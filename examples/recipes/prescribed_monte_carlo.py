@@ -1230,6 +1230,33 @@ def _build_results_rows(
     return rows, columns
 
 
+def _transpose_results_rows(
+    rows: list[dict[str, Any]],
+    metric_columns: list[str],
+    run_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Transpose run-major rows into metric-major rows for aggregate CSV output.
+
+    Each output row is keyed by metric name and has one column per run ID.
+    Missing values are left as empty strings, matching existing CSV behavior.
+    """
+    rows_by_run_id = {
+        row.get("run_id"): row
+        for row in rows
+        if isinstance(row.get("run_id"), str)
+    }
+    transposed_rows: list[dict[str, Any]] = []
+    for metric_key in metric_columns:
+        metric_row: dict[str, Any] = {"key": metric_key}
+        for run_id in run_ids:
+            source_row = rows_by_run_id.get(run_id)
+            metric_row[run_id] = (
+                source_row.get(metric_key, "") if source_row is not None else ""
+            )
+        transposed_rows.append(metric_row)
+    return transposed_rows
+
+
 def _write_results_csv(
     out_path: Path,
     run_entries: list[dict[str, Any]],
@@ -1265,11 +1292,14 @@ def _write_results_csv(
         "eigen.truncate_by_eigval",
         "noise.add_noise",
     ]
-    columns = base_columns + param_columns
+    metric_columns = base_columns + param_columns
+    run_ids = [entry["run_id"] for entry in run_entries]
+    transposed_rows = _transpose_results_rows(rows, metric_columns, run_ids)
+    columns = ["key", *run_ids]
     with out_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row in rows:
+        for row in transposed_rows:
             writer.writerow({key: row.get(key, "") for key in columns})
     return columns
 
