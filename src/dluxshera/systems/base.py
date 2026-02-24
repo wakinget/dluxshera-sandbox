@@ -234,7 +234,8 @@ class BaseSheraBinder:
         """
         from ..builders.detector import build_detector
 
-        return build_detector(self.cfg)
+        detector, _detector_contract = build_detector(self.cfg)
+        return detector
 
     def _build_optics(self, store: ParameterStore):  # pragma: no cover - abstract hook
         """Build the optics model for the given store.

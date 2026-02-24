@@ -13,6 +13,7 @@ from ..components.detectors import (
     DetectorSpec,
     SheraDetector,
 )
+from ..params.spec import ParamField, ParamSpec
 from ..layers.detector_layers import ApplyPixelOffsets
 from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse, Downsample
 
@@ -135,7 +136,30 @@ def _load_array(path: Path) -> jnp.ndarray:
 
     raise ValueError(f"Unsupported calibration file type: {path} (expected .npy or .npz)")
 
-def build_detector(cfg) -> SheraDetector:
+def _build_detector_contract(detector: SheraDetector) -> ParamSpec:
+    """Build a minimal detector ParamSpec contract from an assembled detector."""
+
+    jitter_layer = detector.layers.get("jitter", None)
+    if jitter_layer is None:
+        return ParamSpec()
+
+    return ParamSpec(
+        [
+            ParamField(
+                key="detector.jitter.sigma",
+                group="detector",
+                kind="primitive",
+                dtype=float,
+                shape=(),
+                default=float(jitter_layer.sigma),
+                bounds=(0.0, None),
+                doc="Detector jitter sigma [pixels], runtime-overridable from the store.",
+            )
+        ]
+    )
+
+
+def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
     """Construct the baseline detector for a Shera system."""
     psf_npix = int(cfg.psf_npix)
     target_shape = (psf_npix, psf_npix)
@@ -179,7 +203,8 @@ def build_detector(cfg) -> SheraDetector:
         ("pixel_response", ApplyPixelResponse(pixel_response)),
         ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
     ]
-    return SheraDetector(layers=layers, spec=spec)
+    detector = SheraDetector(layers=layers, spec=spec)
+    return detector, _build_detector_contract(detector)
 
 
 def apply_runtime_bindings(
@@ -191,6 +216,25 @@ def apply_runtime_bindings(
 
     if store is None:
         return detector
+
+    runtime_sigma = store.get("detector.jitter.sigma", default=None)
+    if runtime_sigma is not None and "jitter" in detector.layers:
+        jitter_layer = detector.layers["jitter"]
+        rebuilt_layers = []
+        for layer_name, layer in detector.layers.items():
+            if layer_name == "jitter":
+                rebuilt_layers.append(
+                    (
+                        "jitter",
+                        ApplyJitter(
+                            sigma=float(runtime_sigma),
+                            kernel_size=int(jitter_layer.kernel_size),
+                        ),
+                    )
+                )
+            else:
+                rebuilt_layers.append((layer_name, layer))
+        detector = SheraDetector(layers=rebuilt_layers, spec=detector.spec)
 
     for store_key, set_path in bindings:
         val = store.get(store_key, default=None)

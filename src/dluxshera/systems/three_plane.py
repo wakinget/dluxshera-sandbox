@@ -9,6 +9,7 @@ import dLux as dl
 import jax.numpy as jnp
 
 from .base import BaseConfig, BaseSheraBinder
+from ..builders.detector import build_detector
 from ..builders.source import build_alpha_cen_source
 from ..params.spec import ParamField, ParamSpec
 from ..params.store import ParameterStore
@@ -662,7 +663,9 @@ def build_forward_spec_from_config(cfg: SheraThreePlaneConfig) -> ParamSpec:
             )
         )
 
-    return ParamSpec(fields, system_id=SHERA_THREEPLANE_SYSTEM_ID)
+    forward_spec = ParamSpec(fields, system_id=SHERA_THREEPLANE_SYSTEM_ID)
+    _, detector_contract = build_detector(cfg)
+    return forward_spec.merge(detector_contract)
 
 
 # ---------------------------------------------------------------------
