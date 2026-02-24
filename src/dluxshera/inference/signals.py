@@ -39,6 +39,18 @@ def _lookup(decoded: DecodedMapping, key: str) -> np.ndarray:
     raise KeyError(f"Decoded mapping is missing required key {key!r}")
 
 
+def _compute_raw_fluxes(decoded: DecodedMapping) -> np.ndarray:
+    """Compute report-only binary raw fluxes from primitive inferred values."""
+    log_flux_total = _lookup(decoded, "binary.log_flux_total")
+    contrast = _lookup(decoded, "binary.contrast")
+    # ``binary.raw_fluxes`` is a reporting-only derived value: compute it in-place
+    # from log(total flux) and contrast so signals do not depend on derived store keys.
+    total_flux = 10.0 ** log_flux_total
+    flux_b = total_flux / (1.0 + contrast)
+    flux_a = contrast * flux_b
+    return np.asarray([flux_a, flux_b])
+
+
 def _broadcast_truth(truth: Optional[Mapping[str, object]], key: str, shape) -> Optional[np.ndarray]:
     if truth is None:
         return None
@@ -55,6 +67,23 @@ def _broadcast_truth(truth: Optional[Mapping[str, object]], key: str, shape) -> 
         return np.broadcast_to(value, shape)
     except ValueError:
         return value
+
+
+def _truth_raw_fluxes(
+    truth: Optional[Mapping[str, object]],
+    shape,
+) -> Optional[np.ndarray]:
+    """Return truth raw fluxes, computing from primitives when derived key is absent."""
+    if truth is None:
+        return None
+    raw_fluxes = _broadcast_truth(truth, "binary.raw_fluxes", shape)
+    if raw_fluxes is not None:
+        return raw_fluxes
+    try:
+        computed = _compute_raw_fluxes(truth)
+    except KeyError:
+        return None
+    return np.broadcast_to(np.asarray(computed), shape)
 
 
 def _residual(est: np.ndarray, truth: Optional[np.ndarray]) -> np.ndarray:
@@ -126,7 +155,7 @@ def build_signals(
     sep_est = stack_decoded("binary.separation_as")
     pa_est = stack_decoded("binary.position_angle_deg")
     ps_est = stack_decoded("system.plate_scale_as_per_pix")
-    raw_flux_est = stack_decoded("binary.raw_fluxes")
+    raw_flux_est = np.stack([_compute_raw_fluxes(decoded) for decoded in decoded_steps], axis=0)
     zern_est = stack_decoded("primary.zernike_coeffs_nm")
     try:
         sec_zern_est = stack_decoded("secondary.zernike_coeffs_nm")
@@ -138,7 +167,7 @@ def build_signals(
     sep_true = _broadcast_truth(truth, "binary.separation_as", sep_est.shape)
     pa_true = _broadcast_truth(truth, "binary.position_angle_deg", pa_est.shape)
     ps_true = _broadcast_truth(truth, "system.plate_scale_as_per_pix", ps_est.shape)
-    raw_flux_true = _broadcast_truth(truth, "binary.raw_fluxes", raw_flux_est.shape)
+    raw_flux_true = _truth_raw_fluxes(truth, raw_flux_est.shape)
     zern_true = _broadcast_truth(truth, "primary.zernike_coeffs_nm", zern_est.shape)
 
     signals["binary.x_error_uas"] = 1e6 * _residual(x_est, x_true).reshape((T,))
