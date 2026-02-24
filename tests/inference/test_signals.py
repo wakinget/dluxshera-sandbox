@@ -35,7 +35,8 @@ def test_build_intro_signals_scaling_and_shapes():
         "binary.position_angle_deg": np.zeros(T),
         "system.plate_scale_as_per_pix": np.full(T, 0.1),
         "primary.zernike_coeffs_nm": np.array([0.05, 0.1, 0.15]),
-        "binary.raw_fluxes": np.array([10.0, 5.0]),
+        "binary.log_flux_total": np.log10(15.0),
+        "binary.contrast": 2.0,
     }
 
     def decoder(theta_row: np.ndarray):
@@ -46,7 +47,8 @@ def test_build_intro_signals_scaling_and_shapes():
             "binary.position_angle_deg": 0.0,
             "system.plate_scale_as_per_pix": 0.1 + 0.01 * theta_row[2],
             "primary.zernike_coeffs_nm": theta_row + 0.1,
-            "binary.raw_fluxes": np.array([10.0, 5.0]) + theta_row[0],
+            "binary.log_flux_total": np.log10(15.0 + 2.0 * theta_row[0]),
+            "binary.contrast": (10.0 + theta_row[0]) / (5.0 + theta_row[0]),
         }
 
     signals = build_signals(trace, meta={}, decoder=decoder, truth=truth)
@@ -90,7 +92,8 @@ def test_build_signals_handles_missing_truth_with_nans():
             "binary.position_angle_deg": 0.0,
             "system.plate_scale_as_per_pix": 0.1,
             "primary.zernike_coeffs_nm": np.zeros(2),
-            "binary.raw_fluxes": np.ones(2),
+            "binary.log_flux_total": 0.0,
+            "binary.contrast": 1.0,
         }
 
     signals = build_signals(trace, meta={}, decoder=decoder, truth=None)
@@ -98,3 +101,32 @@ def test_build_signals_handles_missing_truth_with_nans():
     assert np.isnan(signals["binary.x_error_uas"]).all()
     assert np.isnan(signals["binary.raw_flux_error_ppm"]).all()
     assert np.isnan(signals["primary.zernike_rms_nm"]).all()
+
+
+def test_build_signals_computes_flux_from_store_without_refresh_derived():
+    theta = np.array([[0.0], [0.1], [0.2]])
+    trace = {"theta": theta, "loss": np.zeros(theta.shape[0])}
+
+    truth = {
+        "binary.log_flux_total": np.log10(15.0),
+        "binary.contrast": 2.0,
+    }
+
+    def decoder(theta_row: np.ndarray):
+        return ParameterStore.from_dict(
+            {
+                "binary.x_position_as": 0.0,
+                "binary.y_position_as": 0.0,
+                "binary.separation_as": 1.0,
+                "binary.position_angle_deg": 0.0,
+                "system.plate_scale_as_per_pix": 0.1,
+                "primary.zernike_coeffs_nm": np.zeros(1),
+                "binary.log_flux_total": np.log10(15.0 + 2.0 * theta_row[0]),
+                "binary.contrast": (10.0 + theta_row[0]) / (5.0 + theta_row[0]),
+            }
+        )
+
+    signals = build_signals(trace, meta={}, decoder=decoder, truth=truth)
+
+    expected_flux_error = 1e6 * (theta[:, 0][:, None] / np.array([10.0, 5.0]))
+    np.testing.assert_allclose(signals["binary.raw_flux_error_ppm"], expected_flux_error)
