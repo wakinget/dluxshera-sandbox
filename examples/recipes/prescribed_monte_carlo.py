@@ -12,6 +12,8 @@ Execution flow
 - Run optimization in eigen space (FIM-based) or primitive parameter space.
 - Write run artifacts under runs/<run_id>/..., including summaries and logs.
 - Aggregate manifest.json and results.csv across runs at the experiment root.
+  `results.csv` defaults to column orientation (first column `key`, one column
+  per `run_id`), with an optional compatibility mode for row orientation.
 
 Notes behavior
 --------------
@@ -1261,12 +1263,17 @@ def _write_results_csv(
     out_path: Path,
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
+    *,
+    results_orientation: str,
 ) -> list[str]:
     """Write the aggregate results.csv file for all runs.
 
     Invoked by `_write_experiment_outputs` after runs complete or during
-    aggregation-only mode. This is a workflow-specific writer and not intended
-    for reuse outside this experiment layout.
+    aggregation-only mode. Preferred schema is column-oriented with a leading
+    `key` column and one column per `run_id`. Pass `results_orientation="row"`
+    for compatibility with run-major rows where `run_id` is a data column.
+    This is a workflow-specific writer and not intended for reuse outside this
+    experiment layout.
     """
     rows, param_columns = _build_results_rows(run_entries, infer_keys)
     base_columns = [
@@ -1293,13 +1300,17 @@ def _write_results_csv(
         "noise.add_noise",
     ]
     metric_columns = base_columns + param_columns
-    run_ids = [entry["run_id"] for entry in run_entries]
-    transposed_rows = _transpose_results_rows(rows, metric_columns, run_ids)
-    columns = ["key", *run_ids]
+    if results_orientation == "col":
+        run_ids = [entry["run_id"] for entry in run_entries]
+        rows_to_write = _transpose_results_rows(rows, metric_columns, run_ids)
+        columns = ["key", *run_ids]
+    else:
+        rows_to_write = rows
+        columns = metric_columns
     with out_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row in transposed_rows:
+        for row in rows_to_write:
             writer.writerow({key: row.get(key, "") for key in columns})
     return columns
 
@@ -1415,12 +1426,15 @@ def _write_experiment_outputs(
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
     repo_root: Path,
+    results_orientation: str,
 ) -> None:
     """Write aggregated outputs (results.csv and manifest.json) for the run set.
 
     Called in `main` after execution or in aggregate-only mode to produce
     experiment-level artifacts. This is specific to the prescribed Monte Carlo
-    workflow and not intended as a generic utility.
+    workflow and not intended as a generic utility. `results.csv` can be written
+    in column orientation (`key` + `run_id` columns; preferred default) or row
+    orientation (`run_id` as a field; compatibility mode).
     """
     experiment = prescription.get("experiment", {})
     results_filename = (
@@ -1429,7 +1443,12 @@ def _write_experiment_outputs(
         or "results.csv"
     )
     results_path = outdir / results_filename
-    _write_results_csv(results_path, run_entries, infer_keys)
+    _write_results_csv(
+        results_path,
+        run_entries,
+        infer_keys,
+        results_orientation=results_orientation,
+    )
 
     manifest_path = outdir / "manifest.json"
     overrides = prescription.get("overrides", {})
@@ -1452,7 +1471,7 @@ def _write_experiment_outputs(
         runs=manifest_runs,
         artifacts=[
             {"path": "manifest.json"},
-            {"path": results_filename},
+            {"path": results_filename, "orientation": results_orientation},
         ],
     )
 
@@ -1482,6 +1501,9 @@ def main() -> None:
             optimization runs or writing run artifacts.
         --aggregate-only: Skip execution and only aggregate manifest.json and
             results.csv from existing run artifacts inside the resolved outdir.
+        --results-orientation: Output schema for results.csv. `col` (default)
+            writes a leading `key` column plus one column per run_id. `row`
+            writes one row per run with `run_id` as a data column.
         --num-preview: Limit the number of resolved run specs shown in preview
             output (useful with large plans).
     """
@@ -1516,6 +1538,15 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Generate manifest + results.csv from existing runs without executing.",
+    )
+    parser.add_argument(
+        "--results-orientation",
+        choices=("row", "col"),
+        default="col",
+        help=(
+            "results.csv schema: 'col' writes key + run_id columns (default), "
+            "'row' writes one row per run for compatibility."
+        ),
     )
     parser.add_argument("--num-preview", type=int, default=None)
 
@@ -1742,6 +1773,7 @@ def main() -> None:
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
+            results_orientation=args.results_orientation,
         )
         print(f"Wrote experiment manifest/results to: {outdir}")
         return
@@ -2249,6 +2281,7 @@ def main() -> None:
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
+        results_orientation=args.results_orientation,
     )
     t1_experiment = time.time()
     print(
