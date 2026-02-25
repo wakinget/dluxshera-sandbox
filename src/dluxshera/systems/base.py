@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace as dataclass_replace
-from typing import Optional, Sequence, Self
+from typing import Callable, Optional, Sequence, Self
 
 import jax.numpy as jnp
 import dLux as dl
@@ -51,7 +52,7 @@ class BaseSheraBinder:
     call.
     """
 
-    cfg: "SheraThreePlaneConfig | SheraTwoPlaneConfig"
+    cfg: object
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
     structural_hash: Optional[str]
@@ -213,6 +214,54 @@ class BaseSheraBinder:
     # Hooks for subclasses
     # ------------------------------------------------------------------
 
+    def _cfg_get(self, path: str, default=None):
+        """Read a dotted path from mapping- or attribute-based configs."""
+
+        cur = self.cfg
+        for key in path.split("."):
+            if cur is None:
+                return default
+            if isinstance(cur, Mapping):
+                cur = cur.get(key, None)
+            else:
+                cur = getattr(cur, key, None)
+        return default if cur is None else cur
+
+    def _detect_optics_kind(self) -> str:
+        """Return the configured optics kind with backward-compatible fallback."""
+
+        kind = self._cfg_get("system.optics.kind", default=None)
+        if kind is not None:
+            return str(kind)
+
+        cfg_name = type(self.cfg).__name__.lower()
+        if "threeplane" in cfg_name:
+            return "three_plane"
+        if "twoplane" in cfg_name:
+            return "two_plane"
+
+        kind = self._cfg_get("optics_kind", default=None)
+        if kind is not None:
+            return str(kind)
+
+        raise ValueError(
+            "Unable to resolve optics kind from config. Expected "
+            "`system.optics.kind` (e.g. 'two_plane' or 'three_plane')."
+        )
+
+    def _detect_source_kind(self) -> str:
+        """Return the configured source kind with backward-compatible fallback."""
+
+        kind = self._cfg_get("system.source.kind", default=None)
+        if kind is not None:
+            return str(kind)
+
+        kind = self._cfg_get("source_kind", default=None)
+        if kind is not None:
+            return str(kind)
+
+        return "binary"
+
     def _build_detector(self) -> dl.LayeredDetector:
         """Construct the detector instance for the binder.
 
@@ -237,7 +286,7 @@ class BaseSheraBinder:
         detector, _detector_contract = build_detector(self.cfg)
         return detector
 
-    def _build_optics(self, store: ParameterStore):  # pragma: no cover - abstract hook
+    def _build_optics(self, store: ParameterStore):
         """Build the optics model for the given store.
 
         Called when constructing a telescope (either at initialization or via
@@ -260,9 +309,25 @@ class BaseSheraBinder:
         rebuild. Non-structural keys that can be updated at runtime should be
         surfaced via :meth:`_optics_runtime_bindings`.
         """
-        raise NotImplementedError
+        from ..builders.optics import build_shera_threeplane_optics, build_shera_twoplane_optics
 
-    def _build_source(self, store: ParameterStore):  # pragma: no cover - abstract hook
+        optics_builders: dict[str, Callable[..., object]] = {
+            "two_plane": build_shera_twoplane_optics,
+            "three_plane": build_shera_threeplane_optics,
+        }
+
+        optics_kind = self._detect_optics_kind()
+        try:
+            builder = optics_builders[optics_kind]
+        except KeyError as exc:
+            supported = ", ".join(sorted(optics_builders))
+            raise ValueError(
+                f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
+            ) from exc
+
+        return builder(self.cfg, store=store, spec=self.forward_spec)
+
+    def _build_source(self, store: ParameterStore):
         """Build the source model for the given store.
 
         Called when constructing a telescope or applying runtime updates that
@@ -286,7 +351,23 @@ class BaseSheraBinder:
         Source construction is typically lightweight; it is rebuilt for
         runtime updates even when optics are updated via bindings.
         """
-        raise NotImplementedError
+        from ..builders.source import build_alpha_cen_source
+
+        source_builders: dict[str, Callable[..., object]] = {
+            "binary": build_alpha_cen_source,
+            "alpha_cen": build_alpha_cen_source,
+        }
+
+        source_kind = self._detect_source_kind()
+        try:
+            builder = source_builders[source_kind]
+        except KeyError as exc:
+            supported = ", ".join(sorted(source_builders))
+            raise ValueError(
+                f"Unknown source kind {source_kind!r}. Supported source kinds: {supported}."
+            ) from exc
+
+        return builder(store, cfg=self.cfg)
 
     def _build_telescope(
         self,
@@ -323,7 +404,7 @@ class BaseSheraBinder:
             detector=detector,
         )
 
-    def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:  # pragma: no cover - abstract hook
+    def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
         """Evaluate the model using a fully merged effective store.
 
         Called by :meth:`model` after merging a non-structural store delta with
@@ -346,7 +427,7 @@ class BaseSheraBinder:
         This method should not mutate the binder; use runtime bindings or
         rebuild logic for structural changes instead of modifying state here.
         """
-        raise NotImplementedError
+        return self._build_telescope(eff_store).model()
 
     def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return runtime binding pairs for non-structural optics keys.
@@ -356,7 +437,20 @@ class BaseSheraBinder:
         should override this to list the non-structural optics keys eligible
         for fast-path updates.
         """
-        return ()
+        from ..builders.optics import THREEPLANE_RUNTIME_BINDINGS, TWOPLANE_RUNTIME_BINDINGS
+
+        optics_kind = self._detect_optics_kind()
+        runtime_bindings = {
+            "three_plane": THREEPLANE_RUNTIME_BINDINGS,
+            "two_plane": TWOPLANE_RUNTIME_BINDINGS,
+        }
+        try:
+            return runtime_bindings[optics_kind]
+        except KeyError as exc:
+            supported = ", ".join(sorted(runtime_bindings))
+            raise ValueError(
+                f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
+            ) from exc
 
     def _source_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return runtime binding pairs for non-structural source keys."""
@@ -388,7 +482,22 @@ class BaseSheraBinder:
         The structural hash is compared against the stored value to determine
         if runtime bindings are safe or if a rebuild is required.
         """
-        return None
+        from ..builders.optics import structural_hash_for_twoplane, structural_hash_from_config
+
+        optics_kind = self._detect_optics_kind()
+        hash_fns: dict[str, Callable[..., str]] = {
+            "three_plane": structural_hash_from_config,
+            "two_plane": structural_hash_for_twoplane,
+        }
+        try:
+            struct_hash = hash_fns[optics_kind](self.cfg)
+        except KeyError as exc:
+            supported = ", ".join(sorted(hash_fns))
+            raise ValueError(
+                f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
+            ) from exc
+
+        return f"optics_kind={optics_kind}:{struct_hash}"
 
     def _optics_structural_keys(self) -> set[str]:
         """Return store keys treated as structural for the optics component."""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import dLux as dl
 import jax.numpy as jnp
@@ -31,6 +31,9 @@ class SheraTwoPlaneConfig(BaseConfig):
 
     design_name: Optional[str] = None
     """Human-readable identifier for this optical design."""
+
+    system: Optional[dict[str, Any]] = None
+    """Optional nested system config (e.g. ``system.optics.kind`` dispatch hints)."""
 
     # ------------------------------------------------------------------
     # Pupil & PSF grids
