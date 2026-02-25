@@ -135,7 +135,8 @@ DEFAULT_INFER_KEYS = (
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
-DEFAULT_CONFIG_PATH = REPO_ROOT / "src/dluxshera/data/presets/SHERA_TESTBED_3P.yaml"
+DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P"
+DEFAULT_EXPERIMENT_PRESET = "INFERENCE_CANONICAL"
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -146,6 +147,8 @@ plt.rcParams["image.cmap"] = "inferno_nan"
 def main(
     *,
     config_path: Path | None = None,
+    system_preset: str = DEFAULT_SYSTEM_PRESET,
+    experiment_preset: str = DEFAULT_EXPERIMENT_PRESET,
     fast: bool = FAST_MODE,
     results_dir: Path | None = None,
     use_eigen: bool = USE_EIGEN,
@@ -156,9 +159,11 @@ def main(
     """Run the canonical astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    cfg_path = config_path or DEFAULT_CONFIG_PATH
-    user_cfg = _load_config_file(cfg_path)
-    user_cfg = _coerce_user_cfg_for_resolver(user_cfg, cfg_path)
+    user_cfg = _build_user_config(
+        config_path=config_path,
+        system_preset=system_preset,
+        experiment_preset=experiment_preset,
+    )
     cfg = resolve_config(user_cfg)
 
     system_cfg = resolved_config_to_system_config(cfg)
@@ -642,20 +647,33 @@ def _load_config_file(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _coerce_user_cfg_for_resolver(user_cfg: dict[str, Any], cfg_path: Path) -> dict[str, Any]:
-    system = user_cfg.get("system")
-    if isinstance(system, dict) and isinstance(system.get("preset"), str):
-        return user_cfg
+def _build_user_config(
+    *,
+    config_path: Path | None,
+    system_preset: str,
+    experiment_preset: str,
+) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "system": {"preset": system_preset},
+        "experiment": {"preset": experiment_preset},
+    }
+    if config_path is None:
+        return defaults
 
-    # Compatibility shim for using preset files directly as --config.
-    # Strict resolver still runs after this inserts `system.preset`.
-    preset_name = cfg_path.stem
-    merged = dict(user_cfg)
-    merged_system = dict(system) if isinstance(system, dict) else {}
-    merged_system["preset"] = preset_name
-    merged["system"] = merged_system
-    if "experiment" not in merged:
-        merged["experiment"] = {"kind": "inference"}
+    loaded = _load_config_file(config_path)
+    if not isinstance(loaded.get("system"), dict) or not isinstance(loaded.get("experiment"), dict):
+        raise ValueError("Config file must define top-level 'system' and 'experiment' mappings.")
+    return _deep_merge(defaults, loaded)
+
+
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
     return merged
 
 
@@ -684,9 +702,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_CONFIG_PATH,
-        help="Path to YAML/JSON config file (strict system/experiment schema).",
+        default=None,
+        help="Path to YAML/JSON config file (must include strict top-level system/experiment blocks).",
     )
+    parser.add_argument("--system-preset", type=str, default=DEFAULT_SYSTEM_PRESET)
+    parser.add_argument("--experiment-preset", type=str, default=DEFAULT_EXPERIMENT_PRESET)
     parser.add_argument("--results-dir", type=Path, default=None)
     parser.add_argument("--fast", action="store_true", help="Use reduced optimization iterations.")
     parser.add_argument("--no-eigen", action="store_true", help="Disable eigenmode optimization.")
@@ -697,6 +717,8 @@ if __name__ == "__main__":
     args = _build_parser().parse_args()
     main(
         config_path=args.config,
+        system_preset=args.system_preset,
+        experiment_preset=args.experiment_preset,
         fast=bool(args.fast),
         results_dir=args.results_dir,
         use_eigen=not bool(args.no_eigen),
