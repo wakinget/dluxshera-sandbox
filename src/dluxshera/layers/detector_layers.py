@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
-
 import interpax
 import jax.numpy as np
 from jax import Array
@@ -73,7 +71,7 @@ class ApplyPixelOffsets(DetectorLayer):
             )
 
     def apply(self: DetectorLayer, psf: PSF) -> PSF:
-        """Apply detector-pixel offset warping to the PSF."""
+        """Apply detector-pixel offset warping to the PSF via ``interpax.interp2d``."""
         if self.dx_map.shape != psf.data.shape:
             raise ValueError(
                 "dx_map/dy_map shape must match psf.data.shape; "
