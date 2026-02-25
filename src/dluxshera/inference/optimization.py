@@ -19,6 +19,7 @@ from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..systems.three_plane import SheraThreePlaneConfig
 from ..systems.two_plane import SheraTwoPlaneConfig
+from ..config import resolve_config, resolved_config_to_system_config
 from ..params.spec import ParamSpec, ParamKey
 from ..params.store import ParameterStore, strip_structural, subset_store
 from ..params.packing import (
@@ -532,6 +533,10 @@ def make_binder_image_nll_fn(
             return_predict_fn=return_predict_fn,
         )
 
+    if isinstance(cfg, Mapping):
+        resolved_cfg = resolve_config(cfg)
+        cfg = resolved_config_to_system_config(resolved_cfg)
+
     if isinstance(cfg, SheraThreePlaneConfig):
         binder_obj = SheraThreePlaneBinder(
             cfg,
@@ -546,7 +551,9 @@ def make_binder_image_nll_fn(
         )
     else:
         raise TypeError(
-            "cfg must be a SheraThreePlaneConfig or SheraTwoPlaneConfig for binder construction"
+            "cfg must be either a resolved nested config mapping (system/experiment schema) "
+            "or a SheraThreePlaneConfig/SheraTwoPlaneConfig dataclass. "
+            "Legacy flat config schemas are not supported."
         )
 
     return make_binder_nll_fn(
