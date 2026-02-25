@@ -65,6 +65,12 @@ class ParamField:
     # Human-readable description
     doc: str = ""
 
+    # Whether this field participates in structural cache fingerprints.
+    structural: bool = False
+
+    # Optional runtime binding path on a cached component object.
+    binding: Optional[str] = None
+
 
 class ParamSpec:
     """

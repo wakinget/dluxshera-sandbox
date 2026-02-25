@@ -474,10 +474,15 @@ class SheraTwoPlaneBinder(BaseSheraBinder):
         return build_alpha_cen_source(store, cfg=self.cfg)
 
     def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return the two-plane runtime bindings for non-structural keys."""
-        from ..builders.optics import TWOPLANE_RUNTIME_BINDINGS
+        """Return runtime bindings declared by the optics contract."""
+        from ..components.optics import build_twoplane_optics_contract
 
-        return TWOPLANE_RUNTIME_BINDINGS
+        contract = build_twoplane_optics_contract(self.cfg)
+        return tuple(
+            (field.key, field.binding)
+            for field in contract.values()
+            if field.binding is not None
+        )
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Return the structural hash derived from the two-plane config."""
