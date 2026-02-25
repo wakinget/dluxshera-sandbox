@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +20,25 @@ from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse, Downsam
 
 
 DETECTOR_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
+SUPPORTED_DETECTOR_LAYERS: tuple[str, ...] = (
+    "downsample",
+    "pixel_offsets",
+    "pixel_response",
+    "jitter",
+)
+
+
+def _cfg_get(root, path: str, default=None):
+    """Read a dotted config path from a mapping- or attribute-based config object."""
+    cur = root
+    for key in path.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, Mapping):
+            cur = cur.get(key, None)
+        else:
+            cur = getattr(cur, key, None)
+    return default if cur is None else cur
 
 
 def _center_crop(arr: jnp.ndarray, target_size: int) -> jnp.ndarray:
@@ -81,7 +101,9 @@ def _condition_detector_map(
 
 def _resolve_detector_spec(cfg) -> DetectorSpec:
     """Resolve detector metadata from config, defaulting to the testbed model."""
-    detector_model = getattr(cfg, "detector_model", None)
+    detector_model = _cfg_get(cfg, "system.detector.model", default=None)
+    if detector_model is None:
+        detector_model = getattr(cfg, "detector_model", None)
     if detector_model is None:
         return GSENSE2020BSI_SPEC
 
@@ -136,6 +158,115 @@ def _load_array(path: Path) -> jnp.ndarray:
 
     raise ValueError(f"Unsupported calibration file type: {path} (expected .npy or .npz)")
 
+
+def _build_legacy_detector_layers(cfg, *, target_shape: tuple[int, int]):
+    """Build detector layers from flat legacy detector config fields."""
+    ppu_dx_path = _resolve_repo_path(getattr(cfg, "ppu_dx_path", None))
+    ppu_dy_path = _resolve_repo_path(getattr(cfg, "ppu_dy_path", None))
+    interp_method = getattr(cfg, "ppu_interp_method", "cubic2")
+
+    dx_map_raw = _load_array(ppu_dx_path) if ppu_dx_path is not None else None
+    dy_map_raw = _load_array(ppu_dy_path) if ppu_dy_path is not None else None
+
+    if dx_map_raw is None:
+        dx_map_raw = jnp.zeros(target_shape, dtype=float)
+    if dy_map_raw is None:
+        dy_map_raw = jnp.zeros(target_shape, dtype=float)
+
+    dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
+    dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
+
+    prf_path = _resolve_repo_path(getattr(cfg, "prf_path", None))
+    if prf_path is None:
+        pixel_response_raw = jnp.ones(target_shape, dtype=float)
+    else:
+        pixel_response_raw = _load_array(prf_path)
+
+    pixel_response = _condition_detector_map(
+        pixel_response_raw, map_name="pixel_response", target_shape=target_shape
+    )
+
+    jitter_sigma = float(getattr(cfg, "jitter_sigma", 1e-12))
+    jitter_kernel = int(getattr(cfg, "jitter_kernel_size", 3))
+
+    return [
+        ("downsample", Downsample(cfg.oversample)),
+        (
+            "pixel_offsets",
+            ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method),
+        ),
+        ("pixel_response", ApplyPixelResponse(pixel_response)),
+        ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
+    ]
+
+
+def build_detector_layer(
+    name: str,
+    layer_cfg: Mapping,
+    *,
+    target_shape: tuple[int, int],
+) -> tuple[str, object]:
+    """Build a detector layer from declarative layer config."""
+    if name == "downsample":
+        factor = layer_cfg.get("factor", layer_cfg.get("oversample", None))
+        if factor is None:
+            raise ValueError("downsample layer requires `factor` (or alias `oversample`).")
+        return ("downsample", Downsample(int(factor)))
+
+    if name == "pixel_offsets":
+        dx_path = _resolve_repo_path(layer_cfg.get("dx_path", None))
+        dy_path = _resolve_repo_path(layer_cfg.get("dy_path", None))
+        interp_method = layer_cfg.get("interp_method", "cubic2")
+
+        if dx_path is not None:
+            dx_map_raw = _load_array(dx_path)
+        else:
+            dx_map_raw = jnp.zeros(target_shape, dtype=float)
+            if dy_path is not None:
+                warnings.warn(
+                    "pixel_offsets layer: dx_path missing; defaulting dx_map to zeros.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+        if dy_path is not None:
+            dy_map_raw = _load_array(dy_path)
+        else:
+            dy_map_raw = jnp.zeros(target_shape, dtype=float)
+            if dx_path is not None:
+                warnings.warn(
+                    "pixel_offsets layer: dy_path missing; defaulting dy_map to zeros.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+        dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
+        dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
+        return (
+            "pixel_offsets",
+            ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method),
+        )
+
+    if name == "pixel_response":
+        prf_path = _resolve_repo_path(layer_cfg.get("prf_path", None))
+        if prf_path is None:
+            pixel_response_raw = jnp.ones(target_shape, dtype=float)
+        else:
+            pixel_response_raw = _load_array(prf_path)
+
+        pixel_response = _condition_detector_map(
+            pixel_response_raw, map_name="pixel_response", target_shape=target_shape
+        )
+        return ("pixel_response", ApplyPixelResponse(pixel_response))
+
+    if name == "jitter":
+        sigma = float(layer_cfg.get("sigma", 1e-12))
+        kernel_size = int(layer_cfg.get("kernel_size", 3))
+        return ("jitter", ApplyJitter(sigma=sigma, kernel_size=kernel_size))
+
+    supported = ", ".join(SUPPORTED_DETECTOR_LAYERS)
+    raise ValueError(f"Unknown detector layer name {name!r}. Supported layers: {supported}.")
+
 def _build_detector_contract(detector: SheraDetector) -> ParamSpec:
     """Build a minimal detector ParamSpec contract from an assembled detector."""
 
@@ -161,48 +292,35 @@ def _build_detector_contract(detector: SheraDetector) -> ParamSpec:
 
 def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
     """Construct the baseline detector for a Shera system."""
-    psf_npix = int(cfg.psf_npix)
-    target_shape = (psf_npix, psf_npix)
-
-    # --- Pixel offsets (PPU) ---
-    ppu_dx_path = _resolve_repo_path(getattr(cfg, "ppu_dx_path", None))
-    ppu_dy_path = _resolve_repo_path(getattr(cfg, "ppu_dy_path", None))
-    interp_method = getattr(cfg, "ppu_interp_method", "cubic2")
-
-    dx_map_raw = _load_array(ppu_dx_path) if ppu_dx_path is not None else None
-    dy_map_raw = _load_array(ppu_dy_path) if ppu_dy_path is not None else None
-
-    if dx_map_raw is None:
-        dx_map_raw = jnp.zeros(target_shape, dtype=float)
-    if dy_map_raw is None:
-        dy_map_raw = jnp.zeros(target_shape, dtype=float)
-
-    dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
-    dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
-
-    # --- Pixel response (PRF) ---
-    prf_path = _resolve_repo_path(getattr(cfg, "prf_path", None))
-    if prf_path is None:
-        pixel_response_raw = jnp.ones(target_shape, dtype=float)
-    else:
-        pixel_response_raw = _load_array(prf_path)
-
-    pixel_response = _condition_detector_map(
-        pixel_response_raw, map_name="pixel_response", target_shape=target_shape
-    )
-
-    # --- Jitter ---
-    jitter_sigma = float(getattr(cfg, "jitter_sigma", 1e-12))
-    jitter_kernel = int(getattr(cfg, "jitter_kernel_size", 3))
-
+    detector_layers_cfg = _cfg_get(cfg, "system.detector.layers", default=None)
     spec = _resolve_detector_spec(cfg)
 
-    layers = [
-        ("downsample", Downsample(cfg.oversample)),
-        ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method)),
-        ("pixel_response", ApplyPixelResponse(pixel_response)),
-        ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
-    ]
+    if detector_layers_cfg:
+        psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
+        if psf_npix is None:
+            psf_npix = getattr(cfg, "psf_npix", None)
+        if psf_npix is None:
+            raise ValueError(
+                "Cannot build detector from system.detector.layers: missing system.optics.psf_npix."
+            )
+
+        target_shape = (int(psf_npix), int(psf_npix))
+        layers = []
+        for layer_cfg in detector_layers_cfg:
+            name = layer_cfg.get("name", None)
+            if name is None:
+                raise ValueError("Each detector layer entry must define a `name` field.")
+            layers.append(build_detector_layer(name, layer_cfg, target_shape=target_shape))
+    else:
+        warnings.warn(
+            "system.detector.layers not provided; building detector from legacy flat detector config.",
+            UserWarning,
+            stacklevel=2,
+        )
+        psf_npix = int(cfg.psf_npix)
+        target_shape = (psf_npix, psf_npix)
+        layers = _build_legacy_detector_layers(cfg, target_shape=target_shape)
+
     detector = SheraDetector(layers=layers, spec=spec)
     return detector, _build_detector_contract(detector)
 
@@ -248,4 +366,5 @@ __all__ = [
     "DETECTOR_RUNTIME_BINDINGS",
     "apply_runtime_bindings",
     "build_detector",
+    "build_detector_layer",
 ]
