@@ -1,5 +1,5 @@
 """
-Canonical astrometry retrieval recipe (Shera three-plane).
+Canonical astrometry retrieval recipe (generalized Shera binder).
 
 This script is the primary, end-to-end onboarding example for the dLuxShera workflow.
 It is designed to be read like a Matlab script from top to bottom.
@@ -13,7 +13,7 @@ What this recipe demonstrates
 - Initializing a ParameterStore (values) and populating derived parameters
   (e.g., plate scale computed from focal lengths + pixel pitch via registered
   transforms).
-- Building a SheraThreePlaneBinder to bind parameters to optics/source/detector.
+- Building a BaseSheraBinder that dispatches source/optics/detector by kind.
 - Generating synthetic data (optionally with noise).
 - Defining inference keys + priors, sampling an initial state from priors.
 - Defining the loss (typically NLL; MAP variants also available).
@@ -83,11 +83,11 @@ from dluxshera.plot.plotting import (
     plot_signals_grid,
 )
 from dluxshera.plot.printing import print_optimization_summary
+from dluxshera.systems import BaseSheraBinder
 from dluxshera.systems.three_plane import (
     SheraThreePlaneConfig,
     SHERA_TESTBED_CONFIG,
     SHERA_FLIGHT_CONFIG,
-    SheraThreePlaneBinder,
     build_forward_spec_from_config,
 )
 
@@ -168,14 +168,32 @@ def main(
 
     t0_script = time.time()
 
+    # Phase 6 exemplar note:
+    # This recipe is the canonical example for the generalized BaseSheraBinder
+    # composition path (`system.source.kind` / `system.optics.kind`
+    # dispatch). Other recipes may temporarily drift and will be migrated in
+    # follow-up phases.
     cfg = config or SHERA_TESTBED_CONFIG
     cfg = cfg.replace(
         primary_noll_indices=tuple(range(4, 12)),
-        secondary_noll_indices=tuple(range(4, 12)),)
+        secondary_noll_indices=tuple(range(4, 12)),
+        system={
+            "source": {"kind": "binary"},
+            "optics": {"kind": "three_plane"},
+            "detector": {"kind": "layered"},
+        },
+    )
     if fast:
         cfg = cfg.replace(n_lambda=1,
             primary_noll_indices=tuple(range(4, 9)),
             secondary_noll_indices=tuple(range(4, 9)))
+
+    optics_kind = cfg.system["optics"]["kind"] if cfg.system is not None else "three_plane"
+    if optics_kind != "three_plane":
+        raise ValueError(
+            "canonical_astrometry.py currently demonstrates the three-plane "
+            "exemplar only. Expected system.optics.kind='three_plane'."
+        )
 
     forward_spec = build_forward_spec_from_config(cfg)
 
@@ -191,7 +209,7 @@ def main(
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+    binder = BaseSheraBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
     data_psf = binder.model()
