@@ -8,10 +8,9 @@ from typing import Any, Optional, Tuple
 import dLux as dl
 import jax.numpy as jnp
 
-from .base import BaseConfig, BaseSheraBinder
-from ..builders.detector import build_detector
+from .base import BaseConfig, BaseSheraBinder, compose_forward_spec
 from ..builders.source import build_alpha_cen_source
-from ..params.spec import ParamField, ParamSpec
+from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
 from ..utils.utils import DEFAULT_DP_PATH
 
@@ -111,234 +110,18 @@ class SheraTwoPlaneConfig(BaseConfig):
 
 
 def build_forward_spec_from_config(cfg: SheraTwoPlaneConfig) -> ParamSpec:
-    """
-    Construct a ParamSpec for the Shera two-plane forward model.
+    """Legacy wrapper for composed forward-spec construction.
 
-    This mirrors the three-plane forward spec semantics but treats the plate
-    scale as a primitive (geometry is not modelled explicitly) and omits any
-    secondary mirror Zernike basis. Binary astrometry fields are exposed as
-    primitives, while the total log flux remains a derived quantity handled via
-    the shared log-flux transform.
+    Forward specs are now authored compositionally from component contracts
+    (source + optics + detector). This wrapper remains as a compatibility
+    entry point for existing call sites and delegates to
+    :func:`dluxshera.systems.base.compose_forward_spec`.
     """
 
-    fields = [
-        # --- System geometry (primitive plate scale) ---------------------
-        ParamField(
-            key="system.m1_diameter_m",
-            group="system",
-            kind="primitive",
-            units="m",
-            dtype=float,
-            shape=None,
-            default=cfg.m1_diameter_m,
-            bounds=(0.0, None),
-            doc=(
-                "Primary mirror clear diameter [meters]. Used for collecting "
-                "area in flux calculations."
-            ),
-        ),
-        ParamField(
-            key="system.plate_scale_as_per_pix",
-            group="system",
-            kind="primitive",
-            units="as / pixel",
-            dtype=float,
-            shape=None,
-            default=cfg.plate_scale_as_per_pix,
-            bounds=(0.0, None),
-            doc=(
-                "Plate scale in arcseconds per pixel, treated as a primitive "
-                "knob for the two-plane Shera system."
-            ),
-        ),
+    from ..builders.detector import build_detector
 
-        # --- Bandpass ----------------------------------------------------
-        ParamField(
-            key="band.wavelength_m",
-            group="band",
-            kind="primitive",
-            units="m",
-            dtype=float,
-            shape=None,
-            default=cfg.wavelength_m,
-            bounds=(0.0, None),
-            doc="Central wavelength of the bandpass [meters].",
-        ),
-        ParamField(
-            key="band.bandwidth_m",
-            group="band",
-            kind="primitive",
-            units="m",
-            dtype=float,
-            shape=None,
-            default=cfg.bandwidth_m,
-            bounds=(0.0, None),
-            doc="Approximate bandpass width [meters].",
-        ),
-
-        # --- Imaging configuration ----------------------------------
-        ParamField(
-            key="imaging.exposure_time_s",
-            group="imaging",
-            kind="primitive",
-            units="s",
-            dtype=float,
-            shape=None,
-            default=1800.0,
-            bounds=(0.0, None),
-            doc="Single-exposure integration time [seconds].",
-        ),
-        ParamField(
-            key="imaging.throughput",
-            group="imaging",
-            kind="primitive",
-            units=None,
-            dtype=float,
-            shape=None,
-            default=1.0,
-            bounds=(0.0, 1.0),
-            doc=(
-                "Effective end-to-end throughput efficiency (0–1), capturing "
-                "optical transmission, detector QE, and other losses."
-            ),
-        ),
-
-        # --- Binary astrometry and photometry ---------------------------------
-        ParamField(
-            key="binary.x_position_as",
-            group="binary",
-            kind="primitive",
-            units="as",
-            dtype=float,
-            shape=None,
-            default=0.0,
-            bounds=(None, None),
-            doc=(
-                "On-sky X position of the binary system centroid in arcseconds. "
-                "Positive values follow the detector X axis."
-            ),
-        ),
-        ParamField(
-            key="binary.y_position_as",
-            group="binary",
-            kind="primitive",
-            units="as",
-            dtype=float,
-            shape=None,
-            default=0.0,
-            bounds=(None, None),
-            doc=(
-                "On-sky Y position of the binary system centroid in arcseconds. "
-                "Positive values follow the detector Y axis."
-            ),
-        ),
-        ParamField(
-            key="binary.separation_as",
-            group="binary",
-            kind="primitive",
-            units="as",
-            dtype=float,
-            shape=None,
-            default=10.0,
-            bounds=(0.0, None),
-            doc=(
-                "Angular separation between primary and secondary components in "
-                "arcseconds."
-            ),
-        ),
-        ParamField(
-            key="binary.position_angle_deg",
-            group="binary",
-            kind="primitive",
-            units="deg",
-            dtype=float,
-            shape=None,
-            default=90.0,
-            bounds=(0.0, 360.0),
-            doc=(
-                "Position angle of the secondary relative to the primary, in "
-                "degrees East of North."
-            ),
-        ),
-        ParamField(
-            key="binary.contrast",
-            group="binary",
-            kind="primitive",
-            units=None,
-            dtype=float,
-            shape=None,
-            default=3,
-            bounds=(0.0, None),
-            doc=(
-                "Flux ratio of the binary system, defined as Primary:Secondary "
-                "(A:B). A ratio > 1 indicates the primary is brighter."
-            ),
-        ),
-
-        # --- Source flux normalisation ----------------------------------
-        ParamField(
-            key="binary.spectral_flux_density",
-            group="binary",
-            kind="primitive",
-            units="ph / s / m^2 / m",
-            dtype=float,
-            shape=None,
-            default=1.7227e17,
-            bounds=(0.0, None),
-            doc=(
-                "Mean photon flux density from the binary at the telescope "
-                "entrance pupil, in units of photons/s/m^2 per meter of "
-                "bandwidth."
-            ),
-        ),
-
-        # --- Derived forward-model quantities ---------------------------
-        ParamField(
-            key="binary.log_flux_total",
-            group="binary",
-            kind="derived",
-            units="log10(photons)",
-            dtype=float,
-            shape=None,
-            default=None,
-            bounds=(None, None),
-            transform="binary_log_flux_total",
-            depends_on=(
-                "system.m1_diameter_m",
-                "band.bandwidth_m",
-                "imaging.exposure_time_s",
-                "imaging.throughput",
-                "binary.spectral_flux_density",
-            ),
-            doc=(
-                "Truth-level total log10 photon count from the binary over the "
-                "exposure at the detector plane."
-            ),
-        ),
-    ]
-
-    if cfg.primary_noll_indices:
-        fields.append(
-            ParamField(
-                key="primary.zernike_coeffs_nm",
-                group="primary",
-                kind="primitive",
-                units="nm",
-                dtype=float,
-                shape=(len(cfg.primary_noll_indices),),
-                default=tuple(0.0 for _ in cfg.primary_noll_indices),
-                bounds=(None, None),
-                doc=(
-                    "Primary mirror Zernike WFE coefficients (nm). Length matches "
-                    "the configured primary_noll_indices tuple; defaults to a zero "
-                    "vector for the no-aberration case."
-                ),
-            )
-        )
-
-    forward_spec = ParamSpec(fields, system_id=SHERA_TWOPLANE_SYSTEM_ID)
-    _, detector_contract = build_detector(cfg)
-    return forward_spec.merge(detector_contract)
+    _detector, detector_contract = build_detector(cfg)
+    return compose_forward_spec(cfg, detector_contract=detector_contract)
 
 
 # ---------------------------------------------------------------------

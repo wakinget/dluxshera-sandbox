@@ -13,6 +13,103 @@ from ..params.spec import ParamSpec
 from ..params.store import ParameterStore, StoreNamespace
 
 
+def compose_forward_spec(system_cfg, detector_contract: ParamSpec | None = None) -> ParamSpec:
+    """Compose a forward spec from source, optics, and detector contracts.
+
+    The composition order is deterministic:
+      1) source contract
+      2) optics contract (dispatched by ``system.optics.kind``)
+      3) detector contract
+
+    Key collisions across contracts raise ``ValueError`` with clear component
+    names to avoid silently shadowing fields.
+    """
+
+    from ..components.optics import build_threeplane_optics_contract, build_twoplane_optics_contract
+    from ..components.sources import build_alpha_cen_contract
+
+    source_contract = build_alpha_cen_contract(system_cfg)
+
+    optics_kind = _detect_optics_kind_from_cfg(system_cfg)
+    optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
+        "two_plane": build_twoplane_optics_contract,
+        "three_plane": build_threeplane_optics_contract,
+    }
+    try:
+        optics_contract = optics_contract_builders[optics_kind](system_cfg)
+    except KeyError as exc:
+        supported = ", ".join(sorted(optics_contract_builders))
+        raise ValueError(
+            f"Unknown optics kind {optics_kind!r} when composing forward spec. "
+            f"Supported optics kinds: {supported}."
+        ) from exc
+
+    detector_contract = detector_contract or ParamSpec()
+
+    contracts = (
+        ("source", source_contract),
+        ("optics", optics_contract),
+        ("detector", detector_contract),
+    )
+
+    merged_fields = []
+    seen_keys: dict[str, str] = {}
+    for contract_name, contract in contracts:
+        for field in contract.values():
+            owner = seen_keys.get(field.key)
+            if owner is not None:
+                raise ValueError(
+                    "Forward spec contract key collision on "
+                    f"{field.key!r}: present in both {owner!r} and {contract_name!r}."
+                )
+            seen_keys[field.key] = contract_name
+            merged_fields.append(field)
+
+    system_id = (
+        "shera_threeplane"
+        if optics_kind == "three_plane"
+        else "shera_twoplane"
+    )
+    return ParamSpec(merged_fields, system_id=system_id)
+
+
+def _cfg_get(root, path: str, default=None):
+    """Read a dotted path from mapping- or attribute-based configs."""
+
+    cur = root
+    for key in path.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, Mapping):
+            cur = cur.get(key, None)
+        else:
+            cur = getattr(cur, key, None)
+    return default if cur is None else cur
+
+
+def _detect_optics_kind_from_cfg(cfg) -> str:
+    """Return optics kind from config with compatibility fallbacks."""
+
+    kind = _cfg_get(cfg, "system.optics.kind", default=None)
+    if kind is not None:
+        return str(kind)
+
+    cfg_name = type(cfg).__name__.lower()
+    if "threeplane" in cfg_name:
+        return "three_plane"
+    if "twoplane" in cfg_name:
+        return "two_plane"
+
+    kind = _cfg_get(cfg, "optics_kind", default=None)
+    if kind is not None:
+        return str(kind)
+
+    raise ValueError(
+        "Unable to resolve optics kind from config. Expected "
+        "`system.optics.kind` (e.g. 'two_plane' or 'three_plane')."
+    )
+
+
 class BaseConfig:
     """Shared helpers for immutable Shera configuration dataclasses."""
 
@@ -216,38 +313,11 @@ class BaseSheraBinder:
 
     def _cfg_get(self, path: str, default=None):
         """Read a dotted path from mapping- or attribute-based configs."""
-
-        cur = self.cfg
-        for key in path.split("."):
-            if cur is None:
-                return default
-            if isinstance(cur, Mapping):
-                cur = cur.get(key, None)
-            else:
-                cur = getattr(cur, key, None)
-        return default if cur is None else cur
+        return _cfg_get(self.cfg, path, default=default)
 
     def _detect_optics_kind(self) -> str:
         """Return the configured optics kind with backward-compatible fallback."""
-
-        kind = self._cfg_get("system.optics.kind", default=None)
-        if kind is not None:
-            return str(kind)
-
-        cfg_name = type(self.cfg).__name__.lower()
-        if "threeplane" in cfg_name:
-            return "three_plane"
-        if "twoplane" in cfg_name:
-            return "two_plane"
-
-        kind = self._cfg_get("optics_kind", default=None)
-        if kind is not None:
-            return str(kind)
-
-        raise ValueError(
-            "Unable to resolve optics kind from config. Expected "
-            "`system.optics.kind` (e.g. 'two_plane' or 'three_plane')."
-        )
+        return _detect_optics_kind_from_cfg(self.cfg)
 
     def _detect_source_kind(self) -> str:
         """Return the configured source kind with backward-compatible fallback."""

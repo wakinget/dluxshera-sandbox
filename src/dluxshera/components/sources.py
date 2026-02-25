@@ -67,6 +67,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=float,
             shape=(),
+            default=10.0,
             structural=False,
         ),
         ParamField(
@@ -75,6 +76,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=float,
             shape=(),
+            default=90.0,
             structural=False,
         ),
         ParamField(
@@ -101,6 +103,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=float,
             shape=(),
+            default=20.0,
             structural=False,
         ),
         ParamField(
@@ -109,6 +112,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=float,
             shape=(),
+            default=3.0,
             structural=False,
         ),
     ]
