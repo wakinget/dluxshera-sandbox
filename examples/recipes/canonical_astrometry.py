@@ -1,6 +1,16 @@
 """
 Canonical astrometry retrieval recipe (generalized Shera binder).
 
+Migration reference (strict system/experiment schema)
+------------------------------------------------------
+This recipe is the exemplar for the strict config-schema migration:
+1) Load YAML/JSON config from disk.
+2) Resolve with `resolve_config` (preset + deep-merge + validation).
+3) Build the generalized binder path from resolved `system` config.
+4) Drive inference settings from resolved `experiment` config.
+
+Use this script as the pattern when migrating other recipes.
+
 This script is the primary, end-to-end onboarding example for the dLuxShera workflow.
 It is designed to be read like a Matlab script from top to bottom.
 Open this in your editor and run it.
@@ -45,9 +55,12 @@ Notes
 """
 from __future__ import annotations
 
+import argparse
 import datetime
+import json
 import time
 from pathlib import Path
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -66,6 +79,7 @@ from dluxshera.inference.optimization import (
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
+from dluxshera.config.resolver import resolve_config, resolved_config_to_system_config
 from dluxshera.params.packing import (
     build_eigen_index_map,
     build_index_map,
@@ -85,25 +99,15 @@ from dluxshera.plot.plotting import (
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.systems import BaseSheraBinder
 from dluxshera.systems.three_plane import (
-    SheraThreePlaneConfig,
-    SHERA_TESTBED_CONFIG,
-    SHERA_FLIGHT_CONFIG,
     build_forward_spec_from_config,
 )
+from dluxshera.systems.two_plane import build_forward_spec_from_config as build_twoplane_forward_spec_from_config
 
-# ----------------------------
-# User-facing toggles (edit me)
-# ----------------------------
 JAX_ENABLE_X64 = True
-RNG_SEED = 42
 FAST_MODE = False
 ADD_NOISE = True
 SAVE_PLOTS = True
 PLOT_EIGEN_SPECTRUM = True
-
-# Telescope Config Selection (9cm testbed vs 22cm flight design)
-# Options: None, SHERA_TESTBED_CONFIG / SHERA_FLIGHT_CONFIG
-CONFIG = SHERA_TESTBED_CONFIG
 
 # Eigenmode settings
 USE_EIGEN = True           # Enables re-parameterization
@@ -111,12 +115,11 @@ WHITEN_BASIS = True        # If True, scales each eigenvector by 1/sqrt(lambda)
 TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
-# Inference settings
-N_ITER = 40
-FAST_ITER = 30
-BASE_LR = 0.5
-
-INFER_KEYS = (
+DEFAULT_SEED = 42
+DEFAULT_N_ITER = 40
+DEFAULT_FAST_ITER = 30
+DEFAULT_BASE_LR = 0.5
+DEFAULT_INFER_KEYS = (
     "binary.separation_as",
     "binary.position_angle_deg",
     "binary.x_position_as",
@@ -125,13 +128,14 @@ INFER_KEYS = (
     "binary.contrast",
     "system.plate_scale_as_per_pix",
     "primary.zernike_coeffs_nm",
-    "secondary.zernike_coeffs_nm",  # Optionally comment this one out
+    "secondary.zernike_coeffs_nm",
 )
 
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
+DEFAULT_CONFIG_PATH = REPO_ROOT / "src/dluxshera/data/presets/SHERA_TESTBED_3P.yaml"
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -141,10 +145,8 @@ plt.rcParams["image.cmap"] = "inferno_nan"
 
 def main(
     *,
-    config: SheraThreePlaneConfig | None = CONFIG,
+    config_path: Path | None = None,
     fast: bool = FAST_MODE,
-    save_plots: bool = SAVE_PLOTS,
-    add_noise: bool = ADD_NOISE,
     results_dir: Path | None = None,
     use_eigen: bool = USE_EIGEN,
     whiten_basis: bool = WHITEN_BASIS,
@@ -154,7 +156,26 @@ def main(
     """Run the canonical astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    rng_key = jr.PRNGKey(RNG_SEED)
+    cfg_path = config_path or DEFAULT_CONFIG_PATH
+    user_cfg = _load_config_file(cfg_path)
+    user_cfg = _coerce_user_cfg_for_resolver(user_cfg, cfg_path)
+    cfg = resolve_config(user_cfg)
+
+    system_cfg = resolved_config_to_system_config(cfg)
+    optics_kind = cfg["system"]["optics"]["kind"]
+    if optics_kind == "three_plane":
+        forward_spec = build_forward_spec_from_config(system_cfg)
+    elif optics_kind == "two_plane":
+        forward_spec = build_twoplane_forward_spec_from_config(system_cfg)
+    else:
+        raise ValueError(f"Unsupported optics kind: {optics_kind!r}")
+
+    experiment = _resolve_experiment_options(cfg["experiment"])
+    infer_keys = tuple(experiment["infer_keys"])
+    rng_key = jr.PRNGKey(int(experiment["seed"]))
+    save_plots = bool(experiment["save_plots"])
+    add_noise = bool(experiment["add_noise"])
+
     results_dir = results_dir or DEFAULT_RESULTS_DIR
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,34 +189,8 @@ def main(
 
     t0_script = time.time()
 
-    # Phase 6 exemplar note:
-    # This recipe is the canonical example for the generalized BaseSheraBinder
-    # composition path (`system.source.kind` / `system.optics.kind`
-    # dispatch). Other recipes may temporarily drift and will be migrated in
-    # follow-up phases.
-    cfg = config or SHERA_TESTBED_CONFIG
-    cfg = cfg.replace(
-        primary_noll_indices=tuple(range(4, 12)),
-        secondary_noll_indices=tuple(range(4, 12)),
-        system={
-            "source": {"kind": "binary"},
-            "optics": {"kind": "three_plane"},
-            "detector": {"kind": "layered"},
-        },
-    )
     if fast:
-        cfg = cfg.replace(n_lambda=1,
-            primary_noll_indices=tuple(range(4, 9)),
-            secondary_noll_indices=tuple(range(4, 9)))
-
-    optics_kind = cfg.system["optics"]["kind"] if cfg.system is not None else "three_plane"
-    if optics_kind != "three_plane":
-        raise ValueError(
-            "canonical_astrometry.py currently demonstrates the three-plane "
-            "exemplar only. Expected system.optics.kind='three_plane'."
-        )
-
-    forward_spec = build_forward_spec_from_config(cfg)
+        print("FAST_MODE enabled: using reduced iteration count.")
 
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_store = truth_store.replace(
@@ -209,7 +204,7 @@ def main(
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = BaseSheraBinder(cfg, forward_spec, truth_store)
+    binder = BaseSheraBinder(system_cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
     data_psf = binder.model()
@@ -237,7 +232,7 @@ def main(
     #   inference_subspec = forward_spec.subset(INFER_KEYS)
     # Pack/unpack operate on this subspec, and derived-labeled keys remain
     # inferable directly (store-wins, no forced runtime recomputation).
-    inference_subspec = forward_spec.subset(INFER_KEYS)
+    inference_subspec = forward_spec.subset(infer_keys)
 
     # prior_info defines our initial knowledge of each parameter,
     # and determines the amplitude of the random perturbation applied to the model
@@ -260,9 +255,20 @@ def main(
     }
     prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
-    print("Drawing starting point from priors...")
-    rng_key, split_key = jr.split(rng_key)
-    init_store = prior_spec.sample(rng_key=split_key, keys=INFER_KEYS)
+    init_mode = experiment["init_mode"]
+    print(f"Initialization mode: {init_mode!r}")
+    if init_mode == "prior_sample":
+        print("Drawing starting point from priors...")
+        rng_key, split_key = jr.split(rng_key)
+        init_store = prior_spec.sample(rng_key=split_key, keys=infer_keys)
+    elif init_mode == "truth":
+        print("Using truth store as initialization (debug mode).")
+        init_store = truth_store
+    else:
+        raise ValueError(
+            f"Unsupported experiment.init.mode={init_mode!r}. "
+            "Supported modes: 'prior_sample', 'truth'."
+        )
     # Apply the randomly drawn perturbations to the model and produce an image
     # We use strip_structural() here to remove any structural parameters present in the store
     # Otherwise, the presence of structural parameters requires rebuilding the model
@@ -273,14 +279,14 @@ def main(
     print("Building the loss function...")
     nll_loss_fn, theta0 = make_binder_nll_fn(
         binder=binder,
-        infer_keys=INFER_KEYS,
+        infer_keys=infer_keys,
         data=data,
         var=data_var,
         noise_model="gaussian",
         reduce="sum",
         theta0_store=init_store,
     )
-    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
+    fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=init_store)
 
     def map_loss_fn(theta: np.ndarray) -> np.ndarray:
         store_theta = store_unpack_params(inference_subspec, theta, init_store)
@@ -288,7 +294,7 @@ def main(
         prior_gaussian_loss = prior_spec.quadratic_penalty(
             store_theta,
             center_store=truth_store,
-            keys=INFER_KEYS,
+            keys=infer_keys,
         )
         return nll_loss + prior_gaussian_loss
 
@@ -301,7 +307,7 @@ def main(
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
     F = fim_theta(nll_loss_fn, fim_point)
-    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
+    fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=init_store)
     if save_plots:
         plot_fim(
             F,
@@ -464,14 +470,20 @@ def main(
                 )
 
     labels_by_key = map_labels_to_keys(
-        INFER_KEYS,
+        infer_keys,
         fim_labels,
         store=init_store if use_eigen else None,
         index_map=None if use_eigen else index_map,
     )
 
     print("Running preconditioned gradient descent...")
-    n_iter = FAST_ITER if fast else N_ITER
+    optimizer_cfg = experiment["optimizer"]
+    if optimizer_cfg["kind"] != "gd":
+        raise ValueError(
+            f"Unsupported experiment.optimizer.kind={optimizer_cfg['kind']!r}. "
+            "Only 'gd' is currently implemented in this recipe."
+        )
+    n_iter = int(optimizer_cfg["n_iter_fast"] if fast else optimizer_cfg["n_iter"])
     metric_payload = {
         "theta_ref": np.asarray(theta0_opt),
         "metric_diag": np.asarray(curvature_vec),
@@ -481,7 +493,7 @@ def main(
         loss_fn=loss_opt,
         theta0=theta0_opt,
         index_map=index_map,
-        learning_rate=BASE_LR,
+        learning_rate=float(optimizer_cfg["base_lr"]),
         lr_vec=lr_vec,
         num_steps=n_iter,
         run_dir=results_dir,
@@ -516,9 +528,9 @@ def main(
     print(f"loss(final theta)       = {float(loss_fn(theta_final)):.8g}")
     print("")
 
-    summary_true = {k: truth_store.get(k) for k in INFER_KEYS}
-    summary_init = {k: init_store.get(k) for k in INFER_KEYS}
-    summary_final = {k: final_store.get(k) for k in INFER_KEYS}
+    summary_true = {k: truth_store.get(k) for k in infer_keys}
+    summary_init = {k: init_store.get(k) for k in infer_keys}
+    summary_final = {k: final_store.get(k) for k in infer_keys}
     param_summary = build_param_summary(summary_init, summary_final, truth=summary_true)
     patch_summary(results_dir, {"param_summary": param_summary})
     print_optimization_summary(
@@ -612,5 +624,80 @@ def main(
     print("Script finished in %.3f sec" % (t1_script - t0_script))
 
 
+def _load_config_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    suffix = path.suffix.lower()
+    with path.open("r", encoding="utf-8") as handle:
+        if suffix == ".json":
+            loaded = json.load(handle)
+        elif suffix in {".yaml", ".yml"}:
+            import yaml
+
+            loaded = yaml.safe_load(handle)
+        else:
+            raise ValueError("Config file must be YAML (.yaml/.yml) or JSON (.json).")
+    if not isinstance(loaded, dict):
+        raise ValueError("Config file must deserialize to a mapping/dict.")
+    return loaded
+
+
+def _coerce_user_cfg_for_resolver(user_cfg: dict[str, Any], cfg_path: Path) -> dict[str, Any]:
+    system = user_cfg.get("system")
+    if isinstance(system, dict) and isinstance(system.get("preset"), str):
+        return user_cfg
+
+    # Compatibility shim for using preset files directly as --config.
+    # Strict resolver still runs after this inserts `system.preset`.
+    preset_name = cfg_path.stem
+    merged = dict(user_cfg)
+    merged_system = dict(system) if isinstance(system, dict) else {}
+    merged_system["preset"] = preset_name
+    merged["system"] = merged_system
+    if "experiment" not in merged:
+        merged["experiment"] = {"kind": "inference"}
+    return merged
+
+
+def _resolve_experiment_options(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    optimizer_cfg = experiment_cfg.get("optimizer", {})
+    outputs_cfg = experiment_cfg.get("outputs", {})
+
+    # TODO(phase-8C): tighten validation once the experiment schema is finalized.
+    return {
+        "seed": int(experiment_cfg.get("seed", DEFAULT_SEED)),
+        "infer_keys": tuple(experiment_cfg.get("infer_keys", DEFAULT_INFER_KEYS)),
+        "add_noise": bool(experiment_cfg.get("add_noise", ADD_NOISE)),
+        "save_plots": bool(outputs_cfg.get("save_plots", SAVE_PLOTS)),
+        "optimizer": {
+            "kind": optimizer_cfg.get("kind", "gd"),
+            "n_iter": int(optimizer_cfg.get("n_iter", DEFAULT_N_ITER)),
+            "n_iter_fast": int(optimizer_cfg.get("n_iter_fast", DEFAULT_FAST_ITER)),
+            "base_lr": float(optimizer_cfg.get("base_lr", DEFAULT_BASE_LR)),
+        },
+        "init_mode": experiment_cfg.get("init", {}).get("mode", "prior_sample"),
+    }
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Canonical astrometry strict-schema recipe")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to YAML/JSON config file (strict system/experiment schema).",
+    )
+    parser.add_argument("--results-dir", type=Path, default=None)
+    parser.add_argument("--fast", action="store_true", help="Use reduced optimization iterations.")
+    parser.add_argument("--no-eigen", action="store_true", help="Disable eigenmode optimization.")
+    return parser
+
+
 if __name__ == "__main__":
-    main()
+    args = _build_parser().parse_args()
+    main(
+        config_path=args.config,
+        fast=bool(args.fast),
+        results_dir=args.results_dir,
+        use_eigen=not bool(args.no_eigen),
+    )
