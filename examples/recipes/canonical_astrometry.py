@@ -9,7 +9,7 @@ What this recipe demonstrates
 - Building/choosing a three-plane Shera configuration and applying small overrides.
 - Constructing ParameterSpecs:
     - a forward spec describing the simulation parameters ("forward_spec")
-    - an inference spec describing the solved-for parameters ("inference_spec")
+    - an inference subspec selected from the forward spec via infer_keys
 - Initializing a ParameterStore (values) and populating derived parameters
   (e.g., plate scale computed from focal lengths + pixel pitch via registered
   transforms).
@@ -72,7 +72,6 @@ from dluxshera.params.packing import (
     pack_params,
     unpack_params as store_unpack_params,
 )
-from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
 from dluxshera.params.store import ParameterStore, strip_structural
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
@@ -179,7 +178,6 @@ def main(
             secondary_noll_indices=tuple(range(4, 9)))
 
     forward_spec = build_forward_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic(cfg)
 
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_store = truth_store.replace(
@@ -216,13 +214,12 @@ def main(
     data_var = jnp.maximum(data_psf, 1.0)
 
     print("Configuring Inference...")
-    # We create a subspec here because the user may have
-    # removed one or more keys from the complete list
-    inference_subspec = make_inference_subspec(
-        base_spec=inference_spec,
-        infer_keys=INFER_KEYS,
-        cfg=cfg,
-    )
+    # Phase 5 migration note: inference layout is now defined directly from
+    # the forward spec. This file demonstrates the new pattern:
+    #   inference_subspec = forward_spec.subset(INFER_KEYS)
+    # Pack/unpack operate on this subspec, and derived-labeled keys remain
+    # inferable directly (store-wins, no forced runtime recomputation).
+    inference_subspec = forward_spec.subset(INFER_KEYS)
 
     # prior_info defines our initial knowledge of each parameter,
     # and determines the amplitude of the random perturbation applied to the model
@@ -570,13 +567,13 @@ def main(
                 inference_subspec,
                 eigen_map.theta_from_z(z),
                 init_store,
-            ).refresh_derived(inference_spec)
+            ).refresh_derived(forward_spec)
         else:
             decoder = lambda theta: store_unpack_params(
                 inference_subspec,
                 theta,
                 init_store,
-            ).refresh_derived(inference_spec)
+            ).refresh_derived(forward_spec)
 
         signals = build_signals(
             trace,

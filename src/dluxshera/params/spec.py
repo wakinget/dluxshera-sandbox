@@ -213,11 +213,15 @@ def make_inference_subspec(
     cfg: SheraTwoPlaneConfig | SheraThreePlaneConfig | None = None,
     include_secondary: bool | None = None,
 ) -> ParamSpec:
-    """Construct an inference ParamSpec view from a base specification.
+    """Legacy wrapper around ``base_spec.subset(infer_keys)``.
 
-    This helper is intentionally lightweight: it validates the requested keys
-    against the optional optical configuration and returns ``base_spec.subset``
-    preserving the caller-provided ordering.
+    Phase 5 canonical flow defines inference layout directly from the forward
+    spec via ``forward_spec.subset(infer_keys)``. This helper remains for
+    compatibility with older recipes and tests.
+
+    It optionally validates Zernike-key requests against a supplied
+    configuration, then returns ``base_spec.subset(infer_keys)`` preserving the
+    caller-provided ordering.
 
     Parameters
     ----------

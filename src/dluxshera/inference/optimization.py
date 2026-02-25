@@ -284,7 +284,7 @@ def make_loss_fn(
 # NLL -> Negative Log-Likelihood
 def make_image_nll_fn(
     cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
+    forward_spec: ParamSpec,
     base_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
     data: np.ndarray,
@@ -303,9 +303,9 @@ def make_image_nll_fn(
     ----------
     cfg
         Structural SheraThreePlaneConfig (testbed vs flight, etc.).
-    inference_spec
-        ParamSpec describing the inference-space keys
-        (typically `build_inference_spec_basic()`).
+    forward_spec
+        Full forward ParamSpec catalog. Inference-space layout is defined by
+        ``forward_spec.subset(infer_keys)``.
     base_store
         ParameterStore providing a baseline set of parameter values.
         This is the state we *overlay* when unpacking theta.
@@ -322,7 +322,7 @@ def make_image_nll_fn(
     reduce
         "sum" or "mean" reduction over pixels inside the NLL kernels.
     build_model_fn
-        Callable (cfg, inference_spec, store) -> model. If None, a
+        Callable (cfg, forward_spec, store) -> model. If None, a
         default Shera three-plane builder is imported lazily.
 
     Returns
@@ -332,10 +332,10 @@ def make_image_nll_fn(
         Signature: loss_fn(theta) -> scalar.
     theta0
         Initial packed parameter vector constructed from
-        (inference_spec, base_store, infer_keys).
+        (forward_spec.subset(infer_keys), base_store).
     """
-    # Subset spec to just the keys we want to infer
-    sub_spec = inference_spec.subset(infer_keys)
+    # Inference layout is derived directly from the forward spec.
+    sub_spec = forward_spec.subset(infer_keys)
 
     # Pack base_store → theta0 (this defines ordering of infer_keys)
     theta0 = store_pack_params(sub_spec, base_store)
@@ -368,8 +368,8 @@ def make_image_nll_fn(
         # NOTE: unpack_params(spec_subset, theta, base_store)
         store_theta = store_unpack_params(sub_spec, theta, base_store)
 
-        # Build model from cfg + (inference_spec, store_theta)
-        model = build_model_fn(cfg, inference_spec, store_theta)
+        # Build model from cfg + (forward_spec, store_theta)
+        model = build_model_fn(cfg, forward_spec, store_theta)
 
         # Evaluate loss
         return _model_loss(model, data, var)
