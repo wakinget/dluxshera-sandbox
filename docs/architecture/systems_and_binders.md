@@ -20,6 +20,19 @@ System configuration now lives at the system level: you instantiate a `SheraTwoP
 
 The System (Binder) is the primary model object in dLuxShera. It combines a configuration, the relevant `ParamSpec`, and a baseline `ParameterStore`, then exposes user-facing methods to evaluate the optical system. Callers supply parameter deltas or θ-vectors, and the System handles packing/unpacking, derived parameter resolution, and interaction with the underlying optics. When you “build a Shera model” in the canonical demos, you are creating a System (Binder) and invoking it to produce PSFs or images.
 
+
+### Strict nested config schema (Phase 8A)
+
+A strict nested config schema is now available for binder-first workflows:
+
+- top-level keys: `system`, `experiment`
+- required selector: `system.preset` (preset name loaded from `src/dluxshera/data/presets/`)
+- resolver flow: load preset → deep-merge user overrides → strict validation
+- unknown keys: emitted as warnings (kept in resolved config)
+- missing required keys: hard errors
+
+Legacy flat config dictionaries are intentionally unsupported in this resolver path. Use `dluxshera.config.resolve_config(...)` and pass the resolved structure (or translated system config) into binder construction helpers.
+
 ### Immutability + evaluation contract
 
 Systems are **operationally (mostly) immutable** by design:
