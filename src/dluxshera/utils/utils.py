@@ -35,9 +35,9 @@ plt.rcParams['figure.dpi'] = 120
 def default_diffractive_pupil_path() -> str:
     """Resolve the default diffractive pupil path as a string."""
     try:
-        return str(resources.files("dluxshera.data") / "diffractive_pupil.npy")
+        return str(resources.files("dluxshera.data") / "pupils" / "diffractive_pupil.npy")
     except Exception:
-        return str(Path(__file__).resolve().parents[1] / "data" / "diffractive_pupil.npy")
+        return str(Path(__file__).resolve().parents[1] / "data" / "pupils" / "diffractive_pupil.npy")
 
 DEFAULT_DP_PATH = default_diffractive_pupil_path()
 
