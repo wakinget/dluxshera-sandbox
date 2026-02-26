@@ -98,10 +98,7 @@ from dluxshera.plot.plotting import (
 )
 from dluxshera.plot.printing import print_optimization_summary
 from dluxshera.systems import BaseSheraBinder
-from dluxshera.systems.three_plane import (
-    build_forward_spec_from_config,
-)
-from dluxshera.systems.two_plane import build_forward_spec_from_config as build_twoplane_forward_spec_from_config
+from dluxshera.systems.base import compose_forward_spec
 
 ##############################
 # MAIN SIMULATION PARAMETERS #
@@ -176,13 +173,7 @@ def main(
     cfg = resolve_config(user_cfg)
 
     system_cfg = resolved_config_to_system_config(cfg)
-    optics_kind = cfg["system"]["optics"]["kind"]
-    if optics_kind == "three_plane":
-        forward_spec = build_forward_spec_from_config(system_cfg)
-    elif optics_kind == "two_plane":
-        forward_spec = build_twoplane_forward_spec_from_config(system_cfg)
-    else:
-        raise ValueError(f"Unsupported optics kind: {optics_kind!r}")
+    forward_spec = compose_forward_spec(system_cfg)
 
     experiment = _resolve_experiment_options(cfg["experiment"])
     infer_keys = tuple(experiment["infer_keys"])
