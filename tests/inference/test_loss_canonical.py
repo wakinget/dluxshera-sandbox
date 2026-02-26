@@ -1,7 +1,8 @@
 import jax
 import jax.numpy as jnp
 
-from dluxshera.systems.two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.inference.optimization import (
     make_binder_image_nll_fn,
     loss_canonical,
@@ -77,7 +78,7 @@ def test_make_binder_image_nll_fn_twoplane_smoke():
         "binary.contrast",
     )
 
-    binder = SheraTwoPlaneBinder(cfg, forward_spec, base_store)
+    binder = SheraBinder(cfg, forward_spec, base_store)
     image = binder.model()
     var = jnp.ones_like(image)
 

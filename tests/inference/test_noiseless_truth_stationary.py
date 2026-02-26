@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.three_plane import build_forward_spec_from_config
 from dluxshera.inference.optimization import make_binder_nll_fn
 from dluxshera.params.packing import pack_params
@@ -34,7 +34,7 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder_truth = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+    binder_truth = SheraBinder(cfg, forward_spec, truth_store)
     data = binder_truth.model()
     var = jnp.ones_like(data)
 

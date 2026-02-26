@@ -186,6 +186,14 @@ class ParameterStore:
             if field.dtype is None:
                 return value
 
+            # Keep non-numeric defaults (e.g., filesystem paths) as-is.
+            try:
+                np_dtype = np.dtype(field.dtype)
+            except Exception:
+                np_dtype = None
+            if np_dtype is not None and np_dtype.kind not in "biufc":
+                return value
+
             # coerce to correct dtype
             arr = jnp.asarray(value, dtype=field.dtype)
 

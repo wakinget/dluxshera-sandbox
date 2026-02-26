@@ -135,7 +135,7 @@ BINDER_RESERVED_NAMES = {
 }
 
 
-class BaseSheraBinder:
+class SheraBinder:
     """Shared backbone for Shera binder implementations.
 
     Encapsulates the common binder behaviour: storing config/spec/base-store,
@@ -474,65 +474,41 @@ class BaseSheraBinder:
             detector=detector,
         )
 
-    def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
-        """Evaluate the model using a fully merged effective store.
+    def _group_names_for_component(self, component: str) -> tuple[str, ...]:
+        """Return ParamField groups associated with a binder component."""
 
-        Called by :meth:`model` after merging a non-structural store delta with
-        the base store. Subclasses should implement this as a direct modeling
-        path (usually by building a telescope and calling ``model()``).
-
-        Parameters
-        ----------
-        eff_store : ParameterStore
-            Fully validated store that includes all values needed for a model
-            evaluation.
-
-        Returns
-        -------
-        jax.numpy.ndarray
-            The evaluated PSF model output.
-
-        Notes
-        -----
-        This method should not mutate the binder; use runtime bindings or
-        rebuild logic for structural changes instead of modifying state here.
-        """
-        return self._build_telescope(eff_store).model()
-
-    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural optics keys.
-
-        Runtime bindings map store keys to optics attributes (or paths) that
-        can be updated without rebuilding the full optics model. Subclasses
-        should override this to list the non-structural optics keys eligible
-        for fast-path updates.
-        """
-        from ..builders.optics import THREEPLANE_RUNTIME_BINDINGS, TWOPLANE_RUNTIME_BINDINGS
-
-        optics_kind = self._detect_optics_kind()
-        runtime_bindings = {
-            "three_plane": THREEPLANE_RUNTIME_BINDINGS,
-            "two_plane": TWOPLANE_RUNTIME_BINDINGS,
+        group_aliases = {
+            "optics": ("optics", "system", "band", "primary", "secondary"),
+            "source": ("source",),
+            "detector": ("detector", "imaging"),
         }
         try:
-            return runtime_bindings[optics_kind]
+            return group_aliases[component]
         except KeyError as exc:
-            supported = ", ".join(sorted(runtime_bindings))
-            raise ValueError(
-                f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
-            ) from exc
+            raise ValueError(f"Unknown binder component: {component!r}") from exc
+
+    def _runtime_bindings_for_group(self, group: str) -> tuple[tuple[str, str], ...]:
+        """Return runtime bindings declared by ParamField metadata for a component."""
+
+        groups = set(self._group_names_for_component(group))
+        return tuple(
+            (field.key, field.binding)
+            for field in self.forward_spec.values()
+            if field.group in groups and field.binding is not None
+        )
+
+    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
+        """Return runtime binding pairs for non-structural optics keys."""
+
+        return self._runtime_bindings_for_group("optics")
 
     def _source_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return runtime binding pairs for non-structural source keys."""
-        from ..builders.source import SOURCE_RUNTIME_BINDINGS
-
-        return SOURCE_RUNTIME_BINDINGS
+        return self._runtime_bindings_for_group("source")
 
     def _detector_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
         """Return runtime binding pairs for non-structural detector keys."""
-        from ..builders.detector import DETECTOR_RUNTIME_BINDINGS
-
-        return DETECTOR_RUNTIME_BINDINGS
+        return self._runtime_bindings_for_group("detector")
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Compute a structural hash for the current configuration.
@@ -568,27 +544,6 @@ class BaseSheraBinder:
             ) from exc
 
         return f"optics_kind={optics_kind}:{struct_hash}"
-
-    def _optics_structural_keys(self) -> set[str]:
-        """Return store keys treated as structural for the optics component."""
-
-        structural_keys = {
-            key
-            for key in self.forward_spec.keys()
-            if key.startswith(("system.", "band."))
-        }
-        runtime_keys = {store_key for store_key, _ in self._optics_runtime_bindings()}
-        return structural_keys - runtime_keys
-
-    def _source_structural_keys(self) -> set[str]:
-        """Return store keys treated as structural for the source component."""
-
-        return set()
-
-    def _detector_structural_keys(self) -> set[str]:
-        """Return store keys treated as structural for the detector component."""
-
-        return set()
 
     def _apply_runtime_updates(self, store: ParameterStore) -> dl.Telescope:
         """Apply runtime bindings to update cached telescope components."""
@@ -821,21 +776,22 @@ class BaseSheraBinder:
         return StoreNamespace(self.base_forward_store, prefix)
 
     def _structural_keys_by_component(self) -> dict[str, set[str]]:
-        """Return structural keys grouped by component."""
+        """Return structural keys grouped by binder component."""
 
+        structural_by_group = self.forward_spec.structural_keys_by_group()
         return {
-            "optics": self._optics_structural_keys(),
-            "source": self._source_structural_keys(),
-            "detector": self._detector_structural_keys(),
+            component: {
+                key
+                for group in self._group_names_for_component(component)
+                for key in structural_by_group.get(group, set())
+            }
+            for component in ("optics", "source", "detector")
         }
 
     def _structural_keys(self) -> set[str]:
         """Return the union of structural keys across all components."""
 
-        structural_keys: set[str] = set()
-        for keys in self._structural_keys_by_component().values():
-            structural_keys |= set(keys)
-        return structural_keys
+        return self.forward_spec.structural_keys()
 
     def _structural_keys_in_store(self, store: ParameterStore) -> list[str]:
         """Return the structural keys present in ``store``."""
@@ -963,7 +919,7 @@ class BaseSheraBinder:
     # Mostly immutable helpers
     # ------------------------------------------------------------------
 
-    def with_store(self, new_base_store: ParameterStore) -> "BaseSheraBinder":
+    def with_store(self, new_base_store: ParameterStore) -> "SheraBinder":
         """Return a new binder that uses a different base store.
 
         This is an immutable-style helper: it constructs a new binder instance
@@ -978,7 +934,7 @@ class BaseSheraBinder:
 
         Returns
         -------
-        BaseSheraBinder
+        SheraBinder
             New binder instance with the updated base store.
 
         Raises
@@ -998,7 +954,7 @@ class BaseSheraBinder:
         store: ParameterStore,
         *,
         allow_rebuild: bool = False,
-    ) -> "BaseSheraBinder":
+    ) -> "SheraBinder":
         """Return a new binder with an updated base store.
 
         This immutable-style helper validates the incoming store and applies
@@ -1064,6 +1020,6 @@ class BaseSheraBinder:
 
 __all__ = [
     "BaseConfig",
-    "BaseSheraBinder",
+    "SheraBinder",
     "BINDER_RESERVED_NAMES",
 ]

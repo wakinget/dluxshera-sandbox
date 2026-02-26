@@ -5,11 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-import dLux as dl
-import jax.numpy as jnp
-
-from .base import BaseConfig, BaseSheraBinder, compose_forward_spec
-from ..builders.source import build_alpha_cen_source
+from .base import BaseConfig, compose_forward_spec
 from ..params.spec import ParamSpec
 from ..params.store import ParameterStore
 from ..utils.utils import DEFAULT_DP_PATH
@@ -188,98 +184,9 @@ SHERA_FLIGHT_CONFIG = SheraTwoPlaneConfig(
     dp_design_wavelength_m=550e-9,
 )
 
-@dataclass
-class SheraTwoPlaneBinder(BaseSheraBinder):
-    """Generative model for the Shera two-plane system.
-
-    Mirrors :class:`SheraThreePlaneBinder` semantics: mostly immutable, owns a
-    forward-spec-validated base store, and exposes ``.model(store_delta)`` as the
-    canonical evaluation path. ``.model`` fast-paths through the cached
-    telescope when ``store_delta`` is omitted, and accepts non-structural
-    overlays by default when an explicit delta is provided. Structural updates
-    require ``allow_rebuild=True`` to rebuild the binder state. When
-    ``.update_store()`` returns a new binder instance with the refreshed base
-    store so the original binder remains unchanged.
-
-    The ``with_store`` attribute is an alias of
-    :meth:`BaseSheraBinder.with_store` to keep a stable public API. It preserves
-    immutable-style semantics by always returning a new binder instance.
-    """
-
-    cfg: SheraTwoPlaneConfig
-    forward_spec: ParamSpec
-    base_forward_store: ParameterStore
-
-    def __init__(
-        self,
-        cfg: SheraTwoPlaneConfig,
-        forward_spec: ParamSpec,
-        base_forward_store: ParameterStore,
-    ) -> None:
-        """Construct a binder for the two-plane Shera configuration.
-
-        Parameters
-        ----------
-        cfg : SheraTwoPlaneConfig
-            Fully prepared Shera two-plane configuration. Derived config
-            values expected by the optics/source builders should already be
-            present.
-        forward_spec : ParamSpec
-            Parameter specification describing the forward store, including
-            structural keys and derived entries.
-        base_forward_store : ParameterStore
-            Forward-style base store with derived values populated. The store
-            is validated against ``forward_spec`` and used as the immutable
-            baseline for evaluations.
-        """
-        super().__init__(
-            cfg=cfg,
-            forward_spec=forward_spec,
-            base_forward_store=base_forward_store,
-        )
-
-    def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:
-        """Evaluate the Shera two-plane model directly.
-
-        Builds a fresh telescope using the two-plane optics and alpha Cen
-        source with ``eff_store`` and returns the modeled PSF output.
-        """
-        return self._build_telescope(eff_store).model()
-
-    def _build_optics(self, store: ParameterStore):
-        """Build the Shera two-plane optics stack."""
-        from ..builders.optics import build_shera_twoplane_optics
-
-        return build_shera_twoplane_optics(self.cfg, store=store, spec=self.forward_spec)
-
-    def _build_source(self, store: ParameterStore):
-        """Build the Shera alpha Cen source for the two-plane system."""
-        return build_alpha_cen_source(store, cfg=self.cfg)
-
-    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime bindings declared by the optics contract."""
-        from ..components.optics import build_twoplane_optics_contract
-
-        contract = build_twoplane_optics_contract(self.cfg)
-        return tuple(
-            (field.key, field.binding)
-            for field in contract.values()
-            if field.binding is not None
-        )
-
-    def _compute_structural_hash(self) -> Optional[str]:
-        """Return the structural hash derived from the two-plane config."""
-        from ..builders.optics import structural_hash_for_twoplane
-
-        return structural_hash_for_twoplane(self.cfg)
-
-    with_store = BaseSheraBinder.with_store
-
-
 __all__ = [
     "SHERA_TWOPLANE_SYSTEM_ID",
     "SheraTwoPlaneConfig",
-    "SheraTwoPlaneBinder",
     "SHERA_TESTBED_CONFIG",
     "SHERA_FLIGHT_CONFIG",
     "build_forward_spec_from_config",

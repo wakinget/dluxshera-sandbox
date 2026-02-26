@@ -207,6 +207,24 @@ class ParamSpec:
         keep_keys = [key for key in self._fields if key not in exclude_set]
         return self.subset(keep_keys)
 
+    def structural_keys(self) -> set[str]:
+        """Return all keys declared structural by field metadata."""
+
+        return {
+            field.key
+            for field in self.values()
+            if getattr(field, "structural", False)
+        }
+
+    def structural_keys_by_group(self) -> dict[str, set[str]]:
+        """Return structural keys grouped by field group."""
+
+        grouped: dict[str, set[str]] = {}
+        for field in self.values():
+            if getattr(field, "structural", False):
+                grouped.setdefault(field.group, set()).add(field.key)
+        return grouped
+
 
 # ---------------------------------------------------------------------------
 # Inference helpers

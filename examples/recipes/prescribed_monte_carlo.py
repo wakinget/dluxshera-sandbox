@@ -84,7 +84,7 @@ from dluxshera.systems.three_plane import (
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
     SheraThreePlaneConfig,
-    SheraThreePlaneBinder,
+    SheraBinder,
     build_forward_spec_from_config,
 )
 
@@ -1806,7 +1806,7 @@ def main() -> None:
         truth_store = base_store.replace(truth_overrides)
         truth_store = truth_store.refresh_derived(forward_spec)
 
-        binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+        binder = SheraBinder(cfg, forward_spec, truth_store)
 
         # Generate the synthetic data
         data_psf = binder.model()

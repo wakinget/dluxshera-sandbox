@@ -129,7 +129,7 @@ from dluxshera.params.spec import build_inference_spec_basic, make_inference_sub
 from dluxshera.params.store import ParameterStore, strip_structural
 from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneBinder,
+    SheraBinder,
     SheraThreePlaneConfig,
     build_forward_spec_from_config,
 )
@@ -467,7 +467,7 @@ def main() -> None:
     base_store = ParameterStore.from_spec_defaults(forward_spec)
     base_store = base_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
+    binder = SheraBinder(cfg, forward_spec, base_store)
 
     # =============================================================================
     # Section: Define infer keys, sweep keys, and sweep schedule

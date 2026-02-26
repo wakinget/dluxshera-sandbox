@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt
 from dluxshera.systems.three_plane import (
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneBinder,
+    SheraBinder,
     SheraThreePlaneConfig,
     build_forward_spec_from_config,
 )
@@ -98,7 +98,7 @@ def compute_fim(
     )
     base_store = base_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
+    binder = SheraBinder(cfg, forward_spec, base_store)
     data = binder.model()
     var = data
 

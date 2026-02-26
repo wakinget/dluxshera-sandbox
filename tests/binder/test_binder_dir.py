@@ -1,11 +1,12 @@
-from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 
 from tests.conftest import make_forward_store
 
 
 def _make_binder():
     forward_spec, forward_store = make_forward_store(SHERA_TESTBED_CONFIG)
-    return SheraThreePlaneBinder(
+    return SheraBinder(
         SHERA_TESTBED_CONFIG,
         forward_spec,
         forward_store,

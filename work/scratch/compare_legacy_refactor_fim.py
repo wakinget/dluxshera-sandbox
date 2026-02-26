@@ -44,7 +44,7 @@ from dluxshera.params.spec import (
 )
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.three_plane import (
-    SheraThreePlaneBinder, build_forward_spec_from_config,
+    SheraBinder, build_forward_spec_from_config,
     SHERA_TESTBED_CONFIG, SHERA_FLIGHT_CONFIG
 )
 from dluxshera.builders.optics import build_shera_threeplane_optics
@@ -286,7 +286,7 @@ forward_truth_store = ParameterStore.from_spec_defaults(forward_spec)
 forward_truth_store = forward_truth_store.refresh_derived(forward_spec)
 
 # Create the Binder
-binder = SheraThreePlaneBinder(cfg, forward_spec, forward_truth_store)
+binder = SheraBinder(cfg, forward_spec, forward_truth_store)
 # The binder is the object that acts like the dLux Telescope.
 # It holds the source, optics + detector, and exposes the .model() method
 

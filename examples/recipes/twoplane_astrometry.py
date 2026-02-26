@@ -12,7 +12,7 @@ What this recipe demonstrates
     - an inference spec describing the solved-for parameters ("inference_spec")
 - Initializing a ParameterStore (values) and populating derived parameters
   (e.g., log-flux derived from exposure/throughput/flux density).
-- Building a SheraTwoPlaneBinder to bind parameters to optics/source/detector.
+- Building a SheraBinder to bind parameters to optics/source/detector.
 - Generating synthetic data (optionally with noise).
 - Defining inference keys + priors, sampling an initial state from priors.
 - Defining the loss (typically NLL; MAP variants also available).
@@ -88,7 +88,7 @@ from dluxshera.systems.two_plane import (
     SheraTwoPlaneConfig,
     SHERA_TESTBED_CONFIG,
     SHERA_FLIGHT_CONFIG,
-    SheraTwoPlaneBinder,
+    SheraBinder,
     build_forward_spec_from_config,
 )
 
@@ -191,7 +191,7 @@ def main(
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = SheraTwoPlaneBinder(cfg, forward_spec, truth_store)
+    binder = SheraBinder(cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
     data_psf = binder.model()

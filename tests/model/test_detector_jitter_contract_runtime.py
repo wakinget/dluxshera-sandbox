@@ -6,13 +6,13 @@ from dluxshera.builders.detector import build_detector
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.two_plane import (
     SHERA_TWOPLANE_SYSTEM_ID,
-    SheraTwoPlaneBinder,
+    SheraBinder,
     SheraTwoPlaneConfig,
     build_forward_spec_from_config,
 )
 
 
-def _make_twoplane_binder() -> tuple[SheraTwoPlaneBinder, float]:
+def _make_twoplane_binder() -> tuple[SheraBinder, float]:
     cfg = SheraTwoPlaneConfig(
         pupil_npix=64,
         psf_npix=64,
@@ -25,7 +25,7 @@ def _make_twoplane_binder() -> tuple[SheraTwoPlaneBinder, float]:
         forward_spec,
         system_id=SHERA_TWOPLANE_SYSTEM_ID,
     )
-    binder = SheraTwoPlaneBinder(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
     return binder, float(forward_store.get("detector.jitter.sigma"))
 
 

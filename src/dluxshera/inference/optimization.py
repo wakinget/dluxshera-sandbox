@@ -29,8 +29,7 @@ from ..params.packing import (
 )
 
 if TYPE_CHECKING:
-    from ..systems.three_plane import SheraThreePlaneBinder
-    from ..systems.two_plane import SheraTwoPlaneBinder
+    from ..systems import SheraBinder
 
 
 def _build_artifacts_mapping(
@@ -477,7 +476,7 @@ def make_binder_image_nll_fn(
     Callable[[np.ndarray], np.ndarray], np.ndarray, Callable[[np.ndarray], np.ndarray]
 ]:
     """
-    Canonical θ-space image NLL using :class:`SheraThreePlaneBinder`.
+    Canonical θ-space image NLL using :class:`SheraBinder`.
 
     The returned loss is intentionally explicit:
 
@@ -493,7 +492,7 @@ def make_binder_image_nll_fn(
     data, var
         Observed image and per-pixel variance.
     binder
-        Optional pre-built :class:`SheraThreePlaneBinder`. If omitted a binder
+        Optional pre-built :class:`SheraBinder`. If omitted a binder
         is constructed using ``cfg``, ``forward_spec``, and ``base_forward_store``.
     noise_model, reduce
         Noise model selector and reduction for the NLL.
@@ -505,8 +504,7 @@ def make_binder_image_nll_fn(
         unexpectedly non-zero). Set to ``False`` for the standard
         loss-only tuple.
     """
-    from ..systems.three_plane import SheraThreePlaneBinder
-    from ..systems.two_plane import SheraTwoPlaneBinder
+    from ..systems import SheraBinder
 
     if binder is not None:
         mismatches = []
@@ -538,13 +536,13 @@ def make_binder_image_nll_fn(
         cfg = resolved_config_to_system_config(resolved_cfg)
 
     if isinstance(cfg, SheraThreePlaneConfig):
-        binder_obj = SheraThreePlaneBinder(
+        binder_obj = SheraBinder(
             cfg,
             forward_spec,
             base_forward_store,
         )
     elif isinstance(cfg, SheraTwoPlaneConfig):
-        binder_obj = SheraTwoPlaneBinder(
+        binder_obj = SheraBinder(
             cfg,
             forward_spec,
             base_forward_store,
@@ -591,7 +589,7 @@ def loss_canonical(
         SheraThreePlaneConfig describing the structural optical configuration.
     forward_spec : ParamSpec
         Forward-model ParamSpec describing *all* parameters in the model, both
-        inferred and fixed. This is what the SheraThreePlaneBinder validates
+        inferred and fixed. This is what the SheraBinder validates
         against.
     infer_keys : tuple[str, ...]
         Keys of the parameters that live in θ-space (and their ordering).
@@ -1259,7 +1257,7 @@ def run_image_gd(
     """
     Run gradient descent in θ-space for image-based NLL using the Shera model.
 
-    Now uses SheraThreePlaneBinder + `make_binder_image_nll_fn` under the hood.
+    Now uses SheraBinder + `make_binder_image_nll_fn` under the hood.
 
     Parameters
     ----------
