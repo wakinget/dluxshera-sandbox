@@ -1,25 +1,25 @@
 """
-Canonical astrometry retrieval recipe (generalized Shera binder).
+Canonical astrometry retrieval recipe.
 
-Migration reference (strict system/experiment schema)
+Recent Migration reference
 ------------------------------------------------------
-This recipe is the exemplar for the strict config-schema migration:
+This recipe is the exemplar for the config-schema migration:
 1) Load YAML/JSON config from disk.
 2) Resolve with `resolve_config` (preset + deep-merge + validation).
-3) Build the generalized binder path from resolved `system` config.
+3) Build the binder from resolved `system` config.
 4) Drive inference settings from resolved `experiment` config.
 
 Use this script as the pattern when migrating other recipes.
 
 This script is the primary, end-to-end onboarding example for the dLuxShera workflow.
 It is designed to be read like a Matlab script from top to bottom.
-Open this in your editor and run it.
+You can open this in your editor and run it.
 
 What this recipe demonstrates
-- Building/choosing a three-plane Shera configuration and applying small overrides.
+- Building/choosing a three-plane Shera configuration and applying overrides.
 - Constructing ParameterSpecs:
     - a forward spec describing the simulation parameters ("forward_spec")
-    - an inference subspec selected from the forward spec via infer_keys
+    - a subspec selected from the forward spec via infer_keys
 - Initializing a ParameterStore (values) and populating derived parameters
   (e.g., plate scale computed from focal lengths + pixel pitch via registered
   transforms).
@@ -103,6 +103,10 @@ from dluxshera.systems.three_plane import (
 )
 from dluxshera.systems.two_plane import build_forward_spec_from_config as build_twoplane_forward_spec_from_config
 
+##############################
+# MAIN SIMULATION PARAMETERS #
+##############################
+
 JAX_ENABLE_X64 = True
 FAST_MODE = False
 ADD_NOISE = True
@@ -116,9 +120,11 @@ TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
 DEFAULT_SEED = 42
-DEFAULT_N_ITER = 40
+DEFAULT_N_ITER = 50
 DEFAULT_FAST_ITER = 30
 DEFAULT_BASE_LR = 0.5
+
+# User may comment out any keys they wish not to include in the optimization
 DEFAULT_INFER_KEYS = (
     "binary.separation_as",
     "binary.position_angle_deg",
@@ -131,12 +137,15 @@ DEFAULT_INFER_KEYS = (
     "secondary.zernike_coeffs_nm",
 )
 
+# Presets
+DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P" # System presets describe the system (source, optics, detector)
+DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY" # Experiment presets describe the experiment
+
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
-DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P"
-DEFAULT_EXPERIMENT_PRESET = "INFERENCE_CANONICAL"
+
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -681,7 +690,7 @@ def _resolve_experiment_options(experiment_cfg: dict[str, Any]) -> dict[str, Any
     optimizer_cfg = experiment_cfg.get("optimizer", {})
     outputs_cfg = experiment_cfg.get("outputs", {})
 
-    # TODO(phase-8C): tighten validation once the experiment schema is finalized.
+    # TODO: tighten validation once the experiment schema is finalized.
     return {
         "seed": int(experiment_cfg.get("seed", DEFAULT_SEED)),
         "infer_keys": tuple(experiment_cfg.get("infer_keys", DEFAULT_INFER_KEYS)),
