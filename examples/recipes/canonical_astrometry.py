@@ -23,7 +23,7 @@ What this recipe demonstrates
 - Initializing a ParameterStore (values) and populating derived parameters
   (e.g., plate scale computed from focal lengths + pixel pitch via registered
   transforms).
-- Building a BaseSheraBinder that dispatches source/optics/detector by kind.
+- Building a SheraBinder that dispatches source/optics/detector by kind.
 - Generating synthetic data (optionally with noise).
 - Defining inference keys + priors, sampling an initial state from priors.
 - Defining the loss (typically NLL; MAP variants also available).
@@ -97,7 +97,7 @@ from dluxshera.plot.plotting import (
     plot_signals_grid,
 )
 from dluxshera.plot.printing import print_optimization_summary
-from dluxshera.systems import BaseSheraBinder
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 
 ##############################
@@ -209,7 +209,7 @@ def main(
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = BaseSheraBinder(system_cfg, forward_spec, truth_store)
+    binder = SheraBinder(system_cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
     data_psf = binder.model()

@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.three_plane import build_forward_spec_from_config
 from dluxshera.inference.optimization import make_binder_nll_fn
 from dluxshera.params.packing import pack_params
@@ -20,7 +20,7 @@ def test_theta0_store_override_keeps_binder_base_alignment(shera_smoke_cfg):
     base_store = ParameterStore.from_spec_defaults(forward_spec)
     base_store = base_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
+    binder = SheraBinder(cfg, forward_spec, base_store)
     data = binder.model()
     var = jnp.ones_like(data)
 

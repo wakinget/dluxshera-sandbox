@@ -12,7 +12,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 from tests.conftest import make_forward_store
 
 
@@ -29,7 +30,7 @@ def _check_instance_of(module_name: str, class_name: str, instance) -> bool:
 def test_binder_introspection_snapshot(capsys):
     cfg = SHERA_TESTBED_CONFIG
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = SheraThreePlaneBinder(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
     base_store = binder.base_forward_store
 
     dataclass_params = getattr(type(binder), "__dataclass_params__", None)

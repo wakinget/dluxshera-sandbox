@@ -2,8 +2,10 @@
 
 import pytest
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
-from dluxshera.systems.two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.two_plane import SheraTwoPlaneConfig
 from dluxshera.params.store import ParameterStore
 from tests.conftest import make_forward_store
 
@@ -11,8 +13,8 @@ from tests.conftest import make_forward_store
 @pytest.mark.parametrize(
     "binder_cls,cfg",
     [
-        (SheraThreePlaneBinder, SHERA_TESTBED_CONFIG),
-        (SheraTwoPlaneBinder, SheraTwoPlaneConfig()),
+        (SheraBinder, SHERA_TESTBED_CONFIG),
+        (SheraBinder, SheraTwoPlaneConfig()),
     ],
 )
 def test_binder_merge_overlay_is_shared(binder_cls, cfg):
@@ -35,8 +37,8 @@ def test_binder_merge_overlay_is_shared(binder_cls, cfg):
 @pytest.mark.parametrize(
     "binder_cls,cfg",
     [
-        (SheraThreePlaneBinder, SHERA_TESTBED_CONFIG),
-        (SheraTwoPlaneBinder, SheraTwoPlaneConfig()),
+        (SheraBinder, SHERA_TESTBED_CONFIG),
+        (SheraBinder, SheraTwoPlaneConfig()),
     ],
 )
 def test_binder_get_reads_cfg_and_store(binder_cls, cfg):
@@ -57,8 +59,8 @@ def test_binder_get_reads_cfg_and_store(binder_cls, cfg):
 @pytest.mark.parametrize(
     "binder_cls,cfg",
     [
-        (SheraThreePlaneBinder, SHERA_TESTBED_CONFIG),
-        (SheraTwoPlaneBinder, SheraTwoPlaneConfig()),
+        (SheraBinder, SHERA_TESTBED_CONFIG),
+        (SheraBinder, SheraTwoPlaneConfig()),
     ],
 )
 def test_binder_cfg_field_forwarding(binder_cls, cfg):

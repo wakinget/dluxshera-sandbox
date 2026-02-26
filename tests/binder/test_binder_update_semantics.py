@@ -2,19 +2,15 @@ import pytest
 
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.transform_registry import DEFAULT_SYSTEM_ID
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
-from dluxshera.systems.two_plane import (
-    SHERA_TWOPLANE_SYSTEM_ID,
-    SheraTwoPlaneBinder,
-    SheraTwoPlaneConfig,
-)
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
+from dluxshera.systems.two_plane import SHERA_TWOPLANE_SYSTEM_ID, SheraTwoPlaneConfig
 from tests.conftest import make_forward_store
 
 
-def _runtime_cfg_for_binder(binder_cls, request):
-    if binder_cls is SheraThreePlaneBinder:
-        return request.getfixturevalue("shera_smoke_cfg")
-    return SheraTwoPlaneConfig(pupil_npix=96, psf_npix=96, oversample=2, n_lambda=2)
+@pytest.fixture(params=[SHERA_TESTBED_CONFIG, SheraTwoPlaneConfig(pupil_npix=96, psf_npix=96, oversample=2, n_lambda=2)])
+def cfg(request):
+    return request.param
 
 
 def _refresh_store(store, spec):
@@ -22,14 +18,9 @@ def _refresh_store(store, spec):
     return store.refresh_derived(spec, system_id=system_id)
 
 
-@pytest.mark.parametrize(
-    "binder_cls",
-    [SheraThreePlaneBinder, SheraTwoPlaneBinder],
-)
-def test_model_runtime_overlay_avoids_rebuild(monkeypatch, binder_cls, request):
-    cfg = _runtime_cfg_for_binder(binder_cls, request)
+def test_model_runtime_overlay_avoids_rebuild(monkeypatch, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("model() unexpectedly rebuilt the telescope")
@@ -42,14 +33,9 @@ def test_model_runtime_overlay_avoids_rebuild(monkeypatch, binder_cls, request):
     binder.model(delta)
 
 
-@pytest.mark.parametrize(
-    "binder_cls",
-    [SheraThreePlaneBinder, SheraTwoPlaneBinder],
-)
-def test_update_store_runtime_avoids_optics_rebuild(monkeypatch, binder_cls, request):
-    cfg = _runtime_cfg_for_binder(binder_cls, request)
+def test_update_store_runtime_avoids_optics_rebuild(monkeypatch, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("update_store() unexpectedly rebuilt optics")
@@ -66,14 +52,9 @@ def test_update_store_runtime_avoids_optics_rebuild(monkeypatch, binder_cls, req
     )
 
 
-@pytest.mark.parametrize(
-    "binder_cls",
-    [SheraThreePlaneBinder, SheraTwoPlaneBinder],
-)
-def test_structural_update_requires_allow_rebuild(binder_cls, request):
-    cfg = _runtime_cfg_for_binder(binder_cls, request)
+def test_structural_update_requires_allow_rebuild(cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
 
     new_value = forward_store.get("system.m1_diameter_m") + 0.01
     updated_store = forward_store.replace({"system.m1_diameter_m": new_value})
@@ -83,14 +64,9 @@ def test_structural_update_requires_allow_rebuild(binder_cls, request):
         binder.update_store(updated_store)
 
 
-@pytest.mark.parametrize(
-    "binder_cls",
-    [SheraThreePlaneBinder, SheraTwoPlaneBinder],
-)
-def test_structural_update_rebuilds_optics_when_allowed(monkeypatch, binder_cls, request):
-    cfg = _runtime_cfg_for_binder(binder_cls, request)
+def test_structural_update_rebuilds_optics_when_allowed(monkeypatch, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
 
     new_value = forward_store.get("system.m1_diameter_m") + 0.01
     updated_store = forward_store.replace({"system.m1_diameter_m": new_value})
@@ -113,14 +89,9 @@ def test_structural_update_rebuilds_optics_when_allowed(monkeypatch, binder_cls,
     )
 
 
-@pytest.mark.parametrize(
-    "binder_cls",
-    [SheraThreePlaneBinder, SheraTwoPlaneBinder],
-)
-def test_mixed_updates_structural_dominate(binder_cls, request):
-    cfg = _runtime_cfg_for_binder(binder_cls, request)
+def test_mixed_updates_structural_dominate(cfg):
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = binder_cls(cfg, forward_spec, forward_store)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
 
     delta = ParameterStore.from_dict(
         {

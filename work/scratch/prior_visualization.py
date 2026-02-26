@@ -59,7 +59,7 @@ from dluxshera.plot.plotting import apply_plot_defaults, choose_subplot_grid, ge
 from dluxshera.systems.three_plane import (
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneBinder,
+    SheraBinder,
     build_forward_spec_from_config,
 )
 
@@ -265,7 +265,7 @@ def _plot_hist_grid(
 
 
 def _plot_psf_mosaic(
-    binder: SheraThreePlaneBinder,
+    binder: SheraBinder,
     sample_stores: list[ParameterStore],
     inference_subspec,
     nll_loss_fn,
@@ -385,7 +385,7 @@ def main() -> None:
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+    binder = SheraBinder(cfg, forward_spec, truth_store)
 
     data = binder.model()
     data_var = data

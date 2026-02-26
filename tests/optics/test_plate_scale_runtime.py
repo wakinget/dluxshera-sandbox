@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
-from dluxshera.systems.two_plane import SheraTwoPlaneBinder
+from dluxshera.systems import SheraBinder
+from dluxshera.systems import SheraBinder
 from dluxshera.builders import optics as builder
 from dataclasses import replace
 
@@ -22,7 +22,7 @@ def test_plate_scale_updates_psf(shera_smoke_cfg, shera_smoke_updates):
     forward_spec, forward_store = make_forward_store(
         shera_smoke_cfg, updates=shera_smoke_updates
     )
-    binder = SheraThreePlaneBinder(
+    binder = SheraBinder(
         shera_smoke_cfg,
         forward_spec,
         forward_store,
@@ -60,7 +60,7 @@ def test_twoplane_plate_scale_updates_without_cache_rebuild():
         n_lambda=1,
     )
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = SheraTwoPlaneBinder(
+    binder = SheraBinder(
         cfg,
         forward_spec,
         forward_store,

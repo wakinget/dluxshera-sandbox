@@ -6,9 +6,9 @@ from typing import Dict, Optional
 import jax.numpy as jnp
 import pytest
 
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneBinder,
     SheraThreePlaneConfig,
     build_forward_spec_from_config,
 )
@@ -112,7 +112,7 @@ def shera_smoke_infer_keys():
 @pytest.fixture(scope="session")
 def shera_smoke_binder_data(shera_smoke_cfg, shera_smoke_forward):
     forward_spec, forward_store = shera_smoke_forward
-    binder = SheraThreePlaneBinder(shera_smoke_cfg, forward_spec, forward_store)
+    binder = SheraBinder(shera_smoke_cfg, forward_spec, forward_store)
     data = binder.model()
     var = jnp.ones_like(data)
     return binder, data, var
