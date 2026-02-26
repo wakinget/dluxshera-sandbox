@@ -634,42 +634,6 @@ def strip_derived(
     return ParameterStore.from_dict(filtered)
 
 
-def strip_structural(
-    store: ParameterStore,
-    *,
-    structural_keys: Optional[Iterable[ParamKey]] = None,
-    structural_prefixes: Tuple[str, ...] = ("system.", "band."),
-) -> ParameterStore:
-    """
-    Return a new store with structural keys removed.
-
-    Parameters
-    ----------
-    store:
-        ParameterStore to strip structural keys from.
-    structural_keys:
-        Optional explicit set/iterable of structural keys to remove. When
-        provided, these keys are removed verbatim. When omitted, keys matching
-        any of ``structural_prefixes`` are treated as structural.
-    structural_prefixes:
-        Prefixes used to detect structural keys when ``structural_keys`` is
-        not provided.
-    """
-
-    if structural_keys is None:
-        prefixes = tuple(structural_prefixes)
-        structural_set = {
-            key
-            for key in store.keys()
-            if any(key.startswith(prefix) for prefix in prefixes)
-        }
-    else:
-        structural_set = set(structural_keys)
-
-    filtered = {key: value for key, value in store.items() if key not in structural_set}
-    return ParameterStore.from_dict(filtered)
-
-
 def subset_store(
     store: ParameterStore,
     keys: Iterable[ParamKey],
