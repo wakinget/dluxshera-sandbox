@@ -7,7 +7,7 @@ system:
   optics:
     kind: three_plane
     psf_npix: 256
-    oversample: 1
+    oversample: 3
     pupil_npix: 256
     m1_diameter_m: 0.22
     m2_diameter_m: 0.025
@@ -36,13 +36,13 @@ system:
     - 9
     - 10
     - 11
-    diffractive_pupil_path: src/dluxshera/data/diffractive_pupil.npy
+    diffractive_pupil_path: src/dluxshera/data/pupils/diffractive_pupil.npy
     dp_design_wavelength_m: 5.5e-07
   detector:
     model: HWK4123
     layers:
     - name: downsample
-      factor: 1
+      factor: 3
     - name: pixel_offsets
     - name: pixel_response
     - name: jitter

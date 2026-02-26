@@ -7,7 +7,7 @@ system:
   optics:
     kind: two_plane
     psf_npix: 256
-    oversample: 1
+    oversample: 2
     pupil_npix: 256
     m1_diameter_m: 0.09
     m2_diameter_m: 0.025
@@ -24,13 +24,13 @@ system:
     - 9
     - 10
     - 11
-    diffractive_pupil_path: src/dluxshera/data/diffractive_pupil.npy
+    diffractive_pupil_path: src/dluxshera/data/pupils/diffractive_pupil.npy
     dp_design_wavelength_m: 5.5e-07
   detector:
     model: GSENSE2020BSI
     layers:
     - name: downsample
-      factor: 1
+      factor: 2
     - name: pixel_offsets
     - name: pixel_response
     - name: jitter
