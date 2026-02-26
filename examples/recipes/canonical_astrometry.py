@@ -86,7 +86,7 @@ from dluxshera.params.packing import (
     pack_params,
     unpack_params as store_unpack_params,
 )
-from dluxshera.params.store import ParameterStore, strip_structural
+from dluxshera.params.store import ParameterStore
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
@@ -275,10 +275,10 @@ def main(
             "Supported modes: 'prior_sample', 'truth'."
         )
     # Apply the randomly drawn perturbations to the model and produce an image
-    # We use strip_structural() here to remove any structural parameters present in the store
-    # Otherwise, the presence of structural parameters requires rebuilding the model
+    # Use binder.strip_structural() so structural keys are removed using
+    # the binder's contract-driven structural policy before binder.model().
     init_psf = binder.model(
-        strip_structural(init_store, structural_keys=binder.structural_store_keys())
+        binder.strip_structural(init_store)
     )
 
     print("Building the loss function...")
@@ -518,7 +518,7 @@ def main(
 
     final_store = store_unpack_params(inference_subspec, theta_final, init_store)
     final_psf = binder.model(
-        strip_structural(final_store, structural_keys=binder.structural_store_keys())
+        binder.strip_structural(final_store)
     )
 
     print("\n==============================")

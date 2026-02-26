@@ -840,6 +840,26 @@ class SheraBinder:
 
         return self._structural_keys()
 
+    def strip_structural(self, store: ParameterStore) -> ParameterStore:
+        """
+        Return a new store with structural keys removed according to this binder's
+        forward spec (contract-driven).
+
+        Parameters
+        ----------
+        store:
+            Store to remove structural keys from.
+
+        Returns
+        -------
+        ParameterStore
+            Store with any keys in `self.structural_store_keys()` removed.
+        """
+
+        structural = self.structural_store_keys()
+        filtered = {key: value for key, value in store.items() if key not in structural}
+        return ParameterStore.from_dict(filtered)
+
     def model(
         self,
         store_delta: Optional[ParameterStore] = None,

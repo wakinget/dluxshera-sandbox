@@ -102,3 +102,29 @@ def test_mixed_updates_structural_dominate(cfg):
 
     with pytest.raises(ValueError, match="system.m1_diameter_m"):
         binder.model(delta)
+
+
+def test_strip_structural_removes_only_structural_keys(cfg):
+    forward_spec, forward_store = make_forward_store(cfg)
+    binder = SheraBinder(cfg, forward_spec, forward_store)
+
+    structural_key = next(iter(binder.structural_store_keys()))
+    non_structural_key = next(
+        key
+        for key, field in forward_spec.items()
+        if not field.structural and key in forward_store.keys()
+    )
+
+    base_non_structural = forward_store.get(non_structural_key)
+    delta = ParameterStore.from_dict(
+        {
+            structural_key: forward_store.get(structural_key),
+            non_structural_key: base_non_structural,
+        }
+    )
+
+    stripped = binder.strip_structural(delta)
+
+    assert structural_key not in stripped.keys()
+    assert stripped.get(non_structural_key) == pytest.approx(base_non_structural)
+    assert delta.get(structural_key) == forward_store.get(structural_key)

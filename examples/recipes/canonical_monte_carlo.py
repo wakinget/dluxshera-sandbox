@@ -48,7 +48,7 @@ from dluxshera.params.packing import (
     unpack_params as store_unpack_params,
 )
 from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
-from dluxshera.params.store import ParameterStore, strip_structural
+from dluxshera.params.store import ParameterStore
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
@@ -422,7 +422,7 @@ def main(
 
         init_store = prior_spec.sample(rng_key=split_key, keys=INFER_KEYS)
         init_psf = binder.model(
-            strip_structural(init_store, structural_keys=binder.structural_store_keys())
+            binder.strip_structural(init_store)
         )
 
         _, theta0 = make_binder_nll_fn(
@@ -584,7 +584,7 @@ def main(
 
         final_store = store_unpack_params(inference_subspec, theta_final, init_store)
         final_psf = binder.model(
-            strip_structural(final_store, structural_keys=binder.structural_store_keys())
+            binder.strip_structural(final_store)
         )
 
         loss_init = float(loss_fn(theta0))

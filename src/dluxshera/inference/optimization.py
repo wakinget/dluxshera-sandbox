@@ -21,7 +21,7 @@ from ..systems.three_plane import SheraThreePlaneConfig
 from ..systems.two_plane import SheraTwoPlaneConfig
 from ..config import resolve_config, resolved_config_to_system_config
 from ..params.spec import ParamSpec, ParamKey
-from ..params.store import ParameterStore, strip_structural, subset_store
+from ..params.store import ParameterStore, subset_store
 from ..params.packing import (
     build_index_map,
     pack_params as store_pack_params,
@@ -438,12 +438,8 @@ def make_binder_nll_fn(
 
     def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
         full_store = store_unpack_params(sub_spec, theta, base_forward_store)
-        # Protect binder.model from structural keys while keeping fast path intact.
-        structural_keys = binder.structural_store_keys()
-        return strip_structural(
-            subset_store(full_store, infer_keys),
-            structural_keys=structural_keys,
-        )
+        # Keep binder.model on the non-structural fast path.
+        return binder.strip_structural(subset_store(full_store, infer_keys))
 
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         store_delta = theta_to_store_delta(theta)
