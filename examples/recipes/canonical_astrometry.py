@@ -226,6 +226,7 @@ def main(
             "source.position_angle_deg": 90.0,
             "source.x_position_as": 0.0,
             "source.y_position_as": 0.0,
+            "source.exposure_time_s": 1800.,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
