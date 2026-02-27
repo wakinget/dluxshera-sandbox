@@ -123,12 +123,12 @@ DEFAULT_BASE_LR = 0.5
 
 # User may comment out any keys they wish not to include in the optimization
 DEFAULT_INFER_KEYS = (
-    "binary.separation_as",
-    "binary.position_angle_deg",
-    "binary.x_position_as",
-    "binary.y_position_as",
-    "binary.log_flux_total",
-    "binary.contrast",
+    "source.separation_as",
+    "source.position_angle_deg",
+    "source.x_position_as",
+    "source.y_position_as",
+    "source.log_flux_total",
+    "source.contrast",
     "system.plate_scale_as_per_pix",
     "primary.zernike_coeffs_nm",
     "secondary.zernike_coeffs_nm",
@@ -200,10 +200,10 @@ def main(
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_store = truth_store.replace(
         {
-            "binary.separation_as": 10.0,
-            "binary.position_angle_deg": 90.0,
-            "binary.x_position_as": 0.0,
-            "binary.y_position_as": 0.0,
+            "source.separation_as": 10.0,
+            "source.position_angle_deg": 90.0,
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
             "imaging.exposure_time_s": 1800.,
         }
     )
@@ -242,19 +242,19 @@ def main(
     # prior_info defines our initial knowledge of each parameter,
     # and determines the amplitude of the random perturbation applied to the model
     prior_info = {
-        "binary.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"}, # 1.67e-2 deg = 1 arcmin
-        "binary.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
-        "binary.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
-        "binary.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"}, # 4.3e-3 log-flux -> 1% flux cal
-        "binary.contrast":               {"sigma": 6e-3, "dist": "LogNormal"}, # 6e-3 log-contrast -> indep. 1% star cal
-        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"}, # 4.3e-3 log-platescale -> 1% cal
-        "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),2),
+        "source.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
+        "source.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"}, # 1.67e-2 deg = 1 arcmin
+        "source.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "source.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
+        "source.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"}, # 4.3e-3 log-flux -> 1% flux cal
+        "source.contrast":               {"sigma": 6e-3, "dist": "LogNormal"}, # 6e-3 log-contrast -> indep. 1% star cal
+        "optics.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"}, # 4.3e-3 log-platescale -> 1% cal
+        "optics.primary.zernike_coeffs_nm": {
+            "sigma": np.full_like(truth_store.get("optics.primary.zernike_coeffs_nm"),2),
             "dist": "Normal",
         },
-        "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),2),
+        "optics.secondary.zernike_coeffs_nm": {
+            "sigma": np.full_like(truth_store.get("optics.secondary.zernike_coeffs_nm"),2),
             "dist": "Normal",
         },
     }
