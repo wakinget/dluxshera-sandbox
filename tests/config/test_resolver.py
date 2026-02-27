@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import warnings
+from dataclasses import dataclass
 
 import pytest
 
 from dluxshera.config import (
+    as_dict,
     deep_merge,
     resolve_config,
     resolve_experiment_config,
@@ -75,6 +77,35 @@ def test_deep_merge_replaces_lists():
     assert merged == {"a": {"b": [3], "c": 1, "d": 2}}
 
 
+@dataclass
+class _CfgDC:
+    system: dict | None = None
+    experiment: dict | None = None
+
+
+class _CfgObj:
+    def __init__(self, *, system=None, experiment=None):
+        if system is not None:
+            self.system = system
+        if experiment is not None:
+            self.experiment = experiment
+
+
+def test_as_dict_accepts_system_or_experiment_only():
+    only_system = as_dict({"system": {"preset": "TEST_PRESET"}})
+    only_experiment = as_dict(_CfgDC(experiment={"preset": "INFERENCE_CANONICAL"}))
+    both_from_obj = as_dict(_CfgObj(system={"preset": "TEST_PRESET"}, experiment={"preset": "X"}))
+
+    assert set(only_system) == {"system"}
+    assert "experiment" in only_experiment
+    assert set(both_from_obj) == {"system", "experiment"}
+
+
+def test_as_dict_rejects_missing_both_blocks():
+    with pytest.raises(TypeError, match="at least one of 'system' or 'experiment'"):
+        as_dict({"foo": 1})
+
+
 def test_resolve_system_config_loads_preset_and_user_override_wins(preset_dirs):
     system_dir, _ = preset_dirs
 
@@ -104,22 +135,31 @@ def test_resolve_experiment_config_loads_preset(preset_dirs):
     assert resolved["kind"] == "inference"
 
 
-def test_resolve_config_requires_both_blocks(preset_dirs):
+def test_resolve_config_is_permissive_top_level(preset_dirs):
     system_dir, experiment_dir = preset_dirs
 
-    with pytest.raises(ValueError, match="config.system"):
-        resolve_config(
-            {"experiment": {"preset": "INFERENCE_CANONICAL"}},
-            system_presets_dir=system_dir,
-            experiment_presets_dir=experiment_dir,
-        )
+    only_system = resolve_config(
+        {"system": {"preset": "TEST_PRESET"}},
+        system_presets_dir=system_dir,
+        experiment_presets_dir=experiment_dir,
+    )
+    only_experiment = resolve_config(
+        {"experiment": {"preset": "INFERENCE_CANONICAL"}},
+        system_presets_dir=system_dir,
+        experiment_presets_dir=experiment_dir,
+    )
+    both = resolve_config(
+        {
+            "system": {"preset": "TEST_PRESET"},
+            "experiment": {"preset": "INFERENCE_CANONICAL"},
+        },
+        system_presets_dir=system_dir,
+        experiment_presets_dir=experiment_dir,
+    )
 
-    with pytest.raises(ValueError, match="config.experiment"):
-        resolve_config(
-            {"system": {"preset": "TEST_PRESET"}},
-            system_presets_dir=system_dir,
-            experiment_presets_dir=experiment_dir,
-        )
+    assert set(only_system.keys()) == {"system"}
+    assert set(only_experiment.keys()) == {"experiment"}
+    assert set(both.keys()) == {"system", "experiment"}
 
 
 def test_missing_required_key_errors(preset_dirs):
@@ -200,7 +240,8 @@ def test_resolved_config_to_system_config(preset_dirs):
         system_presets_dir=system_dir,
         experiment_presets_dir=experiment_dir,
     )
-    cfg = resolved_config_to_system_config(resolved)
+    with pytest.deprecated_call(match="deprecated"):
+        cfg = resolved_config_to_system_config(resolved)
 
     assert isinstance(cfg, SheraThreePlaneConfig)
     assert cfg.psf_npix == 128
