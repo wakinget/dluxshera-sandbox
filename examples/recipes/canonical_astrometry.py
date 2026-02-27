@@ -79,7 +79,7 @@ from dluxshera.inference.optimization import (
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
-from dluxshera.config.resolver import resolve_config, resolved_config_to_system_config
+from dluxshera.config.resolver import resolve_config
 from dluxshera.params.packing import (
     build_eigen_index_map,
     build_index_map,
@@ -118,6 +118,28 @@ TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
 DEFAULT_SEED = 42
 DEFAULT_N_ITER = 50
+
+
+class CanonicalSystemConfig:
+    """Lightweight config adapter for canonical binder/spec construction."""
+
+    def __init__(self, resolved: dict[str, Any]):
+        self.system = resolved
+
+        source = resolved.get("source", {})
+        optics = resolved.get("optics", {})
+        detector = resolved.get("detector", {})
+
+        for block in (source, optics):
+            for key, value in block.items():
+                setattr(self, key, value)
+
+        if "dp_path" in optics and not hasattr(self, "diffractive_pupil_path"):
+            self.diffractive_pupil_path = optics["dp_path"]
+
+        if "model" in detector:
+            self.detector_model = detector["model"]
+
 DEFAULT_FAST_ITER = 30
 DEFAULT_BASE_LR = 0.5
 
@@ -129,9 +151,9 @@ DEFAULT_INFER_KEYS = (
     "source.y_position_as",
     "source.log_flux_total",
     "source.contrast",
-    "system.plate_scale_as_per_pix",
-    "primary.zernike_coeffs_nm",
-    "secondary.zernike_coeffs_nm",
+    "optics.plate_scale_as_per_pix",
+    "optics.primary.zernike_coeffs_nm",
+    "optics.secondary.zernike_coeffs_nm",
 )
 
 # Presets
@@ -172,7 +194,7 @@ def main(
     )
     cfg = resolve_config(user_cfg)
 
-    system_cfg = resolved_config_to_system_config(cfg)
+    system_cfg = CanonicalSystemConfig(cfg["system"])
     forward_spec = compose_forward_spec(system_cfg)
 
     experiment = _resolve_experiment_options(cfg["experiment"])
@@ -204,7 +226,6 @@ def main(
             "source.position_angle_deg": 90.0,
             "source.x_position_as": 0.0,
             "source.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1800.,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)

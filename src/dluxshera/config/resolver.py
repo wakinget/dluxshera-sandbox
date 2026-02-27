@@ -182,7 +182,26 @@ def _validate_system_schema(system: object) -> None:
         raise ValueError("system.detector must be a mapping/dict.")
 
     source_allowed = {"kind", "wavelength_m", "bandwidth_m", "n_lambda"}
-    optics_allowed = {"kind", "psf_npix", "oversample"}
+    optics_allowed = {
+        "kind",
+        "psf_npix",
+        "oversample",
+        "pupil_npix",
+        "m1_diameter_m",
+        "m2_diameter_m",
+        "m1_focal_length_m",
+        "m2_focal_length_m",
+        "m1_m2_separation_m",
+        "pixel_pitch_m",
+        "n_struts",
+        "strut_width_m",
+        "strut_rotation_deg",
+        "primary_noll_indices",
+        "secondary_noll_indices",
+        "dp_path",
+        "dp_design_wavelength_m",
+        "plate_scale_as_per_pix",
+    }
     detector_allowed = {"model", "layers"}
 
     _warn_unknown_keys(source, allowed=source_allowed, path="system.source")

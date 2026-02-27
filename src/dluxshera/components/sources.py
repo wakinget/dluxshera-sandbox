@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from ..params.spec import ParamField, ParamSpec
@@ -33,6 +34,29 @@ def build_alpha_cen_contract(
       - ``source.y_position_as`` (defaults to 0.0)
     """
 
+    def _cfg_get(path: str):
+        cur = source_cfg
+        for key in path.split("."):
+            if isinstance(cur, Mapping):
+                cur = cur.get(key, None)
+            else:
+                cur = getattr(cur, key, None)
+            if cur is None:
+                break
+        return cur
+
+    wavelength_m = _cfg_get("system.source.wavelength_m")
+    if wavelength_m is None:
+        wavelength_m = _cfg_get("wavelength_m")
+
+    bandwidth_m = _cfg_get("system.source.bandwidth_m")
+    if bandwidth_m is None:
+        bandwidth_m = _cfg_get("bandwidth_m")
+
+    n_lambda = _cfg_get("system.source.n_lambda")
+    if n_lambda is None:
+        n_lambda = _cfg_get("n_lambda")
+
     fields = [
         ParamField(
             "source.wavelength_m",
@@ -40,7 +64,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=float,
             shape=(),
-            default=source_cfg.wavelength_m,
+            default=wavelength_m,
             structural=True,
         ),
         ParamField(
@@ -49,7 +73,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=float,
             shape=(),
-            default=source_cfg.bandwidth_m,
+            default=bandwidth_m,
             structural=True,
         ),
         ParamField(
@@ -58,7 +82,7 @@ def build_alpha_cen_contract(
             kind="primitive",
             dtype=int,
             shape=(),
-            default=source_cfg.n_lambda,
+            default=n_lambda,
             structural=True,
         ),
         ParamField(
