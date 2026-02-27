@@ -25,15 +25,15 @@ def compose_forward_spec(system_cfg, detector_contract: ParamSpec | None = None)
     names to avoid silently shadowing fields.
     """
 
-    from ..components.optics import build_threeplane_optics_contract, build_twoplane_optics_contract
+    from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
     from ..components.sources import build_alpha_cen_contract
 
     source_contract = build_alpha_cen_contract(system_cfg)
 
     optics_kind = _detect_optics_kind_from_cfg(system_cfg)
     optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
-        "two_plane": build_twoplane_optics_contract,
-        "three_plane": build_threeplane_optics_contract,
+        "two_plane": SheraTwoPlaneOptics.contract,
+        "three_plane": SheraThreePlaneOptics.contract,
     }
     try:
         optics_contract = optics_contract_builders[optics_kind](system_cfg)
