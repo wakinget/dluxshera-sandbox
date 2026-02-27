@@ -36,7 +36,7 @@ system:
     - 9
     - 10
     - 11
-    diffractive_pupil_path: src/dluxshera/data/pupils/diffractive_pupil.npy
+    dp_path: src/dluxshera/data/pupils/diffractive_pupil.npy
     dp_design_wavelength_m: 5.5e-07
   detector:
     model: HWK4123
