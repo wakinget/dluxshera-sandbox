@@ -4,6 +4,11 @@ system:
     wavelength_m: 5.5e-07
     bandwidth_m: 4.1e-08
     n_lambda: 3
+    x_position_as: 0.0
+    y_position_as: 0.0
+    separation_as: 10.0
+    position_angle_deg: 90.0
+    contrast: 3.0
   optics:
     kind: three_plane
     psf_npix: 256
