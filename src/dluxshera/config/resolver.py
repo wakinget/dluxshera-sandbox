@@ -27,27 +27,36 @@ def _default_prf_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "pixel_response"
 
 def as_dict(cfg: object) -> dict:
-    """Convert supported config containers to a nested dict."""
+    """Convert supported config containers to a nested dict.
+
+    Accepted top-level blocks are permissive: configs may provide ``system`` and/or
+    ``experiment``. A :class:`TypeError` is raised only when neither block exists.
+    """
 
     if isinstance(cfg, Mapping):
-        return deepcopy(dict(cfg))
+        data = deepcopy(dict(cfg))
+        if "system" in data or "experiment" in data:
+            return data
 
     if is_dataclass(cfg):
         data = asdict(cfg)
-        if "system" in data and "experiment" in data:
+        if "system" in data or "experiment" in data:
             return data
 
-    if hasattr(cfg, "system") and hasattr(cfg, "experiment"):
+    out: dict[str, dict] = {}
+    if hasattr(cfg, "system"):
         system = getattr(cfg, "system")
+        if isinstance(system, Mapping):
+            out["system"] = deepcopy(dict(system))
+    if hasattr(cfg, "experiment"):
         experiment = getattr(cfg, "experiment")
-        if isinstance(system, Mapping) and isinstance(experiment, Mapping):
-            return {
-                "system": deepcopy(dict(system)),
-                "experiment": deepcopy(dict(experiment)),
-            }
+        if isinstance(experiment, Mapping):
+            out["experiment"] = deepcopy(dict(experiment))
+    if out:
+        return out
 
     raise TypeError(
-        "Config must be a nested mapping/object with top-level 'system' and 'experiment' blocks. "
+        "Config must provide at least one of 'system' or 'experiment'. "
         "Legacy flat config schemas are not supported."
     )
 
@@ -286,24 +295,38 @@ def resolve_config(
     system_presets_dir: Path | None = None,
     experiment_presets_dir: Path | None = None,
 ) -> dict:
-    """Resolve strict nested config via dedicated system and experiment resolvers."""
+    """Resolve provided config blocks via dedicated system/experiment resolvers.
+
+    This combiner is permissive at the top level and resolves whichever of
+    ``system`` and ``experiment`` are present.
+    """
 
     cfg = as_dict(user_cfg)
-    if "system" not in cfg:
-        raise ValueError("Missing required config key: config.system")
-    if "experiment" not in cfg:
-        raise ValueError("Missing required config key: config.experiment")
-
-    resolved_system = resolve_system_config(cfg["system"], presets_dir=system_presets_dir)
-    resolved_experiment = resolve_experiment_config(
-        cfg["experiment"],
-        presets_dir=experiment_presets_dir,
-    )
-    return {"system": resolved_system, "experiment": resolved_experiment}
+    resolved: dict[str, dict] = {}
+    if "system" in cfg:
+        resolved["system"] = resolve_system_config(cfg["system"], presets_dir=system_presets_dir)
+    if "experiment" in cfg:
+        resolved["experiment"] = resolve_experiment_config(
+            cfg["experiment"],
+            presets_dir=experiment_presets_dir,
+        )
+    if not resolved:
+        raise ValueError("Config must provide at least one of 'system' or 'experiment'.")
+    return resolved
 
 
 def resolved_config_to_system_config(resolved_cfg: Mapping[str, object]):
-    """Translate resolved nested config into system dataclasses used by binders."""
+    """Legacy bridge to binder system dataclasses.
+
+    Deprecated: this translation helper exists for older APIs and is not used by
+    canonical workflows.
+    """
+
+    warnings.warn(
+        "resolved_config_to_system_config is deprecated and kept only as a legacy bridge.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     from ..systems.three_plane import SheraThreePlaneConfig
     from ..systems.two_plane import SheraTwoPlaneConfig

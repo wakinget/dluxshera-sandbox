@@ -193,6 +193,16 @@ def main(
         experiment_preset=experiment_preset,
     )
     cfg = resolve_config(user_cfg)
+    if "experiment" not in cfg:
+        raise ValueError(
+            "canonical_astrometry requires an 'experiment' block in config; "
+            "provide experiment.preset (or a full experiment config)."
+        )
+    if "system" not in cfg:
+        raise ValueError(
+            "canonical_astrometry requires a 'system' block in config; "
+            "provide system.preset (or a full system config)."
+        )
 
     system_cfg = CanonicalSystemConfig(cfg["system"])
     forward_spec = compose_forward_spec(system_cfg)
