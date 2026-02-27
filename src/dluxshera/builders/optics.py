@@ -17,8 +17,6 @@ if TYPE_CHECKING:
 from ..components.optics import (
     SheraThreePlaneOptics,
     SheraTwoPlaneOptics,
-    build_threeplane_optics_contract,
-    build_twoplane_optics_contract,
 )
 from ..params.store import ParameterStore
 from ..params.spec import ParamField, ParamSpec
@@ -98,7 +96,7 @@ def apply_runtime_bindings(
 def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
     """Return a deterministic structural hash for three-plane optics."""
 
-    contract = build_threeplane_optics_contract(cfg)
+    contract = SheraThreePlaneOptics.contract(cfg)
     payload = {
         "optics_kind": "three_plane",
         "structural": _structural_subset_from_contract(cfg, contract),
@@ -110,7 +108,7 @@ def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
 def structural_hash_for_twoplane(cfg: SheraTwoPlaneConfig) -> str:
     """Return a deterministic structural hash for two-plane optics."""
 
-    contract = build_twoplane_optics_contract(cfg)
+    contract = SheraTwoPlaneOptics.contract(cfg)
     payload = {
         "optics_kind": "two_plane",
         "structural": _structural_subset_from_contract(cfg, contract),
@@ -148,7 +146,7 @@ def build_shera_threeplane_optics(
 ) -> SheraThreePlaneOptics:
     """Construct a three-plane optical system with structural caching."""
 
-    contract = build_threeplane_optics_contract(cfg)
+    contract = SheraThreePlaneOptics.contract(cfg)
 
     if store is not None and spec is not None:
         store = store.validate_against(spec, allow_derived=True)
@@ -197,7 +195,7 @@ def build_shera_twoplane_optics(
 ) -> SheraTwoPlaneOptics:
     """Construct the Shera two-plane optical system with runtime overrides."""
 
-    contract = build_twoplane_optics_contract(cfg)
+    contract = SheraTwoPlaneOptics.contract(cfg)
 
     if store is not None and spec is not None:
         store = store.validate_against(spec, allow_derived=True)

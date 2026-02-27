@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dluxshera.components.optics import (
-    build_threeplane_optics_contract,
-    build_twoplane_optics_contract,
-)
+from dluxshera.components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
 from dluxshera.components.sources import build_alpha_cen_contract
 from dluxshera.params.spec import ParamField, ParamSpec
 from dluxshera.systems.base import compose_forward_spec
@@ -31,8 +28,8 @@ def _minimal_detector_contract() -> ParamSpec:
 @pytest.mark.parametrize(
     "cfg,optics_builder",
     [
-        (SheraTwoPlaneConfig(), build_twoplane_optics_contract),
-        (SheraThreePlaneConfig(), build_threeplane_optics_contract),
+        (SheraTwoPlaneConfig(), SheraTwoPlaneOptics.contract),
+        (SheraThreePlaneConfig(), SheraThreePlaneOptics.contract),
     ],
 )
 def test_compose_forward_spec_contains_union_of_component_contract_keys(cfg, optics_builder):
