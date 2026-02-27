@@ -10,14 +10,14 @@ experiment:
     n_iter_fast: 30
     base_lr: 0.5
   infer_keys:
-    - binary.separation_as
-    - binary.position_angle_deg
-    - binary.x_position_as
-    - binary.y_position_as
-    - binary.log_flux_total
-    - binary.contrast
-    - system.plate_scale_as_per_pix
-    - primary.zernike_coeffs_nm
-    - secondary.zernike_coeffs_nm
+    - source.separation_as
+    - source.position_angle_deg
+    - source.x_position_as
+    - source.y_position_as
+    - source.log_flux_total
+    - source.contrast
+    - optics.plate_scale_as_per_pix
+    - optics.primary.zernike_coeffs_nm
+    - optics.secondary.zernike_coeffs_nm
   outputs:
     save_plots: true
