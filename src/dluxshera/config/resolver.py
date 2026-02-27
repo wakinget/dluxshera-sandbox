@@ -1,4 +1,36 @@
-"""Strict nested configuration resolvers for system and experiment blocks."""
+"""Resolve preset-driven configuration blocks into validated runtime mappings.
+
+This module is the configuration *resolver* for canonical dLuxShera workflows.
+It combines three sources of information into a normalized, schema-checked
+mapping:
+
+1. Built-in preset files under ``src/dluxshera/data/system_presets`` and
+   ``src/dluxshera/data/experiment_presets``.
+2. User overrides loaded upstream from YAML/JSON (or provided directly as
+   dictionaries/dataclasses).
+3. Lightweight post-validation normalization (for example, coercing numeric
+   fields to ``int``/``float`` so downstream builders do not need to repeat
+   parsing logic).
+
+Typical resolver flow:
+
+1. Load a preset by name from disk.
+2. Deep-merge user overrides into the preset (override values win).
+3. Validate required keys and warn on unknown keys.
+4. Normalize block fields where needed.
+5. Return a resolved nested mapping.
+
+The resolved shape is a dictionary containing ``system`` and/or ``experiment``
+top-level blocks, depending on which blocks the caller supplied.
+
+Separation of responsibilities:
+
+* This module resolves and validates config *blocks*.
+* Recipes/scripts (for example
+  ``examples/recipes/canonical_astrometry.py``) decide which blocks are
+  required for a workflow and how to consume the resolved values (binder/spec
+  composition, inference execution, output handling, and so on).
+"""
 
 from __future__ import annotations
 
@@ -27,7 +59,29 @@ def _default_prf_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "pixel_response"
 
 def as_dict(cfg: object) -> dict:
-    """Convert supported config containers to a nested dict.
+    """Normalize supported config containers into a plain nested dictionary.
+
+    Parameters
+    ----------
+    cfg : object
+        Input configuration container. Supported forms include:
+
+        - ``Mapping`` with ``system`` and/or ``experiment`` keys
+        - Dataclass instances whose fields include ``system`` and/or
+          ``experiment``
+        - Arbitrary objects exposing ``.system`` and/or ``.experiment``
+          attributes that are mappings
+
+    Returns
+    -------
+    dict
+        Deep-copied nested mapping containing one or both top-level blocks:
+        ``{"system": {...}}``, ``{"experiment": {...}}``, or both.
+
+    Notes
+    -----
+    This is the first normalization step in the resolver pipeline so later
+    stages can operate on a single in-memory representation.
 
     Accepted top-level blocks are permissive: configs may provide ``system`` and/or
     ``experiment``. A :class:`TypeError` is raised only when neither block exists.
@@ -95,7 +149,27 @@ def _load_preset_file(preset_name: str, base_dir: Path) -> dict:
 
 
 def load_system_preset(name: str, *, presets_dir: Path | None = None) -> dict:
-    """Load and return a system preset mapping containing only a ``system`` block."""
+    """Load a system preset file and return a single-block mapping.
+
+    Parameters
+    ----------
+    name : str
+        Preset name (file stem) to load from the system preset directory.
+    presets_dir : Path | None, optional
+        Override directory containing ``.yaml``, ``.yml``, or ``.json`` preset
+        files. When omitted, the built-in system preset directory is used.
+
+    Returns
+    -------
+    dict
+        Mapping with exactly one top-level block:
+        ``{"system": <system-mapping>}``.
+
+    Notes
+    -----
+    System presets are strict by contract: they must define top-level
+    ``system`` and must not include top-level ``experiment``.
+    """
 
     loaded = _load_preset_file(name, presets_dir or _default_system_presets_dir())
     if "system" not in loaded:
@@ -109,7 +183,27 @@ def load_system_preset(name: str, *, presets_dir: Path | None = None) -> dict:
 
 
 def load_experiment_preset(name: str, *, presets_dir: Path | None = None) -> dict:
-    """Load and return an experiment preset mapping containing only ``experiment``."""
+    """Load an experiment preset file and return a single-block mapping.
+
+    Parameters
+    ----------
+    name : str
+        Preset name (file stem) to load from the experiment preset directory.
+    presets_dir : Path | None, optional
+        Override directory containing ``.yaml``, ``.yml``, or ``.json`` preset
+        files. When omitted, the built-in experiment preset directory is used.
+
+    Returns
+    -------
+    dict
+        Mapping with exactly one top-level block:
+        ``{"experiment": <experiment-mapping>}``.
+
+    Notes
+    -----
+    Experiment presets are strict by contract: they must define top-level
+    ``experiment`` and must not include top-level ``system``.
+    """
 
     loaded = _load_preset_file(name, presets_dir or _default_experiment_presets_dir())
     if "experiment" not in loaded:
@@ -123,7 +217,25 @@ def load_experiment_preset(name: str, *, presets_dir: Path | None = None) -> dic
 
 
 def deep_merge(base: dict, overrides: dict) -> dict:
-    """Deep-merge ``overrides`` into ``base``."""
+    """Recursively merge dictionaries using ``overrides``-wins semantics.
+
+    Parameters
+    ----------
+    base : dict
+        Baseline mapping, typically loaded from a preset.
+    overrides : dict
+        User-provided values to apply on top of ``base``.
+
+    Returns
+    -------
+    dict
+        New merged mapping. Inputs are not mutated.
+
+    Notes
+    -----
+    If a key exists in both mappings and both values are mappings, merge
+    recursively. Otherwise the value from ``overrides`` replaces ``base``.
+    """
 
     merged = deepcopy(base)
     for key, value in overrides.items():
@@ -169,6 +281,12 @@ def _validate_layer_list(layers: object) -> None:
 
 
 def _normalize_system_in_place(system_cfg: dict) -> None:
+    """Normalize validated ``system`` fields to stable numeric runtime types.
+
+    This coercion happens after schema validation so downstream system builders
+    can assume consistent ``int``/``float`` representations.
+    """
+
     source = system_cfg["source"]
     optics = system_cfg["optics"]
 
@@ -181,6 +299,11 @@ def _normalize_system_in_place(system_cfg: dict) -> None:
 
 
 def _validate_system_schema(system: object) -> None:
+    """Apply strict validation for the ``system`` block.
+
+    Required keys are enforced, and unknown keys emit warnings via allowlists.
+    """
+
     if not isinstance(system, Mapping):
         raise ValueError("system must be a mapping/dict.")
 
@@ -240,6 +363,11 @@ def _validate_system_schema(system: object) -> None:
 
 
 def _validate_experiment_schema(experiment: object) -> None:
+    """Apply strict validation for the ``experiment`` block.
+
+    Required keys are enforced, and unknown keys emit warnings via allowlists.
+    """
+
     if not isinstance(experiment, Mapping):
         raise ValueError("experiment must be a mapping/dict.")
 
@@ -259,7 +387,26 @@ def _validate_experiment_schema(experiment: object) -> None:
 
 
 def resolve_system_config(system_cfg: dict, *, presets_dir: Path | None = None) -> dict:
-    """Resolve ``system`` config from preset + overrides and validate strictly."""
+    """Resolve a ``system`` block from preset + overrides.
+
+    Parameters
+    ----------
+    system_cfg : dict
+        User-provided ``system`` mapping. Must include ``preset`` and may add
+        nested overrides.
+    presets_dir : Path | None, optional
+        Directory for system presets. Defaults to built-in preset data.
+
+    Returns
+    -------
+    dict
+        Resolved and normalized ``system`` mapping (without an outer wrapper).
+
+    Notes
+    -----
+    Resolution steps are: load preset by ``system.preset``, deep-merge
+    overrides, validate schema, then normalize numeric fields.
+    """
 
     if not isinstance(system_cfg, Mapping):
         raise ValueError("system must be a mapping/dict.")
@@ -275,7 +422,26 @@ def resolve_system_config(system_cfg: dict, *, presets_dir: Path | None = None) 
 
 
 def resolve_experiment_config(experiment_cfg: dict, *, presets_dir: Path | None = None) -> dict:
-    """Resolve ``experiment`` config from preset + overrides and validate strictly."""
+    """Resolve an ``experiment`` block from preset + overrides.
+
+    Parameters
+    ----------
+    experiment_cfg : dict
+        User-provided ``experiment`` mapping. Must include ``preset`` and may
+        add nested overrides.
+    presets_dir : Path | None, optional
+        Directory for experiment presets. Defaults to built-in preset data.
+
+    Returns
+    -------
+    dict
+        Resolved ``experiment`` mapping (without an outer wrapper).
+
+    Notes
+    -----
+    Resolution steps are: load preset by ``experiment.preset``, deep-merge
+    overrides, and validate schema.
+    """
 
     if not isinstance(experiment_cfg, Mapping):
         raise ValueError("experiment must be a mapping/dict.")
@@ -295,7 +461,28 @@ def resolve_config(
     system_presets_dir: Path | None = None,
     experiment_presets_dir: Path | None = None,
 ) -> dict:
-    """Resolve provided config blocks via dedicated system/experiment resolvers.
+    """Resolve top-level config into nested ``system``/``experiment`` blocks.
+
+    Parameters
+    ----------
+    user_cfg : object
+        Config container accepted by :func:`as_dict`.
+    system_presets_dir : Path | None, optional
+        Override directory for system presets.
+    experiment_presets_dir : Path | None, optional
+        Override directory for experiment presets.
+
+    Returns
+    -------
+    dict
+        Nested mapping containing whichever resolved blocks were supplied by
+        the user (``system`` and/or ``experiment``).
+
+    Notes
+    -----
+    This orchestration layer resolves each block independently and does not
+    impose workflow policy. Canonical recipes decide whether a block is
+    required and how to interpret resolved values.
 
     This combiner is permissive at the top level and resolves whichever of
     ``system`` and ``experiment`` are present.
@@ -316,7 +503,25 @@ def resolve_config(
 
 
 def resolved_config_to_system_config(resolved_cfg: Mapping[str, object]):
-    """Legacy bridge to binder system dataclasses.
+    """Legacy bridge from resolved mappings to older system dataclass configs.
+
+    Parameters
+    ----------
+    resolved_cfg : Mapping[str, object]
+        Resolved nested configuration that includes a ``system`` block.
+
+    Returns
+    -------
+    object
+        Instance of a legacy system config dataclass selected from
+        ``system.optics.kind``.
+
+    Notes
+    -----
+    This helper is kept for older APIs and is not used by canonical,
+    preset-driven workflows. Prefer passing resolved mappings directly into
+    binder/spec composition in recipes/scripts. This bridge is intended for
+    eventual deprecation.
 
     Deprecated: this translation helper exists for older APIs and is not used by
     canonical workflows.
