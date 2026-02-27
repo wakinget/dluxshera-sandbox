@@ -17,6 +17,14 @@ def _default_system_presets_dir() -> Path:
 def _default_experiment_presets_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "experiment_presets"
 
+def _default_pupils_dir() -> str:
+    return Path(__file__).resolve().parents[1] / "data" / "pupils"
+
+def _default_offsets_dir() -> str:
+    return Path(__file__).resolve().parents[1] / "data" / "pixel_offsets"
+
+def _default_prf_dir() -> str:
+    return Path(__file__).resolve().parents[1] / "data" / "pixel_response"
 
 def as_dict(cfg: object) -> dict:
     """Convert supported config containers to a nested dict."""
