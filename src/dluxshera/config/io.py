@@ -135,15 +135,15 @@ def load_user_config(
 
 def _default_presets_root() -> Path:
     """Default root directory for built-in presets."""
-    return Path(__file__).resolve().parent / "presets"
+    return Path(__file__).resolve().parents[1] / "data"
 
 
 def _default_system_presets_dir() -> Path:
-    return _default_presets_root() / "system"
+    return _default_presets_root() / "system_presets"
 
 
 def _default_experiment_presets_dir() -> Path:
-    return _default_presets_root() / "experiment"
+    return _default_presets_root() / "experiment_presets"
 
 
 def _load_preset_file(preset_name: str, base_dir: Path) -> dict[str, Any]:
