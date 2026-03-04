@@ -12,8 +12,15 @@
   "defaults": {
     "seed": 42,
     "optimizer": {
+      "kind": "sgd",
+      "_kind_options": "sgd | adam",
+      "kwargs": {},
+      "_sgd_kwargs": {"momentum":  0.1, "nesterov":  true},
+      "_adam_kwargs": {"b1":  0.9, "b2":  0.999, "eps":  1e-8, "nesterov": true},
       "n_iter": 50,
-      "base_lr": 0.5
+      "base_lr": 0.5,
+      "loss": "map",
+      "_loss_options": "nll | map"
     },
     "eigen": {
       "use_eigen": true,

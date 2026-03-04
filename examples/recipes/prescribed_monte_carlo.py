@@ -711,6 +711,9 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         "eigen.whiten_basis",
         "eigen.truncate_k",
         "eigen.truncate_by_eigval",
+        "optimizer.kind",
+        "optimizer.loss",
+        "optimizer.kwargs",
         "truth.x",
         "truth.y",
         "init.x",
@@ -734,6 +737,19 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
             value = _get_nested(spec, ["eigen", "truncate_k"])
         elif key == "eigen.truncate_by_eigval":
             value = _get_nested(spec, ["eigen", "truncate_by_eigval"])
+        elif key == "optimizer.kind":
+            value = _get_nested(spec, ["optimizer", "kind"])
+        elif key == "optimizer.loss":
+            value = _get_nested(spec, ["optimizer", "loss"])
+        elif key == "optimizer.kwargs":
+            kwargs_val = _get_nested(spec, ["optimizer", "kwargs"])
+            if kwargs_val:
+                try:
+                    value = json.dumps(kwargs_val, sort_keys=True)
+                except Exception:
+                    value = str(kwargs_val)
+            else:
+                value = ""
         elif key == "truth.x":
             value = _get_nested(spec, ["truth", "binary", "x_position_as"])
         elif key == "truth.y":
@@ -1158,6 +1174,9 @@ def _build_results_rows(
             optimizer_meta.get("preconditioning") if optimizer_meta else {}
         )
         precond_method = precond_meta.get("method")
+        optimizer_kind = optimizer_meta.get("kind")
+        optimizer_kwargs = optimizer_meta.get("kwargs")
+        optimizer_loss = optimizer_meta.get("loss")
 
         row: dict[str, Any] = {
             "run_id": run_id,
@@ -1180,6 +1199,13 @@ def _build_results_rows(
             "init.mode": prescribed_meta.get("init_mode"),
             "optimizer.n_iter": optimizer_meta.get("num_steps"),
             "optimizer.base_lr": optimizer_meta.get("learning_rate"),
+            "optimizer.kind": optimizer_kind,
+            "optimizer.kwargs": (
+                json.dumps(optimizer_kwargs, sort_keys=True)
+                if isinstance(optimizer_kwargs, dict) and optimizer_kwargs
+                else None
+            ),
+            "optimizer.loss": optimizer_loss,
             "eigen.use_eigen": (
                 prescribed_meta.get("use_eigen")
                 if prescribed_meta.get("use_eigen") is not None
@@ -1293,6 +1319,9 @@ def _write_results_csv(
         "init.mode",
         "optimizer.n_iter",
         "optimizer.base_lr",
+        "optimizer.kind",
+        "optimizer.kwargs",
+        "optimizer.loss",
         "eigen.use_eigen",
         "eigen.whiten_basis",
         "eigen.truncate_k",
@@ -1843,14 +1872,6 @@ def main() -> None:
             reduce=reduce,
             theta0_store=truth_store,
         )
-        fim_labels = generate_fim_labels(infer_keys, cfg=cfg, store=truth_store)
-        loss_fn = nll_loss_fn
-
-        # FIM computation and eigen preconditioning flow: pack_params converts
-        # a structured ParameterStore into a flat vector for optimization/FIM.
-        theta_true = pack_params(inference_subspec, truth_store)
-        loss_true = float(loss_fn(theta_true))
-
         fim_cfg = run_spec.get("fim", {})
         reuse_fim_value = fim_cfg.get("reuse_fim")
         if reuse_fim_value is None:
@@ -1862,46 +1883,6 @@ def main() -> None:
         if reuse_fim_value is None:
             reuse_fim_value = _get_nested(prescription, ["defaults", "fim", "reuse_fim"])
         reuse_fim = bool(reuse_fim_value) if reuse_fim_value is not None else False
-
-        fim_point = theta_true
-        # FIM cache key notes:
-        # - Default behavior is strict: reuse uses only exact cache matches unless
-        #   reuse_fim=True is set in the prescription or plan. When reuse_fim=True,
-        #   a cache miss can still reuse the last cached FIM with a warning.
-        # - Safe reuse inputs include full theta_true, infer_keys, and cfg/forward_spec
-        #   identifiers (all must match for FIM reuse).
-        cache_key_payload = {
-            "infer_keys": infer_keys,
-            "model_config_id": model_config_id,
-            "cfg_hash": cfg_hash,
-            "forward_spec_hash": forward_spec_hash,
-            "theta_true_hash": _hash_array(theta_true),
-        }
-        fim_cache_key = _stable_hash(cache_key_payload)[:12]
-        cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
-        cache_entry = fim_cache.get(cache_key)
-        if cache_entry is not None:
-            print("FIM cache hit; reusing cached FIM.")
-            F = cache_entry["F"]
-            fim_diag = cache_entry["fim_diag"]
-            fim_cache_hit = True
-            fim_cache_last = cache_entry
-        elif reuse_fim and fim_cache_last is not None:
-            print(
-                "WARNING: FIM cache miss for strict key; reusing previous cached FIM "
-                "because reuse_fim=True. Inputs may be misaligned."
-            )
-            F = fim_cache_last["F"]
-            fim_diag = fim_cache_last["fim_diag"]
-            fim_cache_hit = False
-        else:
-            print("FIM cache miss; computing new FIM...")
-            F = fim_theta(nll_loss_fn, fim_point)
-            fim_diag = jnp.diag(F)
-            fim_cache_hit = False
-            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
-            fim_cache_last = fim_cache[cache_key]
-            print("FIM computed and cached for later.")
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
@@ -2058,6 +2039,70 @@ def main() -> None:
             theta0_store=init_store,
         )
 
+        def map_loss_fn(theta: np.ndarray) -> np.ndarray:
+            store_theta = store_unpack_params(inference_subspec, theta, init_store)
+            nll_loss = nll_loss_fn(theta)
+            prior_gaussian_loss = prior_spec.quadratic_penalty(
+                store_theta,
+                center_store=truth_store, # TODO: truth_store or init_store?
+                keys=infer_keys,
+            )
+            return nll_loss + prior_gaussian_loss
+
+        loss_kind = (
+            _get_nested(run_spec, ["optimizer", "loss"])
+            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
+            or "nll"
+        )
+        if loss_kind == "map":
+            loss_fn = map_loss_fn
+        elif loss_kind == "nll":
+            loss_fn = nll_loss_fn
+        else:
+            raise ValueError(
+                f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
+            )
+
+        # Pack truth store for FIM/diagnostics and evaluate baseline loss.
+        theta_true = pack_params(inference_subspec, truth_store)
+        loss_true = float(loss_fn(theta_true))
+
+        fim_point = theta_true
+        # FIM cache key includes loss_kind so MAP and NLL cache separately.
+        cache_key_payload = {
+            "infer_keys": infer_keys,
+            "model_config_id": model_config_id,
+            "cfg_hash": cfg_hash,
+            "forward_spec_hash": forward_spec_hash,
+            "theta_true_hash": _hash_array(theta_true),
+            "loss_kind": loss_kind,
+        }
+        fim_cache_key = _stable_hash(cache_key_payload)[:12]
+        cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
+        cache_entry = fim_cache.get(cache_key)
+        if cache_entry is not None:
+            print("FIM cache hit; reusing cached FIM.")
+            F = cache_entry["F"]
+            fim_diag = cache_entry["fim_diag"]
+            fim_cache_hit = True
+            fim_cache_last = cache_entry
+        elif reuse_fim and fim_cache_last is not None:
+            print(
+                "WARNING: FIM cache miss for strict key; reusing previous cached FIM "
+                "because reuse_fim=True. Inputs may be misaligned."
+            )
+            F = fim_cache_last["F"]
+            fim_diag = fim_cache_last["fim_diag"]
+            fim_cache_hit = False
+        else:
+            print("FIM cache miss; computing new FIM...")
+            F = fim_theta(loss_fn, fim_point)
+            fim_diag = jnp.diag(F)
+            fim_cache_hit = False
+            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
+            fim_cache_last = fim_cache[cache_key]
+            print("FIM computed and cached for later.")
+
         if use_eigen:
             if truncate_k is not None and truncate_by_eigval is not None:
                 print(
@@ -2152,7 +2197,7 @@ def main() -> None:
 
         labels_by_key = map_labels_to_keys(
             infer_keys,
-            fim_labels,
+            generate_fim_labels(infer_keys, cfg=cfg, store=init_store if use_eigen else truth_store),
             store=init_store if use_eigen else None,
             index_map=None if use_eigen else index_map,
         )
@@ -2164,8 +2209,15 @@ def main() -> None:
         base_lr_value = optimizer_cfg.get("base_lr")
         if base_lr_value is None:
             raise ValueError(f"Run {run_id} resolved to a null optimizer.base_lr.")
+        optax_kind = optimizer_cfg.get("kind", "sgd")
+        optimizer_kwargs = optimizer_cfg.get("kwargs", {})
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
+        loss_kind = (
+            optimizer_cfg.get("loss")
+            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
+            or "nll"
+        )
 
         # Loss function setup and optimization execution: run_shera_gd consumes
         # the chosen theta_space, preconditioner, and metadata for artifacts.
@@ -2177,13 +2229,20 @@ def main() -> None:
             learning_rate=base_lr,
             lr_vec=lr_vec,
             num_steps=n_iter,
+            optimizer_kind=optax_kind,
+            optimizer_kwargs=optimizer_kwargs,
             runs_dir=runs_dir,
             run_id=run_id,
             return_artifacts=True,
             theta_space=theta_space,
             metric=metric_payload,
             extra_meta={
-                "optimizer": {"preconditioning": precond_meta},
+                "optimizer": {
+                    "preconditioning": precond_meta,
+                    "kind": optax_kind,
+                    "kwargs": optimizer_kwargs,
+                    "loss": loss_kind,
+                },
                 "theta": {"labels_by_key": labels_by_key},
                 "model": {
                     "config_id": model_config_id,
