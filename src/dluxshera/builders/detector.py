@@ -175,9 +175,9 @@ def build_detector(cfg) -> SheraDetector:
 
     layers = [
         ("downsample", Downsample(cfg.oversample)),
-        ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method)),
-        ("pixel_response", ApplyPixelResponse(pixel_response)),
-        ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
+        # ("pixel_offsets", ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method)),
+        # ("pixel_response", ApplyPixelResponse(pixel_response)),
+        # ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
     ]
     return SheraDetector(layers=layers, spec=spec)
 
