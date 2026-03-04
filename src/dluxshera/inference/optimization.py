@@ -19,7 +19,7 @@ from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..systems.three_plane import SheraThreePlaneConfig
 from ..systems.two_plane import SheraTwoPlaneConfig
-from ..config import resolve_config, resolved_config_to_system_config
+from ..config import resolve_config
 from ..params.spec import ParamSpec, ParamKey
 from ..params.store import ParameterStore, subset_store
 from ..params.packing import (
@@ -529,9 +529,19 @@ def make_binder_image_nll_fn(
 
     if isinstance(cfg, Mapping):
         resolved_cfg = resolve_config(cfg)
-        cfg = resolved_config_to_system_config(resolved_cfg)
+        if "system" not in resolved_cfg:
+            raise ValueError(
+                "cfg must contain a top-level 'system' block when provided as a mapping."
+            )
+        cfg = {"system": resolved_cfg["system"]}
 
-    if isinstance(cfg, SheraThreePlaneConfig):
+    if isinstance(cfg, Mapping):
+        binder_obj = SheraBinder(
+            cfg,
+            forward_spec,
+            base_forward_store,
+        )
+    elif isinstance(cfg, SheraThreePlaneConfig):
         binder_obj = SheraBinder(
             cfg,
             forward_spec,
