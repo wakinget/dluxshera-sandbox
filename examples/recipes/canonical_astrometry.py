@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import json
 import time
 from pathlib import Path
 from typing import Any
@@ -79,6 +78,7 @@ from dluxshera.inference.optimization import (
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
+from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -119,27 +119,6 @@ TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 DEFAULT_SEED = 42
 DEFAULT_N_ITER = 50
 
-
-class CanonicalSystemConfig:
-    """Lightweight config adapter for canonical binder/spec construction."""
-
-    def __init__(self, resolved: dict[str, Any]):
-        self.system = resolved
-
-        source = resolved.get("source", {})
-        optics = resolved.get("optics", {})
-        detector = resolved.get("detector", {})
-
-        for block in (source, optics):
-            for key, value in block.items():
-                setattr(self, key, value)
-
-        if "dp_path" in optics and not hasattr(self, "diffractive_pupil_path"):
-            self.diffractive_pupil_path = optics["dp_path"]
-
-        if "model" in detector:
-            self.detector_model = detector["model"]
-
 DEFAULT_FAST_ITER = 30
 DEFAULT_BASE_LR = 0.5
 
@@ -157,8 +136,8 @@ DEFAULT_INFER_KEYS = (
 )
 
 # Presets
-DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P" # System presets describe the system (source, optics, detector)
-DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY" # Experiment presets describe the experiment
+DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P" # System presets describe the source, optics, + detector
+DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY" # Experiment presets describe what to do + default settings
 
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -187,27 +166,27 @@ def main(
     """Run the canonical astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    user_cfg = _build_user_config(
+    user_cfg = load_user_config(
         config_path=config_path,
         system_preset=system_preset,
         experiment_preset=experiment_preset,
     )
-    cfg = resolve_config(user_cfg)
-    if "experiment" not in cfg:
-        raise ValueError(
-            "canonical_astrometry requires an 'experiment' block in config; "
-            "provide experiment.preset (or a full experiment config)."
-        )
-    if "system" not in cfg:
-        raise ValueError(
-            "canonical_astrometry requires a 'system' block in config; "
-            "provide system.preset (or a full system config)."
-        )
+    resolved = resolve_config(user_cfg)
+    system_block = resolved.get("system")
+    experiment_block = resolved.get("experiment")
 
-    system_cfg = CanonicalSystemConfig(cfg["system"])
+    if system_block is None:
+        raise ValueError("canonical_astrometry requires a 'system' block ...")
+    if experiment_block is None:
+        raise ValueError("canonical_astrometry requires an 'experiment' block ...")
+
+    # Minimal “root mapping” expected by compose_forward_spec / binder._cfg_get
+    system_cfg = {"system": system_block}
+
     forward_spec = compose_forward_spec(system_cfg)
+    truth_store = ParameterStore.from_spec_defaults(forward_spec)
 
-    experiment = _resolve_experiment_options(cfg["experiment"])
+    experiment = _validate_experiment(experiment_block)
     infer_keys = tuple(experiment["infer_keys"])
     rng_key = jr.PRNGKey(int(experiment["seed"]))
     save_plots = bool(experiment["save_plots"])
@@ -661,55 +640,7 @@ def main(
     print("Script finished in %.3f sec" % (t1_script - t0_script))
 
 
-def _load_config_file(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
-    suffix = path.suffix.lower()
-    with path.open("r", encoding="utf-8") as handle:
-        if suffix == ".json":
-            loaded = json.load(handle)
-        elif suffix in {".yaml", ".yml"}:
-            import yaml
-
-            loaded = yaml.safe_load(handle)
-        else:
-            raise ValueError("Config file must be YAML (.yaml/.yml) or JSON (.json).")
-    if not isinstance(loaded, dict):
-        raise ValueError("Config file must deserialize to a mapping/dict.")
-    return loaded
-
-
-def _build_user_config(
-    *,
-    config_path: Path | None,
-    system_preset: str,
-    experiment_preset: str,
-) -> dict[str, Any]:
-    defaults: dict[str, Any] = {
-        "system": {"preset": system_preset},
-        "experiment": {"preset": experiment_preset},
-    }
-    if config_path is None:
-        return defaults
-
-    loaded = _load_config_file(config_path)
-    if not isinstance(loaded.get("system"), dict) or not isinstance(loaded.get("experiment"), dict):
-        raise ValueError("Config file must define top-level 'system' and 'experiment' mappings.")
-    return _deep_merge(defaults, loaded)
-
-
-def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in overrides.items():
-        current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(current, value)
-        else:
-            merged[key] = value
-    return merged
-
-
-def _resolve_experiment_options(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+def _validate_experiment(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     optimizer_cfg = experiment_cfg.get("optimizer", {})
     outputs_cfg = experiment_cfg.get("outputs", {})
 
