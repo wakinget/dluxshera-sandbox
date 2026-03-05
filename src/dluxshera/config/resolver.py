@@ -187,7 +187,8 @@ def _validate_system_schema(system: object) -> None:
 
     # Detector requires "model" and "layers"
     _required_nonempty_string("system.detector", detector, "model")
-    _required_nonempty_string("system.detector", detector, "layers")
+    layers = _required("system.detector", detector, "layers")
+    _validate_layer_list(layers)
 
 
 def _validate_experiment_schema(experiment: object) -> None:
