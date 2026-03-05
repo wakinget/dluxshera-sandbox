@@ -1452,7 +1452,7 @@ def generate_fim_labels(
         Ordered parameter keys that define the packed θ vector.
     cfg :
         Shera config used to resolve Zernike Noll indices for
-        ``primary.zernike_coeffs_nm`` and ``secondary.zernike_coeffs_nm``.
+        ``optics.primary.zernike_coeffs_nm`` and ``optics.secondary.zernike_coeffs_nm``.
     store :
         Optional ParameterStore providing concrete values. When present, this
         is used to infer vector lengths. If absent (or missing a key), the
@@ -1463,9 +1463,9 @@ def generate_fim_labels(
     -----
     - Scalar parameters are labeled with their key as-is.
     - Vector parameters are expanded:
-        * ``primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
+        * ``optics.primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
           ``cfg.primary_noll_indices``.
-        * ``secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
+        * ``optics.secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
           ``cfg.secondary_noll_indices``.
         * Other vectors use ``"{key}[{i}]"`` based on the inferred length.
     """
@@ -1517,12 +1517,12 @@ def generate_fim_labels(
             labels.append(key)
             continue
 
-        if key == "primary.zernike_coeffs_nm":
+        if key == "optics.primary.zernike_coeffs_nm":
             nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M1 Z{n}" for n in nolls])
                 continue
-        if key == "secondary.zernike_coeffs_nm":
+        if key == "optics.secondary.zernike_coeffs_nm":
             nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M2 Z{n}" for n in nolls])

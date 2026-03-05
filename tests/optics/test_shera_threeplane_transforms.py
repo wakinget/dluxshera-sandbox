@@ -46,14 +46,14 @@ def test_forward_spec_zernike_coeffs_follow_noll_indices():
     n_m1 = len(cfg.primary_noll_indices)
     n_m2 = len(cfg.secondary_noll_indices)
 
-    field_m1 = spec.get("primary.zernike_coeffs_nm")
-    field_m2 = spec.get("secondary.zernike_coeffs_nm")
+    field_m1 = spec.get("optics.primary.zernike_coeffs_nm")
+    field_m2 = spec.get("optics.secondary.zernike_coeffs_nm")
 
     assert field_m1.shape == (n_m1,)
     assert field_m2.shape == (n_m2,)
 
-    assert store.get("primary.zernike_coeffs_nm") == pytest.approx([0.0] * n_m1)
-    assert store.get("secondary.zernike_coeffs_nm") == pytest.approx([0.0] * n_m2)
+    assert store.get("optics.primary.zernike_coeffs_nm") == pytest.approx([0.0] * n_m1)
+    assert store.get("optics.secondary.zernike_coeffs_nm") == pytest.approx([0.0] * n_m2)
 
 
 def test_forward_spec_omits_zernike_when_basis_absent():
@@ -64,10 +64,10 @@ def test_forward_spec_omits_zernike_when_basis_absent():
     spec = build_forward_spec_from_config(cfg_empty)
     store = ParameterStore.from_spec_defaults(spec)
 
-    assert "primary.zernike_coeffs_nm" not in spec.keys()
-    assert "secondary.zernike_coeffs_nm" not in spec.keys()
-    assert "primary.zernike_coeffs_nm" not in store
-    assert "secondary.zernike_coeffs_nm" not in store
+    assert "optics.primary.zernike_coeffs_nm" not in spec.keys()
+    assert "optics.secondary.zernike_coeffs_nm" not in spec.keys()
+    assert "optics.primary.zernike_coeffs_nm" not in store
+    assert "optics.secondary.zernike_coeffs_nm" not in store
 
 
 def test_system_focal_length_matches_analytic():

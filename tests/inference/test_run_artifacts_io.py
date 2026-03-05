@@ -121,8 +121,8 @@ def test_build_index_map_matches_pack_params(tmp_path: Path):
     spec = build_inference_spec_basic()
     store = ParameterStore.from_spec_defaults(spec).replace(
         {
-            "primary.zernike_coeffs_nm": np.zeros(3),
-            "secondary.zernike_coeffs_nm": np.zeros(2),
+            "optics.primary.zernike_coeffs_nm": np.zeros(3),
+            "optics.secondary.zernike_coeffs_nm": np.zeros(2),
         }
     )
     store = store.refresh_derived(spec)

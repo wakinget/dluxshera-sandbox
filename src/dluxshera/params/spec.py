@@ -258,7 +258,7 @@ def make_inference_subspec(
         coefficient requests are validated against the configured bases.
     include_secondary:
         Optional policy override. If explicitly False and ``infer_keys``
-        includes ``"secondary.zernike_coeffs_nm"``, a ValueError is raised with a
+        includes ``"optics.secondary.zernike_coeffs_nm"``, a ValueError is raised with a
         clear instruction to drop the key. If True but the configuration lacks
         a secondary basis, the configuration still wins and a ValueError is
         raised.
@@ -268,22 +268,22 @@ def make_inference_subspec(
 
     # Optional validation if cfg is provided
     if cfg is not None:
-        if not cfg.primary_noll_indices and "primary.zernike_coeffs_nm" in infer_keys_list:
+        if not cfg.primary_noll_indices and "optics.primary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
                 "Config does not define a primary Zernike basis, but "
-                "infer_keys includes 'primary.zernike_coeffs_nm'."
+                "infer_keys includes 'optics.primary.zernike_coeffs_nm'."
             )
 
         has_secondary_basis = getattr(cfg, "secondary_noll_indices", ())
-        if (not has_secondary_basis) and "secondary.zernike_coeffs_nm" in infer_keys_list:
+        if (not has_secondary_basis) and "optics.secondary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
                 "Config does not define a secondary Zernike basis, but "
-                "infer_keys includes 'secondary.zernike_coeffs_nm'."
+                "infer_keys includes 'optics.secondary.zernike_coeffs_nm'."
             )
 
-    if include_secondary is False and "secondary.zernike_coeffs_nm" in infer_keys_list:
+    if include_secondary is False and "optics.secondary.zernike_coeffs_nm" in infer_keys_list:
         raise ValueError(
-            "include_secondary=False but infer_keys includes 'secondary.zernike_coeffs_nm'; "
+            "include_secondary=False but infer_keys includes 'optics.secondary.zernike_coeffs_nm'; "
             "remove it from the inference view."
         )
 
@@ -445,7 +445,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
         # Optical wavefront errors
         # ----------------------
         ParamField(
-            key="primary.zernike_coeffs_nm",
+            key="optics.primary.zernike_coeffs_nm",
             group="primary",
             kind="primitive",
             units="nm",
@@ -459,7 +459,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="secondary.zernike_coeffs_nm",
+            key="optics.secondary.zernike_coeffs_nm",
             group="secondary",
             kind="primitive",
             units="nm",
@@ -475,6 +475,6 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
     ]
 
     if not include_secondary:
-        fields = [f for f in fields if f.key != "secondary.zernike_coeffs_nm"]
+        fields = [f for f in fields if f.key != "optics.secondary.zernike_coeffs_nm"]
 
     return ParamSpec(fields, system_id="shera_threeplane")

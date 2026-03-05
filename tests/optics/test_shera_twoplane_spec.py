@@ -37,9 +37,9 @@ def test_twoplane_forward_spec_structure_with_primary_basis():
     }
 
     assert expected_binary_keys.issubset(set(spec.keys()))
-    assert "secondary.zernike_coeffs_nm" not in spec
+    assert "optics.secondary.zernike_coeffs_nm" not in spec
 
-    primary_field = spec.get("primary.zernike_coeffs_nm")
+    primary_field = spec.get("optics.primary.zernike_coeffs_nm")
     assert primary_field.shape == (2,)
     assert primary_field.default == (0.0, 0.0)
 
@@ -76,12 +76,12 @@ def test_twoplane_forward_spec_refresh():
 
 def test_inference_spec_secondary_toggle():
     spec_with_secondary = build_inference_spec_basic()
-    assert "secondary.zernike_coeffs_nm" in spec_with_secondary
+    assert "optics.secondary.zernike_coeffs_nm" in spec_with_secondary
 
     spec_without_secondary: ParamSpec = build_inference_spec_basic(
         include_secondary=False
     )
-    assert "secondary.zernike_coeffs_nm" not in spec_without_secondary
+    assert "optics.secondary.zernike_coeffs_nm" not in spec_without_secondary
     # Ensure shared astrometry keys remain
     assert "source.separation_as" in spec_without_secondary
     assert "optics.plate_scale_as_per_pix" in spec_without_secondary

@@ -31,6 +31,6 @@ def test_leaf_index_collects_zernike_leaves():
     zernike_paths = leaf_index.get("zernike_coeffs_nm", [])
 
     assert set(zernike_paths) == {
-        "primary.zernike_coeffs_nm",
-        "secondary.zernike_coeffs_nm",
+        "optics.primary.zernike_coeffs_nm",
+        "optics.secondary.zernike_coeffs_nm",
     }

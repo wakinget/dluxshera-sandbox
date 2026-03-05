@@ -110,15 +110,15 @@ def test_runtime_bindings_update_cached_optics():
 
     store_a = forward_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_a,
-            "secondary.zernike_coeffs_nm": sec_coeffs_a,
+            "optics.primary.zernike_coeffs_nm": coeffs_a,
+            "optics.secondary.zernike_coeffs_nm": sec_coeffs_a,
             "system.plate_scale_as_per_pix": plate_scale,
         }
     )
     store_b = forward_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_b,
-            "secondary.zernike_coeffs_nm": sec_coeffs_b,
+            "optics.primary.zernike_coeffs_nm": coeffs_b,
+            "optics.secondary.zernike_coeffs_nm": sec_coeffs_b,
             "system.plate_scale_as_per_pix": plate_scale + 1e-3,
         }
     )
@@ -148,13 +148,13 @@ def test_runtime_bindings_update_cached_optics():
     twoplane_spec, twoplane_store = make_forward_store(twoplane_cfg)
     twoplane_store_a = twoplane_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_a,
+            "optics.primary.zernike_coeffs_nm": coeffs_a,
             "system.plate_scale_as_per_pix": twoplane_cfg.plate_scale_as_per_pix,
         }
     )
     twoplane_store_b = twoplane_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_b,
+            "optics.primary.zernike_coeffs_nm": coeffs_b,
             "system.plate_scale_as_per_pix": twoplane_cfg.plate_scale_as_per_pix
             + 1e-3,
         }

@@ -46,7 +46,7 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
         "source.log_flux_total",
         "source.contrast",
         "optics.plate_scale_as_per_pix",
-        "primary.zernike_coeffs_nm",
+        "optics.primary.zernike_coeffs_nm",
     )
     inference_subspec = make_inference_subspec(
         base_spec=forward_spec, infer_keys=infer_keys, cfg=cfg

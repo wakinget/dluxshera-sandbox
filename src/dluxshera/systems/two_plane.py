@@ -92,7 +92,7 @@ class SheraTwoPlaneConfig(BaseConfig):
 
     If this tuple is empty, the builder does not construct a Zernike BasisOptic
     for the primary. If non-empty, the forward spec will expect
-    `primary.zernike_coeffs_nm` of matching length.
+    `optics.primary.zernike_coeffs_nm` of matching length.
     """
 
     # ------------------------------------------------------------------

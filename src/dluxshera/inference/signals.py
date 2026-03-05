@@ -156,9 +156,9 @@ def build_signals(
     pa_est = stack_decoded("source.position_angle_deg")
     ps_est = stack_decoded("optics.plate_scale_as_per_pix")
     raw_flux_est = np.stack([_compute_raw_fluxes(decoded) for decoded in decoded_steps], axis=0)
-    zern_est = stack_decoded("primary.zernike_coeffs_nm")
+    zern_est = stack_decoded("optics.primary.zernike_coeffs_nm")
     try:
-        sec_zern_est = stack_decoded("secondary.zernike_coeffs_nm")
+        sec_zern_est = stack_decoded("optics.secondary.zernike_coeffs_nm")
     except KeyError:
         sec_zern_est = None
 
@@ -168,7 +168,7 @@ def build_signals(
     pa_true = _broadcast_truth(truth, "source.position_angle_deg", pa_est.shape)
     ps_true = _broadcast_truth(truth, "optics.plate_scale_as_per_pix", ps_est.shape)
     raw_flux_true = _truth_raw_fluxes(truth, raw_flux_est.shape)
-    zern_true = _broadcast_truth(truth, "primary.zernike_coeffs_nm", zern_est.shape)
+    zern_true = _broadcast_truth(truth, "optics.primary.zernike_coeffs_nm", zern_est.shape)
 
     signals["source.x_error_uas"] = 1e6 * _residual(x_est, x_true).reshape((T,))
     signals["source.y_error_uas"] = 1e6 * _residual(y_est, y_true).reshape((T,))
@@ -186,7 +186,7 @@ def build_signals(
     signals["source.raw_flux_error_ppm"] = _ppm_error(raw_flux_est, raw_flux_true)
 
     zern_error = _residual(zern_est, zern_true)
-    signals["primary.zernike_error_nm"] = zern_error
+    signals["optics.primary.zernike_error_nm"] = zern_error
     zern_mask = np.isfinite(zern_error)
     sum_sq = np.nansum(np.square(zern_error), axis=-1)
     counts = np.sum(zern_mask, axis=-1)
@@ -197,10 +197,10 @@ def build_signals(
 
     if sec_zern_est is not None:
         sec_zern_true = _broadcast_truth(
-            truth, "secondary.zernike_coeffs_nm", sec_zern_est.shape
+            truth, "optics.secondary.zernike_coeffs_nm", sec_zern_est.shape
         )
         sec_zern_error = _residual(sec_zern_est, sec_zern_true)
-        signals["secondary.zernike_error_nm"] = sec_zern_error
+        signals["optics.secondary.zernike_error_nm"] = sec_zern_error
         sec_mask = np.isfinite(sec_zern_error)
         sec_sum_sq = np.nansum(np.square(sec_zern_error), axis=-1)
         sec_counts = np.sum(sec_mask, axis=-1)

@@ -31,6 +31,6 @@ def test_ambiguous_leaf_attr_raises_attribute_error():
 
     message = str(excinfo.value)
     assert "Ambiguous leaf name" in message
-    assert "primary.zernike_coeffs_nm" in message
-    assert "secondary.zernike_coeffs_nm" in message
+    assert "optics.primary.zernike_coeffs_nm" in message
+    assert "optics.secondary.zernike_coeffs_nm" in message
     assert "binder.get(\"<full.key>\")" in message

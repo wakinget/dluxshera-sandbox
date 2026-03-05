@@ -220,11 +220,11 @@ def _iter_signal_panels(
             "filename": "position_angle_residual_as.png",
         }
 
-    if "system.plate_scale_error_ppm" in signals:
+    if "optics.plate_scale_error_ppm" in signals:
         yield {
             "title": title("Plate scale error (ppm)"),
             "ylabel": "Error (ppm)",
-            "ys": [signals["system.plate_scale_error_ppm"]],
+            "ys": [signals["optics.plate_scale_error_ppm"]],
             "labels": ["Plate scale"],
             "filename": "plate_scale_error_ppm.png",
         }
@@ -245,8 +245,8 @@ def _iter_signal_panels(
             "filename": "raw_flux_error_ppm.png",
         }
 
-    if "primary.zernike_error_nm" in signals:
-        zerr = signals["primary.zernike_error_nm"]
+    if "optics.primary.zernike_error_nm" in signals:
+        zerr = signals["optics.primary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
             ys = [zerr[:, i] for i in range(zerr.shape[1])]
             labels = [f"M1 Z{i + 4}" for i in range(zerr.shape[1])]
@@ -267,8 +267,8 @@ def _iter_signal_panels(
             "filename": "m1_zernike_rms_nm.png",
         }
 
-    if "secondary.zernike_error_nm" in signals:
-        zerr = signals["secondary.zernike_error_nm"]
+    if "optics.secondary.zernike_error_nm" in signals:
+        zerr = signals["optics.secondary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
             ys = [zerr[:, i] for i in range(zerr.shape[1])]
             labels = [f"M2 Z{i + 4}" for i in range(zerr.shape[1])]

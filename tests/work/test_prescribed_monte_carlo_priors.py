@@ -44,10 +44,10 @@ def test_extract_prior_override_std_normalizes_to_sigma():
 def test_extract_prior_override_vector_sigma():
     module = _load_prescribed_module()
     _, overrides = module._extract_prior_overrides(
-        {"prior.primary.zernike_coeffs_nm.sigma": [1, 2, 3]}
+        {"prior.optics.primary.zernike_coeffs_nm.sigma": [1, 2, 3]}
     )
 
-    assert overrides == {"primary.zernike_coeffs_nm": {"sigma": [1, 2, 3]}}
+    assert overrides == {"optics.primary.zernike_coeffs_nm": {"sigma": [1, 2, 3]}}
 
 
 def test_extract_prior_override_null_is_ignored_and_warned(capsys):

@@ -82,9 +82,9 @@ def shera_smoke_updates(shera_smoke_cfg):
     n_m1 = len(shera_smoke_cfg.primary_noll_indices)
     n_m2 = len(shera_smoke_cfg.secondary_noll_indices)
     if n_m1 > 0:
-        updates["primary.zernike_coeffs_nm"] = jnp.zeros(n_m1)
+        updates["optics.primary.zernike_coeffs_nm"] = jnp.zeros(n_m1)
     if n_m2 > 0:
-        updates["secondary.zernike_coeffs_nm"] = jnp.zeros(n_m2)
+        updates["optics.secondary.zernike_coeffs_nm"] = jnp.zeros(n_m2)
 
     return updates
 

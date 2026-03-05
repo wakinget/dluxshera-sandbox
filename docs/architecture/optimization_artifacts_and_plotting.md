@@ -182,7 +182,7 @@ Recommended top-level fields:
 **Key decision (v0):** IndexMap is stored in `meta.json`, not inside `trace.npz`.
 
 IndexMap is represented as an ordered list of packed segments (“entries”), each defining a θ slice and its semantic meaning:
-- `name`: dotted key / leaf identifier (e.g., `"binary.x_position_as"`, `"primary.zernike_coeffs_nm"`)
+- `name`: dotted key / leaf identifier (e.g., `"binary.x_position_as"`, `"optics.primary.zernike_coeffs_nm"`)
 - `start`, `stop`: θ slice indices (stop-exclusive)
 - `shape`: original leaf shape (e.g., `[27]`)
 - `block`: optional conceptual grouping label (e.g., `"astrometry"`, `"primary.zernikes"`)
@@ -201,7 +201,7 @@ A stable hash (e.g., of ordered `(name, shape)` pairs) may be stored as `layout_
           "entries": [
             {"name": "binary.x_position_as", "start": 0, "stop": 1, "shape": [1], "block": "astrometry"},
             {"name": "binary.y_position_as", "start": 1, "stop": 2, "shape": [1], "block": "astrometry"},
-            {"name": "primary.zernike_coeffs_nm", "start": 2, "stop": 29, "shape": [27], "block": "primary.zernikes"}
+            {"name": "optics.primary.zernike_coeffs_nm", "start": 2, "stop": 29, "shape": [27], "block": "primary.zernikes"}
           ]
         }
       }
@@ -536,7 +536,7 @@ These are plotted together by defining a plotting “panel recipe” that overla
 
 #### Plate scale and other relative errors: Signals (ppm scaling)
 Quantities like plate scale error in ppm are run diagnostics and remain Signals:
-- `system.plate_scale_error_ppm`: `(T,)` computed as `1e6 * (ps_est - ps_true) / ps_true` (equivalently `1e6 * ps_est / ps_true - 1e6`)
+- `optics.plate_scale_error_ppm`: `(T,)` computed as `1e6 * (ps_est - ps_true) / ps_true` (equivalently `1e6 * ps_est / ps_true - 1e6`)
 
 #### Raw fluxes: Transform for values; Signals for errors
 Flux-related products are split into:
@@ -717,8 +717,8 @@ Signals are optional derived time series used mainly for plotting. If saved, `si
 Preferred v0 approach:
 - Store numeric arrays keyed by fully-qualified signal names that encode unit conventions in the name, e.g.:
   - `binary.x_error_uas`
-  - `system.plate_scale_error_ppm`
-  - `primary.zernike_error_nm`
+  - `optics.plate_scale_error_ppm`
+  - `optics.primary.zernike_error_nm`
 
 This keeps the signals cache lightweight and easy to manage. A strong invalidation story is not required in v0; the decoding context is expected to be clear from run metadata and signal naming.
 

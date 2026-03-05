@@ -40,7 +40,7 @@ def _sample_run_entries() -> list[dict]:
                         "init_delta": 0.7,
                         "final_delta": 0.1,
                     },
-                    "primary.zernike_coeffs_nm": {
+                    "optics.primary.zernike_coeffs_nm": {
                         "truth": [10.0, 20.0],
                         "init": [8.0, 19.0],
                         "final": [9.0, 21.0],
@@ -74,7 +74,7 @@ def test_write_results_csv_column_orientation(tmp_path):
     module = _load_prescribed_module()
     out_path = tmp_path / "results.csv"
     run_entries = _sample_run_entries()
-    infer_keys = ("source.x_position_as", "primary.zernike_coeffs_nm")
+    infer_keys = ("source.x_position_as", "optics.primary.zernike_coeffs_nm")
 
     module._write_results_csv(
         out_path,
@@ -93,8 +93,8 @@ def test_write_results_csv_column_orientation(tmp_path):
 
     assert "loss_init" in rows_by_key
     assert "final.source.x_position_as" in rows_by_key
-    assert "final.primary.zernike_coeffs_nm[0]" in rows_by_key
-    assert "final.primary.zernike_coeffs_nm[1]" in rows_by_key
+    assert "final.optics.primary.zernike_coeffs_nm[0]" in rows_by_key
+    assert "final.optics.primary.zernike_coeffs_nm[1]" in rows_by_key
 
     assert rows_by_key["loss_init"]["run_0001"] == "10.0"
     assert rows_by_key["loss_init"]["run_0002"] == "6.0"
@@ -102,8 +102,8 @@ def test_write_results_csv_column_orientation(tmp_path):
     assert rows_by_key["final.source.x_position_as"]["run_0001"] == "0.3"
     assert rows_by_key["final.source.x_position_as"]["run_0002"] == "1.1"
 
-    assert rows_by_key["final.primary.zernike_coeffs_nm[0]"]["run_0001"] == "9.0"
-    assert rows_by_key["final.primary.zernike_coeffs_nm[0]"]["run_0002"] == ""
+    assert rows_by_key["final.optics.primary.zernike_coeffs_nm[0]"]["run_0001"] == "9.0"
+    assert rows_by_key["final.optics.primary.zernike_coeffs_nm[0]"]["run_0002"] == ""
 
     assert rows_by_key["truth.source.x_position_as"]["run_0001"] == "0.2"
     assert rows_by_key["truth.source.x_position_as"]["run_0002"] == ""
@@ -113,7 +113,7 @@ def test_write_results_csv_row_orientation(tmp_path):
     module = _load_prescribed_module()
     out_path = tmp_path / "results.csv"
     run_entries = _sample_run_entries()
-    infer_keys = ("source.x_position_as", "primary.zernike_coeffs_nm")
+    infer_keys = ("source.x_position_as", "optics.primary.zernike_coeffs_nm")
 
     module._write_results_csv(
         out_path,
@@ -134,7 +134,7 @@ def test_write_results_csv_row_orientation(tmp_path):
     rows_by_run = {row["run_id"]: row for row in rows}
     assert "loss_init" in header
     assert "final.source.x_position_as" in header
-    assert "final.primary.zernike_coeffs_nm[0]" in header
+    assert "final.optics.primary.zernike_coeffs_nm[0]" in header
 
     assert rows_by_run["run_0001"]["loss_init"] == "10.0"
     assert rows_by_run["run_0002"]["loss_init"] == "6.0"
@@ -142,8 +142,8 @@ def test_write_results_csv_row_orientation(tmp_path):
     assert rows_by_run["run_0001"]["final.source.x_position_as"] == "0.3"
     assert rows_by_run["run_0002"]["final.source.x_position_as"] == "1.1"
 
-    assert rows_by_run["run_0001"]["final.primary.zernike_coeffs_nm[1]"] == "21.0"
-    assert rows_by_run["run_0002"]["final.primary.zernike_coeffs_nm[1]"] == ""
+    assert rows_by_run["run_0001"]["final.optics.primary.zernike_coeffs_nm[1]"] == "21.0"
+    assert rows_by_run["run_0002"]["final.optics.primary.zernike_coeffs_nm[1]"] == ""
 
     assert rows_by_run["run_0001"]["truth.source.x_position_as"] == "0.2"
     assert rows_by_run["run_0002"]["truth.source.x_position_as"] == ""

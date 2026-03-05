@@ -13,7 +13,7 @@ def test_plot_signals_panels_creates_pngs(tmp_path: Path):
         "optics.plate_scale_error_ppm": np.ones(5),
         "source.raw_flux_error_ppm": np.zeros((5, 2)),
         "primary.zernike_rms_nm": np.linspace(0.0, 0.2, 5),
-        "primary.zernike_error_nm": np.zeros((5, 3)),
+        "optics.primary.zernike_error_nm": np.zeros((5, 3)),
     }
 
     paths = plot_signals_panels(signals, tmp_path, title_prefix="test")

@@ -34,7 +34,7 @@ def test_build_intro_signals_scaling_and_shapes():
         "source.separation_as": np.ones(T),
         "source.position_angle_deg": np.zeros(T),
         "optics.plate_scale_as_per_pix": np.full(T, 0.1),
-        "primary.zernike_coeffs_nm": np.array([0.05, 0.1, 0.15]),
+        "optics.primary.zernike_coeffs_nm": np.array([0.05, 0.1, 0.15]),
         "source.log_flux_total": np.log10(15.0),
         "source.contrast": 2.0,
     }
@@ -46,7 +46,7 @@ def test_build_intro_signals_scaling_and_shapes():
             "source.separation_as": 1.0 + theta_row[1],
             "source.position_angle_deg": 0.0,
             "optics.plate_scale_as_per_pix": 0.1 + 0.01 * theta_row[2],
-            "primary.zernike_coeffs_nm": theta_row + 0.1,
+            "optics.primary.zernike_coeffs_nm": theta_row + 0.1,
             "source.log_flux_total": np.log10(15.0 + 2.0 * theta_row[0]),
             "source.contrast": (10.0 + theta_row[0]) / (5.0 + theta_row[0]),
         }
@@ -58,7 +58,7 @@ def test_build_intro_signals_scaling_and_shapes():
     assert signals["source.separation_error_uas"].shape == (T,)
     assert signals["optics.plate_scale_error_ppm"].shape == (T,)
     assert signals["source.raw_flux_error_ppm"].shape == (T, 2)
-    assert signals["primary.zernike_error_nm"].shape == (T, 3)
+    assert signals["optics.primary.zernike_error_nm"].shape == (T, 3)
     assert signals["primary.zernike_rms_nm"].shape == (T,)
 
     expected_x_error = theta[:, 0] * 1e6
@@ -66,7 +66,7 @@ def test_build_intro_signals_scaling_and_shapes():
     expected_sep_error = theta[:, 1] * 1e6
     expected_plate_scale_error = 1e6 * (0.01 * theta[:, 2]) / 0.1
     expected_flux_error = 1e6 * (theta[:, 0][:, None] / np.array([10.0, 5.0]))
-    expected_zern_error = (theta + 0.1) - truth["primary.zernike_coeffs_nm"]
+    expected_zern_error = (theta + 0.1) - truth["optics.primary.zernike_coeffs_nm"]
     expected_zern_rms = np.sqrt(np.mean(expected_zern_error**2, axis=-1))
 
     np.testing.assert_allclose(signals["source.x_error_uas"], expected_x_error)
@@ -76,7 +76,7 @@ def test_build_intro_signals_scaling_and_shapes():
         signals["optics.plate_scale_error_ppm"], expected_plate_scale_error
     )
     np.testing.assert_allclose(signals["source.raw_flux_error_ppm"], expected_flux_error)
-    np.testing.assert_allclose(signals["primary.zernike_error_nm"], expected_zern_error)
+    np.testing.assert_allclose(signals["optics.primary.zernike_error_nm"], expected_zern_error)
     np.testing.assert_allclose(signals["primary.zernike_rms_nm"], expected_zern_rms)
 
 
@@ -91,7 +91,7 @@ def test_build_signals_handles_missing_truth_with_nans():
             "source.separation_as": 1.0,
             "source.position_angle_deg": 0.0,
             "optics.plate_scale_as_per_pix": 0.1,
-            "primary.zernike_coeffs_nm": np.zeros(2),
+            "optics.primary.zernike_coeffs_nm": np.zeros(2),
             "source.log_flux_total": 0.0,
             "source.contrast": 1.0,
         }
@@ -120,7 +120,7 @@ def test_build_signals_computes_flux_from_store_without_refresh_derived():
                 "source.separation_as": 1.0,
                 "source.position_angle_deg": 0.0,
                 "optics.plate_scale_as_per_pix": 0.1,
-                "primary.zernike_coeffs_nm": np.zeros(1),
+                "optics.primary.zernike_coeffs_nm": np.zeros(1),
                 "source.log_flux_total": np.log10(15.0 + 2.0 * theta_row[0]),
                 "source.contrast": (10.0 + theta_row[0]) / (5.0 + theta_row[0]),
             }
