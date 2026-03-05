@@ -3,6 +3,8 @@
     "n_runs": 5,
     "run_id_prefix": "mc",
     "results_filename": "results.csv",
+    "results_orientation": "col",
+    "_orientation_options": "col | row",
     "notes": "Experiment-level notes. Briefly describe the experiment."
   },
   "model": {

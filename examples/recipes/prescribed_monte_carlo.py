@@ -1614,7 +1614,8 @@ def main() -> None:
         default="col",
         help=(
             "results.csv schema: 'col' writes key + run_id columns (default), "
-            "'row' writes one row per run for compatibility."
+            "'row' writes one row per run for compatibility. CLI overrides "
+            "prescription experiment.results_orientation when provided."
         ),
     )
     parser.add_argument("--num-preview", type=int, default=None)
@@ -1638,6 +1639,19 @@ def main() -> None:
     # Plan/prescription parsing and run spec resolution: load the JSON recipe
     # and the optional overrides CSV that mutates per-run settings.
     prescription = _load_prescription(prescription_path)
+    def _normalize_orientation(value: str | None) -> str:
+        if value is None:
+            return "col"
+        if value not in {"col", "row"}:
+            raise ValueError("experiment.results_orientation must be 'col' or 'row'")
+        return value
+
+    presc_orientation = _normalize_orientation(
+        _get_nested(prescription, ["experiment", "results_orientation"])
+    )
+    results_orientation = _normalize_orientation(
+        args.results_orientation if args.results_orientation is not None else presc_orientation
+    )
     if overrides_path is None:
         plan_rows = []
     else:
@@ -2507,7 +2521,7 @@ def main() -> None:
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
-        results_orientation=args.results_orientation,
+        results_orientation=results_orientation,
     )
     t1_experiment = time.time()
     print(
