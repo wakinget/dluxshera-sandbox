@@ -1167,8 +1167,7 @@ def run_shera_gd(
     num_steps :
         Number of gradient updates to perform.
     optimizer_kind :
-        Name of optax optimizer to use ("sgd" or "adam"). Defaults to SGD for
-        backward compatibility.
+        Name of optax optimizer to use ("sgd" or "adam"). Defaults to SGD.
     optimizer_kwargs :
         Optional mapping forwarded to the optax optimizer constructor (e.g.,
         {"b1": 0.9, "b2": 0.999, "eps": 1e-8} for Adam). No strict validation
@@ -1211,15 +1210,11 @@ def run_shera_gd(
     """
     def _scale_by_vector(vec: np.ndarray) -> optax.GradientTransformation:
         """Elementwise scaling of updates by vector ``vec``."""
-
         vec = np.asarray(vec)
-
         def init_fn(_):
             return None
-
         def update_fn(updates, state, params=None):
             return jax.tree_util.tree_map(lambda g: g * vec, updates), state
-
         return optax.GradientTransformation(init_fn, update_fn)
 
     opt_kwargs = dict(optimizer_kwargs or {})

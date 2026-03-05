@@ -57,6 +57,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import matplotlib.pyplot as plt
 
 from dluxshera.inference.optimization import (
     EigenThetaMap,
@@ -72,6 +73,7 @@ from dluxshera.inference.run_artifacts import (
     build_param_summary,
     patch_summary,
 )
+from dluxshera.inference.signals import build_signals
 from dluxshera.params.packing import (
     build_eigen_index_map,
     build_index_map,
@@ -80,6 +82,15 @@ from dluxshera.params.packing import (
 )
 from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
 from dluxshera.params.store import ParameterStore, strip_structural
+from dluxshera.plot.plotting import (
+    apply_plot_defaults,
+    get_default_cmaps,
+    plot_eigenvalue_spectrum,
+    plot_fim,
+    plot_parameter_history,
+    plot_psf_comparison,
+    plot_signals_grid,
+)
 from dluxshera.systems.three_plane import (
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
@@ -94,6 +105,11 @@ DEFAULT_PRESCRIPTION_PATH = Path(
 DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
+
+# Plotting defaults
+_ = get_default_cmaps()
+apply_plot_defaults()
+plt.rcParams["image.cmap"] = "inferno_nan"
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -349,6 +365,9 @@ def _apply_experiment_n_runs(
 
 def _detect_prescription_overrides_candidates(
     outdir: Path,
+    *,
+    detect_prescription: bool = True,
+    detect_overrides: bool = True,
 ) -> tuple[Path | None, Path | None]:
     """Scan an output directory for candidate prescription/overrides files.
 
@@ -360,27 +379,33 @@ def _detect_prescription_overrides_candidates(
     if not outdir.exists():
         return None, None
 
-    prescription_candidates = sorted(
-        candidate
-        for candidate in outdir.rglob("*.json")
-        if "prescription" in candidate.name.lower()
-    )
-    overrides_candidates = sorted(
-        (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
-        key=lambda candidate: (
-            candidate.name.lower() != "overrides.csv",
-            candidate.name.lower() == "overrides_wide.csv",
-            str(candidate),
-        ),
-    )
+    prescription_candidates = []
+    overrides_candidates = []
 
-    if len(prescription_candidates) > 1:
+    if detect_prescription:
+        prescription_candidates = sorted(
+            candidate
+            for candidate in outdir.rglob("*.json")
+            if "prescription" in candidate.name.lower()
+        )
+
+    if detect_overrides:
+        overrides_candidates = sorted(
+            (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
+            key=lambda candidate: (
+                candidate.name.lower() != "overrides.csv",
+                candidate.name.lower() == "overrides_wide.csv",
+                str(candidate),
+            ),
+        )
+
+    if detect_prescription and len(prescription_candidates) > 1:
         joined = "\n".join(f"- {candidate}" for candidate in prescription_candidates)
         raise ValueError(
             "Multiple prescription candidates found in "
             f"{outdir}. Provide --prescription to disambiguate:\n{joined}"
         )
-    if len(overrides_candidates) > 1:
+    if detect_overrides and len(overrides_candidates) > 1:
         joined = "\n".join(f"- {candidate}" for candidate in overrides_candidates)
         raise ValueError(
             "Multiple overrides candidates found in "
@@ -401,15 +426,29 @@ def _resolve_prescription_and_overrides(
     overrides_path = args.overrides
     explicit_prescription = prescription_path is not None
 
-    if (prescription_path is None or overrides_path is None) and outdir is not None:
-        detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
-            outdir
-        )
-        if prescription_path is None and detected_prescription is not None:
-            prescription_path = detected_prescription
-            explicit_prescription = True
-        if overrides_path is None and detected_overrides is not None:
-            overrides_path = detected_overrides
+    # Only scan for prescription when none was provided.
+    detected_prescription = None
+    detected_overrides = None
+    if outdir is not None:
+        if prescription_path is None and overrides_path is None:
+            detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
+                outdir
+            )
+        elif prescription_path is None:
+            detected_prescription, _ = _detect_prescription_overrides_candidates(
+                outdir, detect_overrides=False
+            )
+        elif overrides_path is None:
+            _, detected_overrides = _detect_prescription_overrides_candidates(
+                outdir, detect_prescription=False
+            )
+
+    if prescription_path is None and detected_prescription is not None:
+        prescription_path = detected_prescription
+        explicit_prescription = True
+
+    if overrides_path is None and detected_overrides is not None:
+        overrides_path = detected_overrides
 
     if overrides_path is not None and prescription_path is None:
         overrides_label = overrides_path if overrides_path is not None else "unknown"
@@ -647,6 +686,7 @@ def _resolve_run_spec_with_id(
     resolved.setdefault("eigen", {})
     resolved.setdefault("truth", {})
     resolved.setdefault("optimizer", {})
+    resolved.setdefault("outputs", {})
     resolved.setdefault("model", {})
 
     base_seed = presc.get("defaults", {}).get("seed")
@@ -1845,6 +1885,13 @@ def main() -> None:
         if add_noise_value is None:
             add_noise_value = _get_nested(prescription, ["defaults", "noise", "add_noise"])
         add_noise = bool(add_noise_value)
+        outputs_cfg = run_spec.get("outputs", {})
+        if outputs_cfg is None:
+            outputs_cfg = {}
+        plots_flag = outputs_cfg.get("plots")
+        if plots_flag is None:
+            plots_flag = _get_nested(prescription, ["defaults", "outputs", "plots"])
+        save_plots = bool(plots_flag) if plots_flag is not None else False
         if add_noise:
             rng_key, split_key = jr.split(rng_key)
             if np.min(data_psf) > 100:
@@ -2042,7 +2089,7 @@ def main() -> None:
         def map_loss_fn(theta: np.ndarray) -> np.ndarray:
             store_theta = store_unpack_params(inference_subspec, theta, init_store)
             nll_loss = nll_loss_fn(theta)
-            prior_gaussian_loss = prior_spec.quadratic_penalty(
+            prior_gaussian_loss = run_prior_spec.quadratic_penalty(
                 store_theta,
                 center_store=truth_store, # TODO: truth_store or init_store?
                 keys=infer_keys,
@@ -2209,7 +2256,7 @@ def main() -> None:
         base_lr_value = optimizer_cfg.get("base_lr")
         if base_lr_value is None:
             raise ValueError(f"Run {run_id} resolved to a null optimizer.base_lr.")
-        optax_kind = optimizer_cfg.get("kind", "sgd")
+        opt_kind = optimizer_cfg.get("kind", "sgd")
         optimizer_kwargs = optimizer_cfg.get("kwargs", {})
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
@@ -2229,7 +2276,7 @@ def main() -> None:
             learning_rate=base_lr,
             lr_vec=lr_vec,
             num_steps=n_iter,
-            optimizer_kind=optax_kind,
+            optimizer_kind=opt_kind,
             optimizer_kwargs=optimizer_kwargs,
             runs_dir=runs_dir,
             run_id=run_id,
@@ -2239,7 +2286,7 @@ def main() -> None:
             extra_meta={
                 "optimizer": {
                     "preconditioning": precond_meta,
-                    "kind": optax_kind,
+                    "kind": opt_kind,
                     "kwargs": optimizer_kwargs,
                     "loss": loss_kind,
                 },
@@ -2315,6 +2362,126 @@ def main() -> None:
                     },
                 )
                 _maybe_warn_missing_artifacts(run_dir)
+
+                if save_plots:
+                    plots_dir = run_dir / "plots"
+                    plots_dir.mkdir(parents=True, exist_ok=True)
+
+                    fim_labels = generate_fim_labels(
+                        infer_keys,
+                        cfg=cfg,
+                        store=init_store if use_eigen else truth_store,
+                    )
+                    plot_fim(
+                        F,
+                        fim_labels,
+                        save_path=plots_dir / "fim.png",
+                        vmin=4,
+                        vmax=14,
+                        show=False,
+                    )
+
+                    if use_eigen and eigen_map is not None:
+                        eigvals, eigvecs = np.linalg.eigh(np.asarray(F))
+                        sort_idx = np.argsort(eigvals)[::-1]
+                        eigvals = eigvals[sort_idx]
+                        eigvecs = eigvecs[:, sort_idx]
+                        spectrum_truncate_k = None
+                        if truncate_k is not None:
+                            spectrum_truncate_k = int(truncate_k)
+                        elif truncate_by_eigval is not None:
+                            spectrum_truncate_k = int(np.sum(eigvals >= truncate_by_eigval))
+                            if spectrum_truncate_k <= 0:
+                                spectrum_truncate_k = 1
+                        plot_eigenvalue_spectrum(
+                            eigvals,
+                            eigvecs,
+                            labels=fim_labels,
+                            truncate_k=spectrum_truncate_k,
+                            label_boxes=False,
+                            save_path=plots_dir / "eigenvalue_spectrum.png",
+                            show=False,
+                        )
+
+                    psf_extent_as = (
+                        binder.cfg.psf_npix
+                        * binder.base_forward_store.get("system.plate_scale_as_per_pix")
+                        / 2
+                        * np.array([-1, 1, -1, 1])
+                    )
+
+                    plot_psf_comparison(
+                        data=data,
+                        model=init_psf,
+                        var=data_var,
+                        extent=psf_extent_as,
+                        model_label="Initial Model",
+                        save_path=plots_dir / "initial_psf_comparison.png",
+                        show=False,
+                    )
+
+                    plot_psf_comparison(
+                        data=data,
+                        model=final_psf,
+                        var=data_var,
+                        extent=psf_extent_as,
+                        model_label="Final Model",
+                        save_path=plots_dir / "final_psf_comparison.png",
+                        show=False,
+                    )
+
+                    losses = np.asarray(trace["loss"])
+                    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+                    axes = axes.flatten()
+                    plot_parameter_history(
+                        names=("Loss",),
+                        histories=(losses,),
+                        true_vals=(float(loss_true),),
+                        ax=axes[0],
+                        title="Optimization Loss History",
+                        show=False,
+                        close=False,
+                    )
+                    window = min(10, n_iter)
+                    axes[1].plot(np.arange(n_iter - window, n_iter) + 1, losses[-window:])
+                    axes[1].set_title(f"Last {window} Iterations, Final= {losses[-1]:.3f}")
+                    axes[1].set_xlabel("Iteration")
+                    axes[1].set_ylabel("Loss")
+                    axes[1].axhline(loss_true, linestyle="--", color="k", alpha=0.6)
+                    final_delta = np.abs(losses[-1] - loss_true)
+                    if final_delta != 0:
+                        axes[1].set_ylim(loss_true - 3 * final_delta, loss_true + 3 * final_delta)
+                    fig.tight_layout()
+                    fig.savefig(plots_dir / "loss_history.png", dpi=300)
+                    plt.close(fig)
+
+                    if use_eigen and eigen_map is not None:
+                        decoder = lambda z: store_unpack_params(
+                            inference_subspec,
+                            eigen_map.theta_from_z(z),
+                            init_store,
+                        ).refresh_derived(forward_spec)
+                    else:
+                        decoder = lambda theta: store_unpack_params(
+                            inference_subspec,
+                            theta,
+                            init_store,
+                        ).refresh_derived(forward_spec)
+
+                    signals = build_signals(
+                        trace,
+                        meta={},
+                        decoder=decoder,
+                        truth=truth_store,
+                        signal_set="intro",
+                    )
+                    plot_signals_grid(
+                        signals,
+                        plots_dir,
+                        include_zernike_rms=False,
+                        figsize=(15, 10),
+                        show=False,
+                    )
 
         t1_run = time.time()
         print(
