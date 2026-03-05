@@ -20,6 +20,7 @@ system:
     n_struts: 4
     strut_width_m: 0.002
     strut_rotation_deg: 45.0
+    throughput: 1.0
     primary_noll_indices:
     - 4
     - 5
