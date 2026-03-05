@@ -2105,7 +2105,7 @@ def main() -> None:
             nll_loss = nll_loss_fn(theta)
             prior_gaussian_loss = run_prior_spec.quadratic_penalty(
                 store_theta,
-                center_store=truth_store, # TODO: truth_store or init_store?
+                center_store=init_store, # TODO: truth_store or init_store?
                 keys=infer_keys,
             )
             return nll_loss + prior_gaussian_loss
