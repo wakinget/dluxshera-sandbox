@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from dataclasses import asdict, is_dataclass
+from typing import Any
 
 from ..params.spec import ParamField, ParamSpec
-
-if TYPE_CHECKING:
-    from ..systems.three_plane import SheraThreePlaneConfig
-    from ..systems.two_plane import SheraTwoPlaneConfig
-
 
 __all__ = ["build_alpha_cen_contract"]
 
 
-def build_alpha_cen_contract(
-    source_cfg: "SheraThreePlaneConfig | SheraTwoPlaneConfig",
-) -> ParamSpec:
+def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
     """Return the AlphaCen source parameter contract under ``source.*`` keys.
 
     Required keys:
@@ -34,28 +28,21 @@ def build_alpha_cen_contract(
       - ``source.y_position_as`` (defaults to 0.0)
     """
 
-    def _cfg_get(path: str):
-        cur = source_cfg
-        for key in path.split("."):
-            if isinstance(cur, Mapping):
-                cur = cur.get(key, None)
-            else:
-                cur = getattr(cur, key, None)
-            if cur is None:
-                break
-        return cur
+    if is_dataclass(source_cfg):
+        source_cfg = asdict(source_cfg)
 
-    wavelength_m = _cfg_get("system.source.wavelength_m")
-    if wavelength_m is None:
-        wavelength_m = _cfg_get("wavelength_m")
+    if isinstance(source_cfg, Mapping) and "source" in source_cfg:
+        source_cfg = source_cfg["source"]
 
-    bandwidth_m = _cfg_get("system.source.bandwidth_m")
-    if bandwidth_m is None:
-        bandwidth_m = _cfg_get("bandwidth_m")
+    if not isinstance(source_cfg, Mapping):
+        raise ValueError(
+            "build_alpha_cen_contract expected a source mapping or a system "
+            "mapping containing a 'source' key."
+        )
 
-    n_lambda = _cfg_get("system.source.n_lambda")
-    if n_lambda is None:
-        n_lambda = _cfg_get("n_lambda")
+    wavelength_m = source_cfg.get("wavelength_m")
+    bandwidth_m = source_cfg.get("bandwidth_m")
+    n_lambda = source_cfg.get("n_lambda")
 
     fields = [
         ParamField(

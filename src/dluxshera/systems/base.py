@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace as dataclass_replace
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace as dataclass_replace
 from typing import Callable, Optional, Sequence, Self
 
 import jax.numpy as jnp
@@ -28,15 +28,23 @@ def compose_forward_spec(system_cfg, detector_contract: ParamSpec | None = None)
     from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
     from ..components.sources import build_alpha_cen_contract
 
-    source_contract = build_alpha_cen_contract(system_cfg)
-
     optics_kind = _detect_optics_kind_from_cfg(system_cfg)
+
+    if is_dataclass(system_cfg):
+        system_cfg = asdict(system_cfg)
+
+    source_contract = build_alpha_cen_contract(system_cfg)
     optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
         "two_plane": SheraTwoPlaneOptics.contract,
         "three_plane": SheraThreePlaneOptics.contract,
     }
     try:
-        optics_contract = optics_contract_builders[optics_kind](system_cfg)
+        optics_cfg = (
+            system_cfg["optics"]
+            if isinstance(system_cfg, Mapping) and "optics" in system_cfg
+            else system_cfg
+        )
+        optics_contract = optics_contract_builders[optics_kind](optics_cfg)
     except KeyError as exc:
         supported = ", ".join(sorted(optics_contract_builders))
         raise ValueError(
