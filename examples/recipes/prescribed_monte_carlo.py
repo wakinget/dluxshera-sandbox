@@ -12,6 +12,8 @@ Execution flow
 - Run optimization in eigen space (FIM-based) or primitive parameter space.
 - Write run artifacts under runs/<run_id>/..., including summaries and logs.
 - Aggregate manifest.json and results.csv across runs at the experiment root.
+  `results.csv` defaults to column orientation (first column `key`, one column
+  per `run_id`), with an optional compatibility mode for row orientation.
 
 Notes behavior
 --------------
@@ -55,6 +57,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import matplotlib.pyplot as plt
 
 from dluxshera.inference.optimization import (
     EigenThetaMap,
@@ -70,6 +73,7 @@ from dluxshera.inference.run_artifacts import (
     build_param_summary,
     patch_summary,
 )
+from dluxshera.inference.signals import build_signals
 from dluxshera.params.packing import (
     build_eigen_index_map,
     build_index_map,
@@ -78,6 +82,15 @@ from dluxshera.params.packing import (
 )
 from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
 from dluxshera.params.store import ParameterStore, strip_structural
+from dluxshera.plot.plotting import (
+    apply_plot_defaults,
+    get_default_cmaps,
+    plot_eigenvalue_spectrum,
+    plot_fim,
+    plot_parameter_history,
+    plot_psf_comparison,
+    plot_signals_grid,
+)
 from dluxshera.systems.three_plane import (
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
@@ -92,6 +105,11 @@ DEFAULT_PRESCRIPTION_PATH = Path(
 DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
+
+# Plotting defaults
+_ = get_default_cmaps()
+apply_plot_defaults()
+plt.rcParams["image.cmap"] = "inferno_nan"
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -347,6 +365,9 @@ def _apply_experiment_n_runs(
 
 def _detect_prescription_overrides_candidates(
     outdir: Path,
+    *,
+    detect_prescription: bool = True,
+    detect_overrides: bool = True,
 ) -> tuple[Path | None, Path | None]:
     """Scan an output directory for candidate prescription/overrides files.
 
@@ -358,27 +379,33 @@ def _detect_prescription_overrides_candidates(
     if not outdir.exists():
         return None, None
 
-    prescription_candidates = sorted(
-        candidate
-        for candidate in outdir.rglob("*.json")
-        if "prescription" in candidate.name.lower()
-    )
-    overrides_candidates = sorted(
-        (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
-        key=lambda candidate: (
-            candidate.name.lower() != "overrides.csv",
-            candidate.name.lower() == "overrides_wide.csv",
-            str(candidate),
-        ),
-    )
+    prescription_candidates = []
+    overrides_candidates = []
 
-    if len(prescription_candidates) > 1:
+    if detect_prescription:
+        prescription_candidates = sorted(
+            candidate
+            for candidate in outdir.rglob("*.json")
+            if "prescription" in candidate.name.lower()
+        )
+
+    if detect_overrides:
+        overrides_candidates = sorted(
+            (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
+            key=lambda candidate: (
+                candidate.name.lower() != "overrides.csv",
+                candidate.name.lower() == "overrides_wide.csv",
+                str(candidate),
+            ),
+        )
+
+    if detect_prescription and len(prescription_candidates) > 1:
         joined = "\n".join(f"- {candidate}" for candidate in prescription_candidates)
         raise ValueError(
             "Multiple prescription candidates found in "
             f"{outdir}. Provide --prescription to disambiguate:\n{joined}"
         )
-    if len(overrides_candidates) > 1:
+    if detect_overrides and len(overrides_candidates) > 1:
         joined = "\n".join(f"- {candidate}" for candidate in overrides_candidates)
         raise ValueError(
             "Multiple overrides candidates found in "
@@ -399,15 +426,29 @@ def _resolve_prescription_and_overrides(
     overrides_path = args.overrides
     explicit_prescription = prescription_path is not None
 
-    if (prescription_path is None or overrides_path is None) and outdir is not None:
-        detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
-            outdir
-        )
-        if prescription_path is None and detected_prescription is not None:
-            prescription_path = detected_prescription
-            explicit_prescription = True
-        if overrides_path is None and detected_overrides is not None:
-            overrides_path = detected_overrides
+    # Only scan for prescription when none was provided.
+    detected_prescription = None
+    detected_overrides = None
+    if outdir is not None:
+        if prescription_path is None and overrides_path is None:
+            detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
+                outdir
+            )
+        elif prescription_path is None:
+            detected_prescription, _ = _detect_prescription_overrides_candidates(
+                outdir, detect_overrides=False
+            )
+        elif overrides_path is None:
+            _, detected_overrides = _detect_prescription_overrides_candidates(
+                outdir, detect_prescription=False
+            )
+
+    if prescription_path is None and detected_prescription is not None:
+        prescription_path = detected_prescription
+        explicit_prescription = True
+
+    if overrides_path is None and detected_overrides is not None:
+        overrides_path = detected_overrides
 
     if overrides_path is not None and prescription_path is None:
         overrides_label = overrides_path if overrides_path is not None else "unknown"
@@ -645,6 +686,7 @@ def _resolve_run_spec_with_id(
     resolved.setdefault("eigen", {})
     resolved.setdefault("truth", {})
     resolved.setdefault("optimizer", {})
+    resolved.setdefault("outputs", {})
     resolved.setdefault("model", {})
 
     base_seed = presc.get("defaults", {}).get("seed")
@@ -709,6 +751,9 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         "eigen.whiten_basis",
         "eigen.truncate_k",
         "eigen.truncate_by_eigval",
+        "optimizer.kind",
+        "optimizer.loss",
+        "optimizer.kwargs",
         "truth.x",
         "truth.y",
         "init.x",
@@ -732,6 +777,19 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
             value = _get_nested(spec, ["eigen", "truncate_k"])
         elif key == "eigen.truncate_by_eigval":
             value = _get_nested(spec, ["eigen", "truncate_by_eigval"])
+        elif key == "optimizer.kind":
+            value = _get_nested(spec, ["optimizer", "kind"])
+        elif key == "optimizer.loss":
+            value = _get_nested(spec, ["optimizer", "loss"])
+        elif key == "optimizer.kwargs":
+            kwargs_val = _get_nested(spec, ["optimizer", "kwargs"])
+            if kwargs_val:
+                try:
+                    value = json.dumps(kwargs_val, sort_keys=True)
+                except Exception:
+                    value = str(kwargs_val)
+            else:
+                value = ""
         elif key == "truth.x":
             value = _get_nested(spec, ["truth", "binary", "x_position_as"])
         elif key == "truth.y":
@@ -1156,6 +1214,9 @@ def _build_results_rows(
             optimizer_meta.get("preconditioning") if optimizer_meta else {}
         )
         precond_method = precond_meta.get("method")
+        optimizer_kind = optimizer_meta.get("kind")
+        optimizer_kwargs = optimizer_meta.get("kwargs")
+        optimizer_loss = optimizer_meta.get("loss")
 
         row: dict[str, Any] = {
             "run_id": run_id,
@@ -1178,6 +1239,13 @@ def _build_results_rows(
             "init.mode": prescribed_meta.get("init_mode"),
             "optimizer.n_iter": optimizer_meta.get("num_steps"),
             "optimizer.base_lr": optimizer_meta.get("learning_rate"),
+            "optimizer.kind": optimizer_kind,
+            "optimizer.kwargs": (
+                json.dumps(optimizer_kwargs, sort_keys=True)
+                if isinstance(optimizer_kwargs, dict) and optimizer_kwargs
+                else None
+            ),
+            "optimizer.loss": optimizer_loss,
             "eigen.use_eigen": (
                 prescribed_meta.get("use_eigen")
                 if prescribed_meta.get("use_eigen") is not None
@@ -1230,16 +1298,48 @@ def _build_results_rows(
     return rows, columns
 
 
+def _transpose_results_rows(
+    rows: list[dict[str, Any]],
+    metric_columns: list[str],
+    run_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Transpose run-major rows into metric-major rows for aggregate CSV output.
+
+    Each output row is keyed by metric name and has one column per run ID.
+    Missing values are left as empty strings, matching existing CSV behavior.
+    """
+    rows_by_run_id = {
+        row.get("run_id"): row
+        for row in rows
+        if isinstance(row.get("run_id"), str)
+    }
+    transposed_rows: list[dict[str, Any]] = []
+    for metric_key in metric_columns:
+        metric_row: dict[str, Any] = {"key": metric_key}
+        for run_id in run_ids:
+            source_row = rows_by_run_id.get(run_id)
+            metric_row[run_id] = (
+                source_row.get(metric_key, "") if source_row is not None else ""
+            )
+        transposed_rows.append(metric_row)
+    return transposed_rows
+
+
 def _write_results_csv(
     out_path: Path,
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
+    *,
+    results_orientation: str,
 ) -> list[str]:
     """Write the aggregate results.csv file for all runs.
 
     Invoked by `_write_experiment_outputs` after runs complete or during
-    aggregation-only mode. This is a workflow-specific writer and not intended
-    for reuse outside this experiment layout.
+    aggregation-only mode. Preferred schema is column-oriented with a leading
+    `key` column and one column per `run_id`. Pass `results_orientation="row"`
+    for compatibility with run-major rows where `run_id` is a data column.
+    This is a workflow-specific writer and not intended for reuse outside this
+    experiment layout.
     """
     rows, param_columns = _build_results_rows(run_entries, infer_keys)
     base_columns = [
@@ -1259,17 +1359,27 @@ def _write_results_csv(
         "init.mode",
         "optimizer.n_iter",
         "optimizer.base_lr",
+        "optimizer.kind",
+        "optimizer.kwargs",
+        "optimizer.loss",
         "eigen.use_eigen",
         "eigen.whiten_basis",
         "eigen.truncate_k",
         "eigen.truncate_by_eigval",
         "noise.add_noise",
     ]
-    columns = base_columns + param_columns
+    metric_columns = base_columns + param_columns
+    if results_orientation == "col":
+        run_ids = [entry["run_id"] for entry in run_entries]
+        rows_to_write = _transpose_results_rows(rows, metric_columns, run_ids)
+        columns = ["key", *run_ids]
+    else:
+        rows_to_write = rows
+        columns = metric_columns
     with out_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row in rows:
+        for row in rows_to_write:
             writer.writerow({key: row.get(key, "") for key in columns})
     return columns
 
@@ -1385,12 +1495,15 @@ def _write_experiment_outputs(
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
     repo_root: Path,
+    results_orientation: str,
 ) -> None:
     """Write aggregated outputs (results.csv and manifest.json) for the run set.
 
     Called in `main` after execution or in aggregate-only mode to produce
     experiment-level artifacts. This is specific to the prescribed Monte Carlo
-    workflow and not intended as a generic utility.
+    workflow and not intended as a generic utility. `results.csv` can be written
+    in column orientation (`key` + `run_id` columns; preferred default) or row
+    orientation (`run_id` as a field; compatibility mode).
     """
     experiment = prescription.get("experiment", {})
     results_filename = (
@@ -1399,7 +1512,12 @@ def _write_experiment_outputs(
         or "results.csv"
     )
     results_path = outdir / results_filename
-    _write_results_csv(results_path, run_entries, infer_keys)
+    _write_results_csv(
+        results_path,
+        run_entries,
+        infer_keys,
+        results_orientation=results_orientation,
+    )
 
     manifest_path = outdir / "manifest.json"
     overrides = prescription.get("overrides", {})
@@ -1422,7 +1540,7 @@ def _write_experiment_outputs(
         runs=manifest_runs,
         artifacts=[
             {"path": "manifest.json"},
-            {"path": results_filename},
+            {"path": results_filename, "orientation": results_orientation},
         ],
     )
 
@@ -1452,6 +1570,9 @@ def main() -> None:
             optimization runs or writing run artifacts.
         --aggregate-only: Skip execution and only aggregate manifest.json and
             results.csv from existing run artifacts inside the resolved outdir.
+        --results-orientation: Output schema for results.csv. `col` (default)
+            writes a leading `key` column plus one column per run_id. `row`
+            writes one row per run with `run_id` as a data column.
         --num-preview: Limit the number of resolved run specs shown in preview
             output (useful with large plans).
     """
@@ -1487,6 +1608,16 @@ def main() -> None:
         default=False,
         help="Generate manifest + results.csv from existing runs without executing.",
     )
+    parser.add_argument(
+        "--results-orientation",
+        choices=("row", "col"),
+        default="col",
+        help=(
+            "results.csv schema: 'col' writes key + run_id columns (default), "
+            "'row' writes one row per run for compatibility. CLI overrides "
+            "prescription experiment.results_orientation when provided."
+        ),
+    )
     parser.add_argument("--num-preview", type=int, default=None)
 
     args = parser.parse_args()
@@ -1508,6 +1639,19 @@ def main() -> None:
     # Plan/prescription parsing and run spec resolution: load the JSON recipe
     # and the optional overrides CSV that mutates per-run settings.
     prescription = _load_prescription(prescription_path)
+    def _normalize_orientation(value: str | None) -> str:
+        if value is None:
+            return "col"
+        if value not in {"col", "row"}:
+            raise ValueError("experiment.results_orientation must be 'col' or 'row'")
+        return value
+
+    presc_orientation = _normalize_orientation(
+        _get_nested(prescription, ["experiment", "results_orientation"])
+    )
+    results_orientation = _normalize_orientation(
+        args.results_orientation if args.results_orientation is not None else presc_orientation
+    )
     if overrides_path is None:
         plan_rows = []
     else:
@@ -1712,6 +1856,7 @@ def main() -> None:
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
+            results_orientation=args.results_orientation,
         )
         print(f"Wrote experiment manifest/results to: {outdir}")
         return
@@ -1754,6 +1899,13 @@ def main() -> None:
         if add_noise_value is None:
             add_noise_value = _get_nested(prescription, ["defaults", "noise", "add_noise"])
         add_noise = bool(add_noise_value)
+        outputs_cfg = run_spec.get("outputs", {})
+        if outputs_cfg is None:
+            outputs_cfg = {}
+        plots_flag = outputs_cfg.get("plots")
+        if plots_flag is None:
+            plots_flag = _get_nested(prescription, ["defaults", "outputs", "plots"])
+        save_plots = bool(plots_flag) if plots_flag is not None else False
         if add_noise:
             rng_key, split_key = jr.split(rng_key)
             if np.min(data_psf) > 100:
@@ -1781,14 +1933,6 @@ def main() -> None:
             reduce=reduce,
             theta0_store=truth_store,
         )
-        fim_labels = generate_fim_labels(infer_keys, cfg=cfg, store=truth_store)
-        loss_fn = nll_loss_fn
-
-        # FIM computation and eigen preconditioning flow: pack_params converts
-        # a structured ParameterStore into a flat vector for optimization/FIM.
-        theta_true = pack_params(inference_subspec, truth_store)
-        loss_true = float(loss_fn(theta_true))
-
         fim_cfg = run_spec.get("fim", {})
         reuse_fim_value = fim_cfg.get("reuse_fim")
         if reuse_fim_value is None:
@@ -1800,46 +1944,6 @@ def main() -> None:
         if reuse_fim_value is None:
             reuse_fim_value = _get_nested(prescription, ["defaults", "fim", "reuse_fim"])
         reuse_fim = bool(reuse_fim_value) if reuse_fim_value is not None else False
-
-        fim_point = theta_true
-        # FIM cache key notes:
-        # - Default behavior is strict: reuse uses only exact cache matches unless
-        #   reuse_fim=True is set in the prescription or plan. When reuse_fim=True,
-        #   a cache miss can still reuse the last cached FIM with a warning.
-        # - Safe reuse inputs include full theta_true, infer_keys, and cfg/forward_spec
-        #   identifiers (all must match for FIM reuse).
-        cache_key_payload = {
-            "infer_keys": infer_keys,
-            "model_config_id": model_config_id,
-            "cfg_hash": cfg_hash,
-            "forward_spec_hash": forward_spec_hash,
-            "theta_true_hash": _hash_array(theta_true),
-        }
-        fim_cache_key = _stable_hash(cache_key_payload)[:12]
-        cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
-        cache_entry = fim_cache.get(cache_key)
-        if cache_entry is not None:
-            print("FIM cache hit; reusing cached FIM.")
-            F = cache_entry["F"]
-            fim_diag = cache_entry["fim_diag"]
-            fim_cache_hit = True
-            fim_cache_last = cache_entry
-        elif reuse_fim and fim_cache_last is not None:
-            print(
-                "WARNING: FIM cache miss for strict key; reusing previous cached FIM "
-                "because reuse_fim=True. Inputs may be misaligned."
-            )
-            F = fim_cache_last["F"]
-            fim_diag = fim_cache_last["fim_diag"]
-            fim_cache_hit = False
-        else:
-            print("FIM cache miss; computing new FIM...")
-            F = fim_theta(nll_loss_fn, fim_point)
-            fim_diag = jnp.diag(F)
-            fim_cache_hit = False
-            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
-            fim_cache_last = fim_cache[cache_key]
-            print("FIM computed and cached for later.")
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
@@ -1996,6 +2100,70 @@ def main() -> None:
             theta0_store=init_store,
         )
 
+        def map_loss_fn(theta: np.ndarray) -> np.ndarray:
+            store_theta = store_unpack_params(inference_subspec, theta, init_store)
+            nll_loss = nll_loss_fn(theta)
+            prior_gaussian_loss = run_prior_spec.quadratic_penalty(
+                store_theta,
+                center_store=truth_store, # TODO: truth_store or init_store?
+                keys=infer_keys,
+            )
+            return nll_loss + prior_gaussian_loss
+
+        loss_kind = (
+            _get_nested(run_spec, ["optimizer", "loss"])
+            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
+            or "nll"
+        )
+        if loss_kind == "map":
+            loss_fn = map_loss_fn
+        elif loss_kind == "nll":
+            loss_fn = nll_loss_fn
+        else:
+            raise ValueError(
+                f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
+            )
+
+        # Pack truth store for FIM/diagnostics and evaluate baseline loss.
+        theta_true = pack_params(inference_subspec, truth_store)
+        loss_true = float(loss_fn(theta_true))
+
+        fim_point = theta_true
+        # FIM cache key includes loss_kind so MAP and NLL cache separately.
+        cache_key_payload = {
+            "infer_keys": infer_keys,
+            "model_config_id": model_config_id,
+            "cfg_hash": cfg_hash,
+            "forward_spec_hash": forward_spec_hash,
+            "theta_true_hash": _hash_array(theta_true),
+            "loss_kind": loss_kind,
+        }
+        fim_cache_key = _stable_hash(cache_key_payload)[:12]
+        cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
+        cache_entry = fim_cache.get(cache_key)
+        if cache_entry is not None:
+            print("FIM cache hit; reusing cached FIM.")
+            F = cache_entry["F"]
+            fim_diag = cache_entry["fim_diag"]
+            fim_cache_hit = True
+            fim_cache_last = cache_entry
+        elif reuse_fim and fim_cache_last is not None:
+            print(
+                "WARNING: FIM cache miss for strict key; reusing previous cached FIM "
+                "because reuse_fim=True. Inputs may be misaligned."
+            )
+            F = fim_cache_last["F"]
+            fim_diag = fim_cache_last["fim_diag"]
+            fim_cache_hit = False
+        else:
+            print("FIM cache miss; computing new FIM...")
+            F = fim_theta(loss_fn, fim_point)
+            fim_diag = jnp.diag(F)
+            fim_cache_hit = False
+            fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}
+            fim_cache_last = fim_cache[cache_key]
+            print("FIM computed and cached for later.")
+
         if use_eigen:
             if truncate_k is not None and truncate_by_eigval is not None:
                 print(
@@ -2090,7 +2258,7 @@ def main() -> None:
 
         labels_by_key = map_labels_to_keys(
             infer_keys,
-            fim_labels,
+            generate_fim_labels(infer_keys, cfg=cfg, store=init_store if use_eigen else truth_store),
             store=init_store if use_eigen else None,
             index_map=None if use_eigen else index_map,
         )
@@ -2102,8 +2270,15 @@ def main() -> None:
         base_lr_value = optimizer_cfg.get("base_lr")
         if base_lr_value is None:
             raise ValueError(f"Run {run_id} resolved to a null optimizer.base_lr.")
+        opt_kind = optimizer_cfg.get("kind", "sgd")
+        optimizer_kwargs = optimizer_cfg.get("kwargs", {})
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
+        loss_kind = (
+            optimizer_cfg.get("loss")
+            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
+            or "nll"
+        )
 
         # Loss function setup and optimization execution: run_shera_gd consumes
         # the chosen theta_space, preconditioner, and metadata for artifacts.
@@ -2115,13 +2290,20 @@ def main() -> None:
             learning_rate=base_lr,
             lr_vec=lr_vec,
             num_steps=n_iter,
+            optimizer_kind=opt_kind,
+            optimizer_kwargs=optimizer_kwargs,
             runs_dir=runs_dir,
             run_id=run_id,
             return_artifacts=True,
             theta_space=theta_space,
             metric=metric_payload,
             extra_meta={
-                "optimizer": {"preconditioning": precond_meta},
+                "optimizer": {
+                    "preconditioning": precond_meta,
+                    "kind": opt_kind,
+                    "kwargs": optimizer_kwargs,
+                    "loss": loss_kind,
+                },
                 "theta": {"labels_by_key": labels_by_key},
                 "model": {
                     "config_id": model_config_id,
@@ -2195,6 +2377,126 @@ def main() -> None:
                 )
                 _maybe_warn_missing_artifacts(run_dir)
 
+                if save_plots:
+                    plots_dir = run_dir / "plots"
+                    plots_dir.mkdir(parents=True, exist_ok=True)
+
+                    fim_labels = generate_fim_labels(
+                        infer_keys,
+                        cfg=cfg,
+                        store=init_store if use_eigen else truth_store,
+                    )
+                    plot_fim(
+                        F,
+                        fim_labels,
+                        save_path=plots_dir / "fim.png",
+                        vmin=4,
+                        vmax=14,
+                        show=False,
+                    )
+
+                    if use_eigen and eigen_map is not None:
+                        eigvals, eigvecs = np.linalg.eigh(np.asarray(F))
+                        sort_idx = np.argsort(eigvals)[::-1]
+                        eigvals = eigvals[sort_idx]
+                        eigvecs = eigvecs[:, sort_idx]
+                        spectrum_truncate_k = None
+                        if truncate_k is not None:
+                            spectrum_truncate_k = int(truncate_k)
+                        elif truncate_by_eigval is not None:
+                            spectrum_truncate_k = int(np.sum(eigvals >= truncate_by_eigval))
+                            if spectrum_truncate_k <= 0:
+                                spectrum_truncate_k = 1
+                        plot_eigenvalue_spectrum(
+                            eigvals,
+                            eigvecs,
+                            labels=fim_labels,
+                            truncate_k=spectrum_truncate_k,
+                            label_boxes=False,
+                            save_path=plots_dir / "eigenvalue_spectrum.png",
+                            show=False,
+                        )
+
+                    psf_extent_as = (
+                        binder.cfg.psf_npix
+                        * binder.base_forward_store.get("system.plate_scale_as_per_pix")
+                        / 2
+                        * np.array([-1, 1, -1, 1])
+                    )
+
+                    plot_psf_comparison(
+                        data=data,
+                        model=init_psf,
+                        var=data_var,
+                        extent=psf_extent_as,
+                        model_label="Initial Model",
+                        save_path=plots_dir / "initial_psf_comparison.png",
+                        show=False,
+                    )
+
+                    plot_psf_comparison(
+                        data=data,
+                        model=final_psf,
+                        var=data_var,
+                        extent=psf_extent_as,
+                        model_label="Final Model",
+                        save_path=plots_dir / "final_psf_comparison.png",
+                        show=False,
+                    )
+
+                    losses = np.asarray(trace["loss"])
+                    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+                    axes = axes.flatten()
+                    plot_parameter_history(
+                        names=("Loss",),
+                        histories=(losses,),
+                        true_vals=(float(loss_true),),
+                        ax=axes[0],
+                        title="Optimization Loss History",
+                        show=False,
+                        close=False,
+                    )
+                    window = min(10, n_iter)
+                    axes[1].plot(np.arange(n_iter - window, n_iter) + 1, losses[-window:])
+                    axes[1].set_title(f"Last {window} Iterations, Final= {losses[-1]:.3f}")
+                    axes[1].set_xlabel("Iteration")
+                    axes[1].set_ylabel("Loss")
+                    axes[1].axhline(loss_true, linestyle="--", color="k", alpha=0.6)
+                    final_delta = np.abs(losses[-1] - loss_true)
+                    if final_delta != 0:
+                        axes[1].set_ylim(loss_true - 3 * final_delta, loss_true + 3 * final_delta)
+                    fig.tight_layout()
+                    fig.savefig(plots_dir / "loss_history.png", dpi=300)
+                    plt.close(fig)
+
+                    if use_eigen and eigen_map is not None:
+                        decoder = lambda z: store_unpack_params(
+                            inference_subspec,
+                            eigen_map.theta_from_z(z),
+                            init_store,
+                        ).refresh_derived(forward_spec)
+                    else:
+                        decoder = lambda theta: store_unpack_params(
+                            inference_subspec,
+                            theta,
+                            init_store,
+                        ).refresh_derived(forward_spec)
+
+                    signals = build_signals(
+                        trace,
+                        meta={},
+                        decoder=decoder,
+                        truth=truth_store,
+                        signal_set="intro",
+                    )
+                    plot_signals_grid(
+                        signals,
+                        plots_dir,
+                        include_zernike_rms=False,
+                        figsize=(15, 10),
+                        show=False,
+                    )
+
         t1_run = time.time()
         print(
             "Run summary: loss(true)={:.6g}, loss(init)={:.6g}, loss(final)={:.6g}, "
@@ -2219,6 +2521,7 @@ def main() -> None:
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
+        results_orientation=results_orientation,
     )
     t1_experiment = time.time()
     print(

@@ -10,12 +10,12 @@ A template directory contains:
 
 Outputs go to an experiment output directory:
 - `manifest.json` (run metadata and configuration used)
-- `results.csv` (summary of run outputs)
+- `results.csv` (aggregate run outputs; defaults to column orientation with `key` + `run_id` columns)
 - `runs/<run_id>/...` (per-run meta/summary/trace artifacts)
 
 ### Aggregate schema notes
-- `results.csv` includes run metadata columns such as `run_id`, `status`, `created_at`,
-  `run_note`, `plan_label`, and `seed` before optimizer/noise fields and parameter columns.
+- `results.csv` defaults to **column orientation** (`--results-orientation col`): first column `key`, remaining columns are run IDs (`run_0001`, etc.). You can set `experiment.results_orientation` in `prescription.json`; CLI `--results-orientation` overrides the prescription.
+- Compatibility mode `--results-orientation row` writes one row per run with metadata columns such as `run_id`, `status`, `created_at`, `run_note`, `plan_label`, and `seed` before optimizer/noise fields and parameter columns.
 - `manifest.json` includes top-level `notes` from `experiment.notes` (aliases accepted: `experiment.note`, `experiment.comment`, `experiment.comments`).
 - `manifest.json` also includes one record per run under `runs[]`; when a run summary contains
   `run_note`, it is surfaced in that run record for quick annotation lookups.
@@ -112,10 +112,20 @@ python examples/recipes/prescribed_monte_carlo.py \
 ```
 
 ### 6) **Inspect outputs**
-- `Results/my_experiment/results.csv` for run-level summaries
+- `Results/my_experiment/results.csv` for aggregate summaries (default schema: `key` + run-id columns)
 - `Results/my_experiment/runs/<run_id>/` for per-run artifacts
 - `Results/my_experiment/manifest.json` for the resolved configuration and plan
 
+## Aggregate-only mode
+- Use `--aggregate-only` to rebuild `manifest.json` and `results.csv` from existing runs without executing. Orientation precedence remains: CLI `--results-orientation` > `experiment.results_orientation` > default `"col"`.
+
+Example:
+```bash
+python examples/recipes/prescribed_monte_carlo.py \
+  --outdir Results/my_experiment \
+  --aggregate-only \
+  --results-orientation row
+```
 
 ## Auto-discovery
 When you pass `--outdir` without explicit `--prescription` or `--overrides`, the script scans the output directory for:

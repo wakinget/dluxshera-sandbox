@@ -56,7 +56,7 @@ jupyter lab
 Scripts under `examples/scripts/` operate on run directories produced by the
 recipes/runners.
 
-- **summarize_runs.py** — Crawl run directories and emit a CSV summary.
+- **summarize_runs.py** — Crawl run directories and emit a CSV summary from per-run artifacts (independent of aggregate `results.csv` orientation).
   - How to run:
 
     ```bash

@@ -3,6 +3,8 @@
     "n_runs": 5,
     "run_id_prefix": "mc",
     "results_filename": "results.csv",
+    "results_orientation": "col",
+    "_orientation_options": "col | row",
     "notes": "Experiment-level notes. Briefly describe the experiment."
   },
   "model": {
@@ -12,8 +14,17 @@
   "defaults": {
     "seed": 42,
     "optimizer": {
+      "kind": "sgd",
+      "_kind_options": "sgd | adam",
+      "_kind": "Optimizer: sgd (default) or adam.",
+      "kwargs": {},
+      "_kwargs": "Optional optax kwargs (e.g., {\"momentum\":0.9} for sgd or {\"b1\":0.9,\"b2\":0.999,\"eps\":1e-8} for adam).",
+      "_sgd_kwargs": {"momentum": 0.1, "nesterov": true},
+      "_adam_kwargs": {"b1": 0.9, "b2": 0.999, "eps": 1e-8},
       "n_iter": 50,
-      "base_lr": 0.5
+      "base_lr": 0.5,
+      "loss": "map",
+      "_loss_options": "nll | map"
     },
     "eigen": {
       "use_eigen": true,
@@ -30,6 +41,10 @@
     },
     "fim": {
       "reuse_fim": false
+    },
+    "outputs": {
+      "_comment": "Enable per-run plotting outputs (FIM, eigen spectrum, PSF comparisons, loss history, signals grid).",
+      "plots": true
     }
   },
   "overrides": {
