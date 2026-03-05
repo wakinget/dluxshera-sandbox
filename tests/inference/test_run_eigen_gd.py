@@ -52,29 +52,29 @@ def test_run_shera_image_gd_eigen_smoke():
     store = ParameterStore.from_spec_defaults(spec)
 
     updates = {
-        "binary.separation_as": 0.6,
-        "binary.position_angle_deg": 75.0,
-        "binary.x_position_as": 0.02,
-        "binary.y_position_as": -0.015,
-        "binary.contrast": 1.5,
-        "binary.log_flux_total": 7.5,
-        "system.plate_scale_as_per_pix": 0.3,
+        "source.separation_as": 0.6,
+        "source.position_angle_deg": 75.0,
+        "source.x_position_as": 0.02,
+        "source.y_position_as": -0.015,
+        "source.contrast": 1.5,
+        "source.log_flux_total": 7.5,
+        "optics.plate_scale_as_per_pix": 0.3,
     }
     n_m1 = len(cfg.primary_noll_indices)
     if n_m1 > 0:
         updates["primary.zernike_coeffs_nm"] = np.zeros(n_m1)
     store = store.replace(updates)
 
-    infer_keys = ["binary.separation_as"]
-    theta_bias = store.replace({"binary.separation_as": updates["binary.separation_as"] * 1.1})
+    infer_keys = ["source.separation_as"]
+    theta_bias = store.replace({"source.separation_as": updates["source.separation_as"] * 1.1})
 
     sub_spec = spec.subset(infer_keys)
     theta0 = store_pack_params(sub_spec, theta_bias)
-    sep_true = jnp.array(store.get("binary.separation_as"))
+    sep_true = jnp.array(store.get("source.separation_as"))
 
     def loss_fn(theta):
         store_theta = store_unpack_params(sub_spec, theta, theta_bias)
-        sep_val = store_theta.get("binary.separation_as")
+        sep_val = store_theta.get("source.separation_as")
         return 0.5 * jnp.sum((sep_val - sep_true) ** 2)
 
     results = run_shera_image_gd_eigen(
@@ -90,9 +90,9 @@ def test_run_shera_image_gd_eigen_smoke():
 
     final_store = store_unpack_params(sub_spec, results.theta_final, theta_bias)
 
-    sep_true_val = store.get("binary.separation_as")
-    sep_init = theta_bias.get("binary.separation_as")
-    sep_est = final_store.get("binary.separation_as")
+    sep_true_val = store.get("source.separation_as")
+    sep_init = theta_bias.get("source.separation_as")
+    sep_est = final_store.get("source.separation_as")
     assert abs(sep_est - sep_true_val) < abs(sep_init - sep_true_val)
 
 
@@ -110,7 +110,7 @@ def test_eigen_and_pure_theta_share_binder_loss():
 
     forward_spec = build_forward_spec_from_config(cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec).replace(
-        {"binary.x_position_as": 0.0, "binary.y_position_as": 0.0}
+        {"source.x_position_as": 0.0, "source.y_position_as": 0.0}
     )
 
     class _LinearBinder:
@@ -120,7 +120,7 @@ def test_eigen_and_pure_theta_share_binder_loss():
             self.base_forward_store = base_forward_store
 
         def model(self, store_delta):
-            shift = store_delta.get("binary.x_position_as") + store_delta.get("binary.y_position_as")
+            shift = store_delta.get("source.x_position_as") + store_delta.get("source.y_position_as")
             return self.base_image + shift
 
         def structural_store_keys(self):
@@ -132,11 +132,11 @@ def test_eigen_and_pure_theta_share_binder_loss():
     )
     var_image = jnp.ones_like(truth_image) * 0.01
 
-    infer_keys = ["binary.x_position_as", "binary.y_position_as"]
+    infer_keys = ["source.x_position_as", "source.y_position_as"]
     sub_spec = forward_spec.subset(infer_keys)
     theta_truth = store_pack_params(sub_spec, base_store)
 
-    biased_store = base_store.replace({"binary.x_position_as": 0.05, "binary.y_position_as": -0.03})
+    biased_store = base_store.replace({"source.x_position_as": 0.05, "source.y_position_as": -0.03})
 
     loss_nll, theta0 = make_binder_nll_fn(
         binder=binder,

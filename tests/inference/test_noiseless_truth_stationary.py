@@ -25,11 +25,11 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_store = truth_store.replace(
         {
-            "binary.separation_as": 10.0,
-            "binary.position_angle_deg": 90.0,
-            "binary.x_position_as": 0.0,
-            "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1.0,
+            "source.separation_as": 10.0,
+            "source.position_angle_deg": 90.0,
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
+            "source.exposure_time_s": 1.0,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
@@ -39,13 +39,13 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     var = jnp.ones_like(data)
 
     infer_keys = (
-        "binary.separation_as",
-        "binary.position_angle_deg",
-        "binary.x_position_as",
-        "binary.y_position_as",
-        "binary.log_flux_total",
-        "binary.contrast",
-        "system.plate_scale_as_per_pix",
+        "source.separation_as",
+        "source.position_angle_deg",
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.log_flux_total",
+        "source.contrast",
+        "optics.plate_scale_as_per_pix",
         "primary.zernike_coeffs_nm",
     )
     inference_subspec = make_inference_subspec(
@@ -57,7 +57,7 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     # this via theta0_store must not affect the unpack base used by the binder
     # inside the loss.
     mismatched_base = truth_store.replace(
-        {"imaging.exposure_time_s": truth_store.get("imaging.exposure_time_s") * 2.0}
+        {"source.exposure_time_s": truth_store.get("source.exposure_time_s") * 2.0}
     )
 
     loss_fn, _theta0, predict_fn = make_binder_nll_fn(

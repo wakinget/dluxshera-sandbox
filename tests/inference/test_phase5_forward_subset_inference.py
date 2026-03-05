@@ -10,10 +10,10 @@ def _build_forward_store():
     forward_spec = build_forward_spec_from_config(SHERA_TESTBED_CONFIG)
     base_store = ParameterStore.from_spec_defaults(forward_spec).replace(
         {
-            "binary.log_flux_total": 8.0,
-            "binary.contrast": 2.5,
-            "binary.separation_as": 10.0,
-            "binary.position_angle_deg": 90.0,
+            "source.log_flux_total": 8.0,
+            "source.contrast": 2.5,
+            "source.separation_as": 10.0,
+            "source.position_angle_deg": 90.0,
         }
     )
     base_store = base_store.refresh_derived(forward_spec)
@@ -23,9 +23,9 @@ def _build_forward_store():
 def test_subset_layout_matches_legacy_helper_layout():
     forward_spec, base_store = _build_forward_store()
     infer_keys = [
-        "binary.separation_as",
-        "binary.raw_fluxes",
-        "system.plate_scale_as_per_pix",
+        "source.separation_as",
+        "source.raw_fluxes",
+        "optics.plate_scale_as_per_pix",
     ]
 
     legacy_subspec = make_inference_subspec(base_spec=forward_spec, infer_keys=infer_keys)
@@ -43,21 +43,21 @@ def test_subset_layout_matches_legacy_helper_layout():
 def test_forward_subset_allows_derived_key_pack_unpack_roundtrip():
     forward_spec, base_store = _build_forward_store()
 
-    infer_keys = ["binary.raw_fluxes"]
+    infer_keys = ["source.raw_fluxes"]
     subspec = forward_spec.subset(infer_keys)
 
     assert list(subspec.keys()) == infer_keys
-    assert subspec.get("binary.raw_fluxes").kind == "derived"
+    assert subspec.get("source.raw_fluxes").kind == "derived"
 
     theta = pack_params(subspec, base_store)
     unpacked = unpack_params(subspec, theta, base_store)
 
-    assert jnp.allclose(unpacked.get("binary.raw_fluxes"), base_store.get("binary.raw_fluxes"))
+    assert jnp.allclose(unpacked.get("source.raw_fluxes"), base_store.get("source.raw_fluxes"))
 
 
 def test_pack_unpack_store_delta_from_forward_subset():
     forward_spec, base_store = _build_forward_store()
-    infer_keys = ["binary.separation_as", "binary.position_angle_deg"]
+    infer_keys = ["source.separation_as", "source.position_angle_deg"]
     subspec = forward_spec.subset(infer_keys)
 
     theta0 = pack_params(subspec, base_store)
@@ -65,7 +65,7 @@ def test_pack_unpack_store_delta_from_forward_subset():
 
     updated_store = unpack_params(subspec, theta1, base_store)
 
-    assert float(updated_store.get("binary.separation_as")) == float(theta1[0])
-    assert float(updated_store.get("binary.position_angle_deg")) == float(theta1[1])
+    assert float(updated_store.get("source.separation_as")) == float(theta1[0])
+    assert float(updated_store.get("source.position_angle_deg")) == float(theta1[1])
     # Non-inferred keys are preserved from the base store.
-    assert float(updated_store.get("binary.log_flux_total")) == float(base_store.get("binary.log_flux_total"))
+    assert float(updated_store.get("source.log_flux_total")) == float(base_store.get("source.log_flux_total"))

@@ -93,12 +93,12 @@ def build_legacy_shera_threeplane_model(
     # ------------------------------------------------------------------
     # These keys come from build_inference_spec_basic().
     # For now we assume they are present; if not, KeyError is a good signal.
-    sep_as = store.get("binary.separation_as")
-    pa_deg = store.get("binary.position_angle_deg")
-    x_as = store.get("binary.x_position_as")
-    y_as = store.get("binary.y_position_as")
-    contrast = store.get("binary.contrast")
-    log_flux = store.get("binary.log_flux_total")
+    sep_as = store.get("source.separation_as")
+    pa_deg = store.get("source.position_angle_deg")
+    x_as = store.get("source.x_position_as")
+    y_as = store.get("source.y_position_as")
+    contrast = store.get("source.contrast")
+    log_flux = store.get("source.log_flux_total")
 
     params = params.set("separation", sep_as)
     params = params.set("position_angle", pa_deg)

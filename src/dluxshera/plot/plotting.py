@@ -188,8 +188,8 @@ def _iter_signal_panels(
         return f"{title_prefix} — {base}" if title_prefix else base
 
     astrometry = [
-        ("binary.x_error_uas", "Δx"),
-        ("binary.y_error_uas", "Δy"),
+        ("source.x_error_uas", "Δx"),
+        ("source.y_error_uas", "Δy"),
     ]
     if all(key in signals for key, _ in astrometry):
         ys = [signals[key] for key, _ in astrometry]
@@ -202,20 +202,20 @@ def _iter_signal_panels(
             "filename": "astrometry_residuals_uas.png",
         }
 
-    if "binary.separation_error_uas" in signals:
+    if "source.separation_error_uas" in signals:
         yield {
             "title": title("Separation residual (µas)"),
             "ylabel": "Residual (µas)",
-            "ys": [signals["binary.separation_error_uas"]],
+            "ys": [signals["source.separation_error_uas"]],
             "labels": ["Δρ"],
             "filename": "separation_residual_uas.png",
         }
 
-    if "binary.position_angle_error_as" in signals:
+    if "source.position_angle_error_as" in signals:
         yield {
             "title": title("Position angle residual (arcsec)"),
             "ylabel": "Residual (arcsec)",
-            "ys": [signals["binary.position_angle_error_as"]],
+            "ys": [signals["source.position_angle_error_as"]],
             "labels": ["ΔPA"],
             "filename": "position_angle_residual_as.png",
         }
@@ -229,8 +229,8 @@ def _iter_signal_panels(
             "filename": "plate_scale_error_ppm.png",
         }
 
-    if "binary.raw_flux_error_ppm" in signals:
-        flux_err = signals["binary.raw_flux_error_ppm"]
+    if "source.raw_flux_error_ppm" in signals:
+        flux_err = signals["source.raw_flux_error_ppm"]
         if flux_err.ndim == 2 and flux_err.shape[1] >= 2:
             ys = [flux_err[:, 0], flux_err[:, 1]]
             labels = ["Star A", "Star B"]

@@ -73,10 +73,10 @@ def test_run_image_gd_separation_smoke(
     data, var = shera_smoke_model_data
 
     # 2) Start from a slightly wrong separation
-    sep_true = store_true.get("binary.separation_as")
-    store_init = store_true.replace({"binary.separation_as": sep_true * 1.1})
+    sep_true = store_true.get("source.separation_as")
+    store_init = store_true.replace({"source.separation_as": sep_true * 1.1})
 
-    infer_keys = ["binary.separation_as"]
+    infer_keys = ["source.separation_as"]
 
     theta_final, store_final, history = run_image_gd(
         shera_smoke_cfg,
@@ -94,6 +94,6 @@ def test_run_image_gd_separation_smoke(
     assert float(history["loss"][-1]) < float(history["loss"][0])
 
     # Separation should move closer to the truth
-    sep_init = store_init.get("binary.separation_as")
-    sep_est = store_final.get("binary.separation_as")
+    sep_init = store_init.get("source.separation_as")
+    sep_est = store_final.get("source.separation_as")
     assert abs(sep_est - sep_true) < abs(sep_init - sep_true)

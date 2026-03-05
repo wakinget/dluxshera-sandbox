@@ -322,11 +322,11 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
     fields = [
 
         # ----------------------
-        # Binary astrometry
+        # Source astrometry
         # ----------------------
         ParamField(
-            key="binary.separation_as",
-            group="binary",
+            key="source.separation_as",
+            group="source",
             kind="primitive",
             units="as",
             dtype=float,
@@ -336,8 +336,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             doc="Angular separation of the binary on the sky, in arcseconds.",
         ),
         ParamField(
-            key="binary.position_angle_deg",
-            group="binary",
+            key="source.position_angle_deg",
+            group="source",
             kind="primitive",
             units="deg",
             dtype=float,
@@ -349,8 +349,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.x_position_as",
-            group="binary",
+            key="source.x_position_as",
+            group="source",
             kind="primitive",
             units="as",
             dtype=float,
@@ -360,8 +360,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             doc="Binary centroid offset in the detector X direction (arcseconds).",
         ),
         ParamField(
-            key="binary.y_position_as",
-            group="binary",
+            key="source.y_position_as",
+            group="source",
             kind="primitive",
             units="as",
             dtype=float,
@@ -371,8 +371,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             doc="Binary centroid offset in the detector Y direction (arcseconds).",
         ),
         ParamField(
-            key="binary.log_flux_total",
-            group="binary",
+            key="source.log_flux_total",
+            group="source",
             kind="primitive",
             units="log10(photons)",
             dtype=float,
@@ -386,8 +386,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.contrast",
-            group="binary",
+            key="source.contrast",
+            group="source",
             kind="primitive",
             units=None,
             dtype=float,
@@ -400,23 +400,23 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.raw_fluxes",
-            group="binary",
+            key="source.raw_fluxes",
+            group="source",
             kind="derived",
             units="photons",
             dtype=float,
             shape=(2,),
             default=None,
             bounds=(0.0, None),
-            transform="binary_raw_fluxes",
+            transform="source.raw_fluxes",
             depends_on=(
-                "binary.log_flux_total",
-                "binary.contrast",
+                "source.log_flux_total",
+                "source.contrast",
             ),
             doc=(
-                "Raw integrated fluxes for the binary components (photons for "
-                "stars A and B). Derived from binary.log_flux_total and "
-                "binary.contrast using the AlphaCen source convention."
+                "Raw integrated fluxes for the source components (photons for "
+                "stars A and B). Derived from source.log_flux_total and "
+                "source.contrast using the AlphaCen source convention."
             ),
         ),
 
@@ -424,8 +424,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
         # System geometry
         # ----------------------
         ParamField(
-            key="system.plate_scale_as_per_pix",
-            group="system",
+            key="optics.plate_scale_as_per_pix",
+            group="optics",
             kind="primitive",
             units="as / pixel",
             dtype=float,
@@ -437,7 +437,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
                 "three-plane optical system may determine plate scale from "
                 "geometry, in inference we treat it as an effective primitive "
                 "parameter. In the forward model, the corresponding knob is "
-                "`system.plate_scale_as_per_pix`."
+                "`optics.plate_scale_as_per_pix`."
             ),
         ),
 

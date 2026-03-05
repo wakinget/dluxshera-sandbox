@@ -37,14 +37,14 @@ def test_binder_ns_validation(prefix):
 def test_binder_store_prefix_attr_access():
     binder = _make_binder()
 
-    system_ns = binder.system
+    optics_ns = binder.optics
 
-    assert isinstance(system_ns, StoreNamespace)
-    assert system_ns.plate_scale_as_per_pix == binder.base_forward_store.get(
-        "system.plate_scale_as_per_pix"
+    assert isinstance(optics_ns, StoreNamespace)
+    assert optics_ns.plate_scale_as_per_pix == binder.base_forward_store.get(
+        "optics.plate_scale_as_per_pix"
     )
-    assert binder.binary.x_position_as == binder.base_forward_store.get(
-        "binary.x_position_as"
+    assert binder.source.x_position_as == binder.base_forward_store.get(
+        "source.x_position_as"
     )
 
 

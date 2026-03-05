@@ -17,8 +17,8 @@ Key design points
 - Parameter keys are *string identifiers* (ParamKey = str), and in practice
   we use dotted, hierarchical names such as:
 
-      "binary.separation_as"
-      "imaging.plate_scale_as_per_pix"
+      "source.separation_as"
+      "optics.plate_scale_as_per_pix"
       "noise.jitter_rms_as"
 
   These keys are part of the public "parameter API" of the model: they are
@@ -28,14 +28,14 @@ Key design points
   Python identifiers, we cannot safely rely on keyword arguments for
   updating them. For example:
 
-      store.replace(binary_separation_as=12.0)
+      store.replace(source_separation_as=12.0)
 
-  would create/modify a key called "binary_separation_as", which is *not*
-  the same as the canonical key "binary.separation_as". This kind of
+  would create/modify a key called "source_separation_as", which is *not*
+  the same as the canonical key "source.separation_as". This kind of
   mismatch is very easy to introduce and hard to debug.
 
 - To avoid this, ParameterStore.replace() accepts a mapping of literal
-  keys to values (e.g. replace({"binary.separation_as": 12.0})), and only
+  keys to values (e.g. replace({"source.separation_as": 12.0})), and only
   supports **kwargs as a convenience for simple, identifier-like keys.
 
 The overall goal is to treat parameter keys as opaque strings with stable
@@ -87,12 +87,12 @@ class ParameterStore:
     Immutable-ish container mapping parameter keys to values.
 
     Values are typically Python floats/ints or jax.numpy arrays. Keys are
-    ParamKey strings and may contain dots (e.g. "binary.separation_as").
+    ParamKey strings and may contain dots (e.g. "source.separation_as").
 
     Because keys are arbitrary strings, updates should generally be passed
     as an explicit mapping to `replace()`, e.g.:
 
-        store = store.replace({"binary.separation_as": 12.0})
+        store = store.replace({"source.separation_as": 12.0})
 
     rather than using keyword arguments, which only work reliably for simple
     identifier-like keys that don't contain dots.
@@ -282,7 +282,7 @@ class ParameterStore:
             recommended way to update parameters, especially for hierarchical
             keys that contain dots, e.g.:
 
-                store = store.replace({"binary.separation_as": 12.0})
+                store = store.replace({"source.separation_as": 12.0})
 
         **extra_updates:
             Additional updates passed as keyword arguments. This is only
@@ -295,11 +295,11 @@ class ParameterStore:
 
         Notes
         -----
-        For hierarchical parameter keys such as "binary.separation_as",
+        For hierarchical parameter keys such as "source.separation_as",
         always use the mapping form (the `updates` argument). Relying on
         keyword arguments for these keys would silently replace dots with
         underscores at the call site, creating a *different* key (e.g.
-        "binary_separation_mas") and leading to hard-to-debug discrepancies
+        "source_separation_mas") and leading to hard-to-debug discrepancies
         between the spec and the store.
         """
         new_values: Dict[ParamKey, Any] = dict(self._values)

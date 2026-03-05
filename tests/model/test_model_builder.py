@@ -28,15 +28,15 @@ def _make_inference_store(cfg):
 
     updates = {
         # Binary astrometry / photometry
-        "binary.separation_as": 10.0,
-        "binary.position_angle_deg": 45.0,
-        "binary.x_position_as": 0.0,
-        "binary.y_position_as": 0.0,
-        "binary.contrast": 3.0,
-        "binary.log_flux_total": 8.0,
+        "source.separation_as": 10.0,
+        "source.position_angle_deg": 45.0,
+        "source.x_position_as": 0.0,
+        "source.y_position_as": 0.0,
+        "source.contrast": 3.0,
+        "source.log_flux_total": 8.0,
         # System plate scale (not used by the legacy model construction yet,
         # but included for completeness)
-        "system.plate_scale_as_per_pix": 0.355,
+        "optics.plate_scale_as_per_pix": 0.355,
     }
 
     if n_m1 > 0:
@@ -75,12 +75,12 @@ def test_build_shera_threeplane_model_smoke(shera_smoke_cfg):
 
     # These assertions deliberately only check *consistency* with the store;
     # they don't assume any particular unit convention beyond “passed through”.
-    sep_store = float(store.get("binary.separation_as"))
-    pa_store = float(store.get("binary.position_angle_deg"))
-    x_store = float(store.get("binary.x_position_as"))
-    y_store = float(store.get("binary.y_position_as"))
-    contrast_store = float(store.get("binary.contrast"))
-    log_flux_store = float(store.get("binary.log_flux_total"))
+    sep_store = float(store.get("source.separation_as"))
+    pa_store = float(store.get("source.position_angle_deg"))
+    x_store = float(store.get("source.x_position_as"))
+    y_store = float(store.get("source.y_position_as"))
+    contrast_store = float(store.get("source.contrast"))
+    log_flux_store = float(store.get("source.log_flux_total"))
 
     # AlphaCen fields are typically JAX arrays; cast to float for comparison.
     assert pytest.approx(float(src.separation)) == sep_store

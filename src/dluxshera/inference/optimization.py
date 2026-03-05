@@ -1471,13 +1471,13 @@ def generate_fim_labels(
     """
     spec = None
     translations = {
-        "system.plate_scale_as_per_pix": "Plate Scale",
-        "binary.contrast": "Contrast",
-        "binary.log_flux_total": "Log Flux",
-        "binary.x_position_as": "Binary X",
-        "binary.y_position_as": "Binary Y",
-        "binary.separation_as": "Binary Separation",
-        "binary.position_angle_deg": "Position Angle",
+        "optics.plate_scale_as_per_pix": "Plate Scale",
+        "source.contrast": "Contrast",
+        "source.log_flux_total": "Log Flux",
+        "source.x_position_as": "Binary X",
+        "source.y_position_as": "Binary Y",
+        "source.separation_as": "Binary Separation",
+        "source.position_angle_deg": "Position Angle",
     }
 
     def _vector_length(key: ParamKey) -> int | None:

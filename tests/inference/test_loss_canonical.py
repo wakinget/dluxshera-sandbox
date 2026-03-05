@@ -73,9 +73,9 @@ def test_make_binder_image_nll_fn_twoplane_smoke():
     forward_spec, base_store = make_forward_store(cfg)
 
     infer_keys = (
-        "binary.separation_as",
-        "binary.position_angle_deg",
-        "binary.contrast",
+        "source.separation_as",
+        "source.position_angle_deg",
+        "source.contrast",
     )
 
     binder = SheraBinder(cfg, forward_spec, base_store)

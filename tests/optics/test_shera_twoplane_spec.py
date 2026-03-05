@@ -29,11 +29,11 @@ def test_twoplane_forward_spec_structure_with_primary_basis():
     spec = build_forward_spec_from_config(cfg)
 
     expected_binary_keys = {
-        "binary.x_position_as",
-        "binary.y_position_as",
-        "binary.separation_as",
-        "binary.position_angle_deg",
-        "binary.contrast",
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.separation_as",
+        "source.position_angle_deg",
+        "source.contrast",
     }
 
     assert expected_binary_keys.issubset(set(spec.keys()))
@@ -43,13 +43,13 @@ def test_twoplane_forward_spec_structure_with_primary_basis():
     assert primary_field.shape == (2,)
     assert primary_field.default == (0.0, 0.0)
 
-    plate_scale_field = spec.get("system.plate_scale_as_per_pix")
+    plate_scale_field = spec.get("optics.plate_scale_as_per_pix")
     assert plate_scale_field.kind == "primitive"
     assert plate_scale_field.default == cfg.plate_scale_as_per_pix
 
-    log_flux_field = spec.get("binary.log_flux_total")
+    log_flux_field = spec.get("source.log_flux_total")
     assert log_flux_field.kind == "derived"
-    assert log_flux_field.transform == "binary_log_flux_total"
+    assert log_flux_field.transform == "source.log_flux_total"
 
 
 def test_twoplane_forward_spec_refresh():
@@ -57,7 +57,7 @@ def test_twoplane_forward_spec_refresh():
     spec = build_forward_spec_from_config(cfg)
 
     store = ParameterStore.from_spec_defaults(spec)
-    assert "binary.log_flux_total" not in store
+    assert "source.log_flux_total" not in store
 
     refreshed = refresh_derived(
         store,
@@ -67,11 +67,11 @@ def test_twoplane_forward_spec_refresh():
         include_derived=True,
     )
 
-    assert refreshed.get("system.plate_scale_as_per_pix") == pytest.approx(
+    assert refreshed.get("optics.plate_scale_as_per_pix") == pytest.approx(
         cfg.plate_scale_as_per_pix
     )
-    assert "binary.log_flux_total" in refreshed
-    assert refreshed.get("binary.log_flux_total") > 0.0
+    assert "source.log_flux_total" in refreshed
+    assert refreshed.get("source.log_flux_total") > 0.0
 
 
 def test_inference_spec_secondary_toggle():
@@ -83,5 +83,5 @@ def test_inference_spec_secondary_toggle():
     )
     assert "secondary.zernike_coeffs_nm" not in spec_without_secondary
     # Ensure shared astrometry keys remain
-    assert "binary.separation_as" in spec_without_secondary
-    assert "system.plate_scale_as_per_pix" in spec_without_secondary
+    assert "source.separation_as" in spec_without_secondary
+    assert "optics.plate_scale_as_per_pix" in spec_without_secondary

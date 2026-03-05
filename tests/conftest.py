@@ -72,11 +72,11 @@ def shera_smoke_cfg():
 @pytest.fixture(scope="session")
 def shera_smoke_updates(shera_smoke_cfg):
     updates = {
-        "binary.separation_as": 10.0,
-        "binary.position_angle_deg": 90.0,
-        "binary.x_position_as": 0.0,
-        "binary.y_position_as": 0.0,
-        "binary.contrast": 3.0,
+        "source.separation_as": 10.0,
+        "source.position_angle_deg": 90.0,
+        "source.x_position_as": 0.0,
+        "source.y_position_as": 0.0,
+        "source.contrast": 3.0,
     }
 
     n_m1 = len(shera_smoke_cfg.primary_noll_indices)
@@ -103,9 +103,9 @@ def shera_smoke_inference(shera_smoke_forward):
 @pytest.fixture(scope="session")
 def shera_smoke_infer_keys():
     return (
-        "binary.separation_as",
-        "binary.x_position_as",
-        "binary.y_position_as",
+        "source.separation_as",
+        "source.x_position_as",
+        "source.y_position_as",
     )
 
 

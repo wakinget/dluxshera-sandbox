@@ -78,7 +78,7 @@ Use `pack_params(spec_subset, store)` to flatten an inference spec subset into �
   - `TransformRegistry`, `DerivedResolver`
   - `register_transform(...)`, `resolve_derived(...)`, `ensure_registered(...)`
 - `src/dluxshera/params/transforms.py`
-  - system-registered transforms (e.g. `system.focal_length_m`, `system.plate_scale_as_per_pix`, `binary.raw_fluxes`)
+  - system-registered transforms (e.g. `optics.focal_length_m`, `optics.plate_scale_as_per_pix`, `source.raw_fluxes`)
 - `src/dluxshera/params/packing.py`
   - `pack_params`, `unpack_params`, `build_index_map`
 
@@ -87,7 +87,7 @@ For a runnable, canonical example of building specs, creating a store, and refre
 
 ## Gotchas / FAQ
 - “I tried to set a derived key directly; why did it change later?” Derived values are recomputed by `refresh_derived`, so direct edits are overwritten.
-  More precisely, “store wins” is only true for keys treated as primitives in the active spec passed to `refresh_derived`. If a key is marked derived in that spec, refresh recomputes and overwrites it; to keep an explicit value, re-apply it after refresh. For example, setting only `imaging.exposure_time_s` updates derived `binary.log_flux_total`, setting only `binary.log_flux_total` uses that explicit value, and setting both still resolves to explicit `binary.log_flux_total` when it is re-applied after refresh.
+  More precisely, “store wins” is only true for keys treated as primitives in the active spec passed to `refresh_derived`. If a key is marked derived in that spec, refresh recomputes and overwrites it; to keep an explicit value, re-apply it after refresh. For example, setting only `source.exposure_time_s` updates derived `source.log_flux_total`, setting only `source.log_flux_total` uses that explicit value, and setting both still resolves to explicit `source.log_flux_total` when it is re-applied after refresh.
 - “Why does my transform fail?” Check for missing primitives, incorrect dependency lists, wrong `system_id`, or dependency cycles.
 - “When do I refresh derived?” Typically right after store updates and before building binders or computing losses.
 

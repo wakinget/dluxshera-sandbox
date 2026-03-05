@@ -27,8 +27,8 @@ def test_model_runtime_overlay_avoids_rebuild(monkeypatch, cfg):
 
     monkeypatch.setattr(binder, "_build_telescope", _boom)
 
-    base_contrast = forward_store.get("binary.contrast")
-    delta = ParameterStore.from_dict({"binary.contrast": base_contrast + 0.5})
+    base_contrast = forward_store.get("source.contrast")
+    delta = ParameterStore.from_dict({"source.contrast": base_contrast + 0.5})
 
     binder.model(delta)
 
@@ -42,12 +42,12 @@ def test_update_store_runtime_avoids_optics_rebuild(monkeypatch, cfg):
 
     monkeypatch.setattr(binder, "_build_optics", _boom)
 
-    base_contrast = forward_store.get("binary.contrast")
-    updated_store = forward_store.replace({"binary.contrast": base_contrast + 0.25})
+    base_contrast = forward_store.get("source.contrast")
+    updated_store = forward_store.replace({"source.contrast": base_contrast + 0.25})
 
     updated_binder = binder.update_store(updated_store)
 
-    assert updated_binder.base_forward_store.get("binary.contrast") == pytest.approx(
+    assert updated_binder.base_forward_store.get("source.contrast") == pytest.approx(
         base_contrast + 0.25
     )
 
@@ -56,11 +56,11 @@ def test_structural_update_requires_allow_rebuild(cfg):
     forward_spec, forward_store = make_forward_store(cfg)
     binder = SheraBinder(cfg, forward_spec, forward_store)
 
-    new_value = forward_store.get("system.m1_diameter_m") + 0.01
-    updated_store = forward_store.replace({"system.m1_diameter_m": new_value})
+    new_value = forward_store.get("optics.m1_diameter_m") + 0.01
+    updated_store = forward_store.replace({"optics.m1_diameter_m": new_value})
     updated_store = _refresh_store(updated_store, forward_spec)
 
-    with pytest.raises(ValueError, match="system.m1_diameter_m"):
+    with pytest.raises(ValueError, match="optics.m1_diameter_m"):
         binder.update_store(updated_store)
 
 
@@ -68,8 +68,8 @@ def test_structural_update_rebuilds_optics_when_allowed(monkeypatch, cfg):
     forward_spec, forward_store = make_forward_store(cfg)
     binder = SheraBinder(cfg, forward_spec, forward_store)
 
-    new_value = forward_store.get("system.m1_diameter_m") + 0.01
-    updated_store = forward_store.replace({"system.m1_diameter_m": new_value})
+    new_value = forward_store.get("optics.m1_diameter_m") + 0.01
+    updated_store = forward_store.replace({"optics.m1_diameter_m": new_value})
     updated_store = _refresh_store(updated_store, forward_spec)
 
     calls = {"count": 0}
@@ -95,12 +95,12 @@ def test_mixed_updates_structural_dominate(cfg):
 
     delta = ParameterStore.from_dict(
         {
-            "system.m1_diameter_m": forward_store.get("system.m1_diameter_m") + 0.02,
-            "binary.contrast": forward_store.get("binary.contrast") + 0.1,
+            "optics.m1_diameter_m": forward_store.get("optics.m1_diameter_m") + 0.02,
+            "source.contrast": forward_store.get("source.contrast") + 0.1,
         }
     )
 
-    with pytest.raises(ValueError, match="system.m1_diameter_m"):
+    with pytest.raises(ValueError, match="optics.m1_diameter_m"):
         binder.model(delta)
 
 

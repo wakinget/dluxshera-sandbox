@@ -97,7 +97,7 @@ def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Log-flux: binary.log_flux_total
+# Log-flux: source.log_flux_total
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +111,7 @@ def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
         "source.spectral_flux_density",
     ),
 )
-def transform_binary_log_flux_total(ctx: Ctx) -> float:
+def transform_source_log_flux_total(ctx: Ctx) -> float:
     """
     Compute the truth-level log10 total photon count over the exposure.
 
@@ -143,7 +143,7 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
     if not (total_flux > 0.0):
         # Optional guard; you could also just let log10 blow up.
         raise ValueError(
-            f"Non-positive total_flux={total_flux} in binary_log_flux_total "
+            f"Non-positive total_flux={total_flux} in source_log_flux_total "
             "(check flux_density, bandwidth, area, exposure_time, throughput)."
         )
 
@@ -152,18 +152,18 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Raw fluxes: binary.raw_fluxes
+# Raw fluxes: source.raw_fluxes
 # ---------------------------------------------------------------------------
 
 
 @register_for_systems(
-    "binary.raw_fluxes",
+    "source.raw_fluxes",
     depends_on=(
-        "binary.log_flux_total",
-        "binary.contrast",
+        "source.log_flux_total",
+        "source.contrast",
     ),
 )
-def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
+def transform_source_raw_fluxes(ctx: Ctx) -> np.ndarray:
     """
     Compute raw fluxes for the binary pair (photons for star A and B).
 
