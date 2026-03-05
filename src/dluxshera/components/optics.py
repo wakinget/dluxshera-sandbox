@@ -71,6 +71,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         n_struts = optics_cfg["n_struts"]
         strut_width_m = optics_cfg["strut_width_m"]
         strut_rotation_deg = optics_cfg["strut_rotation_deg"]
+        throughput = optics_cfg["throughput"]
         primary_noll_indices = optics_cfg["primary_noll_indices"]
         diffractive_pupil_path = optics_cfg.get(
             "diffractive_pupil_path", optics_cfg.get("dp_path")
@@ -173,7 +174,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
                 group="optics",
                 kind="primitive",
                 dtype=float,
-                default=1.0,
+                default=throughput,
                 structural=False,
             ),
             ParamField(
@@ -401,13 +402,13 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         n_struts = optics_cfg["n_struts"]
         strut_width_m = optics_cfg["strut_width_m"]
         strut_rotation_deg = optics_cfg["strut_rotation_deg"]
+        throughput = optics_cfg["throughput"]
         primary_noll_indices = optics_cfg["primary_noll_indices"]
         secondary_noll_indices = optics_cfg["secondary_noll_indices"]
         diffractive_pupil_path = optics_cfg.get(
             "diffractive_pupil_path", optics_cfg.get("dp_path")
         )
         dp_design_wavelength_m = optics_cfg["dp_design_wavelength_m"]
-        pixel_pitch_m = optics_cfg["pixel_pitch_m"]
 
         fields = [
             ParamField(
@@ -533,19 +534,11 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
                 structural=True,
             ),
             ParamField(
-                "optics.pixel_pitch_m",
-                group="optics",
-                kind="primitive",
-                dtype=float,
-                default=pixel_pitch_m,
-                structural=True,
-            ),
-            ParamField(
                 "optics.throughput",
                 group="optics",
                 kind="primitive",
                 dtype=float,
-                default=1.0,
+                default=throughput,
                 structural=False,
             ),
             ParamField(
@@ -555,7 +548,7 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
                 dtype=float,
                 depends_on=(
                     "optics.focal_length_m",
-                    "optics.pixel_pitch_m",
+                    "detector.pixel_pitch_m",
                 ),
                 structural=False,
                 binding="psf_pixel_scale",
