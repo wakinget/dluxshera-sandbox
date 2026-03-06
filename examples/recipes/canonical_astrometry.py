@@ -171,22 +171,28 @@ def main(
         system_preset=system_preset,
         experiment_preset=experiment_preset,
     )
-    resolved = resolve_config(user_cfg)
-    system_block = resolved.get("system")
-    experiment_block = resolved.get("experiment")
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    experiment_cfg = resolved_cfg.get("experiment")
 
-    if system_block is None:
+    if system_cfg is None:
         raise ValueError("canonical_astrometry requires a 'system' block ...")
-    if experiment_block is None:
+    if experiment_cfg is None:
         raise ValueError("canonical_astrometry requires an 'experiment' block ...")
 
-    # Pass the resolved system block directly to compose_forward_spec / binder
-    system_cfg = system_block
+    # --- Optional explicit override: replace detector.layers within config ---
+    # Demonstrates how we might manually change the detector layers
+    # detector_cfg = system_cfg.get("detector", {}) # Copy the default detector config
+    # detector_cfg["layers"] = [{"name": "downsample","factor": 3}] # Update the detector layers field
+    # detector_cfg["layers"] = [{"name": "downsample", "factor": 3}, # This example defines two layers
+    #                           {"name": "jitter", "sigma": 1.0e-1},]
+    # system_cfg["detector"] = detector_cfg # Insert into the system config
+    # -------------------------------------------------------------
 
     forward_spec = compose_forward_spec(system_cfg)
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
 
-    experiment = _validate_experiment(experiment_block)
+    experiment = _validate_experiment(experiment_cfg)
     infer_keys = tuple(experiment["infer_keys"])
     rng_key = jr.PRNGKey(int(experiment["seed"]))
     save_plots = bool(experiment["save_plots"])
