@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import asdict, is_dataclass
 from typing import Optional, TYPE_CHECKING, Any
+from collections.abc import Mapping
 
 import numpy as np
 import jax.numpy as jnp
@@ -56,7 +58,10 @@ def _structural_subset_from_contract(cfg: Any, contract: ParamSpec) -> dict[str,
         attr = _config_attr_for_field(field)
         if attr is None:
             continue
-        value = getattr(cfg, attr)
+        if isinstance(cfg, Mapping):
+            value = cfg.get(attr)
+        else:
+            value = getattr(cfg, attr)
         subset[field.key] = _normalize_json_value(value)
     return subset
 
@@ -139,6 +144,14 @@ def _load_diffractive_pupil_mask(cfg: SheraTwoPlaneConfig) -> dll.AberratedLayer
     return dll.AberratedLayer(jnp.asarray(mask_array))
 
 
+def _threeplane_cfg_map(cfg: Any) -> Mapping[str, Any]:
+    if is_dataclass(cfg):
+        cfg = asdict(cfg)
+    if isinstance(cfg, Mapping):
+        return cfg.get("optics", cfg)
+    raise ValueError("build_shera_threeplane_optics expects a mapping or dataclass config.")
+
+
 def build_shera_threeplane_optics(
     cfg: SheraThreePlaneConfig,
     store: Optional[ParameterStore] = None,
@@ -146,13 +159,15 @@ def build_shera_threeplane_optics(
 ) -> SheraThreePlaneOptics:
     """Construct a three-plane optical system with structural caching."""
 
-    contract = SheraThreePlaneOptics.contract(cfg)
+    optics_cfg = _threeplane_cfg_map(cfg)
+
+    contract = SheraThreePlaneOptics.contract(optics_cfg)
 
     if store is not None and spec is not None:
         store = store.validate_against(spec, allow_derived=True)
 
     cache_disabled = os.getenv(_CACHE_DISABLED_ENV, "").lower() in {"1", "true", "yes"}
-    struct_hash = structural_hash_from_config(cfg)
+    struct_hash = structural_hash_from_config(optics_cfg)
 
     base_optics = None
     if not cache_disabled:
@@ -160,26 +175,26 @@ def build_shera_threeplane_optics(
 
     if base_optics is None:
         base_optics = SheraThreePlaneOptics(
-            wf_npixels=cfg.pupil_npix,
-            psf_npixels=cfg.psf_npix,
-            oversample=cfg.oversample,
-            detector_pixel_pitch=cfg.pixel_pitch_m,
-            mask=cfg.diffractive_pupil_path,
-            m1_noll_ind=tuple(cfg.primary_noll_indices)
-            if cfg.primary_noll_indices
+            wf_npixels=optics_cfg["pupil_npix"],
+            psf_npixels=optics_cfg["psf_npix"],
+            oversample=optics_cfg["oversample"],
+            detector_pixel_pitch=optics_cfg["pixel_pitch_m"],
+            mask=optics_cfg.get("diffractive_pupil_path", optics_cfg.get("dp_path")),
+            m1_noll_ind=tuple(optics_cfg.get("primary_noll_indices") or [])
+            if optics_cfg.get("primary_noll_indices")
             else None,
-            m2_noll_ind=tuple(cfg.secondary_noll_indices)
-            if cfg.secondary_noll_indices
+            m2_noll_ind=tuple(optics_cfg.get("secondary_noll_indices") or [])
+            if optics_cfg.get("secondary_noll_indices")
             else None,
-            p1_diameter=cfg.m1_diameter_m,
-            p2_diameter=cfg.m2_diameter_m,
-            m1_focal_length=cfg.m1_focal_length_m,
-            m2_focal_length=cfg.m2_focal_length_m,
-            plane_separation=cfg.m1_m2_separation_m,
-            n_struts=cfg.n_struts,
-            strut_width=cfg.strut_width_m,
-            strut_rotation_deg=cfg.strut_rotation_deg,
-            dp_design_wavel=cfg.dp_design_wavelength_m,
+            p1_diameter=optics_cfg["m1_diameter_m"],
+            p2_diameter=optics_cfg["m2_diameter_m"],
+            m1_focal_length=optics_cfg["m1_focal_length_m"],
+            m2_focal_length=optics_cfg["m2_focal_length_m"],
+            plane_separation=optics_cfg["m1_m2_separation_m"],
+            n_struts=optics_cfg["n_struts"],
+            strut_width=optics_cfg["strut_width_m"],
+            strut_rotation_deg=optics_cfg["strut_rotation_deg"],
+            dp_design_wavel=optics_cfg["dp_design_wavelength_m"],
         )
         if not cache_disabled:
             _THREEPLANE_CACHE[struct_hash] = base_optics
@@ -195,7 +210,14 @@ def build_shera_twoplane_optics(
 ) -> SheraTwoPlaneOptics:
     """Construct the Shera two-plane optical system with runtime overrides."""
 
-    contract = SheraTwoPlaneOptics.contract(cfg)
+    if is_dataclass(cfg):
+        cfg = asdict(cfg)
+    if isinstance(cfg, Mapping):
+        optics_cfg = cfg.get("optics", cfg)
+    else:
+        optics_cfg = cfg
+
+    contract = SheraTwoPlaneOptics.contract(optics_cfg)
 
     if store is not None and spec is not None:
         store = store.validate_against(spec, allow_derived=True)
@@ -205,7 +227,7 @@ def build_shera_twoplane_optics(
         "true",
         "yes",
     }
-    struct_hash = structural_hash_for_twoplane(cfg)
+    struct_hash = structural_hash_for_twoplane(optics_cfg)
 
     base_optics = None
     if not cache_disabled:
@@ -213,19 +235,19 @@ def build_shera_twoplane_optics(
 
     if base_optics is None:
         base_optics = SheraTwoPlaneOptics(
-            wf_npixels=cfg.pupil_npix,
-            psf_npixels=cfg.psf_npix,
-            oversample=cfg.oversample,
-            psf_pixel_scale=cfg.plate_scale_as_per_pix,
-            mask=cfg.diffractive_pupil_path,
-            m1_diameter=cfg.m1_diameter_m,
-            m2_diameter=cfg.m2_diameter_m,
-            n_struts=cfg.n_struts,
-            strut_width=cfg.strut_width_m,
-            strut_rotation_deg=cfg.strut_rotation_deg,
-            dp_design_wavel=cfg.dp_design_wavelength_m,
-            noll_indices=jnp.asarray(cfg.primary_noll_indices)
-            if cfg.primary_noll_indices
+            wf_npixels=optics_cfg["pupil_npix"],
+            psf_npixels=optics_cfg["psf_npix"],
+            oversample=optics_cfg["oversample"],
+            psf_pixel_scale=optics_cfg["plate_scale_as_per_pix"],
+            mask=optics_cfg.get("diffractive_pupil_path", optics_cfg.get("dp_path")),
+            m1_diameter=optics_cfg["m1_diameter_m"],
+            m2_diameter=optics_cfg["m2_diameter_m"],
+            n_struts=optics_cfg["n_struts"],
+            strut_width=optics_cfg["strut_width_m"],
+            strut_rotation_deg=optics_cfg["strut_rotation_deg"],
+            dp_design_wavel=optics_cfg["dp_design_wavelength_m"],
+            noll_indices=jnp.asarray(optics_cfg.get("primary_noll_indices") or [])
+            if optics_cfg.get("primary_noll_indices")
             else None,
         )
         if not cache_disabled:

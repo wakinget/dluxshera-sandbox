@@ -522,7 +522,13 @@ def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
     if detector_layers_cfg is not None:
         layers = []
         if detector_layers_cfg:
-            psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
+            psf_npix = None
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", None)
+                if isinstance(optics_block, Mapping):
+                    psf_npix = optics_block.get("psf_npix", None)
+            if psf_npix is None:
+                psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
             if psf_npix is None:
                 psf_npix = getattr(cfg, "psf_npix", None)
             if psf_npix is None:

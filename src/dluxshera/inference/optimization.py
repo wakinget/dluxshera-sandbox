@@ -1440,7 +1440,7 @@ def run_image_gd(
 def generate_fim_labels(
     infer_keys: Sequence[ParamKey],
     *,
-    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | None,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | Mapping[str, Any] | None,
     store: ParameterStore | None = None,
 ) -> list[str]:
     """
@@ -1487,7 +1487,7 @@ def generate_fim_labels(
                 arr = np.asarray(value)
                 if arr.ndim > 0:
                     return int(arr.size)
-        if cfg is None:
+        if cfg is None or isinstance(cfg, Mapping):
             return None
         nonlocal spec
         if spec is None:
@@ -1518,12 +1518,20 @@ def generate_fim_labels(
             continue
 
         if key == "optics.primary.zernike_coeffs_nm":
-            nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", cfg)
+                nolls = optics_block.get("primary_noll_indices", ())
+            else:
+                nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M1 Z{n}" for n in nolls])
                 continue
         if key == "optics.secondary.zernike_coeffs_nm":
-            nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", cfg)
+                nolls = optics_block.get("secondary_noll_indices", ())
+            else:
+                nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M2 Z{n}" for n in nolls])
                 continue

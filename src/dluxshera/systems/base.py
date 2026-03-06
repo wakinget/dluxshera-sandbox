@@ -120,20 +120,40 @@ def compose_forward_spec(system_cfg) -> ParamSpec:
 def _cfg_get(root, path: str, default=None):
     """Read a dotted path from mapping- or attribute-based configs."""
 
-    cur = root
-    for key in path.split("."):
-        if cur is None:
-            return default
-        if isinstance(cur, Mapping):
-            cur = cur.get(key, None)
-        else:
-            cur = getattr(cur, key, None)
-    return default if cur is None else cur
+    parts = path.split(".")
+
+    def _walk(obj, keys):
+        cur = obj
+        for key in keys:
+            if cur is None:
+                return default
+            if isinstance(cur, Mapping):
+                cur = cur.get(key, None)
+            else:
+                cur = getattr(cur, key, None)
+        return default if cur is None else cur
+
+    # Primary attempt: walk as given
+    value = _walk(root, parts)
+    if value is not default:
+        return value
+
+    # Fallback: if first key is "system" but root is already a system mapping
+    if parts and parts[0] == "system" and isinstance(root, Mapping) and "system" not in root:
+        return _walk(root, parts[1:])
+
+    return value
 
 
 def _detect_optics_kind_from_cfg(cfg) -> str:
     """Return optics kind from config with compatibility fallbacks."""
 
+    # Try direct system mapping first
+    kind = _cfg_get(cfg, "optics.kind", default=None)
+    if kind is not None:
+        return str(kind)
+
+    # Nested system mapping fallback
     kind = _cfg_get(cfg, "system.optics.kind", default=None)
     if kind is not None:
         return str(kind)
@@ -366,6 +386,10 @@ class SheraBinder:
     def _detect_source_kind(self) -> str:
         """Return the configured source kind with backward-compatible fallback."""
 
+        kind = self._cfg_get("source.kind", default=None)
+        if kind is not None:
+            return str(kind)
+
         kind = self._cfg_get("system.source.kind", default=None)
         if kind is not None:
             return str(kind)
@@ -579,13 +603,17 @@ class SheraBinder:
             "three_plane": structural_hash_from_config,
             "two_plane": structural_hash_for_twoplane,
         }
-        try:
-            struct_hash = hash_fns[optics_kind](self.cfg)
-        except KeyError as exc:
+        cfg_for_hash = (
+            self.cfg["system"]
+            if isinstance(self.cfg, Mapping) and "system" in self.cfg
+            else self.cfg
+        )
+        if optics_kind not in hash_fns:
             supported = ", ".join(sorted(hash_fns))
             raise ValueError(
                 f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
-            ) from exc
+            )
+        struct_hash = hash_fns[optics_kind](cfg_for_hash)
 
         return f"optics_kind={optics_kind}:{struct_hash}"
 

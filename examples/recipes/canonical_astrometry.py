@@ -180,8 +180,8 @@ def main(
     if experiment_block is None:
         raise ValueError("canonical_astrometry requires an 'experiment' block ...")
 
-    # Minimal “root mapping” expected by compose_forward_spec / binder._cfg_get
-    system_cfg = {"system": system_block}
+    # Pass the resolved system block directly to compose_forward_spec / binder
+    system_cfg = system_block
 
     forward_spec = compose_forward_spec(system_cfg)
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
@@ -276,7 +276,9 @@ def main(
     if init_mode == "prior_sample":
         print("Drawing starting point from priors...")
         rng_key, split_key = jr.split(rng_key)
-        init_store = prior_spec.sample(rng_key=split_key, keys=infer_keys)
+        prior_sample = prior_spec.sample(rng_key=split_key, keys=infer_keys)
+        # Seed structural defaults from the truth store, then apply sampled infer keys
+        init_store = truth_store.replace(prior_sample.as_dict())
     elif init_mode == "truth":
         print("Using truth store as initialization (debug mode).")
         init_store = truth_store
@@ -559,8 +561,8 @@ def main(
     if save_plots:
         print("Plotting outputs...")
         psf_extent_as = (
-            binder.cfg.psf_npix
-            * binder.base_forward_store.get("system.plate_scale_as_per_pix")
+            binder.base_forward_store.get("optics.psf_npix")
+            * binder.base_forward_store.get("optics.plate_scale_as_per_pix")
             / 2
             * np.array([-1, 1, -1, 1])
         )
