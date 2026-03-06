@@ -235,9 +235,9 @@ def build_forward_spec_from_config(cfg: SheraThreePlaneConfig) -> ParamSpec:
     :func:`dluxshera.systems.base.compose_forward_spec`.
     """
 
-    from ..builders.detector import build_detector
+    from ..builders.detector import build_detector_contract
 
-    _detector, detector_contract = build_detector(cfg)
+    detector_contract = build_detector_contract(cfg)
     return compose_forward_spec(cfg, detector_contract=detector_contract)
 
 

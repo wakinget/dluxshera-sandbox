@@ -102,6 +102,12 @@ def _condition_detector_map(
 def _resolve_detector_spec(cfg) -> DetectorSpec:
     """Resolve detector metadata from config, defaulting to the testbed model."""
     detector_model = _cfg_get(cfg, "system.detector.model", default=None)
+    if detector_model is None and isinstance(cfg, Mapping):
+        detector_model = cfg.get("model", None)
+    if detector_model is None and isinstance(cfg, Mapping):
+        detector_cfg = cfg.get("detector", None)
+        if isinstance(detector_cfg, Mapping):
+            detector_model = detector_cfg.get("model", None)
     if detector_model is None:
         detector_model = getattr(cfg, "detector_model", None)
     if detector_model is None:
@@ -200,6 +206,31 @@ def _build_legacy_detector_layers(cfg, *, target_shape: tuple[int, int]):
     ]
 
 
+def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
+    """Return a declarative layer config list derived from legacy flat fields."""
+    return [
+        {
+            "name": "downsample",
+            "factor": getattr(cfg, "oversample", None),
+        },
+        {
+            "name": "pixel_offsets",
+            "dx_path": getattr(cfg, "ppu_dx_path", None),
+            "dy_path": getattr(cfg, "ppu_dy_path", None),
+            "interp_method": getattr(cfg, "ppu_interp_method", "cubic2"),
+        },
+        {
+            "name": "pixel_response",
+            "prf_path": getattr(cfg, "prf_path", None),
+        },
+        {
+            "name": "jitter",
+            "sigma": float(getattr(cfg, "jitter_sigma", 1e-12)),
+            "kernel_size": int(getattr(cfg, "jitter_kernel_size", 3)),
+        },
+    ]
+
+
 def build_detector_layer(
     name: str,
     layer_cfg: Mapping,
@@ -267,50 +298,244 @@ def build_detector_layer(
     supported = ", ".join(SUPPORTED_DETECTOR_LAYERS)
     raise ValueError(f"Unknown detector layer name {name!r}. Supported layers: {supported}.")
 
-def _build_detector_contract(detector: SheraDetector) -> ParamSpec:
-    """Build a minimal detector ParamSpec contract from an assembled detector."""
 
-    jitter_layer = detector.layers.get("jitter", None)
-    if jitter_layer is None:
-        return ParamSpec()
+def _normalize_detector_cfg(detector_cfg) -> Mapping:
+    """Return the detector block mapping from various wrapper shapes."""
 
-    return ParamSpec(
-        [
+    if isinstance(detector_cfg, Mapping):
+        if "detector" in detector_cfg and isinstance(detector_cfg["detector"], Mapping):
+            return detector_cfg["detector"]
+        if (
+            "system" in detector_cfg
+            and isinstance(detector_cfg["system"], Mapping)
+            and isinstance(detector_cfg["system"].get("detector"), Mapping)
+        ):
+            return detector_cfg["system"]["detector"]
+        return detector_cfg
+
+    candidate = _cfg_get(detector_cfg, "system.detector", default=None)
+    if isinstance(candidate, Mapping):
+        return candidate
+
+    return {
+        "model": getattr(detector_cfg, "detector_model", None),
+        "layers": _legacy_layers_cfg_from_cfg(detector_cfg),
+    }
+
+
+def build_detector_contract(detector_cfg) -> ParamSpec:
+    """Build the detector ParamSpec contract from a detector config mapping."""
+
+    cfg = _normalize_detector_cfg(detector_cfg)
+    spec = _resolve_detector_spec(cfg)
+
+    fields: list[ParamField] = [
+        ParamField(
+            key="detector.pixel_pitch_m",
+            group="detector",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=spec.pixel_pitch_m,
+            structural=False,
+        ),
+        ParamField(
+            key="detector.read_noise",
+            group="detector",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=spec.read_noise,
+            structural=False,
+        ),
+        ParamField(
+            key="detector.dark_current",
+            group="detector",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=spec.dark_current,
+            structural=False,
+        ),
+        ParamField(
+            key="detector.full_well",
+            group="detector",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=spec.full_well,
+            structural=False,
+        ),
+        ParamField(
+            key="detector.qe",
+            group="detector",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=spec.qe,
+            structural=False,
+        ),
+        ParamField(
+            key="detector.adc_bits",
+            group="detector",
+            kind="primitive",
+            dtype=int,
+            shape=(),
+            default=spec.adc_bits,
+            structural=False,
+        ),
+    ]
+
+    layers_cfg = cfg.get("layers", None) if isinstance(cfg, Mapping) else None
+    layer_map: dict[str, Mapping] = {}
+    if isinstance(layers_cfg, list):
+        for layer in layers_cfg:
+            if isinstance(layer, Mapping) and "name" in layer:
+                layer_map[layer["name"]] = layer
+
+    def _path_default(raw):
+        resolved = _resolve_repo_path(raw)
+        return str(resolved) if resolved is not None else None
+
+    jitter_cfg = layer_map.get("jitter")
+    if jitter_cfg is not None:
+        sigma_val = jitter_cfg.get("sigma", 1e-12)
+        if sigma_val is None:
+            sigma_val = 1e-12
+        kernel_val = jitter_cfg.get("kernel_size", 3)
+        if kernel_val is None:
+            kernel_val = 3
+        sigma = float(sigma_val)
+        kernel_size = int(kernel_val)
+        fields.extend(
+            [
+                ParamField(
+                    key="detector.jitter.sigma",
+                    group="detector",
+                    kind="primitive",
+                    dtype=float,
+                    shape=(),
+                    default=sigma,
+                    bounds=(0.0, None),
+                    structural=False,
+                    doc="Detector jitter sigma [pixels], runtime-overridable from the store.",
+                ),
+                ParamField(
+                    key="detector.jitter.kernel_size",
+                    group="detector",
+                    kind="primitive",
+                    dtype=int,
+                    shape=(),
+                    default=kernel_size,
+                    structural=True,
+                ),
+            ]
+        )
+
+    pixel_offsets_cfg = layer_map.get("pixel_offsets")
+    if pixel_offsets_cfg is not None:
+        interp_method = pixel_offsets_cfg.get("interp_method", "cubic2") or "cubic2"
+        dx_path = _path_default(pixel_offsets_cfg.get("dx_path", None))
+        dy_path = _path_default(pixel_offsets_cfg.get("dy_path", None))
+        fields.extend(
+            [
+                ParamField(
+                    key="detector.pixel_offsets.interp_method",
+                    group="detector",
+                    kind="primitive",
+                    dtype=str,
+                    shape=(),
+                    default=interp_method,
+                    structural=False,
+                ),
+                ParamField(
+                    key="detector.pixel_offsets.dx_path",
+                    group="detector",
+                    kind="primitive",
+                    dtype=str,
+                    shape=(),
+                    default=dx_path,
+                    structural=True,
+                ),
+                ParamField(
+                    key="detector.pixel_offsets.dy_path",
+                    group="detector",
+                    kind="primitive",
+                    dtype=str,
+                    shape=(),
+                    default=dy_path,
+                    structural=True,
+                ),
+            ]
+        )
+
+    pixel_response_cfg = layer_map.get("pixel_response")
+    if pixel_response_cfg is not None:
+        prf_path = _path_default(pixel_response_cfg.get("prf_path", None))
+        fields.append(
             ParamField(
-                key="detector.jitter.sigma",
+                key="detector.pixel_response.prf_path",
                 group="detector",
                 kind="primitive",
-                dtype=float,
+                dtype=str,
                 shape=(),
-                default=float(jitter_layer.sigma),
-                bounds=(0.0, None),
-                doc="Detector jitter sigma [pixels], runtime-overridable from the store.",
+                default=prf_path,
+                structural=True,
             )
-        ]
-    )
+        )
+
+    downsample_cfg = layer_map.get("downsample")
+    if downsample_cfg is not None:
+        factor = downsample_cfg.get("factor", downsample_cfg.get("oversample", 1))
+        if factor is None:
+            factor = 1
+        fields.append(
+            ParamField(
+                key="detector.downsample.factor",
+                group="detector",
+                kind="primitive",
+                dtype=int,
+                shape=(),
+                default=int(factor),
+                structural=False,
+            )
+        )
+
+    return ParamSpec(fields)
 
 
 def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
     """Construct the baseline detector for a Shera system."""
-    detector_layers_cfg = _cfg_get(cfg, "system.detector.layers", default=None)
-    spec = _resolve_detector_spec(cfg)
+    detector_cfg_block = _normalize_detector_cfg(cfg)
 
-    if detector_layers_cfg:
-        psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
-        if psf_npix is None:
-            psf_npix = getattr(cfg, "psf_npix", None)
-        if psf_npix is None:
-            raise ValueError(
-                "Cannot build detector from system.detector.layers: missing system.optics.psf_npix."
-            )
+    detector_layers_cfg = None
+    if isinstance(detector_cfg_block, Mapping):
+        detector_layers_cfg = detector_cfg_block.get("layers", None)
+    if detector_layers_cfg is None:
+        detector_layers_cfg = _cfg_get(cfg, "system.detector.layers", default=None)
 
-        target_shape = (int(psf_npix), int(psf_npix))
+    spec_source = detector_cfg_block if detector_cfg_block is not None else cfg
+    spec = _resolve_detector_spec(spec_source)
+
+    layers_cfg_used = detector_layers_cfg
+
+    if detector_layers_cfg is not None:
         layers = []
-        for layer_cfg in detector_layers_cfg:
-            name = layer_cfg.get("name", None)
-            if name is None:
-                raise ValueError("Each detector layer entry must define a `name` field.")
-            layers.append(build_detector_layer(name, layer_cfg, target_shape=target_shape))
+        if detector_layers_cfg:
+            psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
+            if psf_npix is None:
+                psf_npix = getattr(cfg, "psf_npix", None)
+            if psf_npix is None:
+                raise ValueError(
+                    "Cannot build detector from system.detector.layers: missing system.optics.psf_npix."
+                )
+
+            target_shape = (int(psf_npix), int(psf_npix))
+            for layer_cfg in detector_layers_cfg:
+                name = layer_cfg.get("name", None)
+                if name is None:
+                    raise ValueError("Each detector layer entry must define a `name` field.")
+                layers.append(build_detector_layer(name, layer_cfg, target_shape=target_shape))
     else:
         warnings.warn(
             "system.detector.layers not provided; building detector from legacy flat detector config.",
@@ -320,9 +545,44 @@ def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
         psf_npix = int(cfg.psf_npix)
         target_shape = (psf_npix, psf_npix)
         layers = _build_legacy_detector_layers(cfg, target_shape=target_shape)
+        layers_cfg_used = [
+            {
+                "name": "downsample",
+                "factor": getattr(cfg, "oversample", None),
+            },
+            {
+                "name": "pixel_offsets",
+                "dx_path": getattr(cfg, "ppu_dx_path", None),
+                "dy_path": getattr(cfg, "ppu_dy_path", None),
+                "interp_method": getattr(cfg, "ppu_interp_method", "cubic2"),
+            },
+            {
+                "name": "pixel_response",
+                "prf_path": getattr(cfg, "prf_path", None),
+            },
+            {
+                "name": "jitter",
+                "sigma": float(getattr(cfg, "jitter_sigma", 1e-12)),
+                "kernel_size": int(getattr(cfg, "jitter_kernel_size", 3)),
+            },
+        ]
 
     detector = SheraDetector(layers=layers, spec=spec)
-    return detector, _build_detector_contract(detector)
+    if not isinstance(detector_cfg_block, Mapping):
+        detector_cfg_block = {}
+    if layers_cfg_used is not None:
+        detector_cfg_block.setdefault("layers", layers_cfg_used)
+    model_value = None
+    if isinstance(detector_cfg_block, Mapping):
+        model_value = detector_cfg_block.get("model", None)
+    if model_value is None:
+        model_value = _cfg_get(cfg, "system.detector.model", default=None)
+    if model_value is None:
+        model_value = getattr(cfg, "detector_model", None)
+    if model_value is not None:
+        detector_cfg_block.setdefault("model", model_value)
+    detector_contract = build_detector_contract(detector_cfg_block)
+    return detector, detector_contract
 
 
 def apply_runtime_bindings(
@@ -366,5 +626,6 @@ __all__ = [
     "DETECTOR_RUNTIME_BINDINGS",
     "apply_runtime_bindings",
     "build_detector",
+    "build_detector_contract",
     "build_detector_layer",
 ]

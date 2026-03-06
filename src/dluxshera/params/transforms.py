@@ -78,7 +78,7 @@ def transform_3P_focal_length_m(ctx: Ctx) -> float:
     "optics.plate_scale_as_per_pix",
     depends_on=(
         "optics.focal_length_m",
-        "optics.pixel_pitch_m",
+        "detector.pixel_pitch_m",
     ),
 )
 def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
@@ -89,7 +89,7 @@ def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
         plate_scale_as_per_pix  = plate_scale_rad_per_pix * ARCSEC_PER_RAD
     """
     f_eff = float(ctx["optics.focal_length_m"])
-    pixel_pitch = float(ctx["optics.pixel_pitch_m"])
+    pixel_pitch = float(ctx["detector.pixel_pitch_m"])
 
     plate_scale_rad = pixel_pitch / f_eff
     plate_scale_as = plate_scale_rad * ARCSEC_PER_RAD
