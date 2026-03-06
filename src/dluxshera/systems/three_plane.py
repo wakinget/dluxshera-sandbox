@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Optional, Tuple
 
 from .base import BaseConfig, compose_forward_spec
@@ -235,10 +235,17 @@ def build_forward_spec_from_config(cfg: SheraThreePlaneConfig) -> ParamSpec:
     :func:`dluxshera.systems.base.compose_forward_spec`.
     """
 
-    from ..builders.detector import build_detector_contract
-
-    detector_contract = build_detector_contract(cfg)
-    return compose_forward_spec(cfg, detector_contract=detector_contract)
+    cfg_dict = asdict(cfg)
+    system_cfg = {
+        "source": {"kind": "alpha_cen", **cfg_dict},
+        "optics": {"kind": "three_plane", **cfg_dict},
+        "detector": {
+            "model": cfg_dict.get("detector_model"),
+            "layers": cfg_dict.get("detector_layers", None),
+            **{k: v for k, v in cfg_dict.items() if k.startswith("detector_")},
+        },
+    }
+    return compose_forward_spec({"system": system_cfg})
 
 
 # ---------------------------------------------------------------------

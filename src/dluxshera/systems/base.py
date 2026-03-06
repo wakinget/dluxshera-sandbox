@@ -13,7 +13,7 @@ from ..params.spec import ParamSpec
 from ..params.store import ParameterStore, StoreNamespace
 
 
-def compose_forward_spec(system_cfg, detector_contract: ParamSpec | None = None) -> ParamSpec:
+def compose_forward_spec(system_cfg) -> ParamSpec:
     """Compose a forward spec from source, optics, and detector contracts.
 
     The composition order is deterministic:
@@ -27,23 +27,59 @@ def compose_forward_spec(system_cfg, detector_contract: ParamSpec | None = None)
 
     from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
     from ..components.sources import build_alpha_cen_contract
+    from ..builders.detector import build_detector_contract
 
-    optics_kind = _detect_optics_kind_from_cfg(system_cfg)
+    system_block = system_cfg.get("system") if isinstance(system_cfg, Mapping) else None
+    if system_block is None:
+        system_block = system_cfg
 
-    if is_dataclass(system_cfg):
-        system_cfg = asdict(system_cfg)
+    if not isinstance(system_block, Mapping):
+        raise ValueError("compose_forward_spec expects a mapping containing 'system' configuration.")
 
-    source_contract = build_alpha_cen_contract(system_cfg)
+    try:
+        source_cfg = system_block["source"]
+        optics_cfg = system_block["optics"]
+        detector_cfg = system_block["detector"]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "compose_forward_spec expects `system` to contain 'source', 'optics', and 'detector' keys."
+        ) from exc
+
+    if not isinstance(source_cfg, Mapping):
+        raise ValueError("system.source must be a mapping/dict.")
+    if not isinstance(optics_cfg, Mapping):
+        raise ValueError("system.optics must be a mapping/dict.")
+    if not isinstance(detector_cfg, Mapping):
+        raise ValueError("system.detector must be a mapping/dict.")
+
+    try:
+        source_kind = str(source_cfg["kind"])
+    except KeyError as exc:
+        raise ValueError("system.source.kind is required for forward spec composition.") from exc
+
+    try:
+        optics_kind = str(optics_cfg["kind"])
+    except KeyError as exc:
+        raise ValueError("system.optics.kind is required for forward spec composition.") from exc
+
+    source_contract_builders: dict[str, Callable[..., ParamSpec]] = {
+        "alpha_cen": build_alpha_cen_contract,
+    }
     optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
         "two_plane": SheraTwoPlaneOptics.contract,
         "three_plane": SheraThreePlaneOptics.contract,
     }
+
     try:
-        optics_cfg = (
-            system_cfg["optics"]
-            if isinstance(system_cfg, Mapping) and "optics" in system_cfg
-            else system_cfg
-        )
+        source_contract = source_contract_builders[source_kind](source_cfg)
+    except KeyError as exc:
+        supported = ", ".join(sorted(source_contract_builders))
+        raise ValueError(
+            f"Unknown source kind {source_kind!r} when composing forward spec. "
+            f"Supported source kinds: {supported}."
+        ) from exc
+
+    try:
         optics_contract = optics_contract_builders[optics_kind](optics_cfg)
     except KeyError as exc:
         supported = ", ".join(sorted(optics_contract_builders))
@@ -52,7 +88,7 @@ def compose_forward_spec(system_cfg, detector_contract: ParamSpec | None = None)
             f"Supported optics kinds: {supported}."
         ) from exc
 
-    detector_contract = detector_contract or ParamSpec()
+    detector_contract = build_detector_contract(detector_cfg)
 
     contracts = (
         ("source", source_contract),
