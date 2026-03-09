@@ -248,6 +248,21 @@ def compute_expected_sample_counts(*, n_swept_components: int, n_magnitudes: int
     perturbed = n_swept_components * (2 * n_magnitudes)
     return {"nominal": 1, "perturbed": perturbed, "total": 1 + perturbed}
 
+
+def compute_preview_counts(
+    *,
+    per_parameter_cfg: dict[str, SweepConfig],
+    scalar_keys: list[str],
+    zernike_component_counts: dict[str, int],
+) -> dict[str, int]:
+    """Compute exact expected totals honoring per-parameter n_magnitudes."""
+    perturbed = 0
+    for key in scalar_keys:
+        perturbed += 2 * per_parameter_cfg[key].n_magnitudes
+    for key, n_components in zernike_component_counts.items():
+        perturbed += n_components * (2 * per_parameter_cfg[key].n_magnitudes)
+    return {"nominal": 1, "perturbed": perturbed, "total": 1 + perturbed}
+
 def _parse_sweep_overrides(raw: str | None) -> dict[str, dict[str, Any]]:
     if raw is None:
         return {}
@@ -274,6 +289,15 @@ def main() -> None:
     parser.add_argument("--outdir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--exclude-secondary-zernikes", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Compute Fisher sigmas and sweep preview only; "
+            "exit before emitting images or output files."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--add-noise", action="store_true")
     parser.add_argument("--min-sigma", type=float, default=0.1)
@@ -293,9 +317,18 @@ def main() -> None:
 
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    cfg = SheraThreePlaneConfig(**SHERA_TESTBED_CONFIG)
-    forward_spec, base_store = build_forward_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic(base_store)
+    cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG
+    cfg = cfg.replace(primary_noll_indices=tuple(range(4, 12)))
+    cfg = cfg.replace(secondary_noll_indices=tuple(range(4, 12)))
+    if args.exclude_secondary_zernikes:
+        cfg = cfg.replace(secondary_noll_indices=None)
+
+    forward_spec = build_forward_spec_from_config(cfg)
+    inference_spec = build_inference_spec_basic(cfg)
+
+    base_store = ParameterStore.from_spec_defaults(forward_spec)
+    base_store = base_store.refresh_derived(forward_spec)
+
     binder = SheraThreePlaneBinder(cfg, forward_spec, base_store)
 
     infer_keys = list(INFER_KEYS)
@@ -344,11 +377,6 @@ def main() -> None:
         default_cfg=default_cfg,
         overrides=_parse_sweep_overrides(args.sweep_config_json),
     )
-
-    run_dir = _resolve_run_dir(args.outdir, args.run_name)
-    run_dir.mkdir(parents=True, exist_ok=False)
-    images_dir = run_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
 
     scalar_keys = [
         key
@@ -412,6 +440,30 @@ def main() -> None:
                 f"[{entry['min_abs_delta']:.6g},{entry['max_abs_delta']:.6g}] | "
                 f"{entry['total_nonzero_samples']}"
             )
+
+    preview_counts = compute_preview_counts(
+        per_parameter_cfg=per_parameter_cfg,
+        scalar_keys=scalar_keys,
+        zernike_component_counts={
+            key: int(np.asarray(base_store.get(key)).size) for key in zernike_keys
+        },
+    )
+    _log_section("Sweep preview")
+    _log(
+        "Preview counts: "
+        f"nominal={preview_counts['nominal']} "
+        f"perturbed={preview_counts['perturbed']} "
+        f"total={preview_counts['total']}"
+    )
+
+    if args.dry_run:
+        _log("Dry run enabled; exiting before image/output generation.")
+        return
+
+    run_dir = _resolve_run_dir(args.outdir, args.run_name)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    images_dir = run_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
 
     baseline_infer = _infer_values(base_store, infer_keys)
     manifest = {

@@ -6,6 +6,7 @@ from work.experiments.generate_training_dataset_v2 import (
     SweepConfig,
     _build_sigma_summary,
     _normalize_sweep_configs,
+    compute_preview_counts,
     compute_expected_sample_counts,
     generate_mirrored_sigma_offsets,
 )
@@ -71,3 +72,16 @@ def test_generate_mirrored_sigma_offsets_validation(kwargs: dict[str, float | in
 def test_nominal_sample_count_is_one_and_not_duplicated() -> None:
     counts = compute_expected_sample_counts(n_swept_components=5, n_magnitudes=3)
     assert counts == {"nominal": 1, "perturbed": 30, "total": 31}
+
+
+def test_compute_preview_counts_honors_per_parameter_n_magnitudes() -> None:
+    counts = compute_preview_counts(
+        per_parameter_cfg={
+            "a": SweepConfig(n_magnitudes=2),
+            "z": SweepConfig(n_magnitudes=4),
+        },
+        scalar_keys=["a"],
+        zernike_component_counts={"z": 3},
+    )
+    # scalar a => 2*2=4, z with 3 comps => 3*(2*4)=24, plus one nominal
+    assert counts == {"nominal": 1, "perturbed": 28, "total": 29}

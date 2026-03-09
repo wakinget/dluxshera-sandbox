@@ -65,6 +65,15 @@ PYTHONPATH=src python work/experiments/generate_training_dataset_v2.py \
   }'
 ```
 
+
+### 7) Dry run (preview only)
+This computes Fisher sigmas and prints sweep preview counts, then exits before creating any dataset outputs:
+
+```bash
+PYTHONPATH=src python work/experiments/generate_training_dataset_v2.py --dry-run
+```
+
+
 ## Per-parameter config template
 A reusable template is provided at:
 
