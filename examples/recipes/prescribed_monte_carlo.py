@@ -58,6 +58,8 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
+from dluxshera.config.io import load_user_config
+from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.optimization import (
     EigenThetaMap,
     fim_theta,
@@ -78,15 +80,9 @@ from dluxshera.params.packing import (
     pack_params,
     unpack_params as store_unpack_params,
 )
-from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
 from dluxshera.params.store import ParameterStore
-from dluxshera.systems.three_plane import (
-    SHERA_FLIGHT_CONFIG,
-    SHERA_TESTBED_CONFIG,
-    SheraThreePlaneConfig,
-    SheraBinder,
-    build_forward_spec_from_config,
-)
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.base import compose_forward_spec
 
 DEFAULT_PRESCRIPTION_PATH = Path(
     "examples/recipes/prescription_templates/prescription.json"
@@ -94,6 +90,19 @@ DEFAULT_PRESCRIPTION_PATH = Path(
 DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
+
+LEGACY_KEY_MAP = {
+    "binary.separation_as": "source.separation_as",
+    "binary.position_angle_deg": "source.position_angle_deg",
+    "binary.x_position_as": "source.x_position_as",
+    "binary.y_position_as": "source.y_position_as",
+    "binary.log_flux_total": "source.log_flux_total",
+    "binary.contrast": "source.contrast",
+    "system.plate_scale_as_per_pix": "optics.plate_scale_as_per_pix",
+    "primary.zernike_coeffs_nm": "optics.primary.zernike_coeffs_nm",
+    "secondary.zernike_coeffs_nm": "optics.secondary.zernike_coeffs_nm",
+    "imaging.exposure_time_s": "source.exposure_time_s",
+}
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -136,6 +145,16 @@ def _strip_private_keys(obj: Any) -> Any:
     if isinstance(obj, tuple):
         return tuple(_strip_private_keys(item) for item in obj)
     return obj
+
+
+def _migrate_param_key(key: str) -> str:
+    """Translate legacy parameter keys to migrated schema."""
+    return LEGACY_KEY_MAP.get(key, key)
+
+
+def _migrate_key_mapping(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a mapping with legacy param keys migrated."""
+    return {_migrate_param_key(k): v for k, v in payload.items()}
 
 
 def _parse_cell(value: str | None) -> Any:
@@ -815,7 +834,7 @@ def _flatten_store_overrides(payload: dict[str, Any]) -> dict[str, Any]:
                 joined = f"{prefix}.{key}" if prefix else key
                 _walk(joined, entry)
         else:
-            flattened[prefix] = value
+            flattened[_migrate_param_key(prefix)] = value
 
     _walk("", payload)
     return flattened
@@ -845,20 +864,15 @@ def _partition_overrides_by_kind(
     return primitive_overrides, derived_overrides, unknown_overrides
 
 
-def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
-    """Resolve a config ID string into a concrete SheraThreePlaneConfig.
-
-    Called in `main` to translate the prescription's `model.config_id` into an
-    actual config object. This is tightly coupled to Shera configs and should
-    remain local to this script or a Shera-specific utility module.
-    """
+def _resolve_config_id(config_id: str | None) -> str:
+    """Map a legacy config_id to a system preset name (new schema)."""
     if not config_id:
         raise ValueError("Prescription must include model.config_id.")
     mapping = {
-        "SHERA_TESTBED_CONFIG": SHERA_TESTBED_CONFIG,
-        "SHERA_FLIGHT_CONFIG": SHERA_FLIGHT_CONFIG,
-        "shera_testbed": SHERA_TESTBED_CONFIG,
-        "shera_flight": SHERA_FLIGHT_CONFIG,
+        "SHERA_TESTBED_CONFIG": "SHERA_TESTBED_3P",
+        "SHERA_FLIGHT_CONFIG": "SHERA_FLIGHT_3P",
+        "shera_testbed": "SHERA_TESTBED_3P",
+        "shera_flight": "SHERA_FLIGHT_3P",
     }
     if config_id in mapping:
         return mapping[config_id]
@@ -866,28 +880,49 @@ def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
 
 
 def _apply_config_overrides(
-    cfg: SheraThreePlaneConfig,
+    system_cfg: dict[str, Any],
     overrides: dict[str, Any],
-) -> SheraThreePlaneConfig:
-    """Apply validated overrides to a SheraThreePlaneConfig.
-
-    Used in `main` after resolving the base config to enforce override keys and
-    normalize list fields. This is Shera-specific and not generally reusable
-    outside this experiment workflow.
-    """
+) -> dict[str, Any]:
+    """Apply basic overrides onto a resolved system config mapping."""
     if not overrides:
-        return cfg
-    field_names = {field.name for field in dataclasses.fields(cfg)}
-    unknown = [key for key in overrides if key not in field_names]
-    if unknown:
-        raise ValueError(
-            "Unknown config override(s): " + ", ".join(sorted(unknown))
-        )
-    normalized = dict(overrides)
-    for key in ("primary_noll_indices", "secondary_noll_indices"):
-        if key in normalized and isinstance(normalized[key], list):
-            normalized[key] = tuple(normalized[key])
-    return cfg.replace(**normalized)
+        return system_cfg
+
+    translated: dict[str, Any] = {}
+    for key, value in overrides.items():
+        migrated = _migrate_param_key(key)
+        # Map common structural fields onto optics/source blocks.
+        if migrated in {
+            "optics.pupil_npix",
+            "optics.psf_npix",
+            "optics.oversample",
+            "optics.primary_noll_indices",
+            "optics.secondary_noll_indices",
+            "optics.dp_path",
+            "optics.dp_design_wavelength_m",
+            "optics.pixel_pitch_m",
+            "optics.m1_diameter_m",
+            "optics.m2_diameter_m",
+        }:
+            translated.setdefault("optics", {})[migrated.split(".", 1)[1]] = value
+        elif migrated in {
+            "source.wavelength_m",
+            "source.bandwidth_m",
+            "source.n_lambda",
+        }:
+            translated.setdefault("source", {})[migrated.split(".", 1)[1]] = value
+        else:
+            translated.setdefault("system", {})[migrated] = value
+
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        out = copy.deepcopy(base)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = copy.deepcopy(v)
+        return out
+
+    return _deep_merge(system_cfg, translated)
 
 
 def _repo_relative_path(path: str | Path | None, *, repo_root: Path) -> str | None:
@@ -906,20 +941,18 @@ def _repo_relative_path(path: str | Path | None, *, repo_root: Path) -> str | No
         return Path(os.path.relpath(resolved, repo_root)).as_posix()
 
 
-def _config_payload(cfg: SheraThreePlaneConfig, *, repo_root: Path) -> dict[str, Any]:
-    """Serialize a SheraThreePlaneConfig and normalize path fields.
-
-    Called in `main` when recording run metadata for the optimizer artifacts.
-    It is tightly coupled to the Shera config schema and is not generic.
-    """
-    payload = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else dict(cfg)
-    if isinstance(payload, dict) and "diffractive_pupil_path" in payload:
-        payload = {
-            **payload,
-            "diffractive_pupil_path": _repo_relative_path(
-                payload.get("diffractive_pupil_path"), repo_root=repo_root
-            ),
-        }
+def _config_payload(cfg: dict[str, Any], *, repo_root: Path) -> dict[str, Any]:
+    """Serialize a resolved system config mapping and normalize path fields."""
+    payload = copy.deepcopy(cfg)
+    dp_path = None
+    if isinstance(payload, dict):
+        dp_path = (
+            payload.get("optics", {}).get("dp_path")
+            or payload.get("optics", {}).get("diffractive_pupil_path")
+        )
+    if dp_path is not None:
+        payload.setdefault("optics", {})
+        payload["optics"]["dp_path"] = _repo_relative_path(dp_path, repo_root=repo_root)
     return payload
 
 
@@ -1703,20 +1736,34 @@ def main() -> None:
 
     jax.config.update("jax_enable_x64", True)
 
-    cfg = _resolve_config_id(model_config_id)
-    cfg = _apply_config_overrides(cfg, config_overrides)
+    system_preset = _resolve_config_id(model_config_id)
+    user_cfg = load_user_config(
+        config_path=None,
+        system_preset=system_preset,
+        experiment_preset=None,
+    )
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    if system_cfg is None:
+        raise ValueError("Resolved config missing 'system' block.")
+    system_cfg = _apply_config_overrides(system_cfg, config_overrides)
 
-    forward_spec = build_forward_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic(cfg)
+    forward_spec = compose_forward_spec(system_cfg)
 
-    infer_keys = tuple(prescription.get("infer_keys", []))
+    infer_keys_raw = tuple(prescription.get("infer_keys", []))
+    infer_keys = tuple(_migrate_param_key(key) for key in infer_keys_raw)
     if not infer_keys:
         raise ValueError("Prescription must include non-empty infer_keys.")
-    inference_subspec = make_inference_subspec(
-        base_spec=inference_spec,
-        infer_keys=infer_keys,
-        cfg=cfg,
-    )
+    missing_infer_keys = [key for key in infer_keys if key not in forward_spec]
+    if missing_infer_keys:
+        print(
+            "WARNING: dropping infer_keys not present in forward_spec: "
+            + ", ".join(missing_infer_keys)
+        )
+    infer_keys = tuple(key for key in infer_keys if key in forward_spec)
+    if not infer_keys:
+        raise ValueError("No valid infer_keys remain after migration/filtering.")
+    inference_subspec = forward_spec.subset(infer_keys)
 
     # Store overrides and derived refresh steps: apply nested overrides via
     # dotted keys, then recompute any derived parameters to keep the store
@@ -1726,7 +1773,8 @@ def main() -> None:
         base_store = base_store.replace(_flatten_store_overrides(store_overrides))
     base_store = base_store.refresh_derived(forward_spec)
 
-    prior_info = prescription.get("priors", {})
+    prior_info_raw = prescription.get("priors", {})
+    prior_info = _migrate_key_mapping(prior_info_raw)
     prior_spec = PriorSpec.from_info(base_store, prior_info)
     prior_spec_cache: dict[str, PriorSpec] = {}
 
@@ -1743,7 +1791,7 @@ def main() -> None:
         array = np.asarray(value)
         return hashlib.sha256(array.tobytes()).hexdigest()
 
-    cfg_hash = _stable_hash(cfg)
+    cfg_hash = _stable_hash(system_cfg)
     forward_spec_hash = _stable_hash(forward_spec)
 
     if args.aggregate_only:
@@ -1806,7 +1854,7 @@ def main() -> None:
         truth_store = base_store.replace(truth_overrides)
         truth_store = truth_store.refresh_derived(forward_spec)
 
-        binder = SheraBinder(cfg, forward_spec, truth_store)
+        binder = SheraBinder(system_cfg, forward_spec, truth_store)
 
         # Generate the synthetic data
         data_psf = binder.model()
@@ -1843,7 +1891,7 @@ def main() -> None:
             reduce=reduce,
             theta0_store=truth_store,
         )
-        fim_labels = generate_fim_labels(infer_keys, cfg=cfg, store=truth_store)
+        fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=truth_store)
         loss_fn = nll_loss_fn
 
         # FIM computation and eigen preconditioning flow: pack_params converts
@@ -1940,7 +1988,7 @@ def main() -> None:
             key: value for key, value in init_cfg.items() if key != "mode"
         }
         init_overrides_flat = _flatten_store_overrides(init_overrides)
-        prior_overrides = run_spec.get("prior_overrides") or {}
+        prior_overrides = _migrate_key_mapping(run_spec.get("prior_overrides") or {})
 
         if init_mode == "prior":
             # Per-run prior overrides only affect prior sampling and do not
@@ -2169,7 +2217,7 @@ def main() -> None:
 
         # Loss function setup and optimization execution: run_shera_gd consumes
         # the chosen theta_space, preconditioner, and metadata for artifacts.
-        config_payload = _config_payload(cfg, repo_root=repo_root)
+        config_payload = _config_payload(system_cfg, repo_root=repo_root)
         theta_final_opt, trace, artifacts = run_shera_gd(
             loss_fn=loss_opt,
             theta0=theta0_opt,
