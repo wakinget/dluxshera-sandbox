@@ -16,6 +16,7 @@ Working practices, priorities, and lessons learned.
 - [Working plan](dev/working_plan.md)
 - [Code structure](dev/code_structure.md)
 - [Lessons learned](dev/lessons_learned.md)
+- [ML training dataset V2 workflow](dev/ml_training_dataset_v2.md)
 
 ## Tutorials
 Hands-on guides for common workflows.

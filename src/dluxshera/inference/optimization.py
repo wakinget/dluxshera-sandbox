@@ -1133,6 +1133,8 @@ def run_shera_gd(
     learning_rate: float = 0.5,
     lr_vec: Optional[np.ndarray] = None,
     num_steps: int = 100,
+    optimizer_kind: str = "sgd",
+    optimizer_kwargs: Optional[Mapping[str, Any]] = None,
     run_dir: Optional[str | Path] = None,
     runs_dir: Optional[str | Path] = None,
     run_id: Optional[str] = None,
@@ -1175,6 +1177,12 @@ def run_shera_gd(
         scalar captures the global scaling.
     num_steps :
         Number of gradient updates to perform.
+    optimizer_kind :
+        Name of optax optimizer to use ("sgd" or "adam"). Defaults to SGD.
+    optimizer_kwargs :
+        Optional mapping forwarded to the optax optimizer constructor (e.g.,
+        {"b1": 0.9, "b2": 0.999, "eps": 1e-8} for Adam). No strict validation
+        is performed.
     run_dir / runs_dir / run_id :
         Optional run directory configuration for artifact output.
     save_checkpoints :
@@ -1211,11 +1219,34 @@ def run_shera_gd(
     docs/architecture/optimization_artifacts_and_plotting.md : Artifact schema.
     docs/architecture/inference_and_loss.md : Shera inference context.
     """
-    optimizer = None
-    if lr_vec is not None:
-        scaled_lr_vec = learning_rate * np.asarray(lr_vec)
-        # Keep lr_vec artifacts unscaled; the base learning rate applies on top.
-        optimizer = optax.sgd(learning_rate=scaled_lr_vec)
+    def _scale_by_vector(vec: np.ndarray) -> optax.GradientTransformation:
+        """Elementwise scaling of updates by vector ``vec``."""
+        vec = np.asarray(vec)
+        def init_fn(_):
+            return None
+        def update_fn(updates, state, params=None):
+            return jax.tree_util.tree_map(lambda g: g * vec, updates), state
+        return optax.GradientTransformation(init_fn, update_fn)
+
+    opt_kwargs = dict(optimizer_kwargs or {})
+    optimizer: optax.GradientTransformation | None = None
+
+    if optimizer_kind == "sgd":
+        if lr_vec is not None:
+            scaled_lr_vec = learning_rate * np.asarray(lr_vec)
+            optimizer = optax.sgd(learning_rate=scaled_lr_vec, **opt_kwargs)
+        else:
+            optimizer = optax.sgd(learning_rate=learning_rate, **opt_kwargs)
+    elif optimizer_kind == "adam":
+        txs = [optax.scale_by_adam(**opt_kwargs)]
+        if lr_vec is not None:
+            txs.append(_scale_by_vector(lr_vec))
+        txs.append(optax.scale(-learning_rate))
+        optimizer = optax.chain(*txs)
+    else:
+        raise ValueError(
+            f"Unsupported optimizer_kind={optimizer_kind!r}; expected 'sgd' or 'adam'."
+        )
 
     return run_gd_with_artifacts(
         loss_fn,
