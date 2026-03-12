@@ -22,37 +22,24 @@ Inspected files include:
 ### What detector object is built today
 
 - `build_detector(cfg)` returns a `SheraDetector`, which subclasses `dLux.LayeredDetector` and adds non-pytree metadata via `.spec`.
-  - Builder: `src/dluxshera/builders/detector.py` (`build_detector`, line ~138).
-  - Wrapper class: `src/dluxshera/components/detectors.py` (`class SheraDetector`, line ~54).
+  - Builder: `src/dluxshera/builders/detector.py` (`build_detector`).
+  - Wrapper class: `src/dluxshera/components/detectors.py` (`class SheraDetector`).
 - In practice, binders consume it as a `dl.LayeredDetector` and pass it to `dl.Telescope`.
 
-### Default layer pipeline and ordering
+### Layer pipeline and ordering
 
-Current layer list is hardcoded and ordered in `build_detector(cfg)`:
-
-1. `("downsample", Downsample(cfg.oversample))`
-2. `("pixel_offsets", ApplyPixelOffsets(...))`
-3. `("pixel_response", ApplyPixelResponse(pixel_response))`
-4. `("jitter", ApplyJitter(...))`
-
-This ordering is defined directly in `layers = [...]` in `src/dluxshera/builders/detector.py` (lines ~176–181).
+- Layers are **declarative**: `system.detector.layers` lists ordered layer configs (downsample, pixel_offsets, pixel_response, jitter supported today).
+- If `system.detector.layers` is omitted, the builder emits a warning and falls back to the legacy flat detector fields to build a compatible pipeline.
+- Each layer entry is converted via `build_detector_layer(name, layer_cfg, target_shape)`, and `target_shape` is derived from `system.optics.psf_npix`.
 
 ### Config keys currently read for detector construction
 
-Detector builder reads **flat top-level config attributes** via `getattr(cfg, ...)` and direct fields:
-
-- Required/assumed present:
-  - `cfg.psf_npix`
-  - `cfg.oversample`
-- Optional (with defaults):
-  - `detector_model` (default metadata spec: GSENSE2020BSI)
-  - `ppu_dx_path`, `ppu_dy_path`
-  - `ppu_interp_method` (default: `"cubic2"`)
-  - `prf_path`
-  - `jitter_sigma` (default: `1e-12`)
-  - `jitter_kernel_size` (default: `3`)
-
-No nested config like `cfg.detector.*` is currently read by the detector builder.
+- Preferred path: nested detector block (`system.detector`), including:
+  - `model` (metadata/spec selection)
+  - `layers` (ordered detector pipeline)
+- Legacy compatibility path:
+  - flat fields such as `psf_npix`, `oversample`, `ppu_dx_path`, `ppu_dy_path`, `prf_path`, `jitter_sigma`, `jitter_kernel_size`, `detector_model`
+- The builder normalizes both shapes via `_normalize_detector_cfg`, so either nested or legacy flat configs work, but `system.detector.layers` is the intended surface going forward.
 
 ### Config declarations in dataclasses
 
@@ -73,8 +60,8 @@ No nested config like `cfg.detector.*` is currently read by the detector builder
 5. `BaseSheraBinder.__init__` then builds a cached `self.telescope = self._build_telescope(..., detector=detector)`.
 6. `model()` behavior:
    - `model(store_delta=None)`: uses cached `self.telescope.model()` (no detector rebuild).
-   - `model(store_delta=...)`: applies runtime updates via `_apply_runtime_updates`; detector updates currently no-op because detector runtime bindings are empty.
-   - structural rebuild path (`update_store(..., allow_rebuild=True)`): detector is rebuilt only if detector is marked structural. Today `_detector_structural_keys()` returns empty set, so detector is not structurally keyed via store changes.
+   - `model(store_delta=...)`: applies runtime updates via `_apply_runtime_updates`; detector runtime updates are limited to jitter sigma plus any explicit detector bindings (currently none beyond jitter).
+   - structural rebuild path (`update_store(..., allow_rebuild=True)`): detector is rebuilt only if detector is marked structural. Today detector structural keys are empty, so detector rebuilds remain rare.
 
 ### Key functions and locations
 

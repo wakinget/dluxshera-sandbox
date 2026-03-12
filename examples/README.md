@@ -13,7 +13,9 @@ Read-first recipes live under `examples/recipes/`. Execute-first runners live
 under `examples/runners/`.
 
 - **Canonical 3-plane runner + recipe** — Shera three-plane end-to-end workflow
-  (config → binder → simulate → loss/inference → plotting).
+  (config → resolve → binder → simulate → loss/inference → plotting). Uses the
+  native `system`/`experiment` config structure, detector layer composition, and
+  binder-first evaluation.
   - Recipe: `examples/recipes/canonical_astrometry.py`
   - Runner: `examples/runners/run_canonical_astrometry.py`
   - How to run:
@@ -23,7 +25,7 @@ under `examples/runners/`.
     python examples/runners/run_canonical_astrometry.py --fast
     ```
 - **2-plane runner + recipe** — Same workflow on the two-plane optical system
-  for a faster, simpler baseline.
+  for a faster, simpler baseline with the same config-resolution flow.
   - Recipe: `examples/recipes/twoplane_astrometry.py`
   - Runner: `examples/runners/run_twoplane_astrometry.py`
   - How to run:

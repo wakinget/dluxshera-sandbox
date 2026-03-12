@@ -191,8 +191,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 
 ## 15) Binder namespace ergonomics (Task 1A–1E status)
 
-- Task 1A–1E: Completed (binder.get, StoreNamespace proxy, Binder.ns explicit access, cfg-field attribute raising, store-prefix attribute raising).
-- Supported access patterns so far: `binder.get(...)`, `binder.ns("prefix")`, cfg forwarding such as `binder.psf_npix`, and store prefix raising such as `binder.system.plate_scale_as_per_pix` / `binder.binary.x_position_as`.
+- Status: binder read ergonomics are now Binder-first and contract-driven. Supported access patterns include `binder.get(...)`, `binder.ns("prefix")`, contract-driven semantic leaves (runtime-first, store fallback), runtime component access (`binder.source/optics/detector`), and runtime-leaf fallback for unique component leaves. `binder.cfg` remains explicit provenance, not part of the fallback chain. Pretty-printing now foregrounds source/optics/detector.
 
 ---
 

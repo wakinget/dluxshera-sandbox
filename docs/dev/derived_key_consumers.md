@@ -18,42 +18,39 @@ It also gives a focused recommendation for `binary.raw_fluxes` (aka “source.ra
 ## 1) Derived keys declared by system kind
 
 ## Two-plane forward spec (`src/dluxshera/systems/two_plane.py`)
-- `binary.log_flux_total` (derived)
-  - transform: `binary_log_flux_total`
+- `source.log_flux_total` (derived)
+  - transform: `source.log_flux_total`
   - depends on:
-    - `system.m1_diameter_m`
-    - `band.bandwidth_m`
-    - `imaging.exposure_time_s`
-    - `imaging.throughput`
-    - `binary.spectral_flux_density`
-
-No other derived keys are declared in the two-plane forward spec.
+    - `source.spectral_flux_density`
+    - `source.throughput`
+    - `source.exposure_time_s`
+    - `optics.m1_diameter_m`
+    - `optics.bandwidth_m`
+- `source.raw_fluxes` (derived)
+  - transform: `source.raw_fluxes`
+  - depends on:
+    - `source.log_flux_total`
+    - `source.contrast`
 
 ## Three-plane forward spec (`src/dluxshera/systems/three_plane.py`)
-- `system.focal_length_m` (derived)
-  - transform: `system_focal_length_m`
+- `optics.plate_scale_as_per_pix` (derived)
+  - transform: `optics.plate_scale_as_per_pix`
   - depends on:
-    - `system.m1_focal_length_m`
-    - `system.m2_focal_length_m`
-    - `system.m1_m2_separation_m`
-- `system.plate_scale_as_per_pix` (derived)
-  - transform: `system_plate_scale_as_per_pix`
+    - `optics.focal_length_m`
+    - `detector.pixel_pitch_m`
+- `source.log_flux_total` (derived)
+  - transform: `source.log_flux_total`
   - depends on:
-    - `system.focal_length_m`
-    - `system.pixel_pitch_m`
-- `binary.log_flux_total` (derived)
-  - transform: `binary_log_flux_total`
+    - `source.spectral_flux_density`
+    - `source.throughput`
+    - `source.exposure_time_s`
+    - `optics.m1_diameter_m`
+    - `optics.bandwidth_m`
+- `source.raw_fluxes` (derived)
+  - transform: `source.raw_fluxes`
   - depends on:
-    - `system.m1_diameter_m`
-    - `band.bandwidth_m`
-    - `imaging.exposure_time_s`
-    - `imaging.throughput`
-    - `binary.spectral_flux_density`
-- `binary.raw_fluxes` (derived)
-  - transform: `binary_raw_fluxes`
-  - depends on:
-    - `binary.log_flux_total`
-    - `binary.contrast`
+    - `source.log_flux_total`
+    - `source.contrast`
 
 ---
 
@@ -61,10 +58,9 @@ No other derived keys are declared in the two-plane forward spec.
 
 | Derived key | Two-plane | Three-plane | Runtime forward model/loss (A) | Builders (B) | Analysis/reporting/plotting (C) | Classification |
 |---|---:|---:|---|---|---|---|
-| `system.focal_length_m` | — | ✅ | Not read directly by binder/model; used as dependency when refreshing derived values | None directly | None found | **Derived-support only** (intermediate for plate-scale transform) |
-| `system.plate_scale_as_per_pix` | primitive in forward spec | ✅ derived in forward spec | Used by optics runtime binding path that sets `psf_pixel_scale` | `THREEPLANE_RUNTIME_BINDINGS` / `TWOPLANE_RUNTIME_BINDINGS` include this key | Used in diagnostics (`plate_scale_error_ppm`) | **Runtime-critical** |
-| `binary.log_flux_total` | ✅ | ✅ | Consumed by source build; directly sets AlphaCen `log_flux` used for image generation and thus loss | `build_alpha_cen_source` reads this key | Also used in labels/summary contexts | **Runtime-critical** |
-| `binary.raw_fluxes` | not in two-plane forward spec | ✅ | Not used in binder/model/loss code paths | Not consumed by source/optics builders | Consumed by `build_signals` to produce `binary.raw_flux_error_ppm`; consumed by plotting/tests around that signal | **Report-only** |
+| `optics.plate_scale_as_per_pix` | primitive in forward spec | ✅ derived in forward spec | Used by optics runtime binding path that sets `psf_pixel_scale` | Optics runtime bindings include this key | Used in diagnostics (`plate_scale_error_ppm`) | **Runtime-critical** |
+| `source.log_flux_total` | ✅ | ✅ | Consumed by source build; directly sets AlphaCen `log_flux` used for image generation and thus loss | `build_alpha_cen_source` reads this key | Also used in labels/summary contexts | **Runtime-critical** |
+| `source.raw_fluxes` | ✅ | ✅ | Not used in binder/model/loss code paths | Not consumed by source/optics builders | Consumed by `build_signals` to produce `source.raw_flux_error_ppm`; consumed by plotting/tests around that signal | **Report-only** |
 
 Notes:
 - Inference spec also declares `binary.raw_fluxes` as a derived field for diagnostics-oriented decoding (`refresh_derived(inference_spec)` workflows).

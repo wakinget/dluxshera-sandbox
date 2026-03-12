@@ -5,6 +5,7 @@ Quick pointers to the main documentation areas without duplicating content.
 ## Architecture
 Design and decisions for the system’s core components and data flow.
 - [Systems and binders](architecture/systems_and_binders.md)
+- [Detector layering and contracts](architecture/systems_and_binders.md#detector-layers-and-detector-builder)
 - [Parameters and store](architecture/params_and_store.md)
 - [Inference and loss](architecture/inference_and_loss.md)
 - [Testing approach](architecture/testing.md)
