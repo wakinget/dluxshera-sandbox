@@ -1,4 +1,13 @@
-"""Detector builder responsibilities (detector assembly and runtime wiring)."""
+"""Detector builder responsibilities (detector assembly and runtime wiring).
+
+This module translates user/configured detector blocks into runtime detector
+objects. It owns:
+  - config shape normalization (supporting both modern declarative and legacy flat layouts)
+  - calibration/path resolution for detector maps
+  - detector-layer construction (both declarative and legacy)
+  - detector contract construction (ParamSpec)
+  - lightweight runtime patching for detector jitters/bindings
+"""
 
 from __future__ import annotations
 
@@ -19,6 +28,8 @@ from ..layers.detector_layers import ApplyPixelOffsets
 from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse, Downsample
 
 
+# Runtime bindings for detectors are currently empty; detector runtime updates are
+# limited to jitter (handled explicitly in apply_runtime_bindings).
 DETECTOR_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
 SUPPORTED_DETECTOR_LAYERS: tuple[str, ...] = (
     "downsample",
@@ -28,6 +39,9 @@ SUPPORTED_DETECTOR_LAYERS: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Config + path utilities
+# ---------------------------------------------------------------------------
 def _cfg_get(root, path: str, default=None):
     """Read a dotted config path from a mapping- or attribute-based config object."""
     cur = root
@@ -165,8 +179,17 @@ def _load_array(path: Path) -> jnp.ndarray:
     raise ValueError(f"Unsupported calibration file type: {path} (expected .npy or .npz)")
 
 
+# ---------------------------------------------------------------------------
+# Map conditioning (shared by legacy + declarative paths)
+# ---------------------------------------------------------------------------
+
 def _build_legacy_detector_layers(cfg, *, target_shape: tuple[int, int]):
-    """Build detector layers from flat legacy detector config fields."""
+    """Build detector layers from flat legacy detector config fields.
+
+    Legacy configs supply individual fields like ``ppu_dx_path`` rather than
+    a modern ``detector.layers`` list. This helper translates those flat fields
+    into runtime layer objects.
+    """
     ppu_dx_path = _resolve_repo_path(getattr(cfg, "ppu_dx_path", None))
     ppu_dy_path = _resolve_repo_path(getattr(cfg, "ppu_dy_path", None))
     interp_method = getattr(cfg, "ppu_interp_method", "cubic2")
@@ -207,7 +230,12 @@ def _build_legacy_detector_layers(cfg, *, target_shape: tuple[int, int]):
 
 
 def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
-    """Return a declarative layer config list derived from legacy flat fields."""
+    """Return a declarative layer config list derived from legacy flat fields.
+
+    This produces a ``detector.layers``-style structure from legacy flat
+    detector config attributes so that downstream contract logic can treat
+    legacy and declarative shapes uniformly.
+    """
     downsample_kernel = (
         getattr(cfg, "kernel_size", None)
         or getattr(cfg, "factor", None)
@@ -217,6 +245,7 @@ def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
         {
             "name": "downsample",
             "kernel_size": downsample_kernel,
+            "factor": downsample_kernel,
         },
         {
             "name": "pixel_offsets",
@@ -236,6 +265,9 @@ def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Layer construction helpers
+# ---------------------------------------------------------------------------
 def build_detector_layer(
     name: str,
     layer_cfg: Mapping,
@@ -305,7 +337,16 @@ def build_detector_layer(
 
 
 def _normalize_detector_cfg(detector_cfg) -> Mapping:
-    """Return the detector block mapping from various wrapper shapes."""
+    """Return the detector block mapping from various wrapper shapes.
+
+    Accepts:
+      - already-normalized detector mappings
+      - system-level mappings containing a detector block
+      - config objects (dataclasses) with detector fields
+
+    The goal is to present a uniform mapping with ``model`` and ``layers``
+    entries to the rest of the builder.
+    """
 
     if isinstance(detector_cfg, Mapping):
         if "detector" in detector_cfg and isinstance(detector_cfg["detector"], Mapping):
@@ -329,7 +370,11 @@ def _normalize_detector_cfg(detector_cfg) -> Mapping:
 
 
 def build_detector_contract(detector_cfg) -> ParamSpec:
-    """Build the detector ParamSpec contract from a detector config mapping."""
+    """Build the detector ParamSpec contract from a detector config mapping.
+
+    The contract incorporates detector metadata from the selected model and
+    layer-specific fields based on the declared ``detector.layers`` config.
+    """
 
     cfg = _normalize_detector_cfg(detector_cfg)
     spec = _resolve_detector_spec(cfg)
@@ -509,8 +554,16 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
     return ParamSpec(fields)
 
 
+# ---------------------------------------------------------------------------
+# Public builder entry points
+# ---------------------------------------------------------------------------
 def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
-    """Construct the baseline detector for a Shera system."""
+    """Construct the baseline detector for a Shera system.
+
+    Accepts either a declarative ``detector.layers`` config or legacy flat
+    detector fields on the system config; both paths converge to the same
+    runtime detector and contract.
+    """
     detector_cfg_block = _normalize_detector_cfg(cfg)
 
     detector_layers_cfg = None
@@ -556,29 +609,7 @@ def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
         psf_npix = int(cfg.psf_npix)
         target_shape = (psf_npix, psf_npix)
         layers = _build_legacy_detector_layers(cfg, target_shape=target_shape)
-        legacy_downsample = getattr(cfg, "oversample", None)
-        layers_cfg_used = [
-            {
-                "name": "downsample",
-                "kernel_size": legacy_downsample,
-                "factor": legacy_downsample,
-            },
-            {
-                "name": "pixel_offsets",
-                "dx_path": getattr(cfg, "ppu_dx_path", None),
-                "dy_path": getattr(cfg, "ppu_dy_path", None),
-                "interp_method": getattr(cfg, "ppu_interp_method", "cubic2"),
-            },
-            {
-                "name": "pixel_response",
-                "prf_path": getattr(cfg, "prf_path", None),
-            },
-            {
-                "name": "jitter",
-                "sigma": float(getattr(cfg, "jitter_sigma", 1e-12)),
-                "kernel_size": int(getattr(cfg, "jitter_kernel_size", 3)),
-            },
-        ]
+        layers_cfg_used = _legacy_layers_cfg_from_cfg(cfg)
 
     detector = SheraDetector(layers=layers, spec=spec)
     if not isinstance(detector_cfg_block, Mapping):
@@ -603,7 +634,13 @@ def apply_runtime_bindings(
     store,
     bindings: tuple[tuple[str, str], ...] = DETECTOR_RUNTIME_BINDINGS,
 ) -> SheraDetector:
-    """Apply runtime ParameterStore overrides onto a cached detector."""
+    """Apply runtime ParameterStore overrides onto a cached detector.
+
+    Scope is intentionally narrow: jitter sigma can be overridden directly,
+    and any explicit detector bindings (currently none) would be applied via
+    ``detector.set``. Structural detector changes are still handled via
+    binder-level rebuilds.
+    """
 
     if store is None:
         return detector
