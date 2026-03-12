@@ -25,24 +25,24 @@ def build_alpha_cen_source(
     Parameters
     ----------
     store :
-        ParameterStore holding the *inference-level* source & binary
-        parameters. For this P0 builder we expect the following keys:
+        ParameterStore holding source parameters under the ``source.*``
+        namespace. Required keys are:
 
-        - 'binary.separation_as'        (float, arcseconds)
-        - 'binary.position_angle_deg'   (float, degrees East of North)
-        - 'binary.x_position_as'        (float, arcseconds)
-        - 'binary.y_position_as'        (float, arcseconds)
-        - 'binary.log_flux_total'       (float, log10 photons)
-        - 'binary.contrast'             (float, unitless flux ratio)
+        - 'source.wavelength_m'         (float, meters)
+        - 'source.bandwidth_m'          (float, meters)
+        - 'source.n_lambda'             (int-like scalar)
+        - 'source.separation_as'        (float, arcseconds)
+        - 'source.position_angle_deg'   (float, degrees East of North)
+        - 'source.log_flux_total'       (float, log10 photons)
+        - 'source.contrast'             (float, unitless flux ratio)
 
-        These match the fields defined in `build_inference_spec_basic()`.
+        Optional keys:
+        - 'source.x_position_as'        (float, arcseconds; defaults to 0.0)
+        - 'source.y_position_as'        (float, arcseconds; defaults to 0.0)
 
     cfg :
-        Shera configuration object providing bandpass inputs in meters. The
-        AlphaCen constructor expects a bandpass in nanometers, so we compute
-        ``center_nm = cfg.wavelength_m * 1e9`` and
-        ``bandwidth_nm = cfg.bandwidth_m * 1e9``, then define the bandpass as
-        ``(center_nm - bandwidth_nm / 2, center_nm + bandwidth_nm / 2)``.
+        Shera configuration object (kept for API compatibility); source
+        structural wavelength settings are read from ``store``.
 
     Returns
     -------
@@ -54,7 +54,7 @@ def build_alpha_cen_source(
     -----
     - This is a *P0 convenience builder*: it assumes that the effective
       log-flux has already been computed (or chosen) and stored under
-      'binary.log_flux_total'. It does *not* try to derive that from
+      'source.log_flux_total'. It does *not* try to derive that from
       physical quantities like exposure time, aperture area, etc.
 
     - Longer-term, we expect a dedicated “UniverseSpec” and parameter
@@ -62,24 +62,27 @@ def build_alpha_cen_source(
       will then simply read whatever effective quantities the spec provides.
     """
     # Required parameters – let KeyError surface if they’re missing.
-    separation_as = store.get("binary.separation_as")
-    position_angle_deg = store.get("binary.position_angle_deg")
-    log_flux_total = store.get("binary.log_flux_total")
-    contrast = store.get("binary.contrast")
+    wavelength_m = store.get("source.wavelength_m")
+    bandwidth_m = store.get("source.bandwidth_m")
+    n_lambda = store.get("source.n_lambda")
+    separation_as = store.get("source.separation_as")
+    position_angle_deg = store.get("source.position_angle_deg")
+    log_flux_total = store.get("source.log_flux_total")
+    contrast = store.get("source.contrast")
 
     # Optional centre; default to (0, 0) if not present
-    x_position = store.get("binary.x_position_as", default=0.0)
-    y_position = store.get("binary.y_position_as", default=0.0)
+    x_position = store.get("source.x_position_as", default=0.0)
+    y_position = store.get("source.y_position_as", default=0.0)
 
-    center_nm = cfg.wavelength_m * 1e9
-    bandwidth_nm = cfg.bandwidth_m * 1e9
+    center_nm = wavelength_m * 1e9
+    bandwidth_nm = bandwidth_m * 1e9
     bandpass = (
         center_nm - bandwidth_nm / 2,
         center_nm + bandwidth_nm / 2,
     )
 
     return AlphaCen(
-        n_wavels=cfg.n_lambda,
+        n_wavels=int(n_lambda),
         separation=separation_as,       # arcsec
         position_angle=position_angle_deg,  # degrees
         x_position=x_position,
@@ -97,7 +100,7 @@ def apply_runtime_bindings(
     cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
     bindings: tuple[tuple[str, str], ...] = SOURCE_RUNTIME_BINDINGS,
 ) -> AlphaCen:
-    """Apply runtime ParameterStore overrides onto a cached source."""
+    """Apply runtime ``source.*`` store overrides onto a cached source."""
 
     if store is None:
         return source

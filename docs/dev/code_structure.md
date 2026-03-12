@@ -1,11 +1,11 @@
-# Code structure (refactor-era overview)
+# Code structure (current overview)
 
 ## Package layout (current)
 
-The refactor reorganized `src/dluxshera/` around a **components / builders / systems** split:
+`src/dluxshera/` is organized around a **components / builders / systems** split:
 
 - `components/`: dLux-compatible classes we own (optics, sources, detectors).
-- `builders/`: assembly logic, runtime bindings, and structural hashing/caching.
+- `builders/`: assembly logic, runtime bindings, and structural hashing/caching (optics, source, detector).
 - `systems/`: user-facing Shera binders + configs + forward spec builders.
 - `params/`: ParamSpec + ParameterStore + transforms/registry + packing utilities.
 - `inference/`: losses, optimization loops, eigenmode helpers, artifacts.
@@ -18,9 +18,9 @@ and `builders/` respectively.
 
 ## Key modules and entry points
 
-- **Binders + configs**: `dluxshera.systems.{three_plane,two_plane}`.
-- **Forward ParamSpecs**: `build_forward_spec_from_config(...)` in each system module.
-- **Inference ParamSpecs**: `dluxshera.params.spec.build_inference_spec_basic(...)`.
+- **Binders + configs**: `dluxshera.systems.{three_plane,two_plane}` (export configs, presets, and Binder entry points).
+- **Forward ParamSpecs**: `build_forward_spec_from_config(...)` in each system module (composes source/optics/detector contracts).
+- **Inference ParamSpecs**: `forward_spec.subset(infer_keys)` or `dluxshera.params.spec.build_inference_spec_basic(...)` (subset of the forward spec).
 - **Transforms / derived registry**: `dluxshera.params.transforms` and
   `dluxshera.params.transform_registry`.
 - **Optimization**: `dluxshera.inference.optimization` (Binder-first NLL, GD).
@@ -33,6 +33,7 @@ We use “builder” for modules that *construct runtime objects* from
 
 - `builders/optics.py`: canonical optics builders + structural hashing + caching.
 - `builders/source.py`: Alpha Cen source assembly + runtime bindings.
+- `builders/detector.py`: detector layer composition (declarative `detector.layers`), detector contracts, and runtime patching scope.
 
 ## Examples and tests
 

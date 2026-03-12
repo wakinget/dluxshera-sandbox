@@ -1,0 +1,56 @@
+system:
+  source:
+    kind: alpha_cen
+    wavelength_m: 5.5e-07
+    bandwidth_m: 1.1e-07
+    n_lambda: 3
+    x_position_as: 0.0
+    y_position_as: 0.0
+    separation_as: 10.0
+    position_angle_deg: 90.0
+    contrast: 3.0
+  optics:
+    kind: three_plane
+    psf_npix: 256
+    oversample: 3
+    pupil_npix: 256
+    m1_diameter_m: 0.09
+    m2_diameter_m: 0.025
+    m1_focal_length_m: 0.35796
+    m2_focal_length_m: -0.041935
+    m1_m2_separation_m: 0.32
+    pixel_pitch_m: 6.5e-06
+    n_struts: 4
+    strut_width_m: 0.002
+    strut_rotation_deg: 45.0
+    throughput: 1.0
+    primary_noll_indices:
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    secondary_noll_indices:
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    dp_path: src/dluxshera/data/pupils/diffractive_pupil.npy
+    dp_design_wavelength_m: 5.5e-07
+  detector:
+    model: GSENSE2020BSI
+    layers:
+    - name: downsample
+      kernel_size: 3
+    - name: pixel_offsets
+    - name: pixel_response
+    - name: jitter
+      sigma: 1.0e-12
+      kernel_size: 3

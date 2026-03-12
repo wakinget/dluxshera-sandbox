@@ -15,22 +15,22 @@ from dluxshera.params.spec import ParamField, ParamSpec, build_inference_spec_ba
 def test_parameter_store_get_and_replace():
     store = ParameterStore.from_dict(
         {
-            "binary.separation_mas": 100.0,
+            "source.separation_mas": 100.0,
             "noise.jitter_rms_mas": 0.5,
         }
     )
 
-    assert store.get("binary.separation_mas") == 100.0
+    assert store.get("source.separation_mas") == 100.0
     assert store.get("noise.jitter_rms_mas") == 0.5
 
     # default behavior for missing key
     assert store.get("does.not.exist", default=None) is None
 
     # replace returns a new store and does not mutate the original
-    new_store = store.replace({"binary.separation_mas": 120.0})
+    new_store = store.replace({"source.separation_mas": 120.0})
 
-    assert new_store.get("binary.separation_mas") == 120.0
-    assert store.get("binary.separation_mas") == 100.0
+    assert new_store.get("source.separation_mas") == 120.0
+    assert store.get("source.separation_mas") == 100.0
 
 
 def test_parameter_store_is_pytree():
@@ -66,9 +66,9 @@ def test_parameter_store_from_spec_defaults():
     store.validate_against(spec)
 
     # Spot-check a couple of known defaults
-    assert store.get("binary.separation_as") == 10.0
-    assert store.get("binary.position_angle_deg") == 90.0
-    assert store.get("binary.log_flux_total") == 8.0
+    assert store.get("source.separation_as") == 10.0
+    assert store.get("source.position_angle_deg") == 90.0
+    assert store.get("source.log_flux_total") == 8.0
 
 def test_parameter_store_validate_against_inference_spec_basic():
     """
@@ -124,7 +124,7 @@ def test_parameter_store_validate_against_with_flags():
 
     # Missing allowed
     values_missing = dict(base_values)
-    values_missing.pop("binary.separation_as")
+    values_missing.pop("source.separation_as")
     store_missing = ParameterStore.from_dict(values_missing)
     store_missing.validate_against(spec, allow_missing=True, allow_derived=True)
 

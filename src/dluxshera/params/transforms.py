@@ -41,16 +41,16 @@ ARCSEC_PER_RAD = 206264.8062470963551565  # 180 / pi * 3600
 
 
 @register_for_systems(
-    "system.focal_length_m",
+    "optics.focal_length_m",
     depends_on=(
-        "system.m1_focal_length_m",
-        "system.m2_focal_length_m",
-        "system.m1_m2_separation_m",
+        "optics.m1_focal_length_m",
+        "optics.m2_focal_length_m",
+        "optics.m1_m2_separation_m",
     ),
 )
-def transform_system_focal_length_m(ctx: Ctx) -> float:
+def transform_3P_focal_length_m(ctx: Ctx) -> float:
     """
-    Compute the effective telescope focal length for the Shera two-mirror relay.
+    Compute the effective telescope focal length for the Shera 3-plane system.
 
         1 / f_eff = 1 / f1 + 1 / f2 - sep / (f1 * f2)
 
@@ -59,9 +59,9 @@ def transform_system_focal_length_m(ctx: Ctx) -> float:
         f2  = secondary focal length
         sep = axial separation between mirrors
     """
-    f1 = float(ctx["system.m1_focal_length_m"])
-    f2 = float(ctx["system.m2_focal_length_m"])
-    sep = float(ctx["system.m1_m2_separation_m"])
+    f1 = float(ctx["optics.m1_focal_length_m"])
+    f2 = float(ctx["optics.m2_focal_length_m"])
+    sep = float(ctx["optics.m1_m2_separation_m"])
 
     denom = (1.0 / f1) + (1.0 / f2) - sep / (f1 * f2)
     # Optionally: guard against denom ≈ 0.0 and raise a TransformError.
@@ -75,28 +75,21 @@ def transform_system_focal_length_m(ctx: Ctx) -> float:
 
 
 @register_for_systems(
-    "system.plate_scale_as_per_pix",
+    "optics.plate_scale_as_per_pix",
     depends_on=(
-        "system.focal_length_m",
-        "system.pixel_pitch_m",
+        "optics.focal_length_m",
+        "detector.pixel_pitch_m",
     ),
 )
-def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
+def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
     """
     Compute the geometric plate scale in arcseconds per pixel.
 
         plate_scale_rad_per_pix = pixel_pitch_m / f_eff
         plate_scale_as_per_pix  = plate_scale_rad_per_pix * ARCSEC_PER_RAD
-
-    This is equivalent to:
-
-        dLux.utils.rad2arcsec(pixel_pitch_m / f_eff)
-
-    but kept self-contained to avoid a heavy dependency on dLux in the
-    parameter transforms layer.
     """
-    f_eff = float(ctx["system.focal_length_m"])
-    pixel_pitch = float(ctx["system.pixel_pitch_m"])
+    f_eff = float(ctx["optics.focal_length_m"])
+    pixel_pitch = float(ctx["detector.pixel_pitch_m"])
 
     plate_scale_rad = pixel_pitch / f_eff
     plate_scale_as = plate_scale_rad * ARCSEC_PER_RAD
@@ -104,21 +97,21 @@ def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Log-flux: binary.log_flux_total
+# Log-flux: source.log_flux_total
 # ---------------------------------------------------------------------------
 
 
 @register_for_systems(
-    "binary.log_flux_total",
+    "source.log_flux_total",
     depends_on=(
-        "system.m1_diameter_m",
-        "band.bandwidth_m",
-        "imaging.exposure_time_s",
-        "imaging.throughput",
-        "binary.spectral_flux_density",
+        "optics.m1_diameter_m",
+        "source.bandwidth_m",
+        "source.exposure_time_s",
+        "optics.throughput",
+        "source.spectral_flux_density",
     ),
 )
-def transform_binary_log_flux_total(ctx: Ctx) -> float:
+def transform_source_log_flux_total(ctx: Ctx) -> float:
     """
     Compute the truth-level log10 total photon count over the exposure.
 
@@ -137,11 +130,11 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
         exposure_time_s        = integration time [s]
         throughput             = end-to-end efficiency (0–1)
     """
-    D = float(ctx["system.m1_diameter_m"])
-    bandwidth_m = float(ctx["band.bandwidth_m"])
-    t_exp = float(ctx["imaging.exposure_time_s"])
-    throughput = float(ctx["imaging.throughput"])
-    flux_density = float(ctx["binary.spectral_flux_density"])
+    D = float(ctx["optics.m1_diameter_m"])
+    bandwidth_m = float(ctx["source.bandwidth_m"])
+    t_exp = float(ctx["source.exposure_time_s"])
+    throughput = float(ctx["optics.throughput"])
+    flux_density = float(ctx["source.spectral_flux_density"])
 
     area = math.pi * (D / 2.0) ** 2
     total_flux = flux_density * bandwidth_m * area * t_exp * throughput
@@ -150,7 +143,7 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
     if not (total_flux > 0.0):
         # Optional guard; you could also just let log10 blow up.
         raise ValueError(
-            f"Non-positive total_flux={total_flux} in binary_log_flux_total "
+            f"Non-positive total_flux={total_flux} in source_log_flux_total "
             "(check flux_density, bandwidth, area, exposure_time, throughput)."
         )
 
@@ -159,18 +152,18 @@ def transform_binary_log_flux_total(ctx: Ctx) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Raw fluxes: binary.raw_fluxes
+# Raw fluxes: source.raw_fluxes
 # ---------------------------------------------------------------------------
 
 
 @register_for_systems(
-    "binary.raw_fluxes",
+    "source.raw_fluxes",
     depends_on=(
-        "binary.log_flux_total",
-        "binary.contrast",
+        "source.log_flux_total",
+        "source.contrast",
     ),
 )
-def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
+def transform_source_raw_fluxes(ctx: Ctx) -> np.ndarray:
     """
     Compute raw fluxes for the binary pair (photons for star A and B).
 
@@ -180,8 +173,8 @@ def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
         flux_A = total_flux * contrast / (1 + contrast)
         flux_B = total_flux / (1 + contrast)
     """
-    log_flux = float(ctx["binary.log_flux_total"])
-    contrast = float(ctx["binary.contrast"])
+    log_flux = float(ctx["source.log_flux_total"])
+    contrast = float(ctx["source.contrast"])
 
     total_flux = 10.0 ** log_flux
     flux_B = total_flux / (1.0 + contrast)

@@ -86,17 +86,17 @@ def test_apply_pixel_offsets_clip_nonnegative():
     assert out.data.min() >= 0.0
 
 
-def test_apply_pixel_offsets_fft_mode_clear_error_if_not_queryable(monkeypatch):
-    image = _gaussian_image(n=9)
+def test_apply_pixel_offsets_subpixel_linear_shift_matches_expected_ramp():
+    width = 8
+    height = 6
+    y, x = jnp.meshgrid(jnp.arange(height), jnp.arange(width), indexing="ij")
+    image = x.astype(float)
     psf = PSF(data=image, pixel_scale=1.0)
-    zeros = jnp.zeros_like(image)
 
-    layer = ApplyPixelOffsets(dx_map=zeros, dy_map=zeros, interp_method="fft")
+    dx = jnp.full_like(image, 0.5, dtype=float)
+    dy = jnp.zeros_like(image, dtype=float)
+    layer = ApplyPixelOffsets(dx_map=dx, dy_map=dy, interp_method="linear")
+    out = layer.apply(psf)
 
-    def _no_query_fft(values):
-        return values
-
-    monkeypatch.setattr("dluxshera.layers.detector_layers.interpax.fft_interp2d", _no_query_fft)
-
-    with pytest.raises(ValueError, match="not supported for per-pixel offsets"):
-        layer.apply(psf)
+    expected = jnp.clip(x + 0.5, 0.0, width - 1.0)
+    assert jnp.allclose(out.data, expected, atol=1e-6, rtol=1e-6)

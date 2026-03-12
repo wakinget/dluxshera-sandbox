@@ -6,9 +6,9 @@ from typing import Dict, Optional
 import jax.numpy as jnp
 import pytest
 
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneBinder,
     SheraThreePlaneConfig,
     build_forward_spec_from_config,
 )
@@ -66,25 +66,31 @@ def shera_smoke_cfg():
         psf_npix=128,
         oversample=2,
         n_lambda=2,
+        detector_layers=[
+            {"name": "downsample", "kernel_size": 2},
+            {"name": "pixel_offsets"},
+            {"name": "pixel_response"},
+            {"name": "jitter"},
+        ],
     )
 
 
 @pytest.fixture(scope="session")
 def shera_smoke_updates(shera_smoke_cfg):
     updates = {
-        "binary.separation_as": 10.0,
-        "binary.position_angle_deg": 90.0,
-        "binary.x_position_as": 0.0,
-        "binary.y_position_as": 0.0,
-        "binary.contrast": 3.0,
+        "source.separation_as": 10.0,
+        "source.position_angle_deg": 90.0,
+        "source.x_position_as": 0.0,
+        "source.y_position_as": 0.0,
+        "source.contrast": 3.0,
     }
 
     n_m1 = len(shera_smoke_cfg.primary_noll_indices)
     n_m2 = len(shera_smoke_cfg.secondary_noll_indices)
     if n_m1 > 0:
-        updates["primary.zernike_coeffs_nm"] = jnp.zeros(n_m1)
+        updates["optics.primary.zernike_coeffs_nm"] = jnp.zeros(n_m1)
     if n_m2 > 0:
-        updates["secondary.zernike_coeffs_nm"] = jnp.zeros(n_m2)
+        updates["optics.secondary.zernike_coeffs_nm"] = jnp.zeros(n_m2)
 
     return updates
 
@@ -103,16 +109,16 @@ def shera_smoke_inference(shera_smoke_forward):
 @pytest.fixture(scope="session")
 def shera_smoke_infer_keys():
     return (
-        "binary.separation_as",
-        "binary.x_position_as",
-        "binary.y_position_as",
+        "source.separation_as",
+        "source.x_position_as",
+        "source.y_position_as",
     )
 
 
 @pytest.fixture(scope="session")
 def shera_smoke_binder_data(shera_smoke_cfg, shera_smoke_forward):
     forward_spec, forward_store = shera_smoke_forward
-    binder = SheraThreePlaneBinder(shera_smoke_cfg, forward_spec, forward_store)
+    binder = SheraBinder(shera_smoke_cfg, forward_spec, forward_store)
     data = binder.model()
     var = jnp.ones_like(data)
     return binder, data, var

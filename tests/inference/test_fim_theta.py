@@ -57,7 +57,7 @@ def test_fim_theta_shera_wrapper_consistency(
     cfg = shera_smoke_cfg
     spec, store = shera_smoke_forward
 
-    infer_keys = ["binary.separation_as", "binary.x_position_as"]
+    infer_keys = ["source.separation_as", "source.x_position_as"]
 
     _, data, var = shera_smoke_binder_data
 

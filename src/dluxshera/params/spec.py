@@ -65,6 +65,12 @@ class ParamField:
     # Human-readable description
     doc: str = ""
 
+    # Whether this field participates in structural cache fingerprints.
+    structural: bool = False
+
+    # Optional runtime binding path on a cached component object.
+    binding: Optional[str] = None
+
 
 class ParamSpec:
     """
@@ -201,6 +207,24 @@ class ParamSpec:
         keep_keys = [key for key in self._fields if key not in exclude_set]
         return self.subset(keep_keys)
 
+    def structural_keys(self) -> set[str]:
+        """Return all keys declared structural by field metadata."""
+
+        return {
+            field.key
+            for field in self.values()
+            if getattr(field, "structural", False)
+        }
+
+    def structural_keys_by_group(self) -> dict[str, set[str]]:
+        """Return structural keys grouped by field group."""
+
+        grouped: dict[str, set[str]] = {}
+        for field in self.values():
+            if getattr(field, "structural", False):
+                grouped.setdefault(field.group, set()).add(field.key)
+        return grouped
+
 
 # ---------------------------------------------------------------------------
 # Inference helpers
@@ -213,11 +237,15 @@ def make_inference_subspec(
     cfg: SheraTwoPlaneConfig | SheraThreePlaneConfig | None = None,
     include_secondary: bool | None = None,
 ) -> ParamSpec:
-    """Construct an inference ParamSpec view from a base specification.
+    """Legacy wrapper around ``base_spec.subset(infer_keys)``.
 
-    This helper is intentionally lightweight: it validates the requested keys
-    against the optional optical configuration and returns ``base_spec.subset``
-    preserving the caller-provided ordering.
+    Phase 5 canonical flow defines inference layout directly from the forward
+    spec via ``forward_spec.subset(infer_keys)``. This helper remains for
+    compatibility with older recipes and tests.
+
+    It optionally validates Zernike-key requests against a supplied
+    configuration, then returns ``base_spec.subset(infer_keys)`` preserving the
+    caller-provided ordering.
 
     Parameters
     ----------
@@ -230,7 +258,7 @@ def make_inference_subspec(
         coefficient requests are validated against the configured bases.
     include_secondary:
         Optional policy override. If explicitly False and ``infer_keys``
-        includes ``"secondary.zernike_coeffs_nm"``, a ValueError is raised with a
+        includes ``"optics.secondary.zernike_coeffs_nm"``, a ValueError is raised with a
         clear instruction to drop the key. If True but the configuration lacks
         a secondary basis, the configuration still wins and a ValueError is
         raised.
@@ -240,22 +268,22 @@ def make_inference_subspec(
 
     # Optional validation if cfg is provided
     if cfg is not None:
-        if not cfg.primary_noll_indices and "primary.zernike_coeffs_nm" in infer_keys_list:
+        if not cfg.primary_noll_indices and "optics.primary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
                 "Config does not define a primary Zernike basis, but "
-                "infer_keys includes 'primary.zernike_coeffs_nm'."
+                "infer_keys includes 'optics.primary.zernike_coeffs_nm'."
             )
 
         has_secondary_basis = getattr(cfg, "secondary_noll_indices", ())
-        if (not has_secondary_basis) and "secondary.zernike_coeffs_nm" in infer_keys_list:
+        if (not has_secondary_basis) and "optics.secondary.zernike_coeffs_nm" in infer_keys_list:
             raise ValueError(
                 "Config does not define a secondary Zernike basis, but "
-                "infer_keys includes 'secondary.zernike_coeffs_nm'."
+                "infer_keys includes 'optics.secondary.zernike_coeffs_nm'."
             )
 
-    if include_secondary is False and "secondary.zernike_coeffs_nm" in infer_keys_list:
+    if include_secondary is False and "optics.secondary.zernike_coeffs_nm" in infer_keys_list:
         raise ValueError(
-            "include_secondary=False but infer_keys includes 'secondary.zernike_coeffs_nm'; "
+            "include_secondary=False but infer_keys includes 'optics.secondary.zernike_coeffs_nm'; "
             "remove it from the inference view."
         )
 
@@ -294,11 +322,11 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
     fields = [
 
         # ----------------------
-        # Binary astrometry
+        # Source astrometry
         # ----------------------
         ParamField(
-            key="binary.separation_as",
-            group="binary",
+            key="source.separation_as",
+            group="source",
             kind="primitive",
             units="as",
             dtype=float,
@@ -308,8 +336,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             doc="Angular separation of the binary on the sky, in arcseconds.",
         ),
         ParamField(
-            key="binary.position_angle_deg",
-            group="binary",
+            key="source.position_angle_deg",
+            group="source",
             kind="primitive",
             units="deg",
             dtype=float,
@@ -321,8 +349,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.x_position_as",
-            group="binary",
+            key="source.x_position_as",
+            group="source",
             kind="primitive",
             units="as",
             dtype=float,
@@ -332,8 +360,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             doc="Binary centroid offset in the detector X direction (arcseconds).",
         ),
         ParamField(
-            key="binary.y_position_as",
-            group="binary",
+            key="source.y_position_as",
+            group="source",
             kind="primitive",
             units="as",
             dtype=float,
@@ -343,8 +371,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             doc="Binary centroid offset in the detector Y direction (arcseconds).",
         ),
         ParamField(
-            key="binary.log_flux_total",
-            group="binary",
+            key="source.log_flux_total",
+            group="source",
             kind="primitive",
             units="log10(photons)",
             dtype=float,
@@ -358,8 +386,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.contrast",
-            group="binary",
+            key="source.contrast",
+            group="source",
             kind="primitive",
             units=None,
             dtype=float,
@@ -372,23 +400,23 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="binary.raw_fluxes",
-            group="binary",
+            key="source.raw_fluxes",
+            group="source",
             kind="derived",
             units="photons",
             dtype=float,
             shape=(2,),
             default=None,
             bounds=(0.0, None),
-            transform="binary_raw_fluxes",
+            transform="source.raw_fluxes",
             depends_on=(
-                "binary.log_flux_total",
-                "binary.contrast",
+                "source.log_flux_total",
+                "source.contrast",
             ),
             doc=(
-                "Raw integrated fluxes for the binary components (photons for "
-                "stars A and B). Derived from binary.log_flux_total and "
-                "binary.contrast using the AlphaCen source convention."
+                "Raw integrated fluxes for the source components (photons for "
+                "stars A and B). Derived from source.log_flux_total and "
+                "source.contrast using the AlphaCen source convention."
             ),
         ),
 
@@ -396,8 +424,8 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
         # System geometry
         # ----------------------
         ParamField(
-            key="system.plate_scale_as_per_pix",
-            group="system",
+            key="optics.plate_scale_as_per_pix",
+            group="optics",
             kind="primitive",
             units="as / pixel",
             dtype=float,
@@ -409,7 +437,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
                 "three-plane optical system may determine plate scale from "
                 "geometry, in inference we treat it as an effective primitive "
                 "parameter. In the forward model, the corresponding knob is "
-                "`system.plate_scale_as_per_pix`."
+                "`optics.plate_scale_as_per_pix`."
             ),
         ),
 
@@ -417,7 +445,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
         # Optical wavefront errors
         # ----------------------
         ParamField(
-            key="primary.zernike_coeffs_nm",
+            key="optics.primary.zernike_coeffs_nm",
             group="primary",
             kind="primitive",
             units="nm",
@@ -431,7 +459,7 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
             ),
         ),
         ParamField(
-            key="secondary.zernike_coeffs_nm",
+            key="optics.secondary.zernike_coeffs_nm",
             group="secondary",
             kind="primitive",
             units="nm",
@@ -447,6 +475,6 @@ def build_inference_spec_basic(include_secondary: bool = True) -> ParamSpec:
     ]
 
     if not include_secondary:
-        fields = [f for f in fields if f.key != "secondary.zernike_coeffs_nm"]
+        fields = [f for f in fields if f.key != "optics.secondary.zernike_coeffs_nm"]
 
     return ParamSpec(fields, system_id="shera_threeplane")

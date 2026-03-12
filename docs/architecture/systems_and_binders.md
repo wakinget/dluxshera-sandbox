@@ -12,13 +12,33 @@
 > - `store_delta`: Store overlay containing updates relative to a baseline.
 > - `structural keys`: Store keys that change optics structure (sampling, topology, shapes).
 
+## Current system-config worldview
+
+- Configs are nested under **system** (physical model composition) and **experiment** (workflow/inference settings). Canonical entry is `load_user_config(...)` followed by `resolve_config(...)`, which deep-merges presets + user overrides into a resolved config.
+- The **system** block carries `source`, `optics`, and `detector` sub-blocks. Detector composition is declarative via `system.detector.layers`, with identity/zero calibrations used when paths are omitted.
+- Resolved system configs feed forward-spec composition (`build_forward_spec_from_config(...)`), which merges source/optics/detector contracts.
+- Binders are constructed from the resolved system config + composed forward spec + base forward store; inference overlays come later.
+
 ## Systems (implemented as binders)
 
 ### System-level configs and named designs
 
-System configuration now lives at the system level: you instantiate a `SheraTwoPlaneConfig` or `SheraThreePlaneConfig` once, then pass that config into builders/spec generation and the System (Binder). The config is treated as a stable, mostly immutable definition of the optical design and sampling defaults, so new users should think of it as the canonical source of truth for geometry, wavelengths, and structural settings. For common starting points, the codebase exports named designs like `SHERA_TESTBED_CONFIG` and `SHERA_FLIGHT_CONFIG` (both two-plane and three-plane variants) with a `design_name` set for traceability. The recommended workflow is to start from a named design and use `.replace(...)` (or an equivalent helper) to derive a customized config, keeping the original untouched so caching, hashing, and reproducibility stay predictable.
+System configuration now lives at the system level: you instantiate a `SheraTwoPlaneConfig` or `SheraThreePlaneConfig` (or load/resolve a system preset) once, then pass that config into builders/spec generation and the System (Binder). The config is treated as a stable, mostly immutable definition of the optical design and sampling defaults, so new users should think of it as the canonical source of truth for geometry, wavelengths, detector layers, and structural settings. For common starting points, the codebase exports named designs like `SHERA_TESTBED_CONFIG` and `SHERA_FLIGHT_CONFIG` (both two-plane and three-plane variants) with a `design_name` set for traceability. The recommended workflow is to start from a named design and use `.replace(...)` (or an equivalent helper) to derive a customized config, keeping the original untouched so caching, hashing, and reproducibility stay predictable.
 
 The System (Binder) is the primary model object in dLuxShera. It combines a configuration, the relevant `ParamSpec`, and a baseline `ParameterStore`, then exposes user-facing methods to evaluate the optical system. Callers supply parameter deltas or θ-vectors, and the System handles packing/unpacking, derived parameter resolution, and interaction with the underlying optics. When you “build a Shera model” in the canonical demos, you are creating a System (Binder) and invoking it to produce PSFs or images.
+
+
+### Strict nested config schema
+
+Binder-first workflows expect a nested config schema:
+
+- top-level keys: `system`, `experiment`
+- system sub-keys: `source`, `optics`, `detector` (including declarative `detector.layers`)
+- resolver flow: `load_user_config(...)` → `resolve_config(...)` (preset + override deep-merge, validation)
+- unknown keys: emitted as warnings (kept in resolved config)
+- missing required keys: hard errors
+
+Legacy flat config dictionaries are intentionally unsupported in this resolver path. Use `dluxshera.config.resolve_config(...)` and pass the resolved structure (or translated system config) into binder construction helpers.
 
 ### Immutability + evaluation contract
 
@@ -54,7 +74,14 @@ We distinguish two categories of values:
    - Changing these should reuse the existing optics structure.
    - Examples: Zernike coefficients, small OPD perturbations, flux parameters, etc.
 
-The structural subset is documented alongside each optics config in `src/dluxshera/optics/config.py`.
+The structural subset is declared on ParamFields in the forward spec; use `binder.structural_store_keys()` when you need the authoritative set for a given system.
+
+### Binder ergonomics (read/inspect)
+
+- `binder.source`, `binder.optics`, `binder.detector` expose runtime component objects.
+- Contract-driven leaf access: `binder.<semantic_leaf>` resolves via the forward spec with bindings (runtime-first, store fallback).
+- Runtime-leaf fallback: unique runtime object leaves (e.g., `binder.separation`, `binder.plane_separation`) are surfaced when no contract leaf matches.
+- Provenance channels stay explicit: `binder.cfg` (design/config), `binder.get(...)` / `binder.ns(...)` (store access), runtime components for inspection.
 
 ### Builders and caching boundaries
 
@@ -104,7 +131,7 @@ binder2 = binder.with_store(new_store)
 System evaluation expects **non-structural deltas** (only values that can be updated without rebuilding optics). Two helpers in `params.store` make it easy to prepare these deltas:
 
 - `subset_store(store, infer_keys)` trims a full `ParameterStore` down to just the inference keys packed into θ. This is the recommended way to convert `store_unpack_params(...)` outputs into a delta suitable for `binder.model`.
-- `strip_structural(store)` (or `strip_structural(store, structural_keys=...)`) removes structural keys like `system.*` / `band.*` when you want to sanitize an overlay before evaluation. For finer control, pass the system's own structural key set (e.g., `binder._structural_store_keys()`) so runtime-bound keys like `system.plate_scale_as_per_pix` remain allowed.
+- `strip_structural(store)` (or `strip_structural(store, structural_keys=...)`) removes structural keys when you want to sanitize an overlay before evaluation. For finer control, pass the system's own structural key set (e.g., `binder.structural_store_keys()`) so runtime-bound keys remain allowed.
 
 In short: **unpack θ → subset → model**, and reserve structural updates for explicit rebuilds via `binder.model(..., allow_rebuild=True)` or by creating a fresh system with `binder.update_store(...)`.
 

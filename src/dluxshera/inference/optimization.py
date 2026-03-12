@@ -19,8 +19,9 @@ from .preconditioning import PreconditioningConfig, compute_precond_vectors
 
 from ..systems.three_plane import SheraThreePlaneConfig
 from ..systems.two_plane import SheraTwoPlaneConfig
+from ..config import resolve_config
 from ..params.spec import ParamSpec, ParamKey
-from ..params.store import ParameterStore, strip_structural, subset_store
+from ..params.store import ParameterStore, subset_store
 from ..params.packing import (
     build_index_map,
     pack_params as store_pack_params,
@@ -28,8 +29,7 @@ from ..params.packing import (
 )
 
 if TYPE_CHECKING:
-    from ..systems.three_plane import SheraThreePlaneBinder
-    from ..systems.two_plane import SheraTwoPlaneBinder
+    from ..systems import SheraBinder
 
 
 def _build_artifacts_mapping(
@@ -284,7 +284,7 @@ def make_loss_fn(
 # NLL -> Negative Log-Likelihood
 def make_image_nll_fn(
     cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
+    forward_spec: ParamSpec,
     base_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
     data: np.ndarray,
@@ -303,9 +303,9 @@ def make_image_nll_fn(
     ----------
     cfg
         Structural SheraThreePlaneConfig (testbed vs flight, etc.).
-    inference_spec
-        ParamSpec describing the inference-space keys
-        (typically `build_inference_spec_basic()`).
+    forward_spec
+        Full forward ParamSpec catalog. Inference-space layout is defined by
+        ``forward_spec.subset(infer_keys)``.
     base_store
         ParameterStore providing a baseline set of parameter values.
         This is the state we *overlay* when unpacking theta.
@@ -322,7 +322,7 @@ def make_image_nll_fn(
     reduce
         "sum" or "mean" reduction over pixels inside the NLL kernels.
     build_model_fn
-        Callable (cfg, inference_spec, store) -> model. If None, a
+        Callable (cfg, forward_spec, store) -> model. If None, a
         default Shera three-plane builder is imported lazily.
 
     Returns
@@ -332,10 +332,10 @@ def make_image_nll_fn(
         Signature: loss_fn(theta) -> scalar.
     theta0
         Initial packed parameter vector constructed from
-        (inference_spec, base_store, infer_keys).
+        (forward_spec.subset(infer_keys), base_store).
     """
-    # Subset spec to just the keys we want to infer
-    sub_spec = inference_spec.subset(infer_keys)
+    # Inference layout is derived directly from the forward spec.
+    sub_spec = forward_spec.subset(infer_keys)
 
     # Pack base_store → theta0 (this defines ordering of infer_keys)
     theta0 = store_pack_params(sub_spec, base_store)
@@ -368,8 +368,8 @@ def make_image_nll_fn(
         # NOTE: unpack_params(spec_subset, theta, base_store)
         store_theta = store_unpack_params(sub_spec, theta, base_store)
 
-        # Build model from cfg + (inference_spec, store_theta)
-        model = build_model_fn(cfg, inference_spec, store_theta)
+        # Build model from cfg + (forward_spec, store_theta)
+        model = build_model_fn(cfg, forward_spec, store_theta)
 
         # Evaluate loss
         return _model_loss(model, data, var)
@@ -438,12 +438,8 @@ def make_binder_nll_fn(
 
     def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
         full_store = store_unpack_params(sub_spec, theta, base_forward_store)
-        # Protect binder.model from structural keys while keeping fast path intact.
-        structural_keys = binder.structural_store_keys()
-        return strip_structural(
-            subset_store(full_store, infer_keys),
-            structural_keys=structural_keys,
-        )
+        # Keep binder.model on the non-structural fast path.
+        return binder.strip_structural(subset_store(full_store, infer_keys))
 
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         store_delta = theta_to_store_delta(theta)
@@ -476,7 +472,7 @@ def make_binder_image_nll_fn(
     Callable[[np.ndarray], np.ndarray], np.ndarray, Callable[[np.ndarray], np.ndarray]
 ]:
     """
-    Canonical θ-space image NLL using :class:`SheraThreePlaneBinder`.
+    Canonical θ-space image NLL using :class:`SheraBinder`.
 
     The returned loss is intentionally explicit:
 
@@ -492,7 +488,7 @@ def make_binder_image_nll_fn(
     data, var
         Observed image and per-pixel variance.
     binder
-        Optional pre-built :class:`SheraThreePlaneBinder`. If omitted a binder
+        Optional pre-built :class:`SheraBinder`. If omitted a binder
         is constructed using ``cfg``, ``forward_spec``, and ``base_forward_store``.
     noise_model, reduce
         Noise model selector and reduction for the NLL.
@@ -504,8 +500,7 @@ def make_binder_image_nll_fn(
         unexpectedly non-zero). Set to ``False`` for the standard
         loss-only tuple.
     """
-    from ..systems.three_plane import SheraThreePlaneBinder
-    from ..systems.two_plane import SheraTwoPlaneBinder
+    from ..systems import SheraBinder
 
     if binder is not None:
         mismatches = []
@@ -532,21 +527,37 @@ def make_binder_image_nll_fn(
             return_predict_fn=return_predict_fn,
         )
 
-    if isinstance(cfg, SheraThreePlaneConfig):
-        binder_obj = SheraThreePlaneBinder(
+    if isinstance(cfg, Mapping):
+        resolved_cfg = resolve_config(cfg)
+        if "system" not in resolved_cfg:
+            raise ValueError(
+                "cfg must contain a top-level 'system' block when provided as a mapping."
+            )
+        cfg = {"system": resolved_cfg["system"]}
+
+    if isinstance(cfg, Mapping):
+        binder_obj = SheraBinder(
+            cfg,
+            forward_spec,
+            base_forward_store,
+        )
+    elif isinstance(cfg, SheraThreePlaneConfig):
+        binder_obj = SheraBinder(
             cfg,
             forward_spec,
             base_forward_store,
         )
     elif isinstance(cfg, SheraTwoPlaneConfig):
-        binder_obj = SheraTwoPlaneBinder(
+        binder_obj = SheraBinder(
             cfg,
             forward_spec,
             base_forward_store,
         )
     else:
         raise TypeError(
-            "cfg must be a SheraThreePlaneConfig or SheraTwoPlaneConfig for binder construction"
+            "cfg must be either a resolved nested config mapping (system/experiment schema) "
+            "or a SheraThreePlaneConfig/SheraTwoPlaneConfig dataclass. "
+            "Legacy flat config schemas are not supported."
         )
 
     return make_binder_nll_fn(
@@ -584,7 +595,7 @@ def loss_canonical(
         SheraThreePlaneConfig describing the structural optical configuration.
     forward_spec : ParamSpec
         Forward-model ParamSpec describing *all* parameters in the model, both
-        inferred and fixed. This is what the SheraThreePlaneBinder validates
+        inferred and fixed. This is what the SheraBinder validates
         against.
     infer_keys : tuple[str, ...]
         Keys of the parameters that live in θ-space (and their ordering).
@@ -1283,7 +1294,7 @@ def run_image_gd(
     """
     Run gradient descent in θ-space for image-based NLL using the Shera model.
 
-    Now uses SheraThreePlaneBinder + `make_binder_image_nll_fn` under the hood.
+    Now uses SheraBinder + `make_binder_image_nll_fn` under the hood.
 
     Parameters
     ----------
@@ -1460,7 +1471,7 @@ def run_image_gd(
 def generate_fim_labels(
     infer_keys: Sequence[ParamKey],
     *,
-    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | None,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | Mapping[str, Any] | None,
     store: ParameterStore | None = None,
 ) -> list[str]:
     """
@@ -1472,7 +1483,7 @@ def generate_fim_labels(
         Ordered parameter keys that define the packed θ vector.
     cfg :
         Shera config used to resolve Zernike Noll indices for
-        ``primary.zernike_coeffs_nm`` and ``secondary.zernike_coeffs_nm``.
+        ``optics.primary.zernike_coeffs_nm`` and ``optics.secondary.zernike_coeffs_nm``.
     store :
         Optional ParameterStore providing concrete values. When present, this
         is used to infer vector lengths. If absent (or missing a key), the
@@ -1483,21 +1494,21 @@ def generate_fim_labels(
     -----
     - Scalar parameters are labeled with their key as-is.
     - Vector parameters are expanded:
-        * ``primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
+        * ``optics.primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
           ``cfg.primary_noll_indices``.
-        * ``secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
+        * ``optics.secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
           ``cfg.secondary_noll_indices``.
         * Other vectors use ``"{key}[{i}]"`` based on the inferred length.
     """
     spec = None
     translations = {
-        "system.plate_scale_as_per_pix": "Plate Scale",
-        "binary.contrast": "Contrast",
-        "binary.log_flux_total": "Log Flux",
-        "binary.x_position_as": "Binary X",
-        "binary.y_position_as": "Binary Y",
-        "binary.separation_as": "Binary Separation",
-        "binary.position_angle_deg": "Position Angle",
+        "optics.plate_scale_as_per_pix": "Plate Scale",
+        "source.contrast": "Contrast",
+        "source.log_flux_total": "Log Flux",
+        "source.x_position_as": "Binary X",
+        "source.y_position_as": "Binary Y",
+        "source.separation_as": "Binary Separation",
+        "source.position_angle_deg": "Position Angle",
     }
 
     def _vector_length(key: ParamKey) -> int | None:
@@ -1507,7 +1518,7 @@ def generate_fim_labels(
                 arr = np.asarray(value)
                 if arr.ndim > 0:
                     return int(arr.size)
-        if cfg is None:
+        if cfg is None or isinstance(cfg, Mapping):
             return None
         nonlocal spec
         if spec is None:
@@ -1537,13 +1548,21 @@ def generate_fim_labels(
             labels.append(key)
             continue
 
-        if key == "primary.zernike_coeffs_nm":
-            nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
+        if key == "optics.primary.zernike_coeffs_nm":
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", cfg)
+                nolls = optics_block.get("primary_noll_indices", ())
+            else:
+                nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M1 Z{n}" for n in nolls])
                 continue
-        if key == "secondary.zernike_coeffs_nm":
-            nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
+        if key == "optics.secondary.zernike_coeffs_nm":
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", cfg)
+                nolls = optics_block.get("secondary_noll_indices", ())
+            else:
+                nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M2 Z{n}" for n in nolls])
                 continue

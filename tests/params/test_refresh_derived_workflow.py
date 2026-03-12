@@ -18,27 +18,27 @@ def test_refresh_derived_lazy_registration_threeplane():
     spec = build_forward_spec_from_config(SHERA_TESTBED_CONFIG)
     store = ParameterStore.from_spec_defaults(spec).replace(
         {
-            "imaging.exposure_time_s": 2.0,
-            "imaging.throughput": 0.9,
-            "binary.spectral_flux_density": 2.0e17,
+            "source.exposure_time_s": 2.0,
+            "optics.throughput": 0.9,
+            "source.spectral_flux_density": 2.0e17,
         }
     )
 
     refreshed = store.refresh_derived(spec)
 
-    assert "system.plate_scale_as_per_pix" in refreshed
-    assert "binary.log_flux_total" in refreshed
+    assert "optics.plate_scale_as_per_pix" in refreshed
+    assert "source.log_flux_total" in refreshed
     # Compare against a simple analytic log-flux to ensure transforms executed.
-    D = float(refreshed.get("system.m1_diameter_m"))
-    bandwidth_m = float(refreshed.get("band.bandwidth_m"))
-    t_exp = float(refreshed.get("imaging.exposure_time_s"))
-    throughput = float(refreshed.get("imaging.throughput"))
-    flux_density = float(refreshed.get("binary.spectral_flux_density"))
+    D = float(refreshed.get("optics.m1_diameter_m"))
+    bandwidth_m = float(refreshed.get("source.bandwidth_m"))
+    t_exp = float(refreshed.get("source.exposure_time_s"))
+    throughput = float(refreshed.get("optics.throughput"))
+    flux_density = float(refreshed.get("source.spectral_flux_density"))
 
     area = math.pi * (D / 2.0) ** 2
     expected_log_flux = math.log10(flux_density * bandwidth_m * area * t_exp * throughput)
 
-    assert refreshed.get("binary.log_flux_total") == pytest.approx(expected_log_flux)
+    assert refreshed.get("source.log_flux_total") == pytest.approx(expected_log_flux)
 
 
 def test_refresh_derived_deterministic_ordering():
