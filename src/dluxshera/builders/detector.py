@@ -54,6 +54,9 @@ def _cfg_get(root, path: str, default=None):
             cur = getattr(cur, key, None)
     return default if cur is None else cur
 
+# ---------------------------------------------------------------------------
+# Map conditioning (shared by declarative layers)
+# ---------------------------------------------------------------------------
 
 def _center_crop(arr: jnp.ndarray, target_size: int) -> jnp.ndarray:
     """Center-crop a square detector map to ``target_size`` pixels."""
@@ -183,9 +186,7 @@ def _load_array(path: Path) -> jnp.ndarray:
     raise ValueError(f"Unsupported calibration file type: {path} (expected .npy or .npz)")
 
 
-# ---------------------------------------------------------------------------
-# Map conditioning (shared by declarative layers)
-# ---------------------------------------------------------------------------
+
 # ---------------------------------------------------------------------------
 # Layer construction helpers
 # ---------------------------------------------------------------------------
