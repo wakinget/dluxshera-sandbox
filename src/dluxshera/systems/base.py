@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, fields, is_dataclass, replace as dataclass_replace
+from dataclasses import asdict, replace as dataclass_replace
 from typing import Callable, Optional, Sequence, Self
 
 import jax.numpy as jnp
 import dLux as dl
 
-from ..params.spec import ParamSpec
+from ..params.spec import ParamField, ParamSpec
 from ..params.store import ParameterStore, StoreNamespace
 
 
@@ -188,6 +188,9 @@ class BaseConfig:
         return dataclass_replace(self, **kwargs)
 
 
+_RUNTIME_MISSING = object()
+
+
 BINDER_RESERVED_NAMES = {
     "cfg",
     "forward_spec",
@@ -272,10 +275,10 @@ class SheraBinder:
     def __dir__(self) -> list[str]:
         """List attribute names available on the binder.
 
-        This augments the default ``dir()`` output with configuration fields,
-        store namespace prefixes, and unique leaf keys (when unambiguous).
-        Use this for discovery in interactive sessions; it does not mutate the
-        binder and only reflects the current base store/config.
+        This augments the default ``dir()`` output with store namespace
+        prefixes and unique ParamField leaf names. Use this for discovery in
+        interactive sessions; it does not mutate the binder and only reflects
+        the current base store/spec.
 
         Returns
         -------
@@ -294,12 +297,8 @@ class SheraBinder:
             ):
                 entries.add(name)
 
-        if is_dataclass(self.cfg):
-            for field in fields(self.cfg):
-                _maybe_add(field.name)
-
         prefixes = set()
-        for key in self.base_forward_store.keys():
+        for key in self.forward_spec.keys():
             if "." not in key:
                 continue
             prefix, _ = key.split(".", 1)
@@ -315,59 +314,42 @@ class SheraBinder:
         return sorted(entries)
 
     def __getattr__(self, name: str) -> object:
-        """Resolve dynamic attributes from the config or base store.
-
-        Resolution order:
-        1) Configuration attributes (e.g., ``binder.oversample``).
-        2) Namespace proxies for store prefixes (``binder.ns("prefix")``).
-        3) Unique leaf names in the store (unambiguous suffixes).
-
-        Use this for ergonomic access to configuration fields and store values.
-        For ambiguous leaf names, prefer ``binder.<prefix>.<leaf>`` or
-        ``binder.get("full.key")``.
-
-        Parameters
-        ----------
-        name : str
-            Attribute name being requested.
-
-        Returns
-        -------
-        Any
-            Configuration attribute value, store namespace proxy, or store
-            value.
-
-        Raises
-        ------
-        AttributeError
-            If ``name`` is reserved, missing, or refers to an ambiguous leaf
-            name in the store.
-        """
+        """Resolve dynamic attributes via ParamField bindings (runtime-first)."""
         if name in BINDER_RESERVED_NAMES:
             raise AttributeError(name)
-
-        if hasattr(self.cfg, name):
-            return getattr(self.cfg, name)
-
-        has_prefix = name.isidentifier() and any(
-            key.startswith(f"{name}.") for key in self.base_forward_store.keys()
-        )
-        if has_prefix:
-            return self.ns(name)
 
         leaf_index = self._leaf_index()
         if name in leaf_index:
             candidates = leaf_index[name]
-            if len(candidates) == 1:
-                return self.base_forward_store.get(candidates[0])
-
-            candidate_list = ", ".join(sorted(candidates))
-            raise AttributeError(
-                "Ambiguous leaf name {leaf!r} found in store keys: {candidates}. "
-                "Use binder.<prefix>.{leaf} or binder.get(\"<full.key>\")".format(
-                    leaf=name, candidates=candidate_list
+            if len(candidates) > 1:
+                candidate_list = ", ".join(sorted(candidates))
+                raise AttributeError(
+                    "Ambiguous leaf name {leaf!r} found in ParamSpec keys: {candidates}. "
+                    "Use binder.get(\"<full.key>\") for an explicit lookup.".format(
+                        leaf=name, candidates=candidate_list
+                    )
                 )
-            )
+
+            field_key = candidates[0]
+            field = self.forward_spec.get(field_key)
+            found, value = self._read_runtime_value(field)
+            if found:
+                return value
+
+            try:
+                return self.base_forward_store.get(field.key)
+            except KeyError as exc:
+                raise AttributeError(
+                    f"Unable to resolve {name!r}: runtime binding "
+                    f"{self._binding_path_for_field(field)!r} missing on "
+                    f"{self._component_for_field(field)!r} and "
+                    "base_forward_store has no value."
+                ) from exc
+
+        if name.isidentifier() and any(
+            key.startswith(f"{name}.") for key in self.base_forward_store.keys()
+        ):
+            return self.ns(name)
 
         raise AttributeError(name)
 
@@ -726,12 +708,68 @@ class SheraBinder:
         )
         return self.base_forward_store.replace(store_delta.as_dict())
 
+    # ------------------------------------------------------------------
+    # Contract-driven runtime access helpers
+    # ------------------------------------------------------------------
+
+    def _binding_path_for_field(self, field: ParamField) -> str:
+        """Return the runtime path for a ParamField (defaults to leaf name)."""
+        return field.binding or field.key.split(".")[-1]
+
+    def _component_for_field(self, field: ParamField) -> str:
+        """Return the binder component that owns a ParamField."""
+        for component in ("optics", "source", "detector"):
+            if field.group in self._group_names_for_component(component):
+                return component
+        raise AttributeError(f"Unknown component for field {field.key!r}")
+
+    def _resolve_runtime_path(self, obj: object, path: str) -> object:
+        """Traverse a dotted path on a runtime object, returning a sentinel on miss."""
+        current = obj
+        for segment in path.split("."):
+            if current is None:
+                return _RUNTIME_MISSING
+            try:
+                current = getattr(current, segment)
+                continue
+            except AttributeError:
+                pass
+
+            if isinstance(current, Mapping) and segment in current:
+                current = current[segment]
+                continue
+
+            if isinstance(current, (list, tuple)) and segment.isdigit():
+                idx = int(segment)
+                if 0 <= idx < len(current):
+                    current = current[idx]
+                    continue
+
+            return _RUNTIME_MISSING
+
+        return current
+
+    def _read_runtime_value(self, field: ParamField) -> tuple[bool, object]:
+        """Return (found, value) using runtime component binding for a field."""
+        component = self._component_for_field(field)
+        component_obj = getattr(self, component)
+        runtime_path = self._binding_path_for_field(field)
+
+        try:
+            value = self._resolve_runtime_path(component_obj, runtime_path)
+        except Exception:
+            return False, _RUNTIME_MISSING
+
+        if value is _RUNTIME_MISSING:
+            return False, _RUNTIME_MISSING
+        return True, value
+
     def _leaf_index(self) -> dict[str, list[str]]:
         """Build an index mapping leaf names to full store paths.
 
         Called by ``__dir__`` and ``__getattr__`` to allow ergonomic access to
-        store values by leaf name (suffix). This is a read-only helper that
-        scans the base store keys.
+        ParamField leaf names (suffixes). This is a read-only helper that
+        scans the forward spec keys.
 
         Returns
         -------
@@ -746,7 +784,8 @@ class SheraBinder:
 
         leaf_index: dict[str, list[str]] = {}
 
-        for key in self.base_forward_store.keys():
+        for field in self.forward_spec.values():
+            key = field.key
             if "." not in key:
                 continue
 

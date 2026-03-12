@@ -68,6 +68,7 @@ def test_binder_cfg_field_forwarding(binder_cls, cfg):
     binder = binder_cls(cfg, forward_spec, forward_store)
 
     assert binder.cfg is cfg
+    assert binder.psf_npix == binder.optics.psf_npixels
     assert binder.psf_npix == binder.cfg.psf_npix
 
     with pytest.raises(AttributeError):

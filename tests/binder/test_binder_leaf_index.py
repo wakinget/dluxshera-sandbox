@@ -20,7 +20,7 @@ def test_leaf_index_includes_plate_scale_key():
     leaf_index = binder._leaf_index()
 
     assert "plate_scale_as_per_pix" in leaf_index
-    assert "system.plate_scale_as_per_pix" in leaf_index["plate_scale_as_per_pix"]
+    assert "optics.plate_scale_as_per_pix" in leaf_index["plate_scale_as_per_pix"]
 
 
 def test_leaf_index_collects_zernike_leaves():

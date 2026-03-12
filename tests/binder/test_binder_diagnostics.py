@@ -61,7 +61,7 @@ def test_binder_introspection_snapshot(capsys):
             if hasattr(base_store, name)
         ],
         "derived_key_presence": {
-            "system.plate_scale_as_per_pix": "system.plate_scale_as_per_pix" in base_store,
+            "optics.plate_scale_as_per_pix": "optics.plate_scale_as_per_pix" in base_store,
         },
         "base_store_len": len(base_store),
     }
@@ -79,5 +79,5 @@ def test_binder_introspection_snapshot(capsys):
     assert diagnostics["is_zdx_base"] is False
     assert diagnostics["base_store_type"] == "ParameterStore"
     assert set(diagnostics["base_store_methods"]) >= {"get", "keys", "items", "as_dict"}
-    assert diagnostics["derived_key_presence"]["system.plate_scale_as_per_pix"] is True
+    assert diagnostics["derived_key_presence"]["optics.plate_scale_as_per_pix"] is True
     assert captured.out.strip(), "Expected diagnostics to be printed"

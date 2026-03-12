@@ -18,7 +18,7 @@ def test_dir_includes_cfg_fields_prefixes_and_unambiguous_leaves():
 
     entries = dir(binder)
 
-    assert "psf_npix" in entries  # cfg field
-    assert "system" in entries  # store prefix
+    assert "psf_npix" in entries  # unambiguous leaf
+    assert "optics" in entries  # component / prefix
     assert "plate_scale_as_per_pix" in entries  # unambiguous leaf
     assert "zernike_coeffs_nm" not in entries  # ambiguous leaf omitted
