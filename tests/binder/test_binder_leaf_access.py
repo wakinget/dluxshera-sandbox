@@ -27,6 +27,26 @@ def test_ambiguous_leaf_attr_raises_attribute_error():
     assert "binder.get(\"<full.key>\")" in message
 
 
+def test_runtime_leaf_fallback_source_separation():
+    binder = _make_binder()
+
+    assert binder.separation == binder.source.separation
+
+
+def test_runtime_leaf_fallback_optics_plane_separation():
+    binder = _make_binder()
+
+    assert binder.plane_separation == binder.optics.plane_separation
+
+
+def test_runtime_leaf_fallback_ambiguous_raises():
+    binder = _make_binder()
+
+    with pytest.raises(AttributeError) as excinfo:
+        _ = binder.layers  # present on optics and detector
+
+    assert "Ambiguous runtime leaf" in str(excinfo.value)
+
 def test_bound_leaf_prefers_runtime_binding_over_store():
     binder = _make_binder()
     runtime_value = binder.optics.psf_npixels

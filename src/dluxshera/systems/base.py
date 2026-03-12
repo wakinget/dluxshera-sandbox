@@ -346,6 +346,10 @@ class SheraBinder:
                     "base_forward_store has no value."
                 ) from exc
 
+        found_runtime, runtime_value = self._runtime_leaf_fallback(name)
+        if found_runtime:
+            return runtime_value
+
         if name.isidentifier() and any(
             key.startswith(f"{name}.") for key in self.base_forward_store.keys()
         ):
@@ -764,6 +768,27 @@ class SheraBinder:
             return False, _RUNTIME_MISSING
         return True, value
 
+    def _runtime_leaf_fallback(self, name: str) -> tuple[bool, object]:
+        """Return (found, value) for a runtime leaf on source/optics/detector."""
+        candidates: list[tuple[str, object]] = []
+        for component_name in ("source", "optics", "detector"):
+            component = getattr(self, component_name)
+            value = self._resolve_runtime_path(component, name)
+            if value is _RUNTIME_MISSING:
+                continue
+            candidates.append((component_name, value))
+
+        if not candidates:
+            return False, _RUNTIME_MISSING
+        if len(candidates) == 1:
+            return True, candidates[0][1]
+
+        component_list = ", ".join(comp for comp, _ in candidates)
+        raise AttributeError(
+            f"Ambiguous runtime leaf {name!r} present on components: {component_list}. "
+            "Access the desired component explicitly (e.g., binder.source.{name} or binder.optics.{name})."
+        )
+
     def _leaf_index(self) -> dict[str, list[str]]:
         """Build an index mapping leaf names to full store paths.
 
@@ -1048,6 +1073,23 @@ class SheraBinder:
     @property
     def detector(self) -> dl.LayeredDetector:
         return self.telescope.detector
+
+    def __repr__(self) -> str:  # pragma: no cover - formatting covered in tests
+        def _indent_block(text: str, indent: int = 2) -> str:
+            pad = " " * indent
+            return "\n".join(f"{pad}{line}" for line in text.splitlines())
+
+        lines = ["SheraBinder("]
+        lines.append("  source=")
+        lines.append(_indent_block(repr(self.source), indent=4))
+        lines.append("  optics=")
+        lines.append(_indent_block(repr(self.optics), indent=4))
+        lines.append("  detector=")
+        lines.append(_indent_block(repr(self.detector), indent=4))
+        lines.append(")")
+        return "\n".join(lines)
+
+    __str__ = __repr__
 
     # ------------------------------------------------------------------
     # Mostly immutable helpers
