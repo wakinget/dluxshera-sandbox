@@ -1,0 +1,93 @@
+system:
+  preset: SHERA_TESTBED_3P
+
+experiment:
+  notes: "Experiment-level notes. Briefly describe the experiment."
+
+  infer_keys:
+    - source.separation_as
+    - source.position_angle_deg
+    - source.x_position_as
+    - source.y_position_as
+    - source.log_flux_total
+    - source.contrast
+    - optics.plate_scale_as_per_pix
+    - optics.primary.zernike_coeffs_nm
+    - optics.secondary.zernike_coeffs_nm
+
+  priors:
+    source.separation_as:
+      dist: Normal
+      sigma: 1.0e-4
+    source.position_angle_deg:
+      dist: Uniform
+      sigma: 1.0e-2
+    source.x_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.y_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.log_flux_total:
+      dist: LogNormal
+      sigma: 1.0e-3
+    source.contrast:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.plate_scale_as_per_pix:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.primary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
+    optics.secondary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
+
+  prescribed_mc:
+    n_runs: 5
+    run_id_prefix: mc
+    results_filename: results.csv
+    results_orientation: col  # col | row
+
+    defaults:
+      seed: 42
+
+      optimizer:
+        kind: sgd       # sgd | adam
+        kwargs: {}
+        n_iter: 50
+        base_lr: 0.5
+        loss: map       # nll | map
+
+      eigen:
+        use_eigen: true
+        whiten_basis: true
+        truncate_k: null
+        truncate_by_eigval: null
+
+      init:
+        mode: prior     # prior | explicit
+
+      noise:
+        add_noise: true
+
+      fim:
+        reuse_fim: false
+
+      outputs:
+        plots: true
+
+      truth:
+        source:
+          x_position_as: 0.0
+          y_position_as: 0.0
+          position_angle_deg: 90.0
+          separation_as: 10.0
+          contrast: 3.0
+          exposure_time_s: 1800.0
+        optics:
+          primary:
+            zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+          secondary:
+            zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]

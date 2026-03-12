@@ -147,3 +147,31 @@ def test_write_results_csv_row_orientation(tmp_path):
 
     assert rows_by_run["run_0001"]["truth.source.x_position_as"] == "0.2"
     assert rows_by_run["run_0002"]["truth.source.x_position_as"] == ""
+
+
+def test_write_experiment_outputs_propagates_notes(tmp_path):
+    module = _load_prescribed_module()
+
+    experiment_cfg = {"notes": "hello world"}
+    mc_cfg = {"results_filename": "custom.csv", "defaults": {"seed": 1}}
+    run_entries: list[dict] = []
+    infer_keys: tuple[str, ...] = ()
+
+    module._write_experiment_outputs(
+        outdir=tmp_path,
+        experiment_cfg=experiment_cfg,
+        mc_cfg=mc_cfg,
+        prescription_path=tmp_path / "prescription.yaml",
+        plan_path=None,
+        run_entries=run_entries,
+        infer_keys=infer_keys,
+        repo_root=tmp_path,
+        results_orientation="col",
+        system_label="TEST_SYSTEM",
+        config_override_keys=[],
+        truth_default_keys=[],
+    )
+
+    manifest = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+    assert "hello world" in manifest
+    assert "TEST_SYSTEM" in manifest

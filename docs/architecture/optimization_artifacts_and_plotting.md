@@ -749,7 +749,7 @@ sweeps reproducible and easy to define programmatically.
 ### Files and responsibilities
 
 **Inputs (optional, recommended for ensembles):**
-- `prescription.json` (input)
+- `prescription.yaml` (input; YAML/JSON supported)
   - Experiment-wide defaults: config/design identifier, infer_keys, prior definitions, default
     optimizer settings, default init policy (e.g., sample-from-prior), and default noise settings.
   - Think: “global defaults / knobs.”

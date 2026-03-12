@@ -5,8 +5,9 @@ Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
 --------------
-- Load the prescription JSON and optional per-run overrides CSV.
-- Resolve run specs and seeds, plus experiment-wide config/store overrides.
+- Load the prescription YAML/JSON (native system/experiment config) and optional
+  per-run overrides CSV.
+- Resolve run specs and seeds from experiment.prescribed_mc defaults + plan CSV.
 - Build truth/init stores for each run, then generate synthetic observations with
   optional noise.
 - Run optimization in eigen space (FIM-based) or primitive parameter space.
@@ -26,7 +27,7 @@ Notes behavior
 
 CLI arguments (mirrors `main`)
 ------------------------------
-- --prescription: JSON experiment recipe (defaults to template when omitted).
+- --prescription: YAML/JSON experiment config (defaults to template when omitted).
 - --overrides: optional CSV of per-run overrides (defaults to template when omitted).
 - --outdir: root output directory for the experiment (experiment root). If
   omitted, the output directory is derived from `--run-name` or a timestamp.
@@ -59,7 +60,7 @@ import jax.random as jr
 import numpy as np
 import matplotlib.pyplot as plt
 
-from dluxshera.config.io import load_user_config
+from dluxshera.config.io import load_user_config, load_config_file
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.optimization import (
     EigenThetaMap,
@@ -96,7 +97,7 @@ from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "examples/recipes/prescription_templates/prescription.json"
+    "examples/recipes/prescription_templates/prescription.yaml"
 )
 DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
@@ -131,17 +132,15 @@ def _timestamp_tag() -> str:
 
 
 def _load_prescription(path: Path) -> dict[str, Any]:
-    """Load a prescription JSON file from disk.
+    """Load a prescription config (YAML or JSON) from disk.
 
-    Called early in `main` to materialize the experiment recipe that drives run
-    spec resolution and defaults. Keys that start with `_` are treated as
-    private annotations/disabled fields and are recursively stripped from the
-    loaded object before any downstream parsing/validation runs. This is
-    generally reusable for JSON config loading, but kept local because it
-    assumes the specific prescription schema expected by this script.
+    Keys that start with `_` are treated as private/disabled template fields and
+    are recursively stripped from the loaded mapping. The resulting mapping is
+    used downstream to detect legacy vs. native schema and then fed into the
+    canonical `resolve_config` path.
     """
-    with path.open("r", encoding="utf-8") as handle:
-        return _strip_private_keys(json.load(handle))
+    loaded = load_config_file(path)
+    return _strip_private_keys(loaded)
 
 
 def _strip_private_keys(obj: Any) -> Any:
@@ -163,6 +162,11 @@ def _strip_private_keys(obj: Any) -> Any:
     return obj
 
 
+def _is_legacy_prescription(presc: dict[str, Any]) -> bool:
+    """Detect legacy prescription schema (no top-level system block)."""
+    return "system" not in presc and "model" in presc
+
+
 def _migrate_param_key(key: str) -> str:
     """Translate legacy parameter keys to migrated schema."""
     return LEGACY_KEY_MAP.get(key, key)
@@ -171,6 +175,60 @@ def _migrate_param_key(key: str) -> str:
 def _migrate_key_mapping(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of a mapping with legacy param keys migrated."""
     return {_migrate_param_key(k): v for k, v in payload.items()}
+
+
+def _upgrade_legacy_prescription(
+    legacy: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Translate legacy prescription schema into native config mapping.
+
+    Returns a tuple of (user_cfg, compatibility_meta) where ``user_cfg`` is a
+    canonical config mapping containing ``system`` and ``experiment`` blocks
+    ready for ``resolve_config``, and ``compatibility_meta`` carries any legacy
+    override payloads that still need special handling (e.g., structural
+    config overrides applied post-resolution).
+    """
+    experiment_block = legacy.get("experiment", {}) or {}
+    legacy_overrides = legacy.get("overrides", {}) or {}
+    config_overrides = _migrate_key_mapping(legacy_overrides.get("config", {}) or {})
+    store_overrides = _migrate_key_mapping(legacy_overrides.get("store", {}) or {})
+
+    # Legacy infer_keys/priors live at the top level.
+    infer_keys = tuple(_migrate_param_key(key) for key in legacy.get("infer_keys", []) or [])
+    priors = _migrate_key_mapping(legacy.get("priors", {}) or {})
+
+    mc_defaults = copy.deepcopy(legacy.get("defaults", {}) or {})
+    if store_overrides:
+        mc_defaults.setdefault("truth", {})
+        _deep_update(mc_defaults["truth"], store_overrides)
+
+    mc_block = {
+        "n_runs": experiment_block.get("n_runs"),
+        "run_id_prefix": experiment_block.get("run_id_prefix"),
+        "results_filename": (
+            experiment_block.get("results_filename")
+            or experiment_block.get("results_table_name")
+        ),
+        "results_orientation": experiment_block.get("results_orientation"),
+        "defaults": mc_defaults,
+    }
+
+    notes = _first_present_string(experiment_block, EXPERIMENT_NOTE_KEYS)
+    experiment_cfg = {
+        "notes": notes,
+        "infer_keys": infer_keys,
+        "priors": priors,
+        "prescribed_mc": mc_block,
+    }
+
+    model_cfg = legacy.get("model", {}) or {}
+    system_preset = _resolve_config_id(model_cfg.get("config_id"))
+    user_cfg = {
+        "system": {"preset": system_preset},
+        "experiment": experiment_cfg,
+    }
+
+    return user_cfg, {"config_overrides": config_overrides, "legacy_schema": True}
 
 def _parse_cell(value: str | None) -> Any:
     """Parse a CSV cell value into a typed Python value.
@@ -325,9 +383,9 @@ def _apply_experiment_n_runs(
     plan_rows: list[dict[str, Any]],
     n_runs: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, int | None]]:
-    """Apply experiment.n_runs precedence to the plan-defined run rows.
+    """Apply prescribed_mc.n_runs precedence to the plan-defined run rows.
 
-    When experiment.n_runs is set, it becomes authoritative: the plan is padded
+    When experiment.n_runs (now experiment.prescribed_mc.n_runs) is set, it becomes authoritative: the plan is padded
     with default-only rows or truncated as needed so downstream previews and run
     execution operate on the resolved run count. When experiment.n_runs is not
     set, the plan length defines the run count and an empty plan is rejected.
@@ -338,7 +396,7 @@ def _apply_experiment_n_runs(
     if n_runs is None:
         if plan_runs == 0:
             raise ValueError(
-                "Unable to resolve run count: experiment.n_runs is not set and "
+                "Unable to resolve run count: experiment.prescribed_mc.n_runs is not set and "
                 "overrides.csv defines 0 runs."
             )
         return (
@@ -355,10 +413,10 @@ def _apply_experiment_n_runs(
     try:
         resolved_n_runs = int(n_runs)
     except (TypeError, ValueError) as exc:
-        raise ValueError("experiment.n_runs must be an integer.") from exc
+        raise ValueError("experiment.prescribed_mc.n_runs must be an integer.") from exc
 
     if resolved_n_runs <= 0:
-        raise ValueError("experiment.n_runs must be a positive integer.")
+        raise ValueError("experiment.prescribed_mc.n_runs must be a positive integer.")
 
     padded = 0
     truncated = 0
@@ -403,7 +461,8 @@ def _detect_prescription_overrides_candidates(
     if detect_prescription:
         prescription_candidates = sorted(
             candidate
-            for candidate in outdir.rglob("*.json")
+            for candidate in outdir.rglob("*")
+            if candidate.suffix.lower() in {".json", ".yaml", ".yml"}
             if "prescription" in candidate.name.lower()
         )
 
@@ -480,7 +539,7 @@ def _resolve_prescription_and_overrides(
     if prescription_path is None:
         outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
-            "WARNING: No prescription path provided/detected (no prescription JSON "
+            "WARNING: No prescription path provided/detected (no prescription config "
             f"{outdir_label}); falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
         )
         prescription_path = DEFAULT_PRESCRIPTION_PATH
@@ -651,18 +710,18 @@ def _apply_prior_overrides(
     return merged, applied
 
 
-def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) -> dict[str, Any]:
+def _resolve_run_spec(mc_cfg: dict[str, Any], row: dict[str, Any], index: int) -> dict[str, Any]:
     """Resolve a run spec from a plan row using default run indexing.
 
     This is a compatibility wrapper used for older call sites; in this script
     `_resolve_run_spec_with_id` is used directly to accommodate disabled rows.
     It is reusable only for the prescription schema defined here.
     """
-    return _resolve_run_spec_with_id(presc, row, index=index, run_id_index=index)
+    return _resolve_run_spec_with_id(mc_cfg, row, index=index, run_id_index=index)
 
 
 def _resolve_run_spec_with_id(
-    presc: dict[str, Any],
+    mc_cfg: dict[str, Any],
     row: dict[str, Any],
     *,
     index: int,
@@ -675,11 +734,10 @@ def _resolve_run_spec_with_id(
     is tightly coupled to the prescription schema and run ID conventions in
     this script, so it is not intended as a general utility.
     """
-    defaults = copy.deepcopy(presc.get("defaults", {}))
+    defaults = copy.deepcopy(mc_cfg.get("defaults", {}))
     resolved = copy.deepcopy(defaults)
 
-    experiment = presc.get("experiment", {})
-    run_id_prefix = experiment.get("run_id_prefix", "run")
+    run_id_prefix = mc_cfg.get("run_id_prefix", "run")
 
     row = dict(row)
     row.pop("_plan_label", None)
@@ -697,17 +755,14 @@ def _resolve_run_spec_with_id(
 
     _deep_update(resolved, structured_row)
 
-    resolved["model"] = copy.deepcopy(presc.get("model", {}))
-
     resolved.setdefault("init", {})
     resolved.setdefault("noise", {})
     resolved.setdefault("eigen", {})
     resolved.setdefault("truth", {})
     resolved.setdefault("optimizer", {})
     resolved.setdefault("outputs", {})
-    resolved.setdefault("model", {})
 
-    base_seed = presc.get("defaults", {}).get("seed")
+    base_seed = mc_cfg.get("defaults", {}).get("seed")
     if base_seed is None:
         raise ValueError("Prescription defaults must include a base seed.")
     if seed_override is None:
@@ -751,6 +806,30 @@ def _first_present_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str
             if text:
                 return text
     return None
+
+
+def _get_prescribed_mc_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Fetch and validate the prescribed_mc block from resolved experiment config."""
+    mc_cfg = experiment_cfg.get("prescribed_mc")
+    if mc_cfg is None:
+        raise ValueError("Experiment config must include an 'experiment.prescribed_mc' block.")
+    if not isinstance(mc_cfg, dict):
+        raise ValueError("experiment.prescribed_mc must be a mapping/dict.")
+    return mc_cfg
+
+
+def _resolve_loss_kind(run_spec: dict[str, Any], mc_defaults: dict[str, Any]) -> str:
+    """Resolve optimizer.loss with run-spec override and experiment default."""
+    loss_kind = (
+        _get_nested(run_spec, ["optimizer", "loss"])
+        or _get_nested(mc_defaults, ["optimizer", "loss"])
+        or "nll"
+    )
+    if loss_kind not in {"nll", "map"}:
+        raise ValueError(
+            f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
+        )
+    return loss_kind
 
 
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:
@@ -920,7 +999,7 @@ def _partition_overrides_by_kind(
 
 
 def _resolve_config_id(config_id: str | None) -> str:
-    """Map a legacy config_id to a system preset name (new schema)."""
+    """Map a legacy config_id to a system preset name (legacy compatibility)."""
     if not config_id:
         raise ValueError("Prescription must include model.config_id.")
     mapping = {
@@ -1521,13 +1600,17 @@ def _build_manifest_runs(run_entries: list[dict[str, Any]]) -> list[dict[str, An
 def _write_experiment_outputs(
     *,
     outdir: Path,
-    prescription: dict[str, Any],
+    experiment_cfg: dict[str, Any],
+    mc_cfg: dict[str, Any],
     prescription_path: Path,
     plan_path: Path | None,
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
     repo_root: Path,
     results_orientation: str,
+    system_label: str | None,
+    config_override_keys: list[str],
+    truth_default_keys: list[str],
 ) -> None:
     """Write aggregated outputs (results.csv and manifest.json) for the run set.
 
@@ -1537,12 +1620,7 @@ def _write_experiment_outputs(
     in column orientation (`key` + `run_id` columns; preferred default) or row
     orientation (`run_id` as a field; compatibility mode).
     """
-    experiment = prescription.get("experiment", {})
-    results_filename = (
-        experiment.get("results_filename")
-        or experiment.get("results_table_name")
-        or "results.csv"
-    )
+    results_filename = mc_cfg.get("results_filename") or "results.csv"
     results_path = outdir / results_filename
     _write_results_csv(
         results_path,
@@ -1552,11 +1630,8 @@ def _write_experiment_outputs(
     )
 
     manifest_path = outdir / "manifest.json"
-    overrides = prescription.get("overrides", {})
-    config_keys = sorted((overrides.get("config") or {}).keys())
-    store_keys = sorted((overrides.get("store") or {}).keys())
     manifest_runs = _build_manifest_runs(run_entries)
-    experiment_notes = _first_present_string(experiment, EXPERIMENT_NOTE_KEYS)
+    experiment_notes = _first_present_string(experiment_cfg, EXPERIMENT_NOTE_KEYS)
 
     _write_manifest(
         manifest_path,
@@ -1565,10 +1640,10 @@ def _write_experiment_outputs(
         or "examples/recipes/prescribed_monte_carlo.py",
         prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
         plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
-        config_id=_get_nested(prescription, ["model", "config_id"]),
+        config_id=system_label,
         notes=experiment_notes,
-        overrides_config_keys=config_keys,
-        overrides_store_keys=store_keys,
+        overrides_config_keys=config_override_keys,
+        overrides_store_keys=truth_default_keys,
         runs=manifest_runs,
         artifacts=[
             {"path": "manifest.json"},
@@ -1581,15 +1656,13 @@ def main() -> None:
     """Run the prescribed Monte Carlo experiment pipeline.
 
     Args:
-        --prescription: Path to the JSON experiment recipe. This file sets the
-            experiment defaults, model config, and per-run seed rules, and may
-            include an experiment-level note (`experiment.notes`; aliases
-            `experiment.note`/`experiment.comment`/`experiment.comments`) that
-            is persisted once in top-level manifest.json `notes`.
-        --overrides: Optional CSV of per-run overrides. Rows
-            cannot override model or overrides.* settings; they only mutate
-            run-level fields. Per-run notes come from
-            note/notes/comment/comments fields and are persisted as `run_note`.
+        --prescription: Path to the YAML/JSON experiment config. The file must
+            contain native `system` and `experiment` blocks (with
+            `experiment.prescribed_mc` for Monte Carlo settings). Experiment
+            notes live in `experiment.notes` (aliases note/comment/comments).
+        --overrides: Optional CSV of per-run overrides (plan). Rows mutate
+            run-level fields only; structural/system changes belong in YAML.
+            Per-run notes come from note/notes/comment/comments columns.
         --outdir: Root output directory for the experiment. When supplied, this
             is treated as the experiment root, and all run artifacts
             (runs/<run_id>/...), manifest.json, and results.csv are written
@@ -1613,7 +1686,7 @@ def main() -> None:
         "--prescription",
         type=Path,
         default=None,
-        help="Path to prescription JSON (defaults to template if omitted)",
+        help="Path to prescription YAML/JSON (defaults to template if omitted)",
     )
     parser.add_argument(
         "--overrides",
@@ -1647,7 +1720,7 @@ def main() -> None:
         help=(
             "results.csv schema: 'col' writes key + run_id columns (default), "
             "'row' writes one row per run for compatibility. CLI overrides "
-            "prescription experiment.results_orientation when provided."
+            "prescription experiment.prescribed_mc.results_orientation when provided."
         ),
     )
     parser.add_argument("--num-preview", type=int, default=None)
@@ -1668,27 +1741,53 @@ def main() -> None:
     else:
         print(f"Resolved overrides path: {resolved_overrides or overrides_path}")
 
-    # Plan/prescription parsing and run spec resolution: load the JSON recipe
-    # and the optional overrides CSV that mutates per-run settings.
-    prescription = _load_prescription(prescription_path)
+    raw_prescription = _load_prescription(prescription_path)
+    if _is_legacy_prescription(raw_prescription):
+        user_cfg, compat_meta = _upgrade_legacy_prescription(raw_prescription)
+    else:
+        user_cfg = _strip_private_keys(
+            load_user_config(
+                config_path=prescription_path,
+                system_preset=None,
+                experiment_preset=None,
+            )
+        )
+        compat_meta = {"config_overrides": {}, "legacy_schema": False}
+
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    experiment_cfg = resolved_cfg.get("experiment")
+
+    if system_cfg is None:
+        raise ValueError("Prescribed Monte Carlo requires a top-level 'system' block.")
+    if experiment_cfg is None:
+        raise ValueError("Prescribed Monte Carlo requires a top-level 'experiment' block.")
+
+    mc_cfg = _get_prescribed_mc_cfg(experiment_cfg)
+    mc_defaults = mc_cfg.get("defaults", {}) or {}
+    if not isinstance(mc_defaults, dict):
+        raise ValueError("experiment.prescribed_mc.defaults must be a mapping/dict.")
+    if mc_defaults.get("seed") is None:
+        raise ValueError("experiment.prescribed_mc.defaults.seed must be set.")
+
     def _normalize_orientation(value: str | None) -> str:
         if value is None:
             return "col"
         if value not in {"col", "row"}:
-            raise ValueError("experiment.results_orientation must be 'col' or 'row'")
+            raise ValueError("experiment.prescribed_mc.results_orientation must be 'col' or 'row'")
         return value
 
-    presc_orientation = _normalize_orientation(
-        _get_nested(prescription, ["experiment", "results_orientation"])
-    )
+    presc_orientation = _normalize_orientation(mc_cfg.get("results_orientation"))
     results_orientation = _normalize_orientation(
         args.results_orientation if args.results_orientation is not None else presc_orientation
     )
+
     if overrides_path is None:
         plan_rows = []
     else:
         plan_rows = _load_plan_csv(overrides_path)
-    n_runs = _get_nested(prescription, ["experiment", "n_runs"])
+
+    n_runs = mc_cfg.get("n_runs")
     # experiment.n_runs is authoritative: it pads or truncates the plan so
     # previews and run execution operate on the resolved run count.
     plan_rows, run_policy = _apply_experiment_n_runs(plan_rows, n_runs)
@@ -1696,23 +1795,23 @@ def main() -> None:
     disabled_count = len(plan_rows) - enabled_count
     if run_policy["n_runs"] is None:
         print(
-            "Run count policy: experiment.n_runs not set; "
+            "Run count policy: experiment.prescribed_mc.n_runs not set; "
             f"plan defines {run_policy['plan_runs']} run(s)."
         )
     else:
         print(
-            "Run count policy: experiment.n_runs="
+            "Run count policy: experiment.prescribed_mc.n_runs="
             f"{run_policy['n_runs']} (plan defines {run_policy['plan_runs']}) "
             f"-> resolved {run_policy['resolved_runs']} run(s)."
         )
         if run_policy["padded_runs"]:
             print(
                 "  Added "
-                f"{run_policy['padded_runs']} default-only run(s) to match experiment.n_runs."
+                f"{run_policy['padded_runs']} default-only run(s) to match experiment.prescribed_mc.n_runs."
             )
         if run_policy["truncated_runs"]:
             print(
-                "WARNING: experiment.n_runs is authoritative; truncated "
+                "WARNING: experiment.prescribed_mc.n_runs is authoritative; truncated "
                 f"{run_policy['truncated_runs']} plan-defined run(s)."
             )
     print(
@@ -1731,26 +1830,23 @@ def main() -> None:
             key
             for key in row
             if not key.startswith("_")
-            if key == "model"
-            or key.startswith("model.")
-            or key == "overrides"
-            or key.startswith("overrides.")
+            if key == "system"
+            or key.startswith("system.")
+            or key == "experiment"
+            or key.startswith("experiment.")
         ]
         if forbidden:
             raise ValueError(
-                "Plan rows cannot override model settings; remove: "
+                "Plan rows cannot override system/experiment settings; remove: "
                 + ", ".join(sorted(forbidden))
             )
 
-    model_config_id = _get_nested(prescription, ["model", "config_id"])
-    config_overrides = _get_nested(prescription, ["overrides", "config"]) or {}
-    store_overrides = _get_nested(prescription, ["overrides", "store"]) or {}
+    config_overrides = compat_meta.get("config_overrides", {}) or {}
     config_override_keys = (
         ", ".join(sorted(config_overrides.keys())) if config_overrides else "none"
     )
-    store_override_keys = (
-        ", ".join(sorted(store_overrides.keys())) if store_overrides else "none"
-    )
+    truth_defaults = mc_defaults.get("truth", {}) or {}
+    truth_default_keys = sorted(_flatten_store_overrides(truth_defaults).keys())
 
     plan_labels = [row.get("_plan_label") for row in plan_rows]
     run_specs: list[dict[str, Any]] = []
@@ -1762,7 +1858,7 @@ def main() -> None:
             # Resolve each run spec by merging defaults + row overrides and
             # assigning an indexed run_id for enabled rows.
             resolved = _resolve_run_spec_with_id(
-                prescription,
+                mc_cfg,
                 row,
                 index=index + 1,
                 run_id_index=run_id_index,
@@ -1770,7 +1866,7 @@ def main() -> None:
         else:
             # Disabled rows keep the resolved fields but do not receive a run_id.
             resolved = _resolve_run_spec_with_id(
-                prescription,
+                mc_cfg,
                 row,
                 index=index + 1,
                 run_id_index=None,
@@ -1779,9 +1875,11 @@ def main() -> None:
 
     outdir = _resolve_outdir(args.outdir, args.run_name)
     print(f"Resolved outdir: {outdir}")
-    print(f"Model config_id: {model_config_id}")
-    print(f"Config overrides: {config_override_keys}")
-    print(f"Store overrides: {store_override_keys}")
+    system_label = _get_nested(user_cfg, ["system", "preset"]) or "custom"
+    print(f"System preset: {system_label}")
+    print(f"Structural config overrides: {config_override_keys}")
+    if truth_default_keys:
+        print("Truth defaults provided for keys: " + ", ".join(truth_default_keys))
     if any(label is not None for label in plan_labels):
         print("Plan column labels -> run_id mapping:")
         for label, spec in zip(plan_labels, run_specs):
@@ -1818,21 +1916,11 @@ def main() -> None:
 
     jax.config.update("jax_enable_x64", True)
 
-    system_preset = _resolve_config_id(model_config_id)
-    user_cfg = load_user_config(
-        config_path=None,
-        system_preset=system_preset,
-        experiment_preset=None,
-    )
-    resolved_cfg = resolve_config(user_cfg)
-    system_cfg = resolved_cfg.get("system")
-    if system_cfg is None:
-        raise ValueError("Resolved config missing 'system' block.")
     system_cfg = _apply_config_overrides(system_cfg, config_overrides)
 
     forward_spec = compose_forward_spec(system_cfg)
 
-    infer_keys_raw = tuple(prescription.get("infer_keys", []))
+    infer_keys_raw = tuple(experiment_cfg.get("infer_keys", []))
     infer_keys = tuple(_migrate_param_key(key) for key in infer_keys_raw)
     if not infer_keys:
         raise ValueError("Prescription must include non-empty infer_keys.")
@@ -1851,11 +1939,11 @@ def main() -> None:
     # dotted keys, then recompute any derived parameters to keep the store
     # self-consistent for forward/inference use.
     base_store = ParameterStore.from_spec_defaults(forward_spec)
-    if store_overrides:
-        base_store = base_store.replace(_flatten_store_overrides(store_overrides))
+    if truth_defaults:
+        base_store = base_store.replace(_flatten_store_overrides(truth_defaults))
     base_store = base_store.refresh_derived(forward_spec)
 
-    prior_info_raw = prescription.get("priors", {})
+    prior_info_raw = experiment_cfg.get("priors", {})
     prior_info = _migrate_key_mapping(prior_info_raw)
     prior_spec = PriorSpec.from_info(base_store, prior_info)
     prior_spec_cache: dict[str, PriorSpec] = {}
@@ -1890,20 +1978,24 @@ def main() -> None:
         runs_dir = outdir / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
 
-    run_id_prefix = _get_nested(prescription, ["experiment", "run_id_prefix"]) or "run"
+    run_id_prefix = mc_cfg.get("run_id_prefix") or "run"
     run_counter = 0
 
     if args.aggregate_only:
         run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
         _write_experiment_outputs(
             outdir=outdir,
-            prescription=prescription,
+            experiment_cfg=experiment_cfg,
+            mc_cfg=mc_cfg,
             prescription_path=prescription_path,
             plan_path=overrides_path,
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
-            results_orientation=args.results_orientation,
+            results_orientation=results_orientation,
+            system_label=system_label,
+            config_override_keys=sorted(config_overrides.keys()),
+            truth_default_keys=truth_default_keys,
         )
         print(f"Wrote experiment manifest/results to: {outdir}")
         return
@@ -1944,14 +2036,14 @@ def main() -> None:
         # Optionally add noise to the data
         add_noise_value = _get_nested(run_spec, ["noise", "add_noise"])
         if add_noise_value is None:
-            add_noise_value = _get_nested(prescription, ["defaults", "noise", "add_noise"])
+            add_noise_value = _get_nested(mc_defaults, ["noise", "add_noise"])
         add_noise = bool(add_noise_value)
         outputs_cfg = run_spec.get("outputs", {})
         if outputs_cfg is None:
             outputs_cfg = {}
         plots_flag = outputs_cfg.get("plots")
         if plots_flag is None:
-            plots_flag = _get_nested(prescription, ["defaults", "outputs", "plots"])
+            plots_flag = _get_nested(mc_defaults, ["outputs", "plots"])
         save_plots = bool(plots_flag) if plots_flag is not None else False
         if add_noise:
             rng_key, split_key = jr.split(rng_key)
@@ -1997,18 +2089,18 @@ def main() -> None:
         if reuse_fim_value is None:
             reuse_fim_value = run_spec.get("reuse_fim")
         if reuse_fim_value is None:
-            reuse_fim_value = _get_nested(prescription, ["defaults", "fim", "reuse_fim"])
+            reuse_fim_value = _get_nested(mc_defaults, ["fim", "reuse_fim"])
         reuse_fim = bool(reuse_fim_value) if reuse_fim_value is not None else False
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
         if use_eigen_value is None:
-            use_eigen_value = _get_nested(prescription, ["defaults", "eigen", "use_eigen"])
+            use_eigen_value = _get_nested(mc_defaults, ["eigen", "use_eigen"])
         use_eigen = bool(use_eigen_value)
         whiten_basis_value = eigen_cfg.get("whiten_basis")
         if whiten_basis_value is None:
             whiten_basis_value = _get_nested(
-                prescription, ["defaults", "eigen", "whiten_basis"]
+                mc_defaults, ["eigen", "whiten_basis"]
             )
         whiten_basis = bool(whiten_basis_value)
         truncate_k = eigen_cfg.get("truncate_k")
@@ -2031,7 +2123,7 @@ def main() -> None:
 
         init_cfg = run_spec.get("init", {})
         init_mode = init_cfg.get("mode") or _get_nested(
-            prescription, ["defaults", "init", "mode"]
+            mc_defaults, ["init", "mode"]
         )
         init_overrides = {
             key: value for key, value in init_cfg.items() if key != "mode"
@@ -2165,19 +2257,11 @@ def main() -> None:
             )
             return nll_loss + prior_gaussian_loss
 
-        loss_kind = (
-            _get_nested(run_spec, ["optimizer", "loss"])
-            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
-            or "nll"
-        )
+        loss_kind = _resolve_loss_kind(run_spec, mc_defaults)
         if loss_kind == "map":
             loss_fn = map_loss_fn
         elif loss_kind == "nll":
             loss_fn = nll_loss_fn
-        else:
-            raise ValueError(
-                f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
-            )
 
         # Pack truth store for FIM/diagnostics and evaluate baseline loss.
         theta_true = pack_params(inference_subspec, truth_store)
@@ -2187,7 +2271,7 @@ def main() -> None:
         # FIM cache key includes loss_kind so MAP and NLL cache separately.
         cache_key_payload = {
             "infer_keys": infer_keys,
-            "model_config_id": model_config_id,
+            "model_config_id": system_label,
             "cfg_hash": cfg_hash,
             "forward_spec_hash": forward_spec_hash,
             "theta_true_hash": _hash_array(theta_true),
@@ -2329,11 +2413,7 @@ def main() -> None:
         optimizer_kwargs = optimizer_cfg.get("kwargs", {})
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
-        loss_kind = (
-            optimizer_cfg.get("loss")
-            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
-            or "nll"
-        )
+        loss_kind = _resolve_loss_kind(run_spec, mc_defaults)
 
         # Loss function setup and optimization execution: run_shera_gd consumes
         # the chosen theta_space, preconditioner, and metadata for artifacts.
@@ -2361,7 +2441,7 @@ def main() -> None:
                 },
                 "theta": {"labels_by_key": labels_by_key},
                 "model": {
-                    "config_id": model_config_id,
+                    "config_id": system_label,
                     "config": config_payload,
                 },
                 "prescribed": {
@@ -2473,9 +2553,7 @@ def main() -> None:
                         )
 
                     psf_extent_as = (
-                        binder.cfg.psf_npix
-                        * binder.base_forward_store.get("system.plate_scale_as_per_pix")
-                        / 2
+                        binder.optics.psf_npixels * binder.optics.psf_pixel_scale / 2
                         * np.array([-1, 1, -1, 1])
                     )
 
@@ -2570,13 +2648,17 @@ def main() -> None:
     run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
     _write_experiment_outputs(
         outdir=outdir,
-        prescription=prescription,
+        experiment_cfg=experiment_cfg,
+        mc_cfg=mc_cfg,
         prescription_path=prescription_path,
         plan_path=overrides_path,
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
         results_orientation=results_orientation,
+        system_label=system_label,
+        config_override_keys=sorted(config_overrides.keys()),
+        truth_default_keys=truth_default_keys,
     )
     t1_experiment = time.time()
     print(

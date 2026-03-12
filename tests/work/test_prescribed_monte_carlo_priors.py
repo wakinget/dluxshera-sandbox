@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load_prescribed_module():
     repo_root = Path(__file__).resolve().parents[2]
@@ -117,33 +119,40 @@ def test_strip_private_keys_recursively_removes_leading_underscore_keys():
 def test_load_prescription_strips_private_keys_before_overrides_validation(tmp_path):
     module = _load_prescribed_module()
 
-    prescription_path = tmp_path / "prescription.json"
+    prescription_path = tmp_path / "prescription.yaml"
     prescription_path.write_text(
-        """{
-  "_comment": "top-level note",
-  "model": {"config_id": "SHERA_TESTBED_CONFIG"},
-  "overrides": {
-    "config": {
-      "bandwidth_m": 1.1e-7,
-      "_bandwidth_m": 9.9e-7
-    },
-    "store": {
-      "source.x_position_as": 0.123,
-      "_source.x_position_as": 0.999
-    }
-  }
-}
+        """system:
+  preset: SHERA_TESTBED_3P
+experiment:
+  _comment: drop me
+  notes: keep me
+  prescribed_mc:
+    defaults:
+      seed: 11
+      truth:
+        source:
+          x_position_as: 0.123
+          _x_position_as: 0.999
 """,
         encoding="utf-8",
     )
 
     prescription = module._load_prescription(prescription_path)
 
-    assert "_comment" not in prescription
-    assert prescription["overrides"]["config"] == {"bandwidth_m": 1.1e-7}
-    assert prescription["overrides"]["store"] == {"source.x_position_as": 0.123}
+    assert "_comment" not in prescription["experiment"]
+    truth = prescription["experiment"]["prescribed_mc"]["defaults"]["truth"]
+    assert truth["source"]["x_position_as"] == 0.123
+    assert "_x_position_as" not in truth["source"]
 
-    cfg = module._resolve_config_id(prescription["model"]["config_id"])
-    updated = module._apply_config_overrides(cfg, prescription["overrides"]["config"])
 
-    assert updated.bandwidth_m == 1.1e-7
+def test_resolve_loss_kind_prefers_run_spec_then_defaults():
+    module = _load_prescribed_module()
+
+    defaults = {"optimizer": {"loss": "map"}}
+    assert module._resolve_loss_kind({}, defaults) == "map"
+
+    run_spec = {"optimizer": {"loss": "nll"}}
+    assert module._resolve_loss_kind(run_spec, defaults) == "nll"
+
+    with pytest.raises(ValueError):
+        module._resolve_loss_kind({"optimizer": {"loss": "invalid"}}, defaults)
