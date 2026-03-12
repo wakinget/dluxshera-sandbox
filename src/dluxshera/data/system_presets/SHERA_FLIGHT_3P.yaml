@@ -48,7 +48,7 @@ system:
     model: HWK4123
     layers:
     - name: downsample
-      factor: 3
+      kernel_size: 3
     - name: pixel_offsets
     - name: pixel_response
     - name: jitter

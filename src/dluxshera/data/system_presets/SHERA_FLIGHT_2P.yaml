@@ -36,7 +36,7 @@ system:
     model: GSENSE2020BSI
     layers:
     - name: downsample
-      factor: 2
+      kernel_size: 2
     - name: pixel_offsets
     - name: pixel_response
     - name: jitter

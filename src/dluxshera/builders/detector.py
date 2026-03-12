@@ -211,7 +211,7 @@ def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
     return [
         {
             "name": "downsample",
-            "factor": getattr(cfg, "oversample", None),
+            "kernel_size": getattr(cfg, "kernel_size", None),
         },
         {
             "name": "pixel_offsets",
@@ -239,10 +239,10 @@ def build_detector_layer(
 ) -> tuple[str, object]:
     """Build a detector layer from declarative layer config."""
     if name == "downsample":
-        factor = layer_cfg.get("factor", layer_cfg.get("oversample", None))
-        if factor is None:
-            raise ValueError("downsample layer requires `factor` (or alias `oversample`).")
-        return ("downsample", Downsample(int(factor)))
+        kernel_size = layer_cfg.get("kernel_size", layer_cfg.get("factor", None))
+        if kernel_size is None:
+            raise ValueError("downsample layer requires `kernel_size` (or alias `factor`).")
+        return ("downsample", Downsample(int(kernel_size)))
 
     if name == "pixel_offsets":
         dx_path = _resolve_repo_path(layer_cfg.get("dx_path", None))
@@ -486,17 +486,17 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
 
     downsample_cfg = layer_map.get("downsample")
     if downsample_cfg is not None:
-        factor = downsample_cfg.get("factor", downsample_cfg.get("oversample", 1))
-        if factor is None:
-            factor = 1
+        kernel_size = downsample_cfg.get("kernel_size", downsample_cfg.get("factor", 1))
+        if kernel_size is None:
+            kernel_size = 1
         fields.append(
             ParamField(
-                key="detector.downsample.factor",
+                key="detector.downsample.kernel_size",
                 group="detector",
                 kind="primitive",
                 dtype=int,
                 shape=(),
-                default=int(factor),
+                default=int(kernel_size),
                 structural=False,
             )
         )
