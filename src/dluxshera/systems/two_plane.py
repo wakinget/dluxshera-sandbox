@@ -72,6 +72,9 @@ class SheraTwoPlaneConfig(BaseConfig):
     strut_rotation_deg: float = -45.0
     """Rotation angle of the spider pattern [degrees]."""
 
+    throughput: float = 1.0
+    """System throughput applied in forward modelling (unitless)."""
+
     # ------------------------------------------------------------------
     # Fixed plate scale (primitive for the two-plane model)
     # ------------------------------------------------------------------

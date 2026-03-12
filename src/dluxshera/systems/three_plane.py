@@ -137,6 +137,9 @@ class SheraThreePlaneConfig(BaseConfig):
     strut_rotation_deg: float = 0.0
     """Rotation angle of the spider pattern [degrees]."""
 
+    throughput: float = 1.0
+    """System throughput applied in forward modelling (unitless)."""
+
     # ------------------------------------------------------------------
     # Zernike basis selection (structure, not coefficients)
     # ------------------------------------------------------------------

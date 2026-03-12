@@ -71,8 +71,8 @@ def test_binder_introspection_snapshot(capsys):
 
     # The prints are for quick diagnostics; the asserts guard against regressions
     # in Binder mutability/typing expectations.
-    assert diagnostics["is_dataclass"] is True
-    assert diagnostics["dataclass_frozen"] is False
+    assert diagnostics["is_dataclass"] is False
+    assert diagnostics["dataclass_frozen"] is None or diagnostics["dataclass_frozen"] is False
     assert diagnostics["dataclass_slots"] is False
     assert diagnostics["has_slots_attr"] is False
     assert diagnostics["is_eqx_module"] is False

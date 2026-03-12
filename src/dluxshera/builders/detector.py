@@ -208,10 +208,15 @@ def _build_legacy_detector_layers(cfg, *, target_shape: tuple[int, int]):
 
 def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
     """Return a declarative layer config list derived from legacy flat fields."""
+    downsample_kernel = (
+        getattr(cfg, "kernel_size", None)
+        or getattr(cfg, "factor", None)
+        or getattr(cfg, "oversample", None)
+    )
     return [
         {
             "name": "downsample",
-            "kernel_size": getattr(cfg, "kernel_size", None),
+            "kernel_size": downsample_kernel,
         },
         {
             "name": "pixel_offsets",
@@ -551,10 +556,12 @@ def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
         psf_npix = int(cfg.psf_npix)
         target_shape = (psf_npix, psf_npix)
         layers = _build_legacy_detector_layers(cfg, target_shape=target_shape)
+        legacy_downsample = getattr(cfg, "oversample", None)
         layers_cfg_used = [
             {
                 "name": "downsample",
-                "factor": getattr(cfg, "oversample", None),
+                "kernel_size": legacy_downsample,
+                "factor": legacy_downsample,
             },
             {
                 "name": "pixel_offsets",

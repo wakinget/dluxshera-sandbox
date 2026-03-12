@@ -1,4 +1,5 @@
 import pytest
+import jax.numpy as jnp
 
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.transform_registry import DEFAULT_SYSTEM_ID
@@ -84,7 +85,7 @@ def test_structural_update_rebuilds_optics_when_allowed(monkeypatch, cfg):
     updated_binder = binder.update_store(updated_store, allow_rebuild=True)
 
     assert calls["count"] == 1
-    assert updated_binder.base_forward_store.get("system.m1_diameter_m") == pytest.approx(
+    assert updated_binder.base_forward_store.get("optics.m1_diameter_m") == pytest.approx(
         new_value
     )
 
@@ -127,4 +128,5 @@ def test_strip_structural_removes_only_structural_keys(cfg):
 
     assert structural_key not in stripped.keys()
     assert stripped.get(non_structural_key) == pytest.approx(base_non_structural)
-    assert delta.get(structural_key) == forward_store.get(structural_key)
+    # Original delta remains unchanged
+    assert jnp.all(delta.get(structural_key) == forward_store.get(structural_key))

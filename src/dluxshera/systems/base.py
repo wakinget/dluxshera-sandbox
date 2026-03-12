@@ -70,23 +70,23 @@ def compose_forward_spec(system_cfg) -> ParamSpec:
         "three_plane": SheraThreePlaneOptics.contract,
     }
 
-    try:
-        source_contract = source_contract_builders[source_kind](source_cfg)
-    except KeyError as exc:
+    source_builder = source_contract_builders.get(source_kind)
+    if source_builder is None:
         supported = ", ".join(sorted(source_contract_builders))
         raise ValueError(
             f"Unknown source kind {source_kind!r} when composing forward spec. "
             f"Supported source kinds: {supported}."
-        ) from exc
-
-    try:
-        optics_contract = optics_contract_builders[optics_kind](optics_cfg)
-    except KeyError as exc:
+        )
+    optics_builder = optics_contract_builders.get(optics_kind)
+    if optics_builder is None:
         supported = ", ".join(sorted(optics_contract_builders))
         raise ValueError(
             f"Unknown optics kind {optics_kind!r} when composing forward spec. "
             f"Supported optics kinds: {supported}."
-        ) from exc
+        )
+
+    source_contract = source_builder(source_cfg)
+    optics_contract = optics_builder(optics_cfg)
 
     detector_contract = build_detector_contract(detector_cfg)
 
@@ -913,6 +913,9 @@ class SheraBinder:
     @staticmethod
     def _values_equal(current_value: object, incoming_value: object) -> bool:
         """Return whether two values are equivalent for structural checks."""
+
+        if current_value is None and incoming_value is None:
+            return True
 
         try:
             return bool(
