@@ -113,6 +113,7 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             shape=(),
             default=10.0,
             structural=False,
+            binding="separation",
         ),
         ParamField(
             "source.position_angle_deg",
@@ -122,6 +123,7 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             shape=(),
             default=90.0,
             structural=False,
+            binding="position_angle",
         ),
         ParamField(
             "source.x_position_as",
@@ -131,6 +133,7 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             shape=(),
             default=0.0,
             structural=False,
+            binding="x_position",
         ),
         ParamField(
             "source.y_position_as",
@@ -140,6 +143,7 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             shape=(),
             default=0.0,
             structural=False,
+            binding="y_position",
         ),
         ParamField(
             "source.log_flux_total",
@@ -151,6 +155,7 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             structural=False,
             transform="source.log_flux_total",
             depends_on=log_flux_dependencies,
+            binding="log_flux",
         ),
         ParamField(
             "source.contrast",
