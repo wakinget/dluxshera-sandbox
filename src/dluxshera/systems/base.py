@@ -431,7 +431,7 @@ class SheraBinder:
         -----
         Subclasses should treat structural changes in ``store`` as requiring a
         rebuild. Non-structural keys that can be updated at runtime should be
-        surfaced via :meth:`_optics_runtime_bindings`.
+        surfaced via runtime binding pairs on the optics component.
         """
         from ..builders.optics import build_shera_threeplane_optics, build_shera_twoplane_optics
 
@@ -541,28 +541,22 @@ class SheraBinder:
         except KeyError as exc:
             raise ValueError(f"Unknown binder component: {component!r}") from exc
 
-    def _runtime_bindings_for_group(self, group: str) -> tuple[tuple[str, str], ...]:
-        """Return runtime bindings declared by ParamField metadata for a component."""
+    def _runtime_binding_pairs(self, component: str) -> tuple[tuple[str, str], ...]:
+        """
+        Return runtime binding pairs (store_key, runtime_path) for a component.
 
-        groups = set(self._group_names_for_component(group))
-        return tuple(
-            (field.key, field.binding)
-            for field in self.forward_spec.values()
-            if field.group in groups and field.binding is not None
-        )
-
-    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural optics keys."""
-
-        return self._runtime_bindings_for_group("optics")
-
-    def _source_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural source keys."""
-        return self._runtime_bindings_for_group("source")
-
-    def _detector_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural detector keys."""
-        return self._runtime_bindings_for_group("detector")
+        This is used by the runtime update/patch path and remains limited to
+        fields that explicitly declare ``binding`` metadata in the forward spec.
+        """
+        groups = set(self._group_names_for_component(component))
+        pairs: list[tuple[str, str]] = []
+        for field in self.forward_spec.values():
+            if field.binding is None:
+                continue
+            if field.group not in groups:
+                continue
+            pairs.append((field.key, field.binding))
+        return tuple(pairs)
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Compute a structural hash for the current configuration.
@@ -613,18 +607,18 @@ class SheraBinder:
         optics = optics_builder.apply_runtime_bindings(
             self.telescope.optics,
             store,
-            self._optics_runtime_bindings(),
+            self._runtime_binding_pairs("optics"),
         )
         source = source_builder.apply_runtime_bindings(
             self.telescope.source,
             store,
             cfg=self.cfg,
-            bindings=self._source_runtime_bindings(),
+            bindings=self._runtime_binding_pairs("source"),
         )
         detector = detector_builder.apply_runtime_bindings(
             self.telescope.detector,
             store,
-            self._detector_runtime_bindings(),
+            self._runtime_binding_pairs("detector"),
         )
         return dl.Telescope(source=source, optics=optics, detector=detector)
 
@@ -646,7 +640,7 @@ class SheraBinder:
             optics = optics_builder.apply_runtime_bindings(
                 self.telescope.optics,
                 store,
-                self._optics_runtime_bindings(),
+                self._runtime_binding_pairs("optics"),
             )
 
         if "source" in structural_components:
@@ -656,7 +650,7 @@ class SheraBinder:
                 self.telescope.source,
                 store,
                 cfg=self.cfg,
-                bindings=self._source_runtime_bindings(),
+                bindings=self._runtime_binding_pairs("source"),
             )
 
         if "detector" in structural_components:
@@ -667,7 +661,7 @@ class SheraBinder:
         detector = detector_builder.apply_runtime_bindings(
             detector,
             store,
-            self._detector_runtime_bindings(),
+            self._runtime_binding_pairs("detector"),
         )
 
         return dl.Telescope(source=source, optics=optics, detector=detector)
