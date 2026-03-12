@@ -33,7 +33,7 @@ We use “builder” for modules that *construct runtime objects* from
 
 - `builders/optics.py`: canonical optics builders + structural hashing + caching.
 - `builders/source.py`: Alpha Cen source assembly + runtime bindings.
-- `builders/detector.py`: detector layer composition (declarative `detector.layers` or legacy flat config), detector contracts, and runtime patching scope.
+- `builders/detector.py`: detector layer composition (declarative `detector.layers`), detector contracts, and runtime patching scope.
 
 ## Examples and tests
 

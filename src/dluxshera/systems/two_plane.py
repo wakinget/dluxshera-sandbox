@@ -27,6 +27,12 @@ class SheraTwoPlaneConfig(BaseConfig):
     design_name: Optional[str] = None
     """Human-readable identifier for this optical design."""
 
+    detector_model: Optional[str] = None
+    """Detector model selector used by the detector builder metadata lookup."""
+
+    detector_layers: Optional[list[dict[str, object]]] = None
+    """Declarative detector layer pipeline for the detector builder."""
+
     system: Optional[dict[str, Any]] = None
     """Optional nested system config (e.g. ``system.optics.kind`` dispatch hints)."""
 
@@ -106,6 +112,18 @@ class SheraTwoPlaneConfig(BaseConfig):
 
     dp_design_wavelength_m: Optional[float] = None
     """Design wavelength for the diffractive pupil mask [meters]."""
+
+    def __post_init__(self):
+        if self.detector_layers is None:
+            default_layers = [
+                {"name": "downsample", "kernel_size": int(self.oversample)},
+                {"name": "pixel_offsets"},
+                {"name": "pixel_response"},
+                {"name": "jitter", "sigma": 1e-12, "kernel_size": 3},
+            ]
+            object.__setattr__(self, "detector_layers", default_layers)
+        elif not isinstance(self.detector_layers, list):
+            object.__setattr__(self, "detector_layers", list(self.detector_layers))
 
 
 def build_forward_spec_from_config(cfg: SheraTwoPlaneConfig) -> ParamSpec:

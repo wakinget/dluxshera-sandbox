@@ -40,7 +40,11 @@ def test_base_binder_dispatch_threeplane_smoke(shera_smoke_cfg):
         system={
             "source": {"kind": "binary"},
             "optics": {"kind": "three_plane"},
-            "detector": {"kind": "layered"},
+            "detector": {
+                "kind": "layered",
+                "model": shera_smoke_cfg.detector_model,
+                "layers": shera_smoke_cfg.detector_layers,
+            },
         }
     )
     forward_spec, forward_store = make_forward_store(cfg)

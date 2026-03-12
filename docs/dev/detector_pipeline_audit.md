@@ -29,7 +29,6 @@ Inspected files include:
 ### Layer pipeline and ordering
 
 - Layers are **declarative**: `system.detector.layers` lists ordered layer configs (downsample, pixel_offsets, pixel_response, jitter supported today).
-- If `system.detector.layers` is omitted, the builder emits a warning and falls back to the legacy flat detector fields to build a compatible pipeline.
 - Each layer entry is converted via `build_detector_layer(name, layer_cfg, target_shape)`, and `target_shape` is derived from `system.optics.psf_npix`.
 
 ### Config keys currently read for detector construction
@@ -37,15 +36,11 @@ Inspected files include:
 - Preferred path: nested detector block (`system.detector`), including:
   - `model` (metadata/spec selection)
   - `layers` (ordered detector pipeline)
-- Legacy compatibility path:
-  - flat fields such as `psf_npix`, `oversample`, `ppu_dx_path`, `ppu_dy_path`, `prf_path`, `jitter_sigma`, `jitter_kernel_size`, `detector_model`
-- The builder normalizes both shapes via `_normalize_detector_cfg`, so either nested or legacy flat configs work, but `system.detector.layers` is the intended surface going forward.
+- The builder normalizes nested detector blocks via `_normalize_detector_cfg`; declarative `system.detector.layers` is required.
 
 ### Config declarations in dataclasses
 
-- `SheraThreePlaneConfig` includes `detector_model` as an explicit dataclass field.
-- `SheraTwoPlaneConfig` does **not** explicitly declare detector fields (including `detector_model`).
-- Because the detector builder uses `getattr`, two-plane can still run with builder defaults as long as `psf_npix` and `oversample` exist.
+- `SheraThreePlaneConfig` and `SheraTwoPlaneConfig` include `detector_model` and `detector_layers` fields; defaults seed the declarative detector pipeline directly.
 
 ---
 

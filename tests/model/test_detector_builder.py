@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import jax
 import numpy as np
 import pytest
@@ -9,10 +7,21 @@ from dluxshera.components.detectors import GSENSE2020BSI_SPEC, HWK4123_SPEC, She
 
 
 def test_build_detector_has_explicit_v1_layer_order():
-    cfg = SimpleNamespace(psf_npix=8, oversample=2)
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 8},
+            "detector": {
+                "layers": [
+                    {"name": "downsample", "kernel_size": 2},
+                    {"name": "pixel_offsets"},
+                    {"name": "pixel_response"},
+                    {"name": "jitter"},
+                ]
+            },
+        }
+    }
 
-    with pytest.warns(UserWarning, match="legacy flat detector config"):
-        detector, _contract = build_detector(cfg)
+    detector, _contract = build_detector(cfg)
 
     assert list(detector.layers.keys()) == [
         "downsample",
@@ -30,12 +39,16 @@ def test_build_detector_conditions_larger_maps_with_center_crop_and_warns(tmp_pa
     np.save(dx_path, dx)
     np.save(dy_path, dy)
 
-    cfg = SimpleNamespace(
-        psf_npix=4,
-        oversample=1,
-        ppu_dx_path=str(dx_path),
-        ppu_dy_path=str(dy_path),
-    )
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 4},
+            "detector": {
+                "layers": [
+                    {"name": "pixel_offsets", "dx_path": str(dx_path), "dy_path": str(dy_path)},
+                ]
+            },
+        }
+    }
 
     with pytest.warns(UserWarning, match="policy center-crop"):
         detector, _contract = build_detector(cfg)
@@ -52,12 +65,16 @@ def test_build_detector_conditions_smaller_maps_with_reflect_pad_and_warns(tmp_p
     np.save(dx_path, dx)
     np.save(dy_path, dy)
 
-    cfg = SimpleNamespace(
-        psf_npix=4,
-        oversample=1,
-        ppu_dx_path=str(dx_path),
-        ppu_dy_path=str(dy_path),
-    )
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 4},
+            "detector": {
+                "layers": [
+                    {"name": "pixel_offsets", "dx_path": str(dx_path), "dy_path": str(dy_path)},
+                ]
+            },
+        }
+    }
 
     with pytest.warns(UserWarning, match=r"policy center-pad\+reflect"):
         detector, _contract = build_detector(cfg)
@@ -67,10 +84,14 @@ def test_build_detector_conditions_smaller_maps_with_reflect_pad_and_warns(tmp_p
 
 
 def test_build_detector_uses_zero_offset_maps_when_unset():
-    cfg = SimpleNamespace(psf_npix=6, oversample=1)
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 6},
+            "detector": {"layers": [{"name": "pixel_offsets"}]},
+        }
+    }
 
-    with pytest.warns(UserWarning, match="legacy flat detector config"):
-        detector, _contract = build_detector(cfg)
+    detector, _contract = build_detector(cfg)
 
     dx = detector.layers["pixel_offsets"].dx_map
     dy = detector.layers["pixel_offsets"].dy_map
@@ -81,10 +102,20 @@ def test_build_detector_uses_zero_offset_maps_when_unset():
 
 
 def test_build_detector_returns_shera_detector_with_spec_access():
-    cfg = SimpleNamespace(psf_npix=8, oversample=1, detector_model="HWK4123")
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 8},
+            "detector": {
+                "model": "HWK4123",
+                "layers": [
+                    {"name": "downsample", "kernel_size": 1},
+                    {"name": "jitter"},
+                ],
+            },
+        }
+    }
 
-    with pytest.warns(UserWarning, match="legacy flat detector config"):
-        detector, _contract = build_detector(cfg)
+    detector, _contract = build_detector(cfg)
 
     assert isinstance(detector, SheraDetector)
     assert detector.spec == HWK4123_SPEC
@@ -92,10 +123,20 @@ def test_build_detector_returns_shera_detector_with_spec_access():
 
 
 def test_detector_spec_is_not_part_of_pytree_leaves():
-    cfg = SimpleNamespace(psf_npix=8, oversample=1, detector_model="GSENSE2020BSI")
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 8},
+            "detector": {
+                "model": "GSENSE2020BSI",
+                "layers": [
+                    {"name": "downsample", "kernel_size": 1},
+                    {"name": "pixel_response"},
+                ],
+            },
+        }
+    }
 
-    with pytest.warns(UserWarning, match="legacy flat detector config"):
-        detector, _contract = build_detector(cfg)
+    detector, _contract = build_detector(cfg)
 
     leaves = jax.tree_util.tree_leaves(detector)
     assert detector.spec == GSENSE2020BSI_SPEC
@@ -103,7 +144,15 @@ def test_detector_spec_is_not_part_of_pytree_leaves():
 
 
 def test_build_detector_rejects_unknown_model_name():
-    cfg = SimpleNamespace(psf_npix=8, oversample=1, detector_model="UNKNOWN")
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 8},
+            "detector": {
+                "model": "UNKNOWN",
+                "layers": [{"name": "downsample", "kernel_size": 1}],
+            },
+        }
+    }
 
     with pytest.raises(ValueError, match="Unknown detector_model"):
         build_detector(cfg)

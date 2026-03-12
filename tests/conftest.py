@@ -66,6 +66,12 @@ def shera_smoke_cfg():
         psf_npix=128,
         oversample=2,
         n_lambda=2,
+        detector_layers=[
+            {"name": "downsample", "kernel_size": 2},
+            {"name": "pixel_offsets"},
+            {"name": "pixel_response"},
+            {"name": "jitter"},
+        ],
     )
 
 

@@ -1,10 +1,10 @@
 """Detector builder responsibilities (detector assembly and runtime wiring).
 
-This module translates user/configured detector blocks into runtime detector
+This module translates declarative detector blocks into runtime detector
 objects. It owns:
-  - config shape normalization (supporting both modern declarative and legacy flat layouts)
+  - config shape normalization for declarative detector blocks
   - calibration/path resolution for detector maps
-  - detector-layer construction (both declarative and legacy)
+  - detector-layer construction from declarative layers
   - detector contract construction (ParamSpec)
   - lightweight runtime patching for detector jitters/bindings
 """
@@ -153,7 +153,11 @@ _REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 
 
 def _resolve_repo_path(path: str | Path | None) -> Path | None:
-    """Resolve a path that may be repo-root-relative."""
+    """Resolve a path that may be repo-root-relative.
+
+    Kept local to the detector builder because calibration maps are detector-
+    specific assets rather than general config I/O.
+    """
     if path is None:
         return None
     p = Path(path).expanduser()
@@ -163,7 +167,7 @@ def _resolve_repo_path(path: str | Path | None) -> Path | None:
 
 
 def _load_array(path: Path) -> jnp.ndarray:
-    """Load a calibration array from .npy or .npz."""
+    """Load a detector calibration array from .npy or .npz."""
     if path.suffix == ".npy":
         arr = np.load(path)
         return jnp.asarray(arr, dtype=float)
@@ -180,91 +184,8 @@ def _load_array(path: Path) -> jnp.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Map conditioning (shared by legacy + declarative paths)
+# Map conditioning (shared by declarative layers)
 # ---------------------------------------------------------------------------
-
-def _build_legacy_detector_layers(cfg, *, target_shape: tuple[int, int]):
-    """Build detector layers from flat legacy detector config fields.
-
-    Legacy configs supply individual fields like ``ppu_dx_path`` rather than
-    a modern ``detector.layers`` list. This helper translates those flat fields
-    into runtime layer objects.
-    """
-    ppu_dx_path = _resolve_repo_path(getattr(cfg, "ppu_dx_path", None))
-    ppu_dy_path = _resolve_repo_path(getattr(cfg, "ppu_dy_path", None))
-    interp_method = getattr(cfg, "ppu_interp_method", "cubic2")
-
-    dx_map_raw = _load_array(ppu_dx_path) if ppu_dx_path is not None else None
-    dy_map_raw = _load_array(ppu_dy_path) if ppu_dy_path is not None else None
-
-    if dx_map_raw is None:
-        dx_map_raw = jnp.zeros(target_shape, dtype=float)
-    if dy_map_raw is None:
-        dy_map_raw = jnp.zeros(target_shape, dtype=float)
-
-    dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
-    dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
-
-    prf_path = _resolve_repo_path(getattr(cfg, "prf_path", None))
-    if prf_path is None:
-        pixel_response_raw = jnp.ones(target_shape, dtype=float)
-    else:
-        pixel_response_raw = _load_array(prf_path)
-
-    pixel_response = _condition_detector_map(
-        pixel_response_raw, map_name="pixel_response", target_shape=target_shape
-    )
-
-    jitter_sigma = float(getattr(cfg, "jitter_sigma", 1e-12))
-    jitter_kernel = int(getattr(cfg, "jitter_kernel_size", 3))
-
-    return [
-        ("downsample", Downsample(cfg.oversample)),
-        (
-            "pixel_offsets",
-            ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method),
-        ),
-        ("pixel_response", ApplyPixelResponse(pixel_response)),
-        ("jitter", ApplyJitter(sigma=jitter_sigma, kernel_size=jitter_kernel)),
-    ]
-
-
-def _legacy_layers_cfg_from_cfg(cfg) -> list[Mapping[str, object]]:
-    """Return a declarative layer config list derived from legacy flat fields.
-
-    This produces a ``detector.layers``-style structure from legacy flat
-    detector config attributes so that downstream contract logic can treat
-    legacy and declarative shapes uniformly.
-    """
-    downsample_kernel = (
-        getattr(cfg, "kernel_size", None)
-        or getattr(cfg, "factor", None)
-        or getattr(cfg, "oversample", None)
-    )
-    return [
-        {
-            "name": "downsample",
-            "kernel_size": downsample_kernel,
-            "factor": downsample_kernel,
-        },
-        {
-            "name": "pixel_offsets",
-            "dx_path": getattr(cfg, "ppu_dx_path", None),
-            "dy_path": getattr(cfg, "ppu_dy_path", None),
-            "interp_method": getattr(cfg, "ppu_interp_method", "cubic2"),
-        },
-        {
-            "name": "pixel_response",
-            "prf_path": getattr(cfg, "prf_path", None),
-        },
-        {
-            "name": "jitter",
-            "sigma": float(getattr(cfg, "jitter_sigma", 1e-12)),
-            "kernel_size": int(getattr(cfg, "jitter_kernel_size", 3)),
-        },
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Layer construction helpers
 # ---------------------------------------------------------------------------
@@ -337,36 +258,65 @@ def build_detector_layer(
 
 
 def _normalize_detector_cfg(detector_cfg) -> Mapping:
-    """Return the detector block mapping from various wrapper shapes.
+    """Return the detector block mapping from supported wrapper shapes.
 
     Accepts:
-      - already-normalized detector mappings
-      - system-level mappings containing a detector block
-      - config objects (dataclasses) with detector fields
+      - a detector mapping
+      - a mapping with top-level ``system`` containing a detector mapping
+      - config objects exposing ``detector_layers`` / ``detector_model`` attributes
 
-    The goal is to present a uniform mapping with ``model`` and ``layers``
-    entries to the rest of the builder.
+    Raises
+    ------
+    ValueError
+        If no detector block can be found.
     """
 
     if isinstance(detector_cfg, Mapping):
-        if "detector" in detector_cfg and isinstance(detector_cfg["detector"], Mapping):
-            return detector_cfg["detector"]
-        if (
-            "system" in detector_cfg
-            and isinstance(detector_cfg["system"], Mapping)
-            and isinstance(detector_cfg["system"].get("detector"), Mapping)
-        ):
-            return detector_cfg["system"]["detector"]
+        if "detector" in detector_cfg:
+            detector_block = detector_cfg["detector"]
+            if not isinstance(detector_block, Mapping):
+                raise ValueError("system.detector must be a mapping/dict.")
+            return detector_block
+        if "system" in detector_cfg:
+            system_block = detector_cfg["system"]
+            if not isinstance(system_block, Mapping):
+                raise ValueError("system must be a mapping/dict.")
+            detector_block = system_block.get("detector", None)
+            if detector_block is None:
+                raise ValueError("system.detector is required for detector construction.")
+            if not isinstance(detector_block, Mapping):
+                raise ValueError("system.detector must be a mapping/dict.")
+            return detector_block
         return detector_cfg
 
     candidate = _cfg_get(detector_cfg, "system.detector", default=None)
-    if isinstance(candidate, Mapping):
+    if candidate is not None:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("system.detector must be a mapping/dict.")
         return candidate
 
-    return {
-        "model": getattr(detector_cfg, "detector_model", None),
-        "layers": _legacy_layers_cfg_from_cfg(detector_cfg),
-    }
+    layers = getattr(detector_cfg, "detector_layers", None)
+    model = getattr(detector_cfg, "detector_model", None)
+    if layers is None:
+        raise ValueError("Detector config must provide system.detector.layers in declarative form.")
+    return {"model": model, "layers": layers}
+
+
+def _validate_layers_cfg(layers_cfg: object) -> list[Mapping]:
+    """Validate and return the declarative detector layer list."""
+    if layers_cfg is None:
+        raise ValueError("system.detector.layers is required for detector construction.")
+    if not isinstance(layers_cfg, list):
+        raise ValueError("system.detector.layers must be a list of layer dictionaries.")
+
+    validated: list[Mapping] = []
+    for idx, layer in enumerate(layers_cfg):
+        if not isinstance(layer, Mapping):
+            raise ValueError(f"system.detector.layers[{idx}] must be a mapping/dict.")
+        if "name" not in layer:
+            raise ValueError(f"Missing required config key: system.detector.layers[{idx}].name")
+        validated.append(layer)
+    return validated
 
 
 def build_detector_contract(detector_cfg) -> ParamSpec:
@@ -436,12 +386,8 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
         ),
     ]
 
-    layers_cfg = cfg.get("layers", None) if isinstance(cfg, Mapping) else None
-    layer_map: dict[str, Mapping] = {}
-    if isinstance(layers_cfg, list):
-        for layer in layers_cfg:
-            if isinstance(layer, Mapping) and "name" in layer:
-                layer_map[layer["name"]] = layer
+    layers_cfg = _validate_layers_cfg(cfg.get("layers", None) if isinstance(cfg, Mapping) else None)
+    layer_map: dict[str, Mapping] = {layer["name"]: layer for layer in layers_cfg}
 
     def _path_default(raw):
         resolved = _resolve_repo_path(raw)
@@ -560,71 +506,36 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
 def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
     """Construct the baseline detector for a Shera system.
 
-    Accepts either a declarative ``detector.layers`` config or legacy flat
-    detector fields on the system config; both paths converge to the same
-    runtime detector and contract.
+    Requires a declarative ``system.detector.layers`` config. No legacy flat
+    detector fields are supported.
     """
     detector_cfg_block = _normalize_detector_cfg(cfg)
+    if not isinstance(detector_cfg_block, Mapping):
+        raise ValueError("Detector config must resolve to a mapping/dict.")
 
-    detector_layers_cfg = None
-    if isinstance(detector_cfg_block, Mapping):
-        detector_layers_cfg = detector_cfg_block.get("layers", None)
-    if detector_layers_cfg is None:
-        detector_layers_cfg = _cfg_get(cfg, "system.detector.layers", default=None)
+    detector_layers_cfg = _validate_layers_cfg(detector_cfg_block.get("layers", None))
 
-    spec_source = detector_cfg_block if detector_cfg_block is not None else cfg
-    spec = _resolve_detector_spec(spec_source)
+    psf_npix = None
+    if isinstance(cfg, Mapping):
+        optics_block = cfg.get("optics", None)
+        if isinstance(optics_block, Mapping):
+            psf_npix = optics_block.get("psf_npix", None)
+    if psf_npix is None:
+        psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
+    if psf_npix is None:
+        psf_npix = getattr(cfg, "psf_npix", None)
+    if psf_npix is None:
+        raise ValueError("system.optics.psf_npix is required to build the detector.")
 
-    layers_cfg_used = detector_layers_cfg
+    target_shape = (int(psf_npix), int(psf_npix))
+    layers = [
+        build_detector_layer(layer_cfg["name"], layer_cfg, target_shape=target_shape)
+        for layer_cfg in detector_layers_cfg
+    ]
 
-    if detector_layers_cfg is not None:
-        layers = []
-        if detector_layers_cfg:
-            psf_npix = None
-            if isinstance(cfg, Mapping):
-                optics_block = cfg.get("optics", None)
-                if isinstance(optics_block, Mapping):
-                    psf_npix = optics_block.get("psf_npix", None)
-            if psf_npix is None:
-                psf_npix = _cfg_get(cfg, "system.optics.psf_npix", default=None)
-            if psf_npix is None:
-                psf_npix = getattr(cfg, "psf_npix", None)
-            if psf_npix is None:
-                raise ValueError(
-                    "Cannot build detector from system.detector.layers: missing system.optics.psf_npix."
-                )
-
-            target_shape = (int(psf_npix), int(psf_npix))
-            for layer_cfg in detector_layers_cfg:
-                name = layer_cfg.get("name", None)
-                if name is None:
-                    raise ValueError("Each detector layer entry must define a `name` field.")
-                layers.append(build_detector_layer(name, layer_cfg, target_shape=target_shape))
-    else:
-        warnings.warn(
-            "system.detector.layers not provided; building detector from legacy flat detector config.",
-            UserWarning,
-            stacklevel=2,
-        )
-        psf_npix = int(cfg.psf_npix)
-        target_shape = (psf_npix, psf_npix)
-        layers = _build_legacy_detector_layers(cfg, target_shape=target_shape)
-        layers_cfg_used = _legacy_layers_cfg_from_cfg(cfg)
+    spec = _resolve_detector_spec(detector_cfg_block)
 
     detector = SheraDetector(layers=layers, spec=spec)
-    if not isinstance(detector_cfg_block, Mapping):
-        detector_cfg_block = {}
-    if layers_cfg_used is not None:
-        detector_cfg_block.setdefault("layers", layers_cfg_used)
-    model_value = None
-    if isinstance(detector_cfg_block, Mapping):
-        model_value = detector_cfg_block.get("model", None)
-    if model_value is None:
-        model_value = _cfg_get(cfg, "system.detector.model", default=None)
-    if model_value is None:
-        model_value = getattr(cfg, "detector_model", None)
-    if model_value is not None:
-        detector_cfg_block.setdefault("model", model_value)
     detector_contract = build_detector_contract(detector_cfg_block)
     return detector, detector_contract
 
