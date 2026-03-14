@@ -1,0 +1,141 @@
+system:
+  preset: SHERA_TESTBED_3P
+  # Optional overrides (just one example)
+  source:
+    x_position_as: 0.0
+    y_position_as: 0.0
+    position_angle_deg: 90.0
+    separation_as: 10.0
+    contrast: 3.0
+    exposure_time_s: 1800.0
+  optics:
+    primary:
+      noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+      zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+    secondary:
+      noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+      zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+  detector:
+    model: GSENSE2020BSI
+    layers:
+      - name: downsample
+        kernel_size: 3
+      - name: pixel_offsets
+        dx_path: data/pixel_offsets/DX_CAL_YYYYmmDD.npy
+        dy_path: data/pixel_offsets/DY_CAL_YYYYmmDD.npy
+      - name: pixel_response
+        prf_path: data/pixel_response/PRF_CAL_YYYYmmDD.npy
+
+experiment:
+  kind: prescribed_mc
+  notes: "Astrometry Monte Carlo with optional data/inference mismatch."
+  seed: 42
+
+  monte_carlo:
+    n_runs: 5
+    run_id_prefix: mc
+    results_filename: results.csv
+    results_orientation: col    # col | row
+    plan_csv: examples/recipes/prescribed_mc_template/run_plan.csv
+    reuse_fim: false
+
+  optimizer:
+    kind: sgd   # sgd | adam
+    loss: map   # map | nll
+    n_iter: 40
+    base_lr: 0.5
+    kwargs: {} # Additional kwargs for optimizer.
+    # sgd: {momentum: 0.1, nesterov: true}
+    # adam: {"b1": 0.9, "b2": 0.999, "eps": 1e-8}
+
+  eigenmodes:
+    enable: true
+    whiten: true
+    truncate_k: null
+    truncate_by_eigval: null
+
+  # Optional alternate system used only by the inference model.
+  # If omitted, inference should inherit the resolved top-level system.
+  inference_system:
+    preset: SHERA_TESTBED_3P
+    detector:
+      model: GSENSE2020BSI
+      layers:
+        - name: downsample
+          kernel_size: 3
+        - name: pixel_offsets
+          dx_path: data/pixel_offsets/DX_CAL_YYYYmmDD.npy
+          dy_path: data/pixel_offsets/DY_CAL_YYYYmmDD.npy
+          knowledge_error:
+            model: gaussian # gaussian | uniform
+            rms: 1e-3
+        - name: pixel_response
+          prf_path: data/pixel_response/PRF_CAL_YYYYmmDD.npy
+          knowledge_error:
+            model: gaussian
+            scale: 1e-3
+
+  infer_keys:
+    - source.separation_as
+    - source.position_angle_deg
+    - source.x_position_as
+    - source.y_position_as
+    - source.log_flux_total
+    - source.contrast
+    - optics.plate_scale_as_per_pix
+    - optics.primary.zernike_coeffs_nm
+    - optics.secondary.zernike_coeffs_nm
+
+  noise:
+    enabled: true
+    photon_noise: true
+    read_noise: false
+    dark_current: false
+
+  outputs:
+    outdir: null
+    plots: true
+    save_results: true
+
+  init:
+    sampling: prior # prior | explicit
+    # prior: Initial model sampled with priors around truth.
+    # explicit: Initial model uses explicit values below, any omitted values default to truth.
+#    source.separation_as: 10.0
+#    source.position_angle_deg: 90.0
+#    source.x_position_as: 0.0
+#    source.y_position_as: 0.0
+#    source.exposure_time_s: 1800.0
+#    source.contrast: 3.0
+#    optics.plate_scale_as_per_pix: 0.355
+#    optics.primary.zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+#    optics.secondary.zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+
+  priors:
+    source.separation_as:
+      dist: Normal
+      sigma: 1.0e-4
+    source.position_angle_deg:
+      dist: Uniform
+      sigma: 1.0e-2
+    source.x_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.y_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.log_flux_total:
+      dist: LogNormal
+      sigma: 1.0e-3
+    source.contrast:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.plate_scale_as_per_pix:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.primary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
+    optics.secondary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
