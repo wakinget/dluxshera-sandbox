@@ -97,9 +97,9 @@ from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "examples/recipes/prescription_templates/prescription.yaml"
+    "examples/recipes/prescribed_mc_template/prescription.yaml"
 )
-DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
+DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescribed_mc_template/run_plan.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 
@@ -397,7 +397,7 @@ def _apply_experiment_n_runs(
         if plan_runs == 0:
             raise ValueError(
                 "Unable to resolve run count: experiment.prescribed_mc.n_runs is not set and "
-                "overrides.csv defines 0 runs."
+                "run_plan.csv defines 0 runs."
             )
         return (
             plan_rows_copy,
@@ -470,7 +470,7 @@ def _detect_prescription_overrides_candidates(
         overrides_candidates = sorted(
             (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
             key=lambda candidate: (
-                candidate.name.lower() != "overrides.csv",
+                candidate.name.lower() != "run_plan.csv",
                 candidate.name.lower() == "overrides_wide.csv",
                 str(candidate),
             ),

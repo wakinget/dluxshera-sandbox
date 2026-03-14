@@ -31,23 +31,23 @@ python examples/recipes/prescribed_monte_carlo.py --dry-run
 Explicit files:
 ```bash
 python examples/recipes/prescribed_monte_carlo.py \
-  --prescription examples/recipes/prescription_templates/prescription.yaml \
-  --overrides examples/recipes/prescription_templates/overrides.csv \
+  --prescription examples/recipes/prescribed_mc_template/prescription.yaml \
+  --overrides examples/recipes/prescribed_mc_template/run_plan.csv \
   --dry-run
 ```
 
 Run for real:
 ```bash
 python examples/recipes/prescribed_monte_carlo.py \
-  --prescription examples/recipes/prescription_templates/prescription.yaml \
-  --overrides examples/recipes/prescription_templates/overrides.csv \
+  --prescription examples/recipes/prescribed_mc_template/prescription.yaml \
+  --overrides examples/recipes/prescribed_mc_template/run_plan.csv \
   --outdir Results/my_experiment
 ```
 
 ## Create your own experiment
 1. Copy the templates:
    ```bash
-   cp -R examples/recipes/prescription_templates Results/my_experiment
+   cp -R examples/recipes/prescribed_mc_template Results/my_experiment
    ```
 2. Edit `prescription.yaml`:
    - Set `system.preset` or inline your system block.
