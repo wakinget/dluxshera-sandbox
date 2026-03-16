@@ -26,6 +26,7 @@ from ..components.detectors import (
 from ..params.spec import ParamField, ParamSpec
 from ..layers.detector_layers import ApplyPixelOffsets
 from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse, Downsample
+from ..utils.noise import apply_knowledge_error
 
 
 # Runtime bindings for detectors are currently empty; detector runtime updates are
@@ -195,6 +196,7 @@ def build_detector_layer(
     layer_cfg: Mapping,
     *,
     target_shape: tuple[int, int],
+    base_seed: int | None = None,
 ) -> tuple[str, object]:
     """Build a detector layer from declarative layer config."""
     if name == "downsample":
@@ -232,6 +234,21 @@ def build_detector_layer(
 
         dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
         dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
+
+        knowledge_error = layer_cfg.get("knowledge_error", None)
+        if knowledge_error:
+            dx_map, _ = apply_knowledge_error(
+                dx_map,
+                knowledge_cfg=knowledge_error,
+                base_seed=base_seed,
+                token=f"{name}.dx",
+            )
+            dy_map, _ = apply_knowledge_error(
+                dy_map,
+                knowledge_cfg=knowledge_error,
+                base_seed=base_seed,
+                token=f"{name}.dy",
+            )
         return (
             "pixel_offsets",
             ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method),
@@ -247,6 +264,14 @@ def build_detector_layer(
         pixel_response = _condition_detector_map(
             pixel_response_raw, map_name="pixel_response", target_shape=target_shape
         )
+        knowledge_error = layer_cfg.get("knowledge_error", None)
+        if knowledge_error:
+            pixel_response, _ = apply_knowledge_error(
+                pixel_response,
+                knowledge_cfg=knowledge_error,
+                base_seed=base_seed,
+                token=f"{name}.prf",
+            )
         return ("pixel_response", ApplyPixelResponse(pixel_response))
 
     if name == "jitter":
@@ -504,7 +529,7 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
 # ---------------------------------------------------------------------------
 # Public builder entry points
 # ---------------------------------------------------------------------------
-def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
+def build_detector(cfg, *, base_seed: int | None = None) -> tuple[SheraDetector, ParamSpec]:
     """Construct the baseline detector for a Shera system.
 
     Requires a declarative ``system.detector.layers`` config. No legacy flat
@@ -530,7 +555,12 @@ def build_detector(cfg) -> tuple[SheraDetector, ParamSpec]:
 
     target_shape = (int(psf_npix), int(psf_npix))
     layers = [
-        build_detector_layer(layer_cfg["name"], layer_cfg, target_shape=target_shape)
+        build_detector_layer(
+            layer_cfg["name"],
+            layer_cfg,
+            target_shape=target_shape,
+            base_seed=base_seed,
+        )
         for layer_cfg in detector_layers_cfg
     ]
 

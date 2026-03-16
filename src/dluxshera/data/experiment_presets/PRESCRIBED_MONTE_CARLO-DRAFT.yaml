@@ -68,7 +68,7 @@ experiment:
           dy_path: data/pixel_offsets/DY_CAL_YYYYmmDD.npy
           knowledge_error:
             model: gaussian # gaussian | uniform
-            rms: 1e-3
+            scale: 1e-3
         - name: pixel_response
           prf_path: data/pixel_response/PRF_CAL_YYYYmmDD.npy
           knowledge_error:
