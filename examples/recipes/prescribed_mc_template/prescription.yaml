@@ -2,7 +2,31 @@ system:
   preset: SHERA_TESTBED_3P
 
 experiment:
+  kind: prescribed_mc
   notes: "Experiment-level notes. Briefly describe the experiment."
+  seed: 42
+
+  monte_carlo:
+    n_runs: 5
+    run_id_prefix: mc
+    results_filename: results.csv
+    results_orientation: col  # col | row
+    # run_plan resolves relative to *this* file.
+    run_plan: run_plan.csv
+    reuse_fim: false
+
+  optimizer:
+    kind: sgd       # sgd | adam
+    kwargs: {}
+    n_iter: 50
+    base_lr: 0.5
+    loss: map       # nll | map
+
+  eigenmodes:
+    enable: true
+    whiten: true
+    truncate_k: null
+    truncate_by_eigval: null
 
   infer_keys:
     - source.separation_as
@@ -14,6 +38,31 @@ experiment:
     - optics.plate_scale_as_per_pix
     - optics.primary.zernike_coeffs_nm
     - optics.secondary.zernike_coeffs_nm
+
+  noise:
+    enabled: false
+    photon_noise: true
+    read_noise: false
+    dark_current: false
+
+  outputs:
+    outdir: null
+    plots: true
+    save_results: true
+
+  init:
+    sampling: prior     # prior | explicit
+    # prior: Initial model sampled with priors around truth.
+    # explicit: Initial model uses explicit values below, any omitted values default to truth.
+    # source.separation_as: 10.0
+    # source.position_angle_deg: 90.0
+    # source.x_position_as: 0.0
+    # source.y_position_as: 0.0
+    # source.exposure_time_s: 1800.0
+    # source.contrast: 3.0
+    # optics.plate_scale_as_per_pix: 0.355
+    # optics.primary.zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+    # optics.secondary.zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
 
   priors:
     source.separation_as:
@@ -43,51 +92,3 @@ experiment:
     optics.secondary.zernike_coeffs_nm:
       dist: Normal
       sigma: 1.0
-
-  prescribed_mc:
-    n_runs: 5
-    run_id_prefix: mc
-    results_filename: results.csv
-    results_orientation: col  # col | row
-
-    defaults:
-      seed: 42
-
-      optimizer:
-        kind: sgd       # sgd | adam
-        kwargs: {}
-        n_iter: 50
-        base_lr: 0.5
-        loss: map       # nll | map
-
-      eigen:
-        use_eigen: true
-        whiten_basis: true
-        truncate_k: null
-        truncate_by_eigval: null
-
-      init:
-        mode: prior     # prior | explicit
-
-      noise:
-        add_noise: true
-
-      fim:
-        reuse_fim: false
-
-      outputs:
-        plots: true
-
-      truth:
-        source:
-          x_position_as: 0.0
-          y_position_as: 0.0
-          position_angle_deg: 90.0
-          separation_as: 10.0
-          contrast: 3.0
-          exposure_time_s: 1800.0
-        optics:
-          primary:
-            zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
-          secondary:
-            zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
