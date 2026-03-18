@@ -33,6 +33,16 @@ Outputs live under the experiment directory:
 - The same general rule applies to other list-valued fields: mappings merge, lists replace.
 - If `experiment.monte_carlo.run_plan` is a relative path, it resolves relative to `prescription.yaml`, not the repo root.
 
+## Data Vs Inference Systems
+- By default, the script uses the resolved top-level `system` both to generate synthetic data and to run inference. This is the no-mismatch case.
+- You can provide `experiment.inference_system` when you want the inference model to differ from the data-generating model.
+- If `experiment.inference_system` is omitted entirely, the script copies the fully resolved top-level `system` and uses that for inference.
+- If `experiment.inference_system` is present, it resolves as its own system block. It does not inherit missing fields from the top-level `system`.
+- If `experiment.inference_system.preset` is set, omitted mapping fields inside `inference_system` fall back to that preset's values.
+- If `experiment.inference_system` is present without its own `preset`, it must be complete enough to resolve as a standalone system.
+- The same merge rules apply inside `inference_system` as for the top-level `system`: mappings merge, lists replace.
+- This is useful for model-mismatch studies such as using different Noll index sets in the optics model, or using different detector calibration maps or detector-layer knowledge errors during inference.
+
 ## Outdir Resolution
 - The experiment root is resolved in this order: `--outdir`, then `experiment.outputs.outdir`, then `--run-name`, then the default timestamped `Results/prescribed_mc_<timestamp>`.
 - If `experiment.outputs.outdir` is a relative path, it resolves relative to `prescription.yaml`, not the repo root.
@@ -86,6 +96,7 @@ python examples/recipes/prescribed_monte_carlo.py \
    ```
 2. Edit `prescription.yaml`:
    - Set `system.preset` or inline your system block.
+   - Add `experiment.inference_system` only if you want the inference model to differ from the data-generating system.
    - Fill `experiment.infer_keys` and `experiment.priors`.
    - Tweak `experiment.monte_carlo`, `optimizer`, `eigenmodes`, `noise`, `outputs`, and `init`.
    - Keep `experiment.monte_carlo.run_plan: run_plan.csv` if you want to use the bundled plan template.
