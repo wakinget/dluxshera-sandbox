@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -5,6 +6,7 @@ pytest.importorskip("interpax")
 
 from dLux.psfs import PSF
 
+from dluxshera.builders.detector import build_detector_layer
 from dluxshera.layers.detector_layers import ApplyPixelOffsets
 
 
@@ -100,3 +102,38 @@ def test_apply_pixel_offsets_subpixel_linear_shift_matches_expected_ramp():
 
     expected = jnp.clip(x + 0.5, 0.0, width - 1.0)
     assert jnp.allclose(out.data, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_apply_pixel_offsets_default_interp_is_cubic():
+    image = _gaussian_image()
+    layer = ApplyPixelOffsets(dx_map=jnp.zeros_like(image), dy_map=jnp.zeros_like(image))
+    assert layer.interp_method == "cubic"
+
+
+def test_apply_pixel_offsets_grad_stable_for_cubic_identity():
+    image = _gaussian_image()
+    layer = ApplyPixelOffsets(
+        dx_map=jnp.zeros_like(image),
+        dy_map=jnp.zeros_like(image),
+        interp_method="cubic",
+    )
+
+    def loss(img):
+        psf = PSF(data=img, pixel_scale=1.0)
+        out = layer.apply(psf)
+        return jnp.sum(out.data ** 2)
+
+    grad = jax.grad(loss)(image)
+    assert jnp.isfinite(grad).all()
+
+
+def test_build_detector_layer_pixel_offsets_default_interp_is_cubic():
+    layer_name, layer_obj = build_detector_layer(
+        "pixel_offsets",
+        {"name": "pixel_offsets"},
+        target_shape=(5, 5),
+        base_seed=None,
+    )
+    assert layer_name == "pixel_offsets"
+    assert isinstance(layer_obj, ApplyPixelOffsets)
+    assert layer_obj.interp_method == "cubic"
