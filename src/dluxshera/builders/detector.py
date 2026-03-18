@@ -171,12 +171,24 @@ def _resolve_repo_path(path: str | Path | None) -> Path | None:
 
 
 def _load_array(path: Path) -> jnp.ndarray:
-    """Load a detector calibration array from .npy or .npz."""
-    if path.suffix == ".npy":
+    """Load a detector calibration array from FITS, .npy, or .npz."""
+
+    suffix = path.suffix.lower()
+    if suffix in {".fits", ".fit", ".fts"}:
+        from astropy.io import fits
+
+        data = fits.getdata(path)
+        if data is None:
+            raise ValueError(f"FITS file {path} does not contain image data.")
+        if data.ndim != 2:
+            raise ValueError(f"FITS calibration map must be 2D; got shape {data.shape} from {path}.")
+        return jnp.asarray(np.asarray(data), dtype=float)
+
+    if suffix == ".npy":
         arr = np.load(path)
         return jnp.asarray(arr, dtype=float)
 
-    if path.suffix == ".npz":
+    if suffix == ".npz":
         with np.load(path) as z:
             # Prefer common keys if present; otherwise take the first array.
             for key in ("data", "arr_0", "dx", "dy", "prf", "pixel_response"):
@@ -184,7 +196,9 @@ def _load_array(path: Path) -> jnp.ndarray:
                     return jnp.asarray(z[key], dtype=float)
             return jnp.asarray(z[z.files[0]], dtype=float)
 
-    raise ValueError(f"Unsupported calibration file type: {path} (expected .npy or .npz)")
+    raise ValueError(
+        f"Unsupported calibration file type: {path} (expected .fits/.fit/.fts, .npy, or .npz)"
+    )
 
 
 
@@ -208,7 +222,7 @@ def build_detector_layer(
     if name == "pixel_offsets":
         dx_path = _resolve_repo_path(layer_cfg.get("dx_path", None))
         dy_path = _resolve_repo_path(layer_cfg.get("dy_path", None))
-        interp_method = layer_cfg.get("interp_method", "cubic2")
+        interp_method = layer_cfg.get("interp_method", "cubic")
 
         if dx_path is not None:
             dx_map_raw = _load_array(dx_path)
@@ -456,7 +470,7 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
 
     pixel_offsets_cfg = layer_map.get("pixel_offsets")
     if pixel_offsets_cfg is not None:
-        interp_method = pixel_offsets_cfg.get("interp_method", "cubic2") or "cubic2"
+        interp_method = pixel_offsets_cfg.get("interp_method", "cubic") or "cubic"
         dx_path = _path_default(pixel_offsets_cfg.get("dx_path", None))
         dy_path = _path_default(pixel_offsets_cfg.get("dy_path", None))
         fields.extend(
