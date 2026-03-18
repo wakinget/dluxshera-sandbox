@@ -33,6 +33,12 @@ Outputs live under the experiment directory:
 - The same general rule applies to other list-valued fields: mappings merge, lists replace.
 - If `experiment.monte_carlo.run_plan` is a relative path, it resolves relative to `prescription.yaml`, not the repo root.
 
+## Outdir Resolution
+- The experiment root is resolved in this order: `--outdir`, then `experiment.outputs.outdir`, then `--run-name`, then the default timestamped `Results/prescribed_mc_<timestamp>`.
+- If `experiment.outputs.outdir` is a relative path, it resolves relative to `prescription.yaml`, not the repo root.
+- Set `experiment.outputs.outdir: .` to write results into the same directory that contains the prescription file.
+- Keep `outputs.outdir` experiment-level. Do not try to steer the experiment root from `run_plan.csv`.
+
 ## Quick start
 Dry run with templates:
 ```bash
@@ -51,6 +57,12 @@ Run for real:
 python examples/recipes/prescribed_monte_carlo.py \
   --prescription examples/recipes/prescribed_mc_template/prescription.yaml \
   --outdir Results/my_experiment
+```
+
+Use the config-defined outdir:
+```bash
+python examples/recipes/prescribed_monte_carlo.py \
+  --prescription examples/recipes/prescribed_mc_template/prescription.yaml
 ```
 
 Name the output directory without typing the full path:
@@ -77,6 +89,8 @@ python examples/recipes/prescribed_monte_carlo.py \
    - Fill `experiment.infer_keys` and `experiment.priors`.
    - Tweak `experiment.monte_carlo`, `optimizer`, `eigenmodes`, `noise`, `outputs`, and `init`.
    - Keep `experiment.monte_carlo.run_plan: run_plan.csv` if you want to use the bundled plan template.
+   - Set `experiment.outputs.outdir` if you want the experiment root to live in a fixed location.
+   - Use `outdir: .` if the prescription file already lives inside the directory where you want outputs written.
    - Set `run_plan: null` or omit the key if you want default-only runs with no CSV plan.
 3. Edit `run_plan.csv` for per-run changes.
    - Blank cell = keep defaults. Use `null` to clear.
@@ -87,7 +101,8 @@ python examples/recipes/prescribed_monte_carlo.py \
 - Experiment notes: `experiment.notes` in YAML; persisted to `manifest.json`.
 - Per-run notes: `note/notes/comment/comments` columns in CSV; persisted to runs/results/manifest.
 - `results.csv` orientation: default `col`; use `--results-orientation row` for row-oriented compatibility output.
-- If `--outdir` is provided without `--prescription`, the script looks for `prescription.*` (yaml/yml/json) under that directory. The run-plan path still comes from the resolved prescription file.
+- If `--outdir` is provided without `--prescription`, the script looks for `prescription.*` (yaml/yml/json) under that directory. This discovery step only helps locate the prescription; `--outdir` still wins as the experiment root once execution starts.
+- If `--prescription` is provided and `experiment.outputs.outdir` is set, you can omit `--outdir` and let the prescription control the experiment root.
 
 ## CSV override hints
 - `run_id`, `enabled`, `seed`, `note`/`comment` supported.
