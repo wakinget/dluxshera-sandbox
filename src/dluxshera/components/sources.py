@@ -165,17 +165,7 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             shape=(),
             default=3.0,
             structural=False,
-        ),
-        ParamField(
-            "source.raw_fluxes",
-            group="source",
-            kind="derived",
-            dtype=float,
-            shape=(2,),
-            default=None,
-            structural=False,
-            transform="source.raw_fluxes",
-            depends_on=raw_flux_dependencies,
+            binding="contrast",
         ),
     ]
     return ParamSpec(fields)
