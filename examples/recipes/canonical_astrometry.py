@@ -74,6 +74,7 @@ from dluxshera.inference.optimization import (
     make_binder_nll_fn,
     map_labels_to_keys,
     run_shera_gd,
+    diagnose_first_step,
 )
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
@@ -87,6 +88,7 @@ from dluxshera.params.packing import (
     unpack_params as store_unpack_params,
 )
 from dluxshera.params.store import ParameterStore
+from dluxshera.utils.noise import apply_observation_noise
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
@@ -195,8 +197,8 @@ def main(
     experiment = _validate_experiment(experiment_cfg)
     infer_keys = tuple(experiment["infer_keys"])
     rng_key = jr.PRNGKey(int(experiment["seed"]))
-    save_plots = bool(experiment["save_plots"])
-    add_noise = bool(experiment["add_noise"])
+    save_plots = bool(experiment["outputs"]["plots"])
+    noise_cfg = experiment["noise"]
 
     results_dir = results_dir or DEFAULT_RESULTS_DIR
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -231,22 +233,17 @@ def main(
     print("Generating synthetic data...")
     data_psf = binder.model()
 
-    # Optionally add noise to the data
-    if add_noise:
-        rng_key, split_key = jr.split(rng_key)
-        if np.min(data_psf) > 100:
-            # Use gaussian approximation to shot noise if image is bright enough
-            data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
-        else:
-            # Otherwise use poisson statistics
-            data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
-            # Casting back to float is important for the optimization
-    else: # No noise
-        data = data_psf
-
-    # Define data variance = data_psf -> Shot noise dominated
-    # Add a minimum variance floor to avoid any division by zero
-    data_var = jnp.maximum(data_psf, 1.0)
+    if noise_cfg["enabled"]:
+        rng_key, noise_key = jr.split(rng_key)
+    else:
+        noise_key = rng_key
+    data, data_var = apply_observation_noise(
+        data_psf,
+        noise_cfg=noise_cfg,
+        rng_key=noise_key,
+        detector_spec=getattr(binder.detector, "spec", None),
+        exposure_time_s=truth_store.get("source.exposure_time_s", default=None),
+    )
 
     print("Configuring Inference...")
     # Phase 5 migration note: inference layout is now defined directly from
@@ -256,6 +253,7 @@ def main(
     # inferable directly (store-wins, no forced runtime recomputation).
     inference_subspec = forward_spec.subset(infer_keys)
 
+    # TODO: Parse priors from experiment preset if present, fall back to defaults
     # prior_info defines our initial knowledge of each parameter,
     # and determines the amplitude of the random perturbation applied to the model
     prior_info = {
@@ -277,16 +275,16 @@ def main(
     }
     prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
-    init_mode = experiment["init_mode"]
+    init_mode = experiment["init"]["sampling"]
     print(f"Initialization mode: {init_mode!r}")
-    if init_mode == "prior_sample":
+    if init_mode == "prior":
         print("Drawing starting point from priors...")
         rng_key, split_key = jr.split(rng_key)
         prior_sample = prior_spec.sample(rng_key=split_key, keys=infer_keys)
         # Seed structural defaults from the truth store, then apply sampled infer keys
         init_store = truth_store.replace(prior_sample.as_dict())
-    elif init_mode == "truth":
-        print("Using truth store as initialization (debug mode).")
+    elif init_mode in {"explicit", "truth"}:
+        print("Using truth store as initialization.")
         init_store = truth_store
     else:
         raise ValueError(
@@ -434,8 +432,8 @@ def main(
             lr_vec = np.ones_like(z0)
             curvature_vec = np.ones_like(z0)
         else:
-            lr_vec = 1.0 / (eigvals_kept + 1e-12)
-            curvature_vec = eigvals_kept
+            curvature_vec = np.maximum(eigvals_kept, 1e-8)
+            lr_vec = 1.0 / (curvature_vec + 1e-12)
 
         index_map = build_eigen_index_map(eigen_map)
         loss_opt = lambda z: loss_fn(eigen_map.theta_from_z(z))
@@ -449,8 +447,8 @@ def main(
         }
     else:
         index_map = build_index_map(inference_subspec, init_store, theta=theta0)
-        lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
-        curvature_vec = fim_diag
+        curvature_vec = np.maximum(np.asarray(fim_diag), 1e-8)
+        lr_vec = 1.0 / (curvature_vec + 1e-12)
         loss_opt = loss_fn
         theta0_opt = theta0
         theta_space = "primitive"
@@ -502,10 +500,10 @@ def main(
 
     print("Running preconditioned gradient descent...")
     optimizer_cfg = experiment["optimizer"]
-    if optimizer_cfg["kind"] != "gd":
+    if optimizer_cfg["kind"] not in {"sgd", "adam"}:
         raise ValueError(
             f"Unsupported experiment.optimizer.kind={optimizer_cfg['kind']!r}. "
-            "Only 'gd' is currently implemented in this recipe."
+            "Supported kinds: 'sgd'/'adam'."
         )
     n_iter = int(optimizer_cfg["n_iter_fast"] if fast else optimizer_cfg["n_iter"])
     metric_payload = {
@@ -513,6 +511,61 @@ def main(
         "metric_diag": np.asarray(curvature_vec),
         "lr_scale": np.asarray(lr_vec),
     }
+
+    run_diagnosis = False
+    if run_diagnosis:
+        diag = diagnose_first_step(
+            loss_fn=loss_opt,
+            theta0=theta0_opt,
+            learning_rate=float(optimizer_cfg["base_lr"]),
+            lr_vec=lr_vec,
+            optimizer_kind="sgd",
+            index_map=index_map,
+            verbose=True,
+        )
+        print("First-step diagnostic:")
+        print(
+            f"  loss0={diag['loss0']:.6g} finite={diag['loss0_finite']} | "
+            f"grad_finite={diag['grad0_finite']} | theta1_finite={diag['theta1_finite']} | "
+            f"loss1={diag['loss1']:.6g} finite={diag['loss1_finite']}"
+        )
+        print(
+            f"  grad0 min/max={diag['grad0_min']:.3e}/{diag['grad0_max']:.3e} | "
+            f"delta min/max={diag['delta_min']:.3e}/{diag['delta_max']:.3e}"
+        )
+        if lr_vec is not None:
+            print(
+                f"  lr_vec min/max={diag['lr_vec_min']:.3e}/{diag['lr_vec_max']:.3e}"
+            )
+        if diag.get("top_grad"):
+            topg = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_grad"])
+            print(f"  top |grad|: {topg}")
+        if diag.get("top_delta"):
+            topl = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_delta"])
+            print(f"  top |delta|: {topl}")
+
+        diag_unscaled = diagnose_first_step(
+            loss_fn=loss_opt,
+            theta0=theta0_opt,
+            learning_rate=float(optimizer_cfg["base_lr"]),
+            lr_vec=None,
+            optimizer_kind="sgd",
+        )
+        diag_tiny = diagnose_first_step(
+            loss_fn=loss_opt,
+            theta0=theta0_opt,
+            learning_rate=float(optimizer_cfg["base_lr"]) * 1e-3,
+            lr_vec=None,
+            optimizer_kind="sgd",
+        )
+        print(
+            "Variant first-step diagnostics: "
+            f"unscaled loss1_finite={diag_unscaled['loss1_finite']} "
+            f"theta1_finite={diag_unscaled['theta1_finite']}; "
+            f"tiny loss1_finite={diag_tiny['loss1_finite']} "
+            f"theta1_finite={diag_tiny['theta1_finite']}"
+        )
+
     theta_final_opt, trace = run_shera_gd(
         loss_fn=loss_opt,
         theta0=theta0_opt,
@@ -648,24 +701,93 @@ def main(
     print("Script finished in %.3f sec" % (t1_script - t0_script))
 
 
-def _validate_experiment(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
-    optimizer_cfg = experiment_cfg.get("optimizer", {})
-    outputs_cfg = experiment_cfg.get("outputs", {})
+def _require_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"experiment.{key} must be a mapping")
+    return value
 
-    # TODO: tighten validation once the experiment schema is finalized.
-    return {
-        "seed": int(experiment_cfg.get("seed", DEFAULT_SEED)),
-        "infer_keys": tuple(experiment_cfg.get("infer_keys", DEFAULT_INFER_KEYS)),
-        "add_noise": bool(experiment_cfg.get("add_noise", ADD_NOISE)),
-        "save_plots": bool(outputs_cfg.get("save_plots", SAVE_PLOTS)),
-        "optimizer": {
-            "kind": optimizer_cfg.get("kind", "gd"),
-            "n_iter": int(optimizer_cfg.get("n_iter", DEFAULT_N_ITER)),
-            "n_iter_fast": int(optimizer_cfg.get("n_iter_fast", DEFAULT_FAST_ITER)),
-            "base_lr": float(optimizer_cfg.get("base_lr", DEFAULT_BASE_LR)),
-        },
-        "init_mode": experiment_cfg.get("init", {}).get("mode", "prior_sample"),
-    }
+
+def _require_bool(parent: dict[str, Any], key: str) -> bool:
+    value = parent.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"Expected boolean for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _require_int(parent: dict[str, Any], key: str) -> int:
+    value = parent.get(key)
+    if not isinstance(value, int):
+        raise ValueError(f"Expected integer for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _require_number(parent: dict[str, Any], key: str) -> float:
+    value = parent.get(key)
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"Expected number for {key!r}, got {type(value).__name__}")
+    return float(value)
+
+
+def _require_str(parent: dict[str, Any], key: str) -> str:
+    value = parent.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"Expected string for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _require_str_list(parent: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = parent.get(key)
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ValueError(f"{key!r} must be a list of strings")
+    return tuple(value)
+
+
+def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(cfg, dict):
+        raise ValueError("experiment config must be a mapping")
+
+    if "experiment" in cfg:
+        experiment_cfg = cfg["experiment"]
+        if not isinstance(experiment_cfg, dict):
+            raise ValueError("cfg['experiment'] must be a mapping")
+    else:
+        experiment_cfg = cfg
+
+    _require_int(experiment_cfg, "seed")
+    _require_str_list(experiment_cfg, "infer_keys")
+
+    noise_cfg = _require_dict(experiment_cfg, "noise")
+    _require_bool(noise_cfg, "enabled")
+    _require_bool(noise_cfg, "photon_noise")
+    # TODO: Make read_noise and dark_current fields optional, default to False
+    _require_bool(noise_cfg, "read_noise")
+    _require_bool(noise_cfg, "dark_current")
+
+    init_cfg = _require_dict(experiment_cfg, "init")
+    init_mode = _require_str(init_cfg, "sampling")
+    if init_mode not in {"prior", "explicit"}:
+        raise ValueError(
+            f"Unsupported experiment.init.mode {init_mode!r}; "
+            "expected 'prior' or 'explicit'."
+        )
+
+    optimizer_cfg = _require_dict(experiment_cfg, "optimizer")
+    optimizer_kind = _require_str(optimizer_cfg, "kind")
+    if optimizer_kind not in {"sgd", "adam"}:
+        raise ValueError(
+            f"Unsupported experiment.optimizer.kind {optimizer_kind!r}; "
+            "expected 'sgd' or 'adam'."
+        )
+    _require_int(optimizer_cfg, "n_iter")
+    # TODO: make n_iter_fast optional, default to 20
+    _require_int(optimizer_cfg, "n_iter_fast")
+    _require_number(optimizer_cfg, "base_lr")
+
+    outputs_cfg = _require_dict(experiment_cfg, "outputs")
+    _require_bool(outputs_cfg, "save_plots")
+
+    return experiment_cfg
 
 
 def _build_parser() -> argparse.ArgumentParser:

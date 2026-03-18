@@ -1,11 +1,15 @@
 experiment:
   kind: inference
   seed: 42
-  add_noise: true
+  noise:
+    enabled: true
+    photon_noise: true
+    read_noise: false
+    dark_current: false
   init:
-    mode: prior_sample
+    sampling: prior
   optimizer:
-    kind: gd
+    kind: sgd # sgd | adam
     n_iter: 40
     n_iter_fast: 30
     base_lr: 0.5
@@ -20,4 +24,33 @@ experiment:
     - optics.primary.zernike_coeffs_nm
     - optics.secondary.zernike_coeffs_nm
   outputs:
-    save_plots: true
+    plots: true
+
+  priors:
+    source.separation_as:
+      dist: Normal
+      sigma: 1.0e-4
+    source.position_angle_deg:
+      dist: Uniform
+      sigma: 1.0e-2
+    source.x_position_as:
+      dist: Normal
+      sigma: 1.0e-2
+    source.y_position_as:
+      dist: Normal
+      sigma: 1.0e-2
+    source.log_flux_total:
+      dist: LogNormal
+      sigma: 1.0e-3
+    source.contrast:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.plate_scale_as_per_pix:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.primary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
+    optics.secondary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0

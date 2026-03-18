@@ -9,10 +9,12 @@ framework; additional models (e.g., 1/f) can hook into the stubs below later.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping, Tuple, Optional
 
 import jax.numpy as jnp
 import jax.random as jr
+
+from ..components.detectors import DetectorSpec
 
 Array = jnp.ndarray
 
@@ -113,13 +115,16 @@ def apply_observation_noise(
     noise_cfg: Mapping[str, Any] | None,
     rng_key: jr.KeyArray,
     bright_threshold: float = 100.0,
+    detector_spec: Optional[DetectorSpec] = None,
+    exposure_time_s: Optional[float] = None,
 ) -> tuple[Array, Array]:
     """Add observation noise according to ``noise_cfg`` and return (data, var).
 
     Supported fields:
       - enabled / add_noise : bool
       - photon_noise : bool (defaults to True when enabled)
-      - read_noise, dark_current : accepted but currently ignored (documented)
+      - read_noise : bool (uses detector_spec.read_noise as Gaussian sigma)
+      - dark_current : bool (Gaussian sigma derived from detector_spec.dark_current and exposure_time_s)
     """
     if noise_cfg is None:
         noise_cfg = {}
@@ -132,8 +137,10 @@ def apply_observation_noise(
         return image, var
 
     photon_noise = noise_cfg.get("photon_noise", True)
-    read_noise = noise_cfg.get("read_noise", False)
-    dark_current = noise_cfg.get("dark_current", False)
+    read_noise_enabled = noise_cfg.get("read_noise", False)
+    dark_current_enabled = noise_cfg.get("dark_current", False)
+
+    total_var = jnp.maximum(image, 1.0)
 
     if photon_noise:
         rng_key, subkey = jr.split(rng_key)
@@ -144,13 +151,26 @@ def apply_observation_noise(
     else:
         noisy = image
 
-    # Placeholder handling for read_noise/dark_current: not implemented yet.
-    if read_noise or dark_current:
-        # Explicitly document in trace rather than silently dropping.
-        pass
+    if read_noise_enabled:
+        if detector_spec is None or detector_spec.read_noise is None:
+            raise ValueError("read_noise enabled but detector spec is missing read_noise.")
+        sigma_read = float(detector_spec.read_noise)
+        rng_key, subkey = jr.split(rng_key)
+        noisy = noisy + sigma_read * jr.normal(subkey, noisy.shape, dtype=noisy.dtype)
+        total_var = total_var + sigma_read**2
 
-    var = jnp.maximum(image, 1.0)
-    return noisy, var
+    if dark_current_enabled:
+        if detector_spec is None or detector_spec.dark_current is None:
+            raise ValueError("dark_current enabled but detector spec is missing dark_current.")
+        if exposure_time_s is None:
+            raise ValueError("dark_current enabled but exposure_time_s is not provided.")
+        dc_rate = float(detector_spec.dark_current)
+        dc_var = max(dc_rate * float(exposure_time_s), 0.0)
+        rng_key, subkey = jr.split(rng_key)
+        noisy = noisy + jnp.sqrt(dc_var) * jr.normal(subkey, noisy.shape, dtype=noisy.dtype)
+        total_var = total_var + dc_var
+
+    return noisy, total_var
 
 
 __all__ = [
