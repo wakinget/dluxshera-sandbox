@@ -73,12 +73,9 @@ def _truth_raw_fluxes(
     truth: Optional[Mapping[str, object]],
     shape,
 ) -> Optional[np.ndarray]:
-    """Return truth raw fluxes, computing from primitives when derived key is absent."""
+    """Return truth raw fluxes computed from source.log_flux_total and source.contrast."""
     if truth is None:
         return None
-    raw_fluxes = _broadcast_truth(truth, "source.raw_fluxes", shape)
-    if raw_fluxes is not None:
-        return raw_fluxes
     try:
         computed = _compute_raw_fluxes(truth)
     except KeyError:
