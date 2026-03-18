@@ -4,6 +4,7 @@ system:
     wavelength_m: 5.5e-07
     bandwidth_m: 4.1e-08
     n_lambda: 3
+    exposure_time_s: 1800.0
     x_position_as: 0.0
     y_position_as: 0.0
     separation_as: 10.0
