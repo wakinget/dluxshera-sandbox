@@ -21,7 +21,7 @@ class ApplyPixelOffsets(DetectorLayer):
         Vertical detector-pixel offsets, sampled with y + dy.
     interp_method : str
         Interpolation method used for warping. Supported values are
-        'nearest', 'linear', 'cubic', 'cubic2', 'catmull-rom',
+        'nearest', 'linear', 'cubic' (default), 'catmull-rom',
         'cardinal', 'monotonic', 'monotonic-0', 'akima'.
     clip_nonnegative : bool
         If True, clip warped output values to be non-negative.
@@ -31,7 +31,6 @@ class ApplyPixelOffsets(DetectorLayer):
         "nearest",
         "linear",
         "cubic",
-        "cubic2",
         "catmull-rom",
         "cardinal",
         "monotonic",
@@ -48,7 +47,7 @@ class ApplyPixelOffsets(DetectorLayer):
         self: DetectorLayer,
         dx_map: Array,
         dy_map: Array,
-        interp_method: str = "cubic2",
+        interp_method: str = "cubic",
         clip_nonnegative: bool = False,
     ):
         super().__init__()
