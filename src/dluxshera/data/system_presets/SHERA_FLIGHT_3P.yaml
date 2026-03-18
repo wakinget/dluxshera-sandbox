@@ -50,7 +50,10 @@ system:
     - name: downsample
       kernel_size: 3
     - name: pixel_offsets
+      dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
+      dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
     - name: pixel_response
+      prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
     - name: jitter
       sigma: 1.0e-12
       kernel_size: 3
