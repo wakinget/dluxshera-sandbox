@@ -201,5 +201,8 @@ cython_debug/
 # Results folder
 Results/
 
+# Calibration map previews
+src/dluxshera/data/pixel_offsets/*.png
+
 # Mac folder files
 *.DS_Store
