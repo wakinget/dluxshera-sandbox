@@ -72,6 +72,7 @@ __all__ = [
     "make_loss_fn",
     "make_image_nll_fn",
     "make_binder_nll_fn",
+    "diagnose_first_step",
 
     # simple θ–space optimizer
     "run_simple_gd",
@@ -1266,6 +1267,114 @@ def run_shera_gd(
         return_artifacts=return_artifacts,
         show_progress=show_progress,
     )
+
+
+def diagnose_first_step(
+    *,
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta0: np.ndarray,
+    learning_rate: float = 1e-2,
+    lr_vec: Optional[np.ndarray] = None,
+    optimizer_kind: str = "sgd",
+    index_map: Optional[Mapping[str, Any]] = None,
+    verbose: bool = False,
+    top_k: int = 10,
+) -> dict[str, object]:
+    """
+    Minimal first-step diagnostic for θ-space optimizers.
+
+    Evaluates loss/grad at ``theta0`` and simulates the first update using the
+    same SGD/Adam wrappers as ``run_shera_gd``. Returns a payload with finiteness
+    flags and the proposed ``theta1``. When ``verbose`` is ``True`` and any
+    non-finite values are detected, offending indices (and IndexMap labels when
+    provided) are printed to stderr/stdout.
+    """
+    theta0 = np.asarray(theta0)
+    loss0 = np.asarray(loss_fn(theta0))
+    grad_fn = jax.grad(lambda th: np.asarray(loss_fn(th)))
+    grad0 = np.asarray(grad_fn(theta0))
+
+    def _print_nonfinite(arr, label):
+        mask = ~np.isfinite(arr)
+        if not mask.any():
+            return
+        idx = np.where(mask)[0]
+        print(f"[diagnose_first_step] non-finite {label} at indices {idx}")
+        if index_map and isinstance(index_map, Mapping):
+            entries = index_map.get("entries", [])
+            for i in idx:
+                for entry in entries:
+                    if entry.get("start") <= i < entry.get("stop"):
+                        name = entry.get("name", "unknown")
+                        print(f"  index {i} -> {name}")
+                        break
+
+    opt_kwargs = {}
+    optimizer: optax.GradientTransformation
+
+    if optimizer_kind == "adam":
+        def _scale_by_vector(vec: np.ndarray) -> optax.GradientTransformation:
+            vec = np.asarray(vec)
+            def init_fn(_):
+                return None
+            def update_fn(updates, state, params=None):
+                return jax.tree_util.tree_map(lambda g: g * vec, updates), state
+            return optax.GradientTransformation(init_fn, update_fn)
+
+        txs = [optax.scale_by_adam(**opt_kwargs)]
+        if lr_vec is not None:
+            txs.append(_scale_by_vector(lr_vec))
+        txs.append(optax.scale(-learning_rate))
+        optimizer = optax.chain(*txs)
+    else:
+        if lr_vec is not None:
+            optimizer = optax.sgd(learning_rate=learning_rate * np.asarray(lr_vec), **opt_kwargs)
+        else:
+            optimizer = optax.sgd(learning_rate=learning_rate, **opt_kwargs)
+
+    opt_state = optimizer.init(theta0)
+    updates, _ = optimizer.update(grad0, opt_state, params=theta0)
+    theta1 = optax.apply_updates(theta0, updates)
+    loss1 = np.asarray(loss_fn(theta1))
+    delta = theta1 - theta0
+
+    if verbose:
+        if not np.isfinite(loss0):
+            print("[diagnose_first_step] non-finite loss0")
+        if not np.isfinite(loss1):
+            print("[diagnose_first_step] non-finite loss1")
+        _print_nonfinite(grad0, "grad0")
+        _print_nonfinite(theta1, "theta1")
+
+    # Top-k magnitude helpers
+    def _top_entries(arr):
+        flat = np.abs(arr).ravel()
+        if flat.size == 0:
+            return []
+        k = min(top_k, flat.size)
+        idx_sorted = np.argsort(flat)[::-1][:k]
+        return [(int(i), float(arr.ravel()[i])) for i in idx_sorted]
+
+    return {
+        "loss0": float(loss0),
+        "loss0_finite": bool(np.isfinite(loss0)),
+        "grad0": grad0,
+        "grad0_finite": bool(np.all(np.isfinite(grad0))),
+        "theta0_min": float(np.min(theta0)),
+        "theta0_max": float(np.max(theta0)),
+        "theta1": theta1,
+        "theta1_finite": bool(np.all(np.isfinite(theta1))),
+        "loss1": float(loss1),
+        "loss1_finite": bool(np.isfinite(loss1)),
+        "grad0_min": float(np.min(grad0)),
+        "grad0_max": float(np.max(grad0)),
+        "delta_min": float(np.min(delta)),
+        "delta_max": float(np.max(delta)),
+        "lr_vec_min": float(np.min(lr_vec)) if lr_vec is not None else None,
+        "lr_vec_max": float(np.max(lr_vec)) if lr_vec is not None else None,
+        "top_grad": _top_entries(grad0),
+        "top_delta": _top_entries(delta),
+    }
 
 
 def run_image_gd(
