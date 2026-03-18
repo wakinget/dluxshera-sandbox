@@ -30,10 +30,10 @@ Notes behavior
 CLI arguments (mirrors `main`)
 ------------------------------
 - --prescription: YAML/JSON experiment config (defaults to template when omitted).
-- --outdir: root output directory for the experiment (experiment root). If
-  omitted, the output directory is derived from `--run-name` or a timestamp.
+- --outdir: explicit experiment root directory. When provided, this overrides
+  `experiment.outputs.outdir`.
 - --run-name: optional name segment used to build Results/<run-name> when
-  `--outdir` is not provided. If both are omitted, a timestamp tag is used.
+  neither `--outdir` nor `experiment.outputs.outdir` is set.
   This remains as a convenience for quick naming when you do not want to type
   a full `--outdir` path, rather than being deprecated.
 - --dry-run: resolve and preview run specs without executing optimization.
@@ -460,12 +460,13 @@ def _apply_experiment_n_runs(
     plan_rows: list[dict[str, Any]],
     n_runs: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, int | None]]:
-    """Apply prescribed_mc.n_runs precedence to the plan-defined run rows.
+    """Apply monte_carlo.n_runs precedence to the plan-defined run rows.
 
-    When experiment.n_runs (now experiment.prescribed_mc.n_runs) is set, it becomes authoritative: the plan is padded
-    with default-only rows or truncated as needed so downstream previews and run
-    execution operate on the resolved run count. When experiment.n_runs is not
-    set, the plan length defines the run count and an empty plan is rejected.
+    When experiment.monte_carlo.n_runs is set, it becomes authoritative: the
+    plan is padded with default-only rows or truncated as needed so downstream
+    previews and run execution operate on the resolved run count. When
+    experiment.monte_carlo.n_runs is not set, the plan length defines the run
+    count and an empty plan is rejected.
     """
     plan_rows_copy = [row.copy() for row in plan_rows]
     plan_runs = len(plan_rows_copy)
@@ -473,7 +474,7 @@ def _apply_experiment_n_runs(
     if n_runs is None:
         if plan_runs == 0:
             raise ValueError(
-                "Unable to resolve run count: experiment.prescribed_mc.n_runs is not set and "
+                "Unable to resolve run count: experiment.monte_carlo.n_runs is not set and "
                 "run_plan.csv defines 0 runs."
             )
         return (
@@ -490,10 +491,10 @@ def _apply_experiment_n_runs(
     try:
         resolved_n_runs = int(n_runs)
     except (TypeError, ValueError) as exc:
-        raise ValueError("experiment.prescribed_mc.n_runs must be an integer.") from exc
+        raise ValueError("experiment.monte_carlo.n_runs must be an integer.") from exc
 
     if resolved_n_runs <= 0:
-        raise ValueError("experiment.prescribed_mc.n_runs must be a positive integer.")
+        raise ValueError("experiment.monte_carlo.n_runs must be a positive integer.")
 
     padded = 0
     truncated = 0
@@ -561,14 +562,38 @@ def _resolve_prescription(args: argparse.Namespace, outdir: Path | None) -> Path
     return Path(prescription_path)
 
 
+def _resolve_path_relative_to_prescription(
+    value: str | Path | None,
+    *,
+    prescription_path: Path,
+    field_name: str,
+) -> Path | None:
+    """Resolve optional paths relative to the prescription file when relative."""
+    if value is None:
+        return None
+
+    if isinstance(value, Path):
+        path_value = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        path_value = Path(stripped)
+    else:
+        raise ValueError(f"{field_name} must be a path string or null.")
+
+    if path_value.is_absolute():
+        return path_value
+    return (prescription_path.parent / path_value).resolve()
+
+
 def _resolve_plan_csv_path(plan_csv: str | Path | None, *, prescription_path: Path) -> Path | None:
     """Resolve plan CSV path relative to the prescription file when relative."""
-    if plan_csv is None:
-        return None
-    plan_path = Path(plan_csv)
-    if plan_path.is_absolute():
-        return plan_path
-    return (prescription_path.parent / plan_path).resolve()
+    return _resolve_path_relative_to_prescription(
+        plan_csv,
+        prescription_path=prescription_path,
+        field_name="experiment.monte_carlo.run_plan",
+    )
 
 
 def _seed_detector_knowledge_errors(
@@ -962,20 +987,41 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         print(" | ".join(value.ljust(width) for value, width in zip(row, widths)))
 
 
-def _resolve_outdir(outdir: str | None, run_name: str | None) -> Path:
-    """Resolve the experiment output directory based on CLI inputs.
+def _resolve_outdir(
+    *,
+    cli_outdir: str | None,
+    run_name: str | None,
+    experiment_cfg: dict[str, Any],
+    prescription_path: Path,
+) -> tuple[Path, str]:
+    """Resolve the experiment output directory with CLI/config precedence.
 
-    Called in `main` to determine where runs and aggregate outputs are written,
-    falling back to a timestamped Results directory via `_timestamp_tag` when
-    neither an explicit outdir nor run name is supplied. This is a reusable
-    pattern for experiment output naming, but naming conventions are specific
-    to this script.
+    Precedence:
+    1) --outdir
+    2) experiment.outputs.outdir (relative to prescription file when relative)
+    3) --run-name
+    4) Results/prescribed_mc_<timestamp>
     """
-    if outdir:
-        return Path(outdir)
+    if cli_outdir and cli_outdir.strip():
+        return Path(cli_outdir), "CLI --outdir"
+
+    outputs_cfg = experiment_cfg.get("outputs", {})
+    if outputs_cfg is None:
+        outputs_cfg = {}
+    if not isinstance(outputs_cfg, dict):
+        raise ValueError("experiment.outputs must be a mapping/dict when provided.")
+
+    cfg_outdir = _resolve_path_relative_to_prescription(
+        outputs_cfg.get("outdir"),
+        prescription_path=prescription_path,
+        field_name="experiment.outputs.outdir",
+    )
+    if cfg_outdir is not None:
+        return cfg_outdir, "experiment.outputs.outdir"
+
     if run_name:
-        return Path("Results") / run_name
-    return Path("Results") / f"prescribed_mc_{_timestamp_tag()}"
+        return Path("Results") / run_name, "CLI --run-name"
+    return Path("Results") / f"prescribed_mc_{_timestamp_tag()}", "auto timestamp"
 
 
 def _row_enabled(row: dict[str, Any]) -> bool:
@@ -1706,16 +1752,14 @@ def main() -> None:
     Args:
         --prescription: Path to the YAML/JSON experiment config. The file must
             contain native `system` and `experiment` blocks (with
-            `experiment.prescribed_mc` for Monte Carlo settings). Experiment
-            notes live in `experiment.notes` (aliases note/comment/comments).
+            `experiment.monte_carlo` for Monte Carlo settings; legacy
+            `experiment.prescribed_mc` is still accepted). Experiment notes live
+            in `experiment.notes` (aliases note/comment/comments).
         --outdir: Root output directory for the experiment. When supplied, this
-            is treated as the experiment root, and all run artifacts
-            (runs/<run_id>/...), manifest.json, and results.csv are written
-            underneath this directory.
+            overrides `experiment.outputs.outdir`.
         --run-name: Optional name segment used to construct Results/<run-name>
-            when --outdir is omitted. If both are omitted, a timestamp-based
-            directory name is used. Supplying both uses --outdir verbatim and
-            ignores --run-name.
+            when neither --outdir nor experiment.outputs.outdir is set. If all
+            of those are omitted, a timestamp-based directory name is used.
         --dry-run: Resolve run specs and print previews without executing the
             optimization runs or writing run artifacts.
         --aggregate-only: Skip execution and only aggregate manifest.json and
@@ -1737,13 +1781,13 @@ def main() -> None:
         "--outdir",
         type=str,
         default=None,
-        help="Experiment root directory (no auto-suffix when provided).",
+        help="Experiment root directory; overrides experiment.outputs.outdir.",
     )
     parser.add_argument(
         "--run-name",
         type=str,
         default=None,
-        help="Convenience name for Results/<run-name> when --outdir is omitted.",
+        help="Convenience name for Results/<run-name> when outdir is not otherwise set.",
     )
     parser.add_argument("--dry-run", action="store_true", default=False)
     parser.add_argument(
@@ -1759,7 +1803,7 @@ def main() -> None:
         help=(
             "results.csv schema: 'col' writes key + run_id columns (default), "
             "'row' writes one row per run for compatibility. CLI overrides "
-            "prescription experiment.prescribed_mc.results_orientation when provided."
+            "prescription experiment.monte_carlo.results_orientation when provided."
         ),
     )
     parser.add_argument("--num-preview", type=int, default=None)
@@ -1806,7 +1850,7 @@ def main() -> None:
         if value is None:
             return "col"
         if value not in {"col", "row"}:
-            raise ValueError("experiment.prescribed_mc.results_orientation must be 'col' or 'row'")
+            raise ValueError("experiment.monte_carlo.results_orientation must be 'col' or 'row'")
         return value
 
     presc_orientation = _normalize_orientation(mc_cfg.get("results_orientation"))
@@ -1850,11 +1894,11 @@ def main() -> None:
         if run_policy["padded_runs"]:
             print(
                 "  Added "
-                f"{run_policy['padded_runs']} default-only run(s) to match experiment.prescribed_mc.n_runs."
+                f"{run_policy['padded_runs']} default-only run(s) to match experiment.monte_carlo.n_runs."
             )
         if run_policy["truncated_runs"]:
             print(
-                "WARNING: experiment.prescribed_mc.n_runs is authoritative; truncated "
+                "WARNING: experiment.monte_carlo.n_runs is authoritative; truncated "
                 f"{run_policy['truncated_runs']} plan-defined run(s)."
             )
     print(
@@ -1916,8 +1960,13 @@ def main() -> None:
             )
         run_specs.append(resolved)
 
-    outdir = _resolve_outdir(args.outdir, args.run_name)
-    print(f"Resolved outdir: {outdir}")
+    outdir, outdir_source = _resolve_outdir(
+        cli_outdir=args.outdir,
+        run_name=args.run_name,
+        experiment_cfg=experiment_cfg,
+        prescription_path=prescription_path,
+    )
+    print(f"Resolved outdir: {outdir} ({outdir_source})")
     system_label = _get_nested(user_cfg, ["system", "preset"]) or "custom"
     print(f"System preset: {system_label}")
     print(f"Structural config overrides: {config_override_keys}")
