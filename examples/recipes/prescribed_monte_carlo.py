@@ -1,13 +1,14 @@
 """Prescribed Monte Carlo experiment.
 
-Purpose: provide a robust way to define and run monte carlo experiments
+Purpose: provide a robust way to define and run monte carlo experiments.
 Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
 --------------
 - Load the prescription YAML/JSON (native system/experiment config) and optional
-  per-run overrides CSV (plan). Plan paths are resolved relative to the config
-  file when relative.
+  run plan CSV specified inside the experiment config. Plan paths are resolved
+  relative to the config file when relative. If no plan is specified, defaults
+  are derived solely from the experiment config.
 - Resolve run specs from experiment-level controls (seed, optimizer, eigenmodes,
   infer_keys, noise, outputs, init, priors) and experiment.monte_carlo settings.
 - Build data and inference systems (optionally distinct via experiment.inference_system),
@@ -23,14 +24,12 @@ Notes behavior
 - Experiment-level note: set `experiment.notes` in the prescription (aliases:
   `experiment.note`, `experiment.comment`, `experiment.comments`). This value
   is written once to top-level `manifest.json["notes"]`.
-- Per-run note: set `note`/`notes`/`comment`/`comments` in overrides rows.
-  The resolved value is stored as `run_note` in run summaries and aggregate
-  outputs.
+- Per-run note: set `note`/`notes`/`comment`/`comments` in run plan rows. The
+  resolved value is stored as `run_note` in run summaries and aggregate outputs.
 
 CLI arguments (mirrors `main`)
 ------------------------------
 - --prescription: YAML/JSON experiment config (defaults to template when omitted).
-- --overrides: optional CSV of per-run overrides (defaults to template when omitted).
 - --outdir: root output directory for the experiment (experiment root). If
   omitted, the output directory is derived from `--run-name` or a timestamp.
 - --run-name: optional name segment used to build Results/<run-name> when
@@ -71,6 +70,7 @@ from dluxshera.inference.optimization import (
     make_binder_nll_fn,
     map_labels_to_keys,
     run_shera_gd,
+    diagnose_first_step,
 )
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import (
@@ -105,7 +105,6 @@ from dluxshera.utils.noise import (
 DEFAULT_PRESCRIPTION_PATH = Path(
     "examples/recipes/prescribed_mc_template/prescription.yaml"
 )
-DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescribed_mc_template/run_plan.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 
@@ -517,102 +516,39 @@ def _apply_experiment_n_runs(
     )
 
 
-def _detect_prescription_overrides_candidates(
-    outdir: Path,
-    *,
-    detect_prescription: bool = True,
-    detect_overrides: bool = True,
-) -> tuple[Path | None, Path | None]:
-    """Scan an output directory for candidate prescription/overrides files.
+def _detect_prescription_candidate(outdir: Path) -> Path | None:
+    """Scan an output directory for a candidate prescription file.
 
-    This is a best-effort helper for `main` when `--prescription` or `--overrides` is
-    omitted but an output directory is provided. Detection rules are intentionally
-    conservative; update this helper when additional filename conventions are
-    introduced in prescribed Monte Carlo workflows.
+    This helper is used when --prescription is omitted but an outdir is
+    provided. Detection rules are intentionally conservative; update this helper
+    when additional filename conventions are introduced in prescribed Monte
+    Carlo workflows.
     """
     if not outdir.exists():
-        return None, None
+        return None
 
-    prescription_candidates = []
-    overrides_candidates = []
+    prescription_candidates = sorted(
+        candidate
+        for candidate in outdir.rglob("*")
+        if candidate.suffix.lower() in {".json", ".yaml", ".yml"}
+        if "prescription" in candidate.name.lower()
+    )
 
-    if detect_prescription:
-        prescription_candidates = sorted(
-            candidate
-            for candidate in outdir.rglob("*")
-            if candidate.suffix.lower() in {".json", ".yaml", ".yml"}
-            if "prescription" in candidate.name.lower()
-        )
-
-    if detect_overrides:
-        overrides_candidates = sorted(
-            (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
-            key=lambda candidate: (
-                candidate.name.lower() != "run_plan.csv",
-                candidate.name.lower() == "overrides_wide.csv",
-                str(candidate),
-            ),
-        )
-
-    if detect_prescription and len(prescription_candidates) > 1:
+    if len(prescription_candidates) > 1:
         joined = "\n".join(f"- {candidate}" for candidate in prescription_candidates)
         raise ValueError(
             "Multiple prescription candidates found in "
             f"{outdir}. Provide --prescription to disambiguate:\n{joined}"
         )
-    if detect_overrides and len(overrides_candidates) > 1:
-        joined = "\n".join(f"- {candidate}" for candidate in overrides_candidates)
-        raise ValueError(
-            "Multiple overrides candidates found in "
-            f"{outdir}. Provide --overrides to disambiguate:\n{joined}"
-        )
 
-    prescription_path = prescription_candidates[0] if prescription_candidates else None
-    overrides_path = overrides_candidates[0] if overrides_candidates else None
-
-    return prescription_path, overrides_path
+    return prescription_candidates[0] if prescription_candidates else None
 
 
-def _resolve_prescription_and_overrides(
-    args: argparse.Namespace, outdir: Path | None
-) -> tuple[Path, Path | None]:
-    """Resolve prescription/overrides paths from CLI args and optional outdir scan."""
+def _resolve_prescription(args: argparse.Namespace, outdir: Path | None) -> Path:
+    """Resolve prescription path from CLI args and optional outdir scan."""
     prescription_path = args.prescription
-    overrides_path = args.overrides
-    explicit_prescription = prescription_path is not None
-
-    # Only scan for prescription when none was provided.
-    detected_prescription = None
-    detected_overrides = None
-    if outdir is not None:
-        if prescription_path is None and overrides_path is None:
-            detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
-                outdir
-            )
-        elif prescription_path is None:
-            detected_prescription, _ = _detect_prescription_overrides_candidates(
-                outdir, detect_overrides=False
-            )
-        elif overrides_path is None:
-            _, detected_overrides = _detect_prescription_overrides_candidates(
-                outdir, detect_prescription=False
-            )
-
-    if prescription_path is None and detected_prescription is not None:
-        prescription_path = detected_prescription
-        explicit_prescription = True
-
-    if overrides_path is None and detected_overrides is not None:
-        overrides_path = detected_overrides
-
-    if overrides_path is not None and prescription_path is None:
-        overrides_label = overrides_path if overrides_path is not None else "unknown"
-        outdir_label = f"{outdir}" if outdir is not None else "no outdir provided"
-        raise ValueError(
-            "Overrides path was provided or detected "
-            f"({overrides_label}, outdir scan: {outdir_label}) but no prescription was "
-            "provided or detected. Pass --prescription explicitly."
-        )
+    if prescription_path is None and outdir is not None:
+        prescription_path = _detect_prescription_candidate(outdir)
 
     if prescription_path is None:
         outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
@@ -621,15 +557,8 @@ def _resolve_prescription_and_overrides(
             f"{outdir_label}); falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
         )
         prescription_path = DEFAULT_PRESCRIPTION_PATH
-    if overrides_path is None and not explicit_prescription:
-        outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
-        print(
-            "WARNING: No overrides path provided/detected (no overrides CSV "
-            f"{outdir_label}); falling back to template at {DEFAULT_OVERRIDES_PATH}"
-        )
-        overrides_path = DEFAULT_OVERRIDES_PATH
 
-    return Path(prescription_path), Path(overrides_path) if overrides_path is not None else None
+    return Path(prescription_path)
 
 
 def _resolve_plan_csv_path(plan_csv: str | Path | None, *, prescription_path: Path) -> Path | None:
@@ -1779,9 +1708,6 @@ def main() -> None:
             contain native `system` and `experiment` blocks (with
             `experiment.prescribed_mc` for Monte Carlo settings). Experiment
             notes live in `experiment.notes` (aliases note/comment/comments).
-        --overrides: Optional CSV of per-run overrides (plan). Rows mutate
-            run-level fields only; structural/system changes belong in YAML.
-            Per-run notes come from note/notes/comment/comments columns.
         --outdir: Root output directory for the experiment. When supplied, this
             is treated as the experiment root, and all run artifacts
             (runs/<run_id>/...), manifest.json, and results.csv are written
@@ -1806,12 +1732,6 @@ def main() -> None:
         type=Path,
         default=None,
         help="Path to prescription YAML/JSON (defaults to template if omitted)",
-    )
-    parser.add_argument(
-        "--overrides",
-        type=Path,
-        default=None,
-        help="Path to per-run overrides CSV (defaults to template if omitted)",
     )
     parser.add_argument(
         "--outdir",
@@ -1851,7 +1771,7 @@ def main() -> None:
     output_metric = False
 
     outdir_hint = Path(args.outdir) if args.outdir else None
-    prescription_path, overrides_path = _resolve_prescription_and_overrides(args, outdir_hint)
+    prescription_path = _resolve_prescription(args, outdir_hint)
     resolved_prescription = _repo_relative_path(prescription_path, repo_root=repo_root)
     print(f"Resolved prescription path: {resolved_prescription or prescription_path}")
 
@@ -1894,21 +1814,21 @@ def main() -> None:
         args.results_orientation if args.results_orientation is not None else presc_orientation
     )
 
-    # Resolve plan CSV: CLI/detected overrides win; otherwise use config-relative path.
-    plan_csv_cfg = mc_cfg.get("plan_csv")
-    plan_csv_resolved = _resolve_plan_csv_path(plan_csv_cfg, prescription_path=prescription_path)
-    if overrides_path is None and plan_csv_resolved is not None:
-        overrides_path = plan_csv_resolved
-    if overrides_path is None and plan_csv_resolved is None:
-        overrides_path = DEFAULT_OVERRIDES_PATH
+    # Resolve plan CSV: prescription config controls plan usage; explicit null/omission disables plans.
+    plan_cfg_provided = "run_plan" in mc_cfg or "plan_csv" in mc_cfg
+    plan_csv_cfg = mc_cfg.get("run_plan")
+    if plan_csv_cfg is None:
+        plan_csv_cfg = mc_cfg.get("plan_csv")
+    plan_path = _resolve_plan_csv_path(plan_csv_cfg, prescription_path=prescription_path)
 
-    if overrides_path is None:
+    if plan_csv_cfg is None:
         plan_rows = []
-        print("Resolved overrides path: None (per-run overrides disabled)")
+        reason = "explicitly disabled in prescription" if plan_cfg_provided else "no run plan specified"
+        print(f"Resolved run plan path: None ({reason})")
     else:
-        resolved_overrides = _repo_relative_path(overrides_path, repo_root=repo_root)
-        print(f"Resolved overrides path: {resolved_overrides or overrides_path}")
-        plan_rows = _load_plan_csv(overrides_path)
+        resolved_plan = _repo_relative_path(plan_path, repo_root=repo_root) if plan_path else None
+        print(f"Resolved run plan path: {resolved_plan or plan_path}")
+        plan_rows = _load_plan_csv(plan_path) if plan_path is not None else []
 
     n_runs = mc_cfg.get("n_runs")
     # experiment.n_runs is authoritative: it pads or truncates the plan so
@@ -2136,7 +2056,7 @@ def main() -> None:
             experiment_cfg=experiment_cfg,
             mc_cfg=mc_cfg,
             prescription_path=prescription_path,
-            plan_path=overrides_path,
+            plan_path=plan_path,
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
@@ -2208,6 +2128,8 @@ def main() -> None:
             data_psf,
             noise_cfg=noise_cfg_run,
             rng_key=noise_key,
+            detector_spec=getattr(binder_data.detector, "spec", None),
+            exposure_time_s=truth_store_data.get("source.exposure_time_s", default=None),
         )
 
         noise_model = "gaussian"
@@ -2505,8 +2427,8 @@ def main() -> None:
                 lr_vec = np.ones_like(z0)
                 curvature_vec = np.ones_like(z0)
             else:
-                lr_vec = 1.0 / (eigvals_kept + 1e-12)
-                curvature_vec = eigvals_kept
+                curvature_vec = np.maximum(eigvals_kept, 1e-8)
+                lr_vec = 1.0 / (curvature_vec + 1e-12)
 
             index_map = build_eigen_index_map(eigen_map)
             # loss_opt maps optimizer z -> physical theta so the loss stays
@@ -2528,8 +2450,8 @@ def main() -> None:
             # Primitive theta_space keeps parameters untransformed and applies
             # a diagonal preconditioner from the FIM.
             index_map = build_index_map(inference_subspec, init_store, theta=theta0)
-            lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
-            curvature_vec = fim_diag
+            curvature_vec = np.maximum(np.asarray(fim_diag), 1e-8)
+            lr_vec = 1.0 / (curvature_vec + 1e-12)
             loss_opt = loss_fn
             theta0_opt = theta0
             metric_payload = None
@@ -2543,6 +2465,49 @@ def main() -> None:
                 **precond_meta_base,
                 "lr_vec": np.asarray(lr_vec),
             }
+        optimizer_cfg = run_spec.get("optimizer", {})
+        n_iter_value = optimizer_cfg.get("n_iter")
+        if n_iter_value is None:
+            raise ValueError(f"Run {run_id} resolved to a null optimizer.n_iter.")
+        base_lr_value = optimizer_cfg.get("base_lr")
+        if base_lr_value is None:
+            raise ValueError(f"Run {run_id} resolved to a null optimizer.base_lr.")
+        opt_kind = optimizer_cfg.get("kind", "sgd")
+        optimizer_kwargs = optimizer_cfg.get("kwargs", {})
+        n_iter = int(n_iter_value)
+        base_lr = float(base_lr_value)
+
+        run_diagnosis = False
+        if run_diagnosis:
+            diag = diagnose_first_step(
+                loss_fn=loss_opt,
+                theta0=theta0_opt,
+                learning_rate=base_lr,
+                lr_vec=lr_vec if use_eigen else None,
+                optimizer_kind=opt_kind,
+                index_map=index_map if not use_eigen else None,
+                verbose=True,
+            )
+            print("First-step diagnostic:")
+            print(
+                f"  loss0={diag['loss0']:.6g} finite={diag['loss0_finite']} | "
+                f"grad_finite={diag['grad0_finite']} | theta1_finite={diag['theta1_finite']} | "
+                f"loss1={diag['loss1']:.6g} finite={diag['loss1_finite']}"
+            )
+            print(
+                f"  grad0 min/max={diag['grad0_min']:.3e}/{diag['grad0_max']:.3e} | "
+                f"delta min/max={diag['delta_min']:.3e}/{diag['delta_max']:.3e}"
+            )
+            if lr_vec is not None:
+                print(
+                    f"  lr_vec min/max={diag['lr_vec_min']:.3e}/{diag['lr_vec_max']:.3e}"
+                )
+            if diag.get("top_grad"):
+                topg = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_grad"])
+                print(f"  top |grad|: {topg}")
+            if diag.get("top_delta"):
+                topl = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_delta"])
+                print(f"  top |delta|: {topl}")
 
         labels_by_key = map_labels_to_keys(
             infer_keys,
@@ -2555,17 +2520,6 @@ def main() -> None:
             index_map=None if use_eigen else index_map,
         )
 
-        optimizer_cfg = run_spec.get("optimizer", {})
-        n_iter_value = optimizer_cfg.get("n_iter")
-        if n_iter_value is None:
-            raise ValueError(f"Run {run_id} resolved to a null optimizer.n_iter.")
-        base_lr_value = optimizer_cfg.get("base_lr")
-        if base_lr_value is None:
-            raise ValueError(f"Run {run_id} resolved to a null optimizer.base_lr.")
-        opt_kind = optimizer_cfg.get("kind", "sgd")
-        optimizer_kwargs = optimizer_cfg.get("kwargs", {})
-        n_iter = int(n_iter_value)
-        base_lr = float(base_lr_value)
         loss_kind = _resolve_loss_kind(run_spec, mc_defaults)
 
         # Loss function setup and optimization execution: run_shera_gd consumes
@@ -2706,7 +2660,7 @@ def main() -> None:
                         )
 
                     psf_extent_as = (
-                        binder.optics.psf_npixels * binder.optics.psf_pixel_scale / 2
+                        binder_data.optics.psf_npixels * binder_data.optics.psf_pixel_scale / 2
                         * np.array([-1, 1, -1, 1])
                     )
 
@@ -2804,7 +2758,7 @@ def main() -> None:
         experiment_cfg=experiment_cfg,
         mc_cfg=mc_cfg,
         prescription_path=prescription_path,
-        plan_path=overrides_path,
+        plan_path=plan_path,
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
