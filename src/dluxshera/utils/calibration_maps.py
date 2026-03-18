@@ -77,8 +77,10 @@ def realize_fpa_offsets(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Replicate the MATLAB-style realize_fpa offset generation.
 
-    - ``row_err`` is ``fixed_row`` tiled down the rows.
-    - ``col_err`` is ``fixed_col`` tiled across the columns.
+    - ``fixed_row`` is a repeating row-pattern applied down the detector rows
+      and then copied across all columns into ``dy``.
+    - ``fixed_col`` is a repeating column-pattern applied across detector
+      columns and then copied down all rows into ``dx``.
     - iid Gaussian noise with std ``sig_offset`` is added to both dx and dy.
     - ``sig_diff`` is currently metadata-only; kept for parity with MATLAB.
     """
@@ -86,13 +88,18 @@ def realize_fpa_offsets(
     fixed_row = np.asarray(fixed_row, dtype=float).reshape(-1)
     fixed_col = np.asarray(fixed_col, dtype=float).reshape(-1)
 
-    if fixed_row.shape[0] != ncols:
-        raise ValueError(f"fixed_row length {fixed_row.shape[0]} must equal ncols={ncols}.")
-    if fixed_col.shape[0] != nrows:
-        raise ValueError(f"fixed_col length {fixed_col.shape[0]} must equal nrows={nrows}.")
+    if fixed_row.shape[0] == 0:
+        raise ValueError("fixed_row must contain at least one value.")
+    if fixed_col.shape[0] == 0:
+        raise ValueError("fixed_col must contain at least one value.")
 
-    row_err = np.tile(fixed_row, (nrows, 1))
-    col_err = np.tile(fixed_col.reshape(-1, 1), (1, ncols))
+    nfixed_row = fixed_row.shape[0]
+    row_pattern = np.tile(fixed_row.reshape(-1, 1), (int(np.ceil(nrows / nfixed_row)), 1))[:nrows]
+    row_err = np.tile(row_pattern, (1, ncols))
+
+    nfixed_col = fixed_col.shape[0]
+    col_pattern = np.tile(fixed_col.reshape(1, -1), (1, int(np.ceil(ncols / nfixed_col))))[:, :ncols]
+    col_err = np.tile(col_pattern, (nrows, 1))
 
     rng = _rng(seed) if sig_offset else None
     iid_dx = sig_offset * rng.standard_normal(size=(nrows, ncols)) if rng is not None else 0.0

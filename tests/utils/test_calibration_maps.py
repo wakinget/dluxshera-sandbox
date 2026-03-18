@@ -4,7 +4,7 @@ import numpy as np
 import jax.numpy as jnp
 from astropy.io import fits
 
-from dluxshera.calibration_maps import (
+from dluxshera.utils.calibration_maps import (
     MapMetadata,
     generate_baseline_maps,
     realize_fpa_offsets,
@@ -34,20 +34,20 @@ def test_baseline_noise_reproducible_with_seed():
 
 
 def test_realize_fpa_tiling_no_noise():
-    fixed_row = np.array([0.1, 0.2])
-    fixed_col = np.array([0.3, 0.4, 0.5])
+    fixed_row = np.array([0.1])
+    fixed_col = np.array([0.3, 0.4])
 
     dx, dy = realize_fpa_offsets(
         3,
-        2,
+        5,
         fixed_row=fixed_row,
         fixed_col=fixed_col,
         sig_offset=0.0,
         seed=42,
     )
 
-    expected_row = np.tile(fixed_row, (3, 1))
-    expected_col = np.tile(fixed_col.reshape(-1, 1), (1, 2))
+    expected_row = np.tile(np.array([[0.1], [0.1], [0.1]]), (1, 5))
+    expected_col = np.tile(np.array([[0.3, 0.4, 0.3, 0.4, 0.3]]), (3, 1))
 
     assert np.allclose(dx, expected_col)
     assert np.allclose(dy, expected_row)
@@ -93,4 +93,3 @@ def test_load_array_reads_npy(tmp_path):
     assert isinstance(loaded, jnp.ndarray)
     assert loaded.shape == (3, 3)
     assert np.allclose(np.array(loaded), arr)
-
