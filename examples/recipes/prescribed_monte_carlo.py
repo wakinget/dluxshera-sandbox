@@ -26,6 +26,11 @@ Notes behavior
   is written once to top-level `manifest.json["notes"]`.
 - Per-run note: set `note`/`notes`/`comment`/`comments` in run plan rows. The
   resolved value is stored as `run_note` in run summaries and aggregate outputs.
+- Detector knowledge-error realization policy: detector-layer
+  `knowledge_error.realization_policy` supports `fixed_per_experiment` (default)
+  and `per_run`. Explicit `knowledge_error.seed` remains authoritative. The
+  inference-side base config is kept unseeded outside the run loop so `per_run`
+  layers are realized fresh from each resolved run seed.
 
 CLI arguments (mirrors `main`)
 ------------------------------
@@ -254,6 +259,8 @@ def _mc_defaults_from_experiment(
 
     _deep_update(defaults["optimizer"], _optimizer_defaults(experiment_cfg))
     _deep_update(defaults["eigen"], _eigen_defaults(experiment_cfg))
+    if mc_cfg.get("reuse_fim") is not None and defaults["fim"].get("reuse_fim") is None:
+        defaults["fim"]["reuse_fim"] = mc_cfg.get("reuse_fim")
     eigen_defaults = _eigen_defaults(experiment_cfg)
     if eigen_defaults.get("reuse_fim") is not None and defaults["fim"].get("reuse_fim") is None:
         defaults["fim"]["reuse_fim"] = eigen_defaults["reuse_fim"]
@@ -663,33 +670,201 @@ def _resolve_plan_csv_path(plan_csv: str | Path | None, *, prescription_path: Pa
     )
 
 
+def _stable_hash_payload(payload: Any) -> str:
+    """Return a stable SHA256 hash for JSON-serializable payloads."""
+    if dataclasses.is_dataclass(payload):
+        payload = dataclasses.asdict(payload)
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _hash_array_bytes(value: Any) -> str:
+    """Return a SHA256 hash of an array's raw bytes."""
+    array = np.asarray(value)
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _normalize_ke_realization_policy(value: Any) -> str:
+    """Normalize detector knowledge-error realization policy strings."""
+    if value is None:
+        return "fixed_per_experiment"
+    policy = str(value).strip().lower()
+    if policy not in {"fixed_per_experiment", "per_run"}:
+        raise ValueError(
+            "detector.layers[*].knowledge_error.realization_policy must be "
+            "'fixed_per_experiment' or 'per_run'."
+        )
+    return policy
+
+
+def _layer_metadata_key(layer_name: str | None, idx: int, *, used: set[str]) -> str:
+    """Build a stable layer metadata key, disambiguating duplicate layer names."""
+    base = (layer_name or f"layer_{idx}").strip() if layer_name is not None else f"layer_{idx}"
+    if not base:
+        base = f"layer_{idx}"
+    key = base
+    if key in used:
+        key = f"{base}_{idx}"
+    used.add(key)
+    return key
+
+
+def _seed_detector_knowledge_errors_with_policy(
+    system_cfg: dict[str, Any],
+    *,
+    experiment_seed: int,
+    token_prefix: str,
+    run_seed: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Attach detector knowledge-error seeds, honoring realization policies.
+
+    Rules per detector layer with a ``knowledge_error`` mapping:
+    - Explicit ``knowledge_error.seed`` is preserved as-is.
+    - ``realization_policy`` defaults to ``fixed_per_experiment`` when omitted.
+    - ``fixed_per_experiment`` derives seed from ``experiment_seed``.
+    - ``per_run`` derives seed from ``run_seed`` when provided, otherwise falls
+      back to ``experiment_seed``.
+
+    Callers that want fresh ``per_run`` realizations must pass an unseeded base
+    config each time. Once a concrete seed is attached to a layer, it is treated
+    as explicit and preserved on subsequent calls.
+    """
+    cfg = copy.deepcopy(system_cfg)
+    detector_cfg = cfg.get("detector", {}) if isinstance(cfg, dict) else {}
+    layers = detector_cfg.get("layers", []) if isinstance(detector_cfg, dict) else []
+
+    seeded_layers = []
+    metadata_layers: dict[str, dict[str, Any]] = {}
+    used_meta_keys: set[str] = set()
+    has_per_run = False
+
+    for idx, layer in enumerate(layers):
+        if not isinstance(layer, dict):
+            seeded_layers.append(layer)
+            continue
+
+        layer_copy = dict(layer)
+        layer_name = layer_copy.get("name")
+        knowledge_error = layer_copy.get("knowledge_error")
+
+        if isinstance(knowledge_error, dict):
+            seeded_ke = dict(knowledge_error)
+            policy = _normalize_ke_realization_policy(seeded_ke.get("realization_policy"))
+            seeded_ke["realization_policy"] = policy
+            has_per_run = has_per_run or policy == "per_run"
+
+            explicit_seed = seeded_ke.get("seed") is not None
+            if not explicit_seed:
+                seed_base = (
+                    run_seed
+                    if policy == "per_run" and run_seed is not None
+                    else experiment_seed
+                )
+                seed_token = f"{token_prefix}.{layer_name or 'layer'}.{idx}"
+                seeded_ke["seed"] = make_subseed(seed_base, seed_token)
+
+            layer_copy["knowledge_error"] = seeded_ke
+
+            layer_name_text = None
+            if layer_name is not None:
+                raw_name = str(layer_name).strip()
+                layer_name_text = raw_name if raw_name else None
+            meta_key = _layer_metadata_key(
+                layer_name_text,
+                idx,
+                used=used_meta_keys,
+            )
+            metadata_layers[meta_key] = {
+                "name": layer_name,
+                "index": idx,
+                "model": seeded_ke.get("model"),
+                "scale": seeded_ke.get("scale"),
+                "realization_policy": policy,
+                "seed": seeded_ke.get("seed"),
+                "seed_source": (
+                    "explicit"
+                    if explicit_seed
+                    else (
+                        "run_seed"
+                        if policy == "per_run" and run_seed is not None
+                        else "experiment_seed"
+                    )
+                ),
+            }
+
+        seeded_layers.append(layer_copy)
+
+    if isinstance(detector_cfg, dict):
+        detector_cfg = dict(detector_cfg)
+        detector_cfg["layers"] = seeded_layers
+        cfg["detector"] = detector_cfg
+
+    metadata = {
+        "token_prefix": token_prefix,
+        "experiment_seed": experiment_seed,
+        "run_seed": run_seed,
+        "has_per_run_realization": has_per_run,
+        "layers": metadata_layers,
+    }
+    return cfg, metadata
+
+
+def _detector_ke_has_per_run_realization(system_cfg: dict[str, Any]) -> bool:
+    """Return whether any detector layer requests ``realization_policy=per_run``.
+
+    This is intentionally read-only so callers can inspect the configured
+    policy without materializing detector knowledge-error seeds.
+    """
+    detector_cfg = system_cfg.get("detector", {}) if isinstance(system_cfg, dict) else {}
+    layers = detector_cfg.get("layers", []) if isinstance(detector_cfg, dict) else []
+
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        knowledge_error = layer.get("knowledge_error")
+        if not isinstance(knowledge_error, dict):
+            continue
+        policy = _normalize_ke_realization_policy(knowledge_error.get("realization_policy"))
+        if policy == "per_run":
+            return True
+    return False
+
+
 def _seed_detector_knowledge_errors(
     system_cfg: dict[str, Any],
     *,
     base_seed: int,
     token_prefix: str,
+    run_seed: int | None = None,
 ) -> dict[str, Any]:
-    """Attach deterministic seeds to detector layer knowledge_error blocks."""
-    cfg = copy.deepcopy(system_cfg)
-    detector_cfg = cfg.get("detector", {}) if isinstance(cfg, dict) else {}
-    layers = detector_cfg.get("layers", []) if isinstance(detector_cfg, dict) else []
-    seeded_layers = []
-    for idx, layer in enumerate(layers):
-        if not isinstance(layer, dict):
-            seeded_layers.append(layer)
-            continue
-        knowledge_error = layer.get("knowledge_error")
-        if isinstance(knowledge_error, dict) and knowledge_error.get("seed") is None:
-            seeded_ke = dict(knowledge_error)
-            seeded_ke["seed"] = make_subseed(base_seed, f"{token_prefix}.{layer.get('name', 'layer')}.{idx}")
-            layer = dict(layer)
-            layer["knowledge_error"] = seeded_ke
-        seeded_layers.append(layer)
-    if isinstance(detector_cfg, dict):
-        detector_cfg = dict(detector_cfg)
-        detector_cfg["layers"] = seeded_layers
-        cfg["detector"] = detector_cfg
+    """Backward-compatible wrapper around policy-aware detector KE seeding."""
+    cfg, _ = _seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=base_seed,
+        token_prefix=token_prefix,
+        run_seed=run_seed,
+    )
     return cfg
+
+
+def _build_fim_cache_key_payload(
+    *,
+    infer_keys: tuple[str, ...],
+    system_label: str,
+    cfg_hash: str,
+    forward_spec_hash: str,
+    theta_true_hash: str,
+    loss_kind: str,
+) -> dict[str, Any]:
+    """Build a structured FIM-cache payload to hash into a cache key."""
+    return {
+        "infer_keys": infer_keys,
+        "model_config_id": system_label,
+        "cfg_hash": cfg_hash,
+        "forward_spec_hash": forward_spec_hash,
+        "theta_true_hash": theta_true_hash,
+        "loss_kind": loss_kind,
+    }
 
 
 def _set_nested(target: dict[str, Any], keys: list[str], value: Any) -> None:
@@ -2079,25 +2254,25 @@ def main() -> None:
 
     system_cfg = _apply_config_overrides(system_cfg, config_overrides)
 
-    inference_system_cfg = experiment_cfg.get("inference_system")
-    if inference_system_cfg is not None:
-        inference_system_cfg = resolve_system_config(inference_system_cfg)
+    inference_system_cfg_base = experiment_cfg.get("inference_system")
+    if inference_system_cfg_base is not None:
+        inference_system_cfg_base = resolve_system_config(inference_system_cfg_base)
     else:
-        inference_system_cfg = copy.deepcopy(system_cfg)
+        inference_system_cfg_base = copy.deepcopy(system_cfg)
 
-    system_cfg = _seed_detector_knowledge_errors(
+    system_cfg, data_detector_ke_meta = _seed_detector_knowledge_errors_with_policy(
         system_cfg,
-        base_seed=base_seed,
+        experiment_seed=base_seed,
         token_prefix="data.detector",
     )
-    inference_system_cfg = _seed_detector_knowledge_errors(
-        inference_system_cfg,
-        base_seed=base_seed,
-        token_prefix="inference.detector",
-    )
+    if _detector_ke_has_per_run_realization(inference_system_cfg_base):
+        print(
+            "Inference detector knowledge_error includes realization_policy=per_run; "
+            "inference-side detector realization will be resampled per run seed."
+        )
 
     forward_spec_data = compose_forward_spec(system_cfg)
-    forward_spec_infer = compose_forward_spec(inference_system_cfg)
+    forward_spec_infer = compose_forward_spec(inference_system_cfg_base)
 
     infer_keys_raw = tuple(experiment_cfg.get("infer_keys", []))
     infer_keys = tuple(_migrate_param_key(key) for key in infer_keys_raw)
@@ -2112,8 +2287,6 @@ def main() -> None:
     infer_keys = tuple(key for key in infer_keys if key in forward_spec_infer)
     if not infer_keys:
         raise ValueError("No valid infer_keys remain after migration/filtering.")
-    inference_subspec = forward_spec_infer.subset(infer_keys)
-
     # Store overrides and derived refresh steps: apply nested overrides via
     # dotted keys, then recompute any derived parameters to keep the store
     # self-consistent for forward/inference use.
@@ -2134,19 +2307,6 @@ def main() -> None:
 
     fim_cache: dict[str, dict[str, Any]] = {}
     fim_cache_last: dict[str, Any] | None = None
-
-    def _stable_hash(payload: Any) -> str:
-        if dataclasses.is_dataclass(payload):
-            payload = dataclasses.asdict(payload)
-        serialized = json.dumps(payload, sort_keys=True, default=str)
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    def _hash_array(value: Any) -> str:
-        array = np.asarray(value)
-        return hashlib.sha256(array.tobytes()).hexdigest()
-
-    cfg_hash = _stable_hash(inference_system_cfg)
-    forward_spec_hash = _stable_hash(forward_spec_infer)
 
     if args.aggregate_only:
         if not outdir.exists():
@@ -2205,6 +2365,22 @@ def main() -> None:
         rng_key, init_key = jr.split(rng_key)
         rng_key, noise_key = jr.split(rng_key)
 
+        inference_system_cfg_run, inference_detector_ke_meta = _seed_detector_knowledge_errors_with_policy(
+            inference_system_cfg_base,
+            experiment_seed=base_seed,
+            token_prefix="inference.detector",
+            run_seed=seed,
+        )
+        forward_spec_infer_run = compose_forward_spec(inference_system_cfg_run)
+        if tuple(forward_spec_infer_run.keys()) != tuple(forward_spec_infer.keys()):
+            raise ValueError(
+                "Run-specific inference forward spec keys differ from experiment-level keys. "
+                "Per-run detector knowledge-error realization currently requires invariant model structure."
+            )
+        inference_subspec = forward_spec_infer_run.subset(infer_keys)
+        cfg_hash = _stable_hash_payload(inference_system_cfg_run)
+        forward_spec_hash = _stable_hash_payload(forward_spec_infer_run)
+
         print(f"Generating synthetic data...")
         # Synthetic data generation + noise handling: build the "truth" store,
         # refresh derived values, then forward-model data and inject noise.
@@ -2214,17 +2390,17 @@ def main() -> None:
 
         truth_store_infer = base_store_infer.replace(truth_overrides)
         aligned_truth = {}
-        for key in forward_spec_infer.keys():
+        for key in forward_spec_infer_run.keys():
             try:
                 aligned_truth[key] = truth_store_data.get(key)
             except KeyError:
                 continue
         if aligned_truth:
             truth_store_infer = truth_store_infer.replace(aligned_truth)
-        truth_store_infer = truth_store_infer.refresh_derived(forward_spec_infer)
+        truth_store_infer = truth_store_infer.refresh_derived(forward_spec_infer_run)
 
         binder_data = SheraBinder(system_cfg, forward_spec_data, truth_store_data)
-        binder_infer = SheraBinder(inference_system_cfg, forward_spec_infer, truth_store_infer)
+        binder_infer = SheraBinder(inference_system_cfg_run, forward_spec_infer_run, truth_store_infer)
 
         # Generate the synthetic data
         data_psf = binder_data.model()
@@ -2259,7 +2435,11 @@ def main() -> None:
             reduce=reduce,
             theta0_store=truth_store_infer,
         )
-        fim_labels = generate_fim_labels(infer_keys, cfg=inference_system_cfg, store=truth_store_infer)
+        fim_labels = generate_fim_labels(
+            infer_keys,
+            cfg=inference_system_cfg_run,
+            store=truth_store_infer,
+        )
         loss_fn = nll_loss_fn
 
         # FIM computation and eigen preconditioning flow: pack_params converts
@@ -2330,7 +2510,7 @@ def main() -> None:
                     base_store=base_store_infer,
                 )
                 if applied_keys:
-                    cache_key = _stable_hash(run_prior_info)
+                    cache_key = _stable_hash_payload(run_prior_info)
                     run_prior_spec = prior_spec_cache.get(cache_key)
                     if run_prior_spec is None:
                         run_prior_spec = PriorSpec.from_info(base_store_infer, run_prior_info)
@@ -2374,7 +2554,7 @@ def main() -> None:
                     init_primitive_overrides,
                     init_derived_overrides,
                     init_unknown_overrides,
-                ) = _partition_overrides_by_kind(init_overrides_flat, forward_spec_infer)
+                ) = _partition_overrides_by_kind(init_overrides_flat, forward_spec_infer_run)
                 if init_unknown_overrides:
                     print(
                         "WARNING: explicit init overrides include keys that are not "
@@ -2385,7 +2565,7 @@ def main() -> None:
 
                 if init_primitive_overrides:
                     init_store = init_store.replace(init_primitive_overrides)
-                    init_store = init_store.refresh_derived(forward_spec_infer)
+                    init_store = init_store.refresh_derived(forward_spec_infer_run)
 
                 if init_derived_overrides:
                     infer_derived_keys = [
@@ -2413,7 +2593,7 @@ def main() -> None:
                 if init_unknown_overrides:
                     init_store = init_store.replace(init_unknown_overrides)
             else:
-                init_store = init_store.refresh_derived(forward_spec_infer)
+                init_store = init_store.refresh_derived(forward_spec_infer_run)
             if prior_overrides:
                 print(
                     f"Note: prior overrides provided for run_id={run_id} but "
@@ -2425,7 +2605,7 @@ def main() -> None:
             init_store = _refresh_preserving_derived_infer_keys(
                 init_store,
                 infer_keys=infer_keys,
-                spec=forward_spec_infer,
+                spec=forward_spec_infer_run,
             )
 
         _, theta0 = make_binder_nll_fn(
@@ -2460,15 +2640,15 @@ def main() -> None:
 
         fim_point = theta_true
         # FIM cache key includes loss_kind so MAP and NLL cache separately.
-        cache_key_payload = {
-            "infer_keys": infer_keys,
-            "model_config_id": system_label,
-            "cfg_hash": cfg_hash,
-            "forward_spec_hash": forward_spec_hash,
-            "theta_true_hash": _hash_array(theta_true),
-            "loss_kind": loss_kind,
-        }
-        fim_cache_key = _stable_hash(cache_key_payload)[:12]
+        cache_key_payload = _build_fim_cache_key_payload(
+            infer_keys=infer_keys,
+            system_label=system_label,
+            cfg_hash=cfg_hash,
+            forward_spec_hash=forward_spec_hash,
+            theta_true_hash=_hash_array_bytes(theta_true),
+            loss_kind=loss_kind,
+        )
+        fim_cache_key = _stable_hash_payload(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
         cache_entry = fim_cache.get(cache_key)
         if cache_entry is not None:
@@ -2633,7 +2813,7 @@ def main() -> None:
             infer_keys,
             generate_fim_labels(
                 infer_keys,
-                cfg=inference_system_cfg,
+                cfg=inference_system_cfg_run,
                 store=init_store if use_eigen else truth_store_infer,
             ),
             store=init_store if use_eigen else None,
@@ -2681,6 +2861,17 @@ def main() -> None:
                     "reuse_fim": reuse_fim,
                     "fim_cache_key": fim_cache_key,
                     "fim_cache_hit": fim_cache_hit,
+                    "inference_cfg_hash": cfg_hash,
+                    "inference_forward_spec_hash": forward_spec_hash,
+                    "detector_ke_realization_mode": (
+                        "per_run"
+                        if inference_detector_ke_meta.get("has_per_run_realization")
+                        else "fixed_per_experiment"
+                    ),
+                },
+                "detector_knowledge_error": {
+                    "data": data_detector_ke_meta,
+                    "inference": inference_detector_ke_meta,
                 },
             },
         )
@@ -2745,7 +2936,7 @@ def main() -> None:
 
                     fim_labels = generate_fim_labels(
                         infer_keys,
-                        cfg=inference_system_cfg,
+                        cfg=inference_system_cfg_run,
                         store=init_store if use_eigen else truth_store_infer,
                     )
                     plot_fim(
@@ -2880,7 +3071,7 @@ def main() -> None:
                                 init_store,
                             ),
                             infer_keys=infer_keys,
-                            spec=forward_spec_infer,
+                            spec=forward_spec_infer_run,
                         )
                     else:
                         decoder = lambda theta: _refresh_preserving_derived_infer_keys(
@@ -2890,7 +3081,7 @@ def main() -> None:
                                 init_store,
                             ),
                             infer_keys=infer_keys,
-                            spec=forward_spec_infer,
+                            spec=forward_spec_infer_run,
                         )
 
                     signals = build_signals(

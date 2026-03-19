@@ -67,11 +67,16 @@ Outputs live under the experiment directory:
                     knowledge_error:
                         model: gaussian
                         scale: 1e-3
+                        realization_policy: per_run
           ```
 - If `experiment.inference_system.preset` is set, omitted mapping fields inside `inference_system` fall back to that preset's values.
 - If `experiment.inference_system` is present without its own `preset`, it must be complete enough to resolve as a standalone system.
 - The same merge rules apply inside `inference_system` as for the top-level `system`: mappings merge, lists replace.
 - This is useful for model-mismatch studies such as using different Noll index sets in the optics model, or using different detector calibration maps or detector-layer knowledge errors during inference.
+- Detector layer `knowledge_error` blocks support optional `realization_policy`:
+  - `fixed_per_experiment` (default): one deterministic realization for the whole experiment.
+  - `per_run`: seed derives from each run seed so detector mismatch re-realizes per run.
+  - Explicit `knowledge_error.seed` still wins and is never overridden by policy.
 
 ## Outdir Resolution
 - The experiment root is resolved in this order: `--outdir`, then `experiment.outputs.outdir`, then `--run-name`, then the default timestamped `Results/prescribed_mc_<timestamp>`.
@@ -160,6 +165,11 @@ python examples/scripts/aggregate_detector_ke_sweep.py \
 - Outputs are written under the sweep root:
   - `sweep_runs.csv` (one row per run across all experiments)
   - `sweep_summary.csv` (one row per KE setting with grouped metrics)
+- The outer aggregator preserves both configured detector KE settings
+  (`prescription.*`) and realized per-run detector KE metadata from
+  `runs*/<run_id>/meta.json` when available (including per-run seeds/policies).
+  Older runs that lack this metadata are still aggregated with null realized
+  columns.
 
 ## CSV override hints
 - `run_id`, `enabled`, `seed`, `note`/`comment` supported.

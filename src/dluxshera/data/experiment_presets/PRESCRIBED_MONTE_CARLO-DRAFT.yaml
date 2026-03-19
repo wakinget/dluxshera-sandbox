@@ -70,11 +70,13 @@ experiment:
           knowledge_error:
             model: gaussian # gaussian | uniform
             scale: 1e-3
+            realization_policy: per_run # fixed_per_experiment | per_run
         - name: pixel_response
           prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
           knowledge_error:
             model: gaussian
             scale: 1e-3
+            realization_policy: per_run # fixed_per_experiment | per_run
 
   infer_keys:
     - source.separation_as

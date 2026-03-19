@@ -75,6 +75,286 @@ def test_seed_detector_knowledge_errors_inserts_seed():
     assert "seed" in seeded_layers[0]["knowledge_error"]
 
 
+def test_monte_carlo_reuse_fim_populates_fim_defaults():
+    m = _load_module()
+    experiment_cfg = {"seed": 42}
+    mc_cfg = {"reuse_fim": True}
+
+    _, defaults = m._mc_defaults_from_experiment(experiment_cfg, mc_cfg)
+
+    assert defaults["fim"]["reuse_fim"] is True
+
+
+def test_detector_ke_policy_default_matches_fixed_per_experiment():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {"model": "gaussian", "scale": 1e-3},
+                }
+            ]
+        }
+    }
+
+    seeded1, meta1 = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=123,
+        run_seed=1,
+        token_prefix="inference.detector",
+    )
+    seeded2, meta2 = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=123,
+        run_seed=2,
+        token_prefix="inference.detector",
+    )
+
+    seed1 = seeded1["detector"]["layers"][0]["knowledge_error"]["seed"]
+    seed2 = seeded2["detector"]["layers"][0]["knowledge_error"]["seed"]
+    assert seed1 == seed2
+    assert meta1["layers"]["pixel_offsets"]["realization_policy"] == "fixed_per_experiment"
+    assert meta2["layers"]["pixel_offsets"]["realization_policy"] == "fixed_per_experiment"
+
+
+def test_detector_ke_policy_fixed_per_experiment_is_run_invariant():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {
+                        "model": "gaussian",
+                        "scale": 1e-3,
+                        "realization_policy": "fixed_per_experiment",
+                    },
+                }
+            ]
+        }
+    }
+
+    seeded1, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=55,
+        run_seed=1001,
+        token_prefix="inference.detector",
+    )
+    seeded2, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=55,
+        run_seed=2002,
+        token_prefix="inference.detector",
+    )
+
+    seed1 = seeded1["detector"]["layers"][0]["knowledge_error"]["seed"]
+    seed2 = seeded2["detector"]["layers"][0]["knowledge_error"]["seed"]
+    assert seed1 == seed2
+
+
+def test_detector_ke_policy_per_run_uses_run_seed_and_is_reproducible():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {
+                        "model": "gaussian",
+                        "scale": 1e-3,
+                        "realization_policy": "per_run",
+                    },
+                }
+            ]
+        }
+    }
+
+    seeded1, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=77,
+        run_seed=1001,
+        token_prefix="inference.detector",
+    )
+    seeded2, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=77,
+        run_seed=2002,
+        token_prefix="inference.detector",
+    )
+    seeded3, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=77,
+        run_seed=1001,
+        token_prefix="inference.detector",
+    )
+
+    seed1 = seeded1["detector"]["layers"][0]["knowledge_error"]["seed"]
+    seed2 = seeded2["detector"]["layers"][0]["knowledge_error"]["seed"]
+    seed3 = seeded3["detector"]["layers"][0]["knowledge_error"]["seed"]
+
+    assert seed1 != seed2
+    assert seed1 == seed3
+
+
+def test_detector_ke_per_run_policy_inspection_keeps_base_config_pristine():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {
+                        "model": "gaussian",
+                        "scale": 1e-3,
+                        "realization_policy": "per_run",
+                    },
+                }
+            ]
+        }
+    }
+
+    assert m._detector_ke_has_per_run_realization(system_cfg) is True
+    assert "seed" not in system_cfg["detector"]["layers"][0]["knowledge_error"]
+
+    seeded1, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=77,
+        run_seed=1001,
+        token_prefix="inference.detector",
+    )
+    seeded2, _ = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=77,
+        run_seed=2002,
+        token_prefix="inference.detector",
+    )
+
+    seed1 = seeded1["detector"]["layers"][0]["knowledge_error"]["seed"]
+    seed2 = seeded2["detector"]["layers"][0]["knowledge_error"]["seed"]
+    assert seed1 != seed2
+    assert "seed" not in system_cfg["detector"]["layers"][0]["knowledge_error"]
+
+
+def test_detector_ke_policy_explicit_seed_wins_over_policy():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {
+                        "model": "gaussian",
+                        "scale": 1e-3,
+                        "realization_policy": "per_run",
+                        "seed": 999,
+                    },
+                }
+            ]
+        }
+    }
+
+    seeded, meta = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=77,
+        run_seed=1001,
+        token_prefix="inference.detector",
+    )
+
+    assert seeded["detector"]["layers"][0]["knowledge_error"]["seed"] == 999
+    assert meta["layers"]["pixel_offsets"]["seed"] == 999
+    assert meta["layers"]["pixel_offsets"]["seed_source"] == "explicit"
+
+
+def test_detector_ke_metadata_includes_model_scale_policy_and_seed():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {
+                        "model": "gaussian",
+                        "scale": 2e-3,
+                        "realization_policy": "per_run",
+                    },
+                }
+            ]
+        }
+    }
+
+    _, meta = m._seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=42,
+        run_seed=4242,
+        token_prefix="inference.detector",
+    )
+    layer_meta = meta["layers"]["pixel_offsets"]
+
+    assert layer_meta["model"] == "gaussian"
+    assert layer_meta["scale"] == 2e-3
+    assert layer_meta["realization_policy"] == "per_run"
+    assert isinstance(layer_meta["seed"], int)
+    assert layer_meta["seed_source"] == "run_seed"
+    assert meta["has_per_run_realization"] is True
+
+
+def test_fim_cache_key_payload_hash_changes_with_cfg_hash():
+    m = _load_module()
+    payload_a = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_A",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        loss_kind="nll",
+    )
+    payload_b = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_B",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        loss_kind="nll",
+    )
+
+    hash_a = m._stable_hash_payload(payload_a)
+    hash_b = m._stable_hash_payload(payload_b)
+    assert payload_a["cfg_hash"] == "cfg_A"
+    assert payload_b["cfg_hash"] == "cfg_B"
+    assert hash_a != hash_b
+
+
+def test_detector_ke_policy_invalid_value_raises():
+    m = _load_module()
+    system_cfg = {
+        "detector": {
+            "layers": [
+                {
+                    "name": "pixel_offsets",
+                    "knowledge_error": {
+                        "model": "gaussian",
+                        "scale": 1e-3,
+                        "realization_policy": "not_a_policy",
+                    },
+                }
+            ]
+        }
+    }
+
+    try:
+        m._seed_detector_knowledge_errors_with_policy(
+            system_cfg,
+            experiment_seed=1,
+            run_seed=2,
+            token_prefix="inference.detector",
+        )
+    except ValueError as exc:
+        assert "realization_policy" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid realization_policy.")
+
+
 def test_get_pixel_offset_maps_handles_missing_layer():
     m = _load_module()
     class DummyDetector:
