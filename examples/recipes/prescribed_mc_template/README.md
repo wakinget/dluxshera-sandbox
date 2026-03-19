@@ -36,8 +36,38 @@ Outputs live under the experiment directory:
 ## Data Vs Inference Systems
 - By default, the script uses the resolved top-level `system` both to generate synthetic data and to run inference. This is the no-mismatch case.
 - You can provide `experiment.inference_system` when you want the inference model to differ from the data-generating model.
-- If `experiment.inference_system` is omitted entirely, the script copies the fully resolved top-level `system` and uses that for inference.
-- If `experiment.inference_system` is present, it resolves as its own system block. It does not inherit missing fields from the top-level `system`.
+  - If `experiment.inference_system` is omitted entirely, the script copies the fully resolved top-level `system` and uses that for inference.
+    - If `experiment.inference_system` is present, it resolves as its own system block. It does not inherit missing fields from the top-level `system`. This means that any non-default `system` fields that you don't intend to change must be present in `experiment.inference_system`.
+      - For example, if `system.source.exposure_time_s` is set, and you don't intend to change it, it must be present in `experiment.inference_system`:
+        - ```
+          system:
+            preset: SHERA_FLIGHT_3P
+            source:
+              exposure_time_s: 180000.0
+            detector:
+              layers:
+                - name: downsample
+                  kernel_size: 3
+                - name: pixel_offsets
+                  dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
+                  dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
+          
+          experiment:
+            inference_system:
+              preset: SHERA_FLIGHT_3P
+              source:
+                exposure_time_s: 180000.0 # <-- this is required
+              detector:
+                layers:
+                  - name: downsample
+                    kernel_size: 3        # <-- this too
+                  - name: pixel_offsets
+                    dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
+                    dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
+                    knowledge_error:
+                        model: gaussian
+                        scale: 1e-3
+          ```
 - If `experiment.inference_system.preset` is set, omitted mapping fields inside `inference_system` fall back to that preset's values.
 - If `experiment.inference_system` is present without its own `preset`, it must be complete enough to resolve as a standalone system.
 - The same merge rules apply inside `inference_system` as for the top-level `system`: mappings merge, lists replace.
