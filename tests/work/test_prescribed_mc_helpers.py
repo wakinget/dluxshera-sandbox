@@ -86,3 +86,17 @@ def test_get_pixel_offset_maps_handles_missing_layer():
             self.detector = DummyDetector()
 
     assert m._get_pixel_offset_maps(DummyBinder()) is None
+
+
+def test_get_pixel_response_map_handles_missing_layer():
+    m = _load_module()
+
+    class DummyDetector:
+        def __init__(self):
+            self.layers = {}
+
+    class DummyBinder:
+        def __init__(self):
+            self.detector = DummyDetector()
+
+    assert m._get_pixel_response_map(DummyBinder()) is None

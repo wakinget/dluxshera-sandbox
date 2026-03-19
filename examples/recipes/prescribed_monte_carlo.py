@@ -136,6 +136,13 @@ def _get_pixel_offset_maps(binder: SheraBinder):
     return np.asarray(layer.dx_map), np.asarray(layer.dy_map)
 
 
+def _get_pixel_response_map(binder: SheraBinder):
+    """Return pixel_response map from the binder if the layer exists."""
+    layer = binder.detector.layers.get("pixel_response") if hasattr(binder, "detector") else None
+    if layer is None or not hasattr(layer, "pixel_response"):
+        return None
+    return np.asarray(layer.pixel_response)
+
 def _require_experiment_seed(experiment_cfg: dict[str, Any]) -> int:
     seed = experiment_cfg.get("seed")
     if seed is None:
@@ -2761,6 +2768,22 @@ def main() -> None:
                             print("Skipping pixel_offset_maps.png: data/inference map shapes differ.")
                     else:
                         print("Skipping pixel_offset_maps.png: pixel_offsets layer missing.")
+
+                    prf_data = _get_pixel_response_map(binder_data)
+                    prf_infer = _get_pixel_response_map(binder_infer)
+                    if prf_data is not None and prf_infer is not None:
+                        if prf_data.shape == prf_infer.shape:
+                            plot_pixel_response_maps(
+                                prf_data,
+                                prf_infer,
+                                cmap="viridis_nan",
+                                save_path=plots_dir / "pixel_response_maps.png",
+                                show=False,
+                            )
+                        else:
+                            print("Skipping pixel_response_maps.png: data/inference prf shapes differ.")
+                    else:
+                        print("Skipping pixel_response_maps.png: pixel_response layer missing.")
 
                     losses = np.asarray(trace["loss"])
                     fig, axes = plt.subplots(1, 2, figsize=(9, 4))

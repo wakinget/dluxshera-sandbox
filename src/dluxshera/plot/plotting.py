@@ -42,6 +42,7 @@ __all__ = [
     "plot_psf_comparison",
     "plot_opd_surface",
     "plot_pixel_offset_maps",
+    "plot_pixel_response_maps",
     "choose_subplot_grid",
     "plot_parameter_sweeps",
     "plot_fim",
@@ -927,6 +928,57 @@ def plot_pixel_offset_maps(
         cmap=cmap,
         vmin=-diff_dy_abs,
         vmax=diff_dy_abs,
+    )
+
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, axes
+
+
+def plot_pixel_response_maps(
+    data_prf,
+    infer_prf,
+    *,
+    figsize=(9, 9),
+    cmap: str = "viridis_nan",
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot data vs inference pixel-response maps plus their difference (3x1 grid)."""
+
+    get_default_cmaps()
+
+    data_prf = onp.asarray(data_prf)
+    infer_prf = onp.asarray(infer_prf)
+
+    if data_prf.shape != infer_prf.shape:
+        raise ValueError("Pixel response map shapes must match between data and inference systems.")
+
+    diff_prf = data_prf - infer_prf
+
+    prf_min = onp.nanmin([onp.nanmin(data_prf), onp.nanmin(infer_prf)])
+    prf_max = onp.nanmax([onp.nanmax(data_prf), onp.nanmax(infer_prf)])
+    diff_abs = onp.nanmax(onp.abs(diff_prf))
+
+    fig, axes = plt.subplots(3, 1, figsize=figsize, squeeze=False)
+    _imshow_panel(axes[0, 0], data_prf, title="Data pixel_response", cmap=cmap, vmin=prf_min, vmax=prf_max)
+    _imshow_panel(
+        axes[1, 0], infer_prf, title="Inference pixel_response", cmap=cmap, vmin=prf_min, vmax=prf_max
+    )
+    _imshow_panel(
+        axes[2, 0],
+        diff_prf,
+        title="pixel_response (data - inference)",
+        cmap=cmap,
+        vmin=-diff_abs,
+        vmax=diff_abs,
     )
 
     fig.tight_layout()
