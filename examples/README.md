@@ -73,6 +73,18 @@ recipes/runners.
     python examples/scripts/analyze_checkpoint_gradients.py --help
     python examples/scripts/analyze_checkpoint_gradients.py Results/<run_dir>
     ```
+- **aggregate_detector_ke_sweep.py** — Aggregate multiple prescribed-MC detector
+  knowledge-error experiment directories (for example `ke_0`, `ke_1e-3`, ...)
+  into cross-experiment `sweep_runs.csv` and `sweep_summary.csv`.
+  - Use this when each sweep point is its own experiment directory and you want
+    one outer table for all runs plus grouped per-KE statistics.
+  - How to run:
+
+    ```bash
+    python examples/scripts/aggregate_detector_ke_sweep.py --help
+    python examples/scripts/aggregate_detector_ke_sweep.py \
+      --root Results/detector_ke_sweep
+    ```
 
 ## Artifact outputs (what to look for)
 

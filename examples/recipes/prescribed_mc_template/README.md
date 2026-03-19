@@ -145,6 +145,22 @@ python examples/recipes/prescribed_monte_carlo.py \
 - If `--outdir` is provided without `--prescription`, the script looks for `prescription.*` (yaml/yml/json) under that directory. This discovery step only helps locate the prescription; `--outdir` still wins as the experiment root once execution starts.
 - If `--prescription` is provided and `experiment.outputs.outdir` is set, you can omit `--outdir` and let the prescription control the experiment root.
 
+## Outer sweep aggregation (multiple experiment directories)
+- The prescribed-MC recipe already aggregates runs *within one experiment root*
+  (`results.csv`, `manifest.json`).
+- For detector knowledge-error sweeps where each sweep point is a separate
+  experiment directory (for example `Results/detector_ke_sweep/ke_1e-3/`),
+  use the outer aggregator script:
+
+```bash
+python examples/scripts/aggregate_detector_ke_sweep.py \
+  --root Results/detector_ke_sweep
+```
+
+- Outputs are written under the sweep root:
+  - `sweep_runs.csv` (one row per run across all experiments)
+  - `sweep_summary.csv` (one row per KE setting with grouped metrics)
+
 ## CSV override hints
 - `run_id`, `enabled`, `seed`, `note`/`comment` supported.
 - `prior.<infer_key>.sigma|dist` applies when `init.mode` resolves to `prior`.
