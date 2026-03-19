@@ -73,3 +73,16 @@ def test_seed_detector_knowledge_errors_inserts_seed():
     seeded = m._seed_detector_knowledge_errors(system_cfg, base_seed=7, token_prefix="test")
     seeded_layers = seeded["detector"]["layers"]
     assert "seed" in seeded_layers[0]["knowledge_error"]
+
+
+def test_get_pixel_offset_maps_handles_missing_layer():
+    m = _load_module()
+    class DummyDetector:
+        def __init__(self):
+            self.layers = {}
+
+    class DummyBinder:
+        def __init__(self):
+            self.detector = DummyDetector()
+
+    assert m._get_pixel_offset_maps(DummyBinder()) is None

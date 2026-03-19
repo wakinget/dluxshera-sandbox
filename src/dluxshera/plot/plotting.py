@@ -41,6 +41,7 @@ __all__ = [
     "plot_psf_single",
     "plot_psf_comparison",
     "plot_opd_surface",
+    "plot_pixel_offset_maps",
     "choose_subplot_grid",
     "plot_parameter_sweeps",
     "plot_fim",
@@ -294,6 +295,17 @@ def merge_cbar(ax):
     """Append a slim colourbar axis flush with ``ax`` and return it."""
 
     return make_axes_locatable(ax).append_axes("right", size="5%", pad=0.0)
+
+
+def _imshow_panel(ax, data, *, title, cmap, vmin=None, vmax=None):
+    im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title(title)
+    ax.set_xlabel("X (px)")
+    ax.set_ylabel("Y (px)")
+    cax = merge_cbar(ax)
+    ax.figure.colorbar(im, cax=cax)
+
+    return im
 
 
 def plot_parameter_history(
@@ -857,6 +869,75 @@ def plot_psf_comparison(
         plt.close(fig)
 
     return fig, axs
+
+
+def plot_pixel_offset_maps(
+    data_dx,
+    data_dy,
+    infer_dx,
+    infer_dy,
+    *,
+    figsize=(10, 12),
+    cmap: str = "viridis_nan",
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot data vs inference pixel-offset maps plus their differences (3x2 grid)."""
+
+    # Ensure NaN-safe colormaps are registered
+    get_default_cmaps()
+
+    data_dx = onp.asarray(data_dx)
+    data_dy = onp.asarray(data_dy)
+    infer_dx = onp.asarray(infer_dx)
+    infer_dy = onp.asarray(infer_dy)
+
+    if data_dx.shape != infer_dx.shape or data_dy.shape != infer_dy.shape:
+        raise ValueError("Pixel offset map shapes must match between data and inference systems.")
+
+    diff_dx = data_dx - infer_dx
+    diff_dy = data_dy - infer_dy
+
+    dx_min = onp.nanmin([onp.nanmin(data_dx), onp.nanmin(infer_dx)])
+    dx_max = onp.nanmax([onp.nanmax(data_dx), onp.nanmax(infer_dx)])
+    dy_min = onp.nanmin([onp.nanmin(data_dy), onp.nanmin(infer_dy)])
+    dy_max = onp.nanmax([onp.nanmax(data_dy), onp.nanmax(infer_dy)])
+
+    diff_dx_abs = onp.nanmax(onp.abs(diff_dx))
+    diff_dy_abs = onp.nanmax(onp.abs(diff_dy))
+
+    fig, axes = plt.subplots(3, 2, figsize=figsize, squeeze=False)
+    _imshow_panel(axes[0, 0], data_dx, title="Data dx_map", cmap=cmap, vmin=dx_min, vmax=dx_max)
+    _imshow_panel(axes[0, 1], data_dy, title="Data dy_map", cmap=cmap, vmin=dy_min, vmax=dy_max)
+    _imshow_panel(axes[1, 0], infer_dx, title="Inference dx_map", cmap=cmap, vmin=dx_min, vmax=dx_max)
+    _imshow_panel(axes[1, 1], infer_dy, title="Inference dy_map", cmap=cmap, vmin=dy_min, vmax=dy_max)
+    _imshow_panel(
+        axes[2, 0],
+        diff_dx,
+        title="dx_map (data - inference)",
+        cmap=cmap,
+        vmin=-diff_dx_abs,
+        vmax=diff_dx_abs,
+    )
+    _imshow_panel(
+        axes[2, 1],
+        diff_dy,
+        title="dy_map (data - inference)",
+        cmap=cmap,
+        vmin=-diff_dy_abs,
+        vmax=diff_dy_abs,
+    )
+
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, axes
 
 
 def plot_opd_surface(

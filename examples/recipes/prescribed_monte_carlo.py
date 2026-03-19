@@ -94,6 +94,7 @@ from dluxshera.plot.plotting import (
     plot_parameter_history,
     plot_psf_comparison,
     plot_signals_grid,
+    plot_pixel_offset_maps,
 )
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
@@ -125,6 +126,14 @@ LEGACY_KEY_MAP = {
     "secondary.zernike_coeffs_nm": "optics.secondary.zernike_coeffs_nm",
     "imaging.exposure_time_s": "source.exposure_time_s",
 }
+
+
+def _get_pixel_offset_maps(binder: SheraBinder):
+    """Return (dx_map, dy_map) from the binder if pixel_offsets layer exists."""
+    layer = binder.detector.layers.get("pixel_offsets") if hasattr(binder, "detector") else None
+    if layer is None or not hasattr(layer, "dx_map") or not hasattr(layer, "dy_map"):
+        return None
+    return np.asarray(layer.dx_map), np.asarray(layer.dy_map)
 
 
 def _require_experiment_seed(experiment_cfg: dict[str, Any]) -> int:
@@ -2732,6 +2741,26 @@ def main() -> None:
                         save_path=plots_dir / "final_psf_comparison.png",
                         show=False,
                     )
+
+                    pixel_offsets_data = _get_pixel_offset_maps(binder_data)
+                    pixel_offsets_infer = _get_pixel_offset_maps(binder_infer)
+                    if pixel_offsets_data is not None and pixel_offsets_infer is not None:
+                        data_dx, data_dy = pixel_offsets_data
+                        infer_dx, infer_dy = pixel_offsets_infer
+                        if data_dx.shape == infer_dx.shape and data_dy.shape == infer_dy.shape:
+                            plot_pixel_offset_maps(
+                                data_dx,
+                                data_dy,
+                                infer_dx,
+                                infer_dy,
+                                cmap="viridis_nan",
+                                save_path=plots_dir / "pixel_offset_maps.png",
+                                show=False,
+                            )
+                        else:
+                            print("Skipping pixel_offset_maps.png: data/inference map shapes differ.")
+                    else:
+                        print("Skipping pixel_offset_maps.png: pixel_offsets layer missing.")
 
                     losses = np.asarray(trace["loss"])
                     fig, axes = plt.subplots(1, 2, figsize=(9, 4))
