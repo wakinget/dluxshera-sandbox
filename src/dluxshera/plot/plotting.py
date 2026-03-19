@@ -105,7 +105,7 @@ def get_default_cmaps(
     """Return the default plotting colormaps with NaN handling."""
 
     return make_nan_cmaps(
-        ["inferno", "seismic", "coolwarm"],
+        ["inferno", "viridis", "seismic", "coolwarm"],
         bad_color=bad_color,
         bad_alpha=bad_alpha,
     )
