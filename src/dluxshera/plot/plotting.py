@@ -70,6 +70,7 @@ def make_nan_cmaps(
     *,
     bad_color: str = "k",
     bad_alpha: float = 0.5,
+    register: bool = True,
 ) -> Mapping[str, matplotlib.colors.Colormap]:
     """Create colormaps with NaNs rendered as a specified color.
 
@@ -81,6 +82,9 @@ def make_nan_cmaps(
         Color to use for NaNs/invalid entries.
     bad_alpha : float
         Alpha value to use for NaNs/invalid entries.
+    register : bool
+        When True, register ``<name>_nan`` with Matplotlib. When False, skip
+        registration to avoid repeated overwrite warnings.
 
     Returns
     -------
@@ -94,8 +98,9 @@ def make_nan_cmaps(
         cmap.set_bad(bad_color, bad_alpha)
         cmaps[name] = cmap
         registered_name = f"{name}_nan"
-        matplotlib.colormaps.register(cmap, name=registered_name, force=True)
-        cmaps[registered_name] = cmap
+        if register and registered_name not in matplotlib.colormaps:
+            matplotlib.colormaps.register(cmap, name=registered_name, force=True)
+        cmaps[registered_name] = matplotlib.colormaps.get(registered_name, cmap)
     return cmaps
 
 
@@ -103,6 +108,7 @@ def get_default_cmaps(
     *,
     bad_color: str = "k",
     bad_alpha: float = 0.5,
+    register: bool = True,
 ) -> Mapping[str, matplotlib.colors.Colormap]:
     """Return the default plotting colormaps with NaN handling."""
 
@@ -110,6 +116,7 @@ def get_default_cmaps(
         ["inferno", "viridis", "seismic", "coolwarm"],
         bad_color=bad_color,
         bad_alpha=bad_alpha,
+        register=register,
     )
 
 
