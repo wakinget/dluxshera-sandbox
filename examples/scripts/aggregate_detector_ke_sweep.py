@@ -40,13 +40,14 @@ for `pixel_offsets` and `pixel_response` (when present), including:
 
 - `knowledge_error.model`
 - `knowledge_error.scale`
+- `knowledge_error.realization_policy`
 - calibration paths (`dx_path`, `dy_path`, `prf_path`)
 
 When `experiment.inference_system` is absent, this script treats the experiment
 as having no inference-side detector mismatch and records:
 
-- `pixel_offsets_knowledge_error_scale = 0.0`
-- `pixel_response_knowledge_error_scale = 0.0`
+- `pixel_offsets_configured_scale = 0.0`
+- `pixel_response_configured_scale = 0.0`
 - model/path columns as null
 
 What is read from each `results.csv`
@@ -65,12 +66,27 @@ already flattened into component columns such as
 `final_delta.optics.primary.zernike_coeffs_nm[0]`. This script summarizes each
 component independently.
 
+What is read from each `runs/*/meta.json`
+-----------------------------------------
+When present, run metadata is read from run artifact directories (`runs/` or
+`runs*`) and used to enrich each run row with realized detector KE fields from:
+
+- `detector_knowledge_error.inference.layers`
+- selected `prescribed.*` audit fields (for example realization mode/hashes)
+
+Configured values (from prescription) and realized values (from run metadata)
+are stored in separate columns so intended vs realized behavior remains explicit.
+
 Derived outputs
 ---------------
 `sweep_runs.csv` adds sweep metadata plus:
 
 - `sep_error_as`
 - `abs_sep_error_as`
+- configured detector KE columns (for example
+  `pixel_offsets_configured_model/scale/realization_policy`)
+- realized detector KE columns from run metadata when available (for example
+  `pixel_offsets_realized_model/scale/realization_policy/seed/seed_source`)
 
 where separation error uses:
 
@@ -87,6 +103,14 @@ where separation error uses:
   - `<quantity>_mean_abs_error`
   - `<quantity>_median_abs_error`
   - `<quantity>_rmse`
+
+Backward compatibility
+----------------------
+- Older sweeps with only `prescription.*` + row-oriented `results.csv` are
+  supported.
+- Missing `runs/` or missing `meta.json` for some runs leaves realized columns
+  null by default.
+- `--strict` upgrades missing/malformed run metadata to hard errors.
 
 Examples
 --------
@@ -109,6 +133,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import re
 from pathlib import Path
@@ -235,16 +260,49 @@ def _string_or_none(value: Any) -> str | None:
     return text if text else None
 
 
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _get_nested(mapping: Any, dotted_key: str) -> Any:
+    current = mapping
+    for key in dotted_key.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
 def extract_detector_knowledge_error_metadata(prescription: dict[str, Any]) -> dict[str, Any]:
     """Extract inference-detector knowledge-error metadata from a prescription."""
     out: dict[str, Any] = {
         "inference_system_present": False,
-        "pixel_offsets_knowledge_error_scale": 0.0,
-        "pixel_offsets_knowledge_error_model": None,
+        "pixel_offsets_configured_scale": 0.0,
+        "pixel_offsets_configured_model": None,
+        "pixel_offsets_configured_realization_policy": None,
         "pixel_offsets_dx_path": None,
         "pixel_offsets_dy_path": None,
-        "pixel_response_knowledge_error_scale": 0.0,
-        "pixel_response_knowledge_error_model": None,
+        "pixel_response_configured_scale": 0.0,
+        "pixel_response_configured_model": None,
+        "pixel_response_configured_realization_policy": None,
         "pixel_response_prf_path": None,
     }
 
@@ -267,20 +325,26 @@ def extract_detector_knowledge_error_metadata(prescription: dict[str, Any]) -> d
         out["pixel_offsets_dy_path"] = _string_or_none(offsets_layer.get("dy_path"))
         ke_cfg = offsets_layer.get("knowledge_error")
         if isinstance(ke_cfg, dict):
-            out["pixel_offsets_knowledge_error_model"] = _string_or_none(ke_cfg.get("model"))
+            out["pixel_offsets_configured_model"] = _string_or_none(ke_cfg.get("model"))
+            out["pixel_offsets_configured_realization_policy"] = _string_or_none(
+                ke_cfg.get("realization_policy")
+            )
             scale = _coerce_float(ke_cfg.get("scale"))
             if scale is not None:
-                out["pixel_offsets_knowledge_error_scale"] = scale
+                out["pixel_offsets_configured_scale"] = scale
 
     response_layer = _first_layer_by_name(layers, "pixel_response")
     if response_layer is not None:
         out["pixel_response_prf_path"] = _string_or_none(response_layer.get("prf_path"))
         ke_cfg = response_layer.get("knowledge_error")
         if isinstance(ke_cfg, dict):
-            out["pixel_response_knowledge_error_model"] = _string_or_none(ke_cfg.get("model"))
+            out["pixel_response_configured_model"] = _string_or_none(ke_cfg.get("model"))
+            out["pixel_response_configured_realization_policy"] = _string_or_none(
+                ke_cfg.get("realization_policy")
+            )
             scale = _coerce_float(ke_cfg.get("scale"))
             if scale is not None:
-                out["pixel_response_knowledge_error_scale"] = scale
+                out["pixel_response_configured_scale"] = scale
 
     return out
 
@@ -324,6 +388,165 @@ def _read_row_results_csv(path: Path) -> tuple[list[dict[str, str]], list[str]]:
     if not rows:
         raise ValueError("results.csv has no data rows.")
     return rows, list(fieldnames)
+
+
+def _discover_run_artifact_roots(experiment_dir: Path) -> list[Path]:
+    roots: list[Path] = []
+    preferred = experiment_dir / "runs"
+    if preferred.exists() and preferred.is_dir():
+        roots.append(preferred)
+    for candidate in sorted(experiment_dir.glob("runs*")):
+        if not candidate.is_dir():
+            continue
+        if candidate == preferred:
+            continue
+        roots.append(candidate)
+    return roots
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected top-level object in {path}")
+    return payload
+
+
+def _load_run_meta_index(
+    experiment_dir: Path,
+    *,
+    strict: bool,
+    verbose: bool,
+) -> dict[str, dict[str, Any]]:
+    """Index run `meta.json` payloads by run_id for one experiment directory."""
+    index: dict[str, dict[str, Any]] = {}
+    run_roots = _discover_run_artifact_roots(experiment_dir)
+    if not run_roots:
+        _fail_or_warn(
+            f"{experiment_dir}: no run artifact directory found (expected runs/ or runs*).",
+            strict=strict,
+        )
+        return index
+
+    for run_root in run_roots:
+        run_dirs = sorted(path for path in run_root.iterdir() if path.is_dir())
+        for run_dir in run_dirs:
+            meta_path = run_dir / "meta.json"
+            if not meta_path.exists():
+                _fail_or_warn(
+                    f"{run_dir}: missing meta.json.",
+                    strict=strict,
+                )
+                continue
+            try:
+                meta = _read_json_dict(meta_path)
+            except Exception as exc:
+                _fail_or_warn(
+                    f"{meta_path}: failed to read run metadata ({exc}).",
+                    strict=strict,
+                )
+                continue
+
+            run_id = _string_or_none(meta.get("run_id")) or run_dir.name
+            if run_id in index:
+                _warn(
+                    f"{experiment_dir}: duplicate run_id '{run_id}' meta; "
+                    f"keeping first from {index[run_id]['meta_path']}, ignoring {meta_path}."
+                )
+                continue
+            index[run_id] = {
+                "meta": meta,
+                "meta_path": meta_path,
+                "runs_root": run_root,
+            }
+
+    _log(
+        f"[meta] {experiment_dir.name}: loaded {len(index)} run meta records",
+        verbose=verbose,
+    )
+    return index
+
+
+def _extract_layer_meta(layers_payload: Any, layer_name: str) -> dict[str, Any] | None:
+    if isinstance(layers_payload, dict):
+        direct = layers_payload.get(layer_name)
+        if isinstance(direct, dict):
+            return direct
+        for layer in layers_payload.values():
+            if isinstance(layer, dict) and _string_or_none(layer.get("name")) == layer_name:
+                return layer
+    if isinstance(layers_payload, list):
+        for layer in layers_payload:
+            if isinstance(layer, dict) and _string_or_none(layer.get("name")) == layer_name:
+                return layer
+    return None
+
+
+def _realized_detector_ke_defaults(*, run_meta_present: bool) -> dict[str, Any]:
+    return {
+        "run_meta_present": run_meta_present,
+        "detector_ke_realization_mode": None,
+        "inference_cfg_hash": None,
+        "inference_forward_spec_hash": None,
+        "pixel_offsets_realized_model": None,
+        "pixel_offsets_realized_scale": None,
+        "pixel_offsets_realized_realization_policy": None,
+        "pixel_offsets_realized_seed": None,
+        "pixel_offsets_realized_seed_source": None,
+        "pixel_response_realized_model": None,
+        "pixel_response_realized_scale": None,
+        "pixel_response_realized_realization_policy": None,
+        "pixel_response_realized_seed": None,
+        "pixel_response_realized_seed_source": None,
+    }
+
+
+def extract_realized_detector_knowledge_error_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Extract inference-side realized detector KE metadata from run meta payload."""
+    out = _realized_detector_ke_defaults(run_meta_present=True)
+    out["detector_ke_realization_mode"] = _string_or_none(
+        _get_nested(meta, "prescribed.detector_ke_realization_mode")
+    )
+    out["inference_cfg_hash"] = _string_or_none(
+        _get_nested(meta, "prescribed.inference_cfg_hash")
+    )
+    out["inference_forward_spec_hash"] = _string_or_none(
+        _get_nested(meta, "prescribed.inference_forward_spec_hash")
+    )
+
+    detector_ke = meta.get("detector_knowledge_error")
+    if not isinstance(detector_ke, dict):
+        return out
+    inference_ke = detector_ke.get("inference")
+    if not isinstance(inference_ke, dict):
+        return out
+    layers_payload = inference_ke.get("layers")
+
+    offsets_layer = _extract_layer_meta(layers_payload, "pixel_offsets")
+    if isinstance(offsets_layer, dict):
+        out["pixel_offsets_realized_model"] = _string_or_none(offsets_layer.get("model"))
+        out["pixel_offsets_realized_scale"] = _coerce_float(offsets_layer.get("scale"))
+        out["pixel_offsets_realized_realization_policy"] = _string_or_none(
+            offsets_layer.get("realization_policy")
+        )
+        out["pixel_offsets_realized_seed"] = _coerce_int(offsets_layer.get("seed"))
+        out["pixel_offsets_realized_seed_source"] = _string_or_none(
+            offsets_layer.get("seed_source")
+        )
+
+    response_layer = _extract_layer_meta(layers_payload, "pixel_response")
+    if isinstance(response_layer, dict):
+        out["pixel_response_realized_model"] = _string_or_none(response_layer.get("model"))
+        out["pixel_response_realized_scale"] = _coerce_float(response_layer.get("scale"))
+        out["pixel_response_realized_realization_policy"] = _string_or_none(
+            response_layer.get("realization_policy")
+        )
+        out["pixel_response_realized_seed"] = _coerce_int(response_layer.get("seed"))
+        out["pixel_response_realized_seed_source"] = _string_or_none(
+            response_layer.get("seed_source")
+        )
+
+    return out
 
 
 def _merge_column_order(existing: list[str], new_columns: list[str]) -> list[str]:
@@ -392,9 +615,9 @@ def _is_success_status(value: Any) -> bool:
 
 
 def _group_sort_key(group_row: dict[str, Any]) -> tuple[float, str]:
-    scale = _coerce_float(group_row.get("pixel_offsets_knowledge_error_scale"))
+    scale = _coerce_float(group_row.get("pixel_offsets_configured_scale"))
     scale_sort = scale if scale is not None else float("inf")
-    model = _string_or_none(group_row.get("pixel_offsets_knowledge_error_model")) or ""
+    model = _string_or_none(group_row.get("pixel_offsets_configured_model")) or ""
     return scale_sort, model
 
 
@@ -403,14 +626,15 @@ def build_sweep_summary_rows(
     components: list[str],
 ) -> list[dict[str, Any]]:
     """Build grouped summary rows keyed by pixel-offsets KE setting."""
-    grouped: dict[tuple[float | None, str | None], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[float | None, str | None, str | None], list[dict[str, Any]]] = {}
     for row in run_rows:
-        scale = _coerce_float(row.get("pixel_offsets_knowledge_error_scale"))
-        model = _string_or_none(row.get("pixel_offsets_knowledge_error_model"))
-        grouped.setdefault((scale, model), []).append(row)
+        scale = _coerce_float(row.get("pixel_offsets_configured_scale"))
+        model = _string_or_none(row.get("pixel_offsets_configured_model"))
+        policy = _string_or_none(row.get("pixel_offsets_configured_realization_policy"))
+        grouped.setdefault((scale, model, policy), []).append(row)
 
     summary_rows: list[dict[str, Any]] = []
-    for (scale, model), rows in grouped.items():
+    for (scale, model, policy), rows in grouped.items():
         sweep_labels = sorted(
             {
                 str(value)
@@ -425,17 +649,29 @@ def build_sweep_summary_rows(
                 if value not in (None, "")
             }
         )
+        realization_modes = sorted(
+            {
+                str(value)
+                for value in (row.get("detector_ke_realization_mode") for row in rows)
+                if value not in (None, "")
+            }
+        )
         base_row: dict[str, Any] = {
-            "pixel_offsets_knowledge_error_scale": scale,
-            "pixel_offsets_knowledge_error_model": model,
-            "pixel_response_knowledge_error_scale": _coerce_float(
-                rows[0].get("pixel_response_knowledge_error_scale")
+            "pixel_offsets_configured_scale": scale,
+            "pixel_offsets_configured_model": model,
+            "pixel_offsets_configured_realization_policy": policy,
+            "pixel_response_configured_scale": _coerce_float(
+                rows[0].get("pixel_response_configured_scale")
             ),
-            "pixel_response_knowledge_error_model": rows[0].get(
-                "pixel_response_knowledge_error_model"
+            "pixel_response_configured_model": rows[0].get(
+                "pixel_response_configured_model"
+            ),
+            "pixel_response_configured_realization_policy": rows[0].get(
+                "pixel_response_configured_realization_policy"
             ),
             "sweep_labels": ";".join(sweep_labels),
             "experiment_dirs": ";".join(experiment_dirs),
+            "detector_ke_realization_modes": ";".join(realization_modes),
             "n_total": len(rows),
             "n_success": sum(1 for row in rows if _is_success_status(row.get("status"))),
         }
@@ -531,9 +767,16 @@ def aggregate_detector_ke_sweep(
             )
             continue
 
+        run_meta_index = _load_run_meta_index(
+            experiment_dir,
+            strict=strict,
+            verbose=verbose,
+        )
+
         result_columns = _merge_column_order(result_columns, fieldnames)
         rel_dir = experiment_dir.relative_to(root).as_posix()
         sweep_label = experiment_dir.name
+        missing_meta_count = 0
 
         for row in run_rows:
             merged_row: dict[str, Any] = dict(row)
@@ -542,10 +785,42 @@ def aggregate_detector_ke_sweep(
             merged_row["sweep_label"] = sweep_label
             merged_row["prescription_path"] = prescription_path.name
 
+            run_id = _string_or_none(merged_row.get("run_id"))
+            meta_record = run_meta_index.get(run_id) if run_id is not None else None
+            if meta_record is not None:
+                meta_payload = meta_record.get("meta")
+                if isinstance(meta_payload, dict):
+                    merged_row.update(
+                        extract_realized_detector_knowledge_error_metadata(meta_payload)
+                    )
+                else:
+                    merged_row.update(_realized_detector_ke_defaults(run_meta_present=False))
+                try:
+                    merged_row["run_meta_path"] = (
+                        Path(meta_record["meta_path"]).relative_to(experiment_dir).as_posix()
+                    )
+                except Exception:
+                    merged_row["run_meta_path"] = str(meta_record.get("meta_path"))
+            else:
+                merged_row.update(_realized_detector_ke_defaults(run_meta_present=False))
+                merged_row["run_meta_path"] = None
+                missing_meta_count += 1
+                if strict and run_id is not None:
+                    raise ValueError(
+                        f"{experiment_dir}: missing run metadata for run_id '{run_id}'."
+                    )
+
             sep_error = compute_component_error(merged_row, "source.separation_as")
             merged_row["sep_error_as"] = sep_error
             merged_row["abs_sep_error_as"] = abs(sep_error) if sep_error is not None else None
             merged_rows.append(merged_row)
+
+        if missing_meta_count > 0:
+            _fail_or_warn(
+                f"{experiment_dir}: missing run meta.json for {missing_meta_count} "
+                f"of {len(run_rows)} result rows.",
+                strict=strict,
+            )
 
         loaded += 1
         _log(
@@ -566,7 +841,7 @@ def aggregate_detector_ke_sweep(
 
 
 def _run_sort_key(row: dict[str, Any]) -> tuple[float, str, str]:
-    scale = _coerce_float(row.get("pixel_offsets_knowledge_error_scale"))
+    scale = _coerce_float(row.get("pixel_offsets_configured_scale"))
     scale_sort = scale if scale is not None else float("inf")
     sweep_label = _string_or_none(row.get("sweep_label")) or ""
     run_id = _string_or_none(row.get("run_id")) or ""
@@ -579,13 +854,30 @@ def _run_fieldnames(result_columns: list[str]) -> list[str]:
         "sweep_label",
         "prescription_path",
         "inference_system_present",
-        "pixel_offsets_knowledge_error_scale",
-        "pixel_offsets_knowledge_error_model",
+        "pixel_offsets_configured_scale",
+        "pixel_offsets_configured_model",
+        "pixel_offsets_configured_realization_policy",
         "pixel_offsets_dx_path",
         "pixel_offsets_dy_path",
-        "pixel_response_knowledge_error_scale",
-        "pixel_response_knowledge_error_model",
+        "pixel_response_configured_scale",
+        "pixel_response_configured_model",
+        "pixel_response_configured_realization_policy",
         "pixel_response_prf_path",
+        "run_meta_present",
+        "run_meta_path",
+        "detector_ke_realization_mode",
+        "inference_cfg_hash",
+        "inference_forward_spec_hash",
+        "pixel_offsets_realized_model",
+        "pixel_offsets_realized_scale",
+        "pixel_offsets_realized_realization_policy",
+        "pixel_offsets_realized_seed",
+        "pixel_offsets_realized_seed_source",
+        "pixel_response_realized_model",
+        "pixel_response_realized_scale",
+        "pixel_response_realized_realization_policy",
+        "pixel_response_realized_seed",
+        "pixel_response_realized_seed_source",
     ]
     preferred_run_columns = [
         "run_id",
@@ -609,12 +901,15 @@ def _run_fieldnames(result_columns: list[str]) -> list[str]:
 
 def _summary_fieldnames(components: list[str]) -> list[str]:
     base = [
-        "pixel_offsets_knowledge_error_scale",
-        "pixel_offsets_knowledge_error_model",
-        "pixel_response_knowledge_error_scale",
-        "pixel_response_knowledge_error_model",
+        "pixel_offsets_configured_scale",
+        "pixel_offsets_configured_model",
+        "pixel_offsets_configured_realization_policy",
+        "pixel_response_configured_scale",
+        "pixel_response_configured_model",
+        "pixel_response_configured_realization_policy",
         "sweep_labels",
         "experiment_dirs",
+        "detector_ke_realization_modes",
         "n_total",
         "n_success",
     ]

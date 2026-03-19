@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,11 @@ def _write_row_results(path: Path, header: list[str], rows: list[list[str]]) -> 
         writer.writerows(rows)
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def test_extract_detector_knowledge_error_metadata_from_inference_layers():
     module = _load_script_module()
     prescription = {
@@ -49,12 +55,20 @@ def test_extract_detector_knowledge_error_metadata_from_inference_layers():
                             "name": "pixel_offsets",
                             "dx_path": "dx.fits",
                             "dy_path": "dy.fits",
-                            "knowledge_error": {"model": "gaussian", "scale": 1e-3},
+                            "knowledge_error": {
+                                "model": "gaussian",
+                                "scale": 1e-3,
+                                "realization_policy": "per_run",
+                            },
                         },
                         {
                             "name": "pixel_response",
                             "prf_path": "prf.fits",
-                            "knowledge_error": {"model": "gaussian", "scale": 2e-3},
+                            "knowledge_error": {
+                                "model": "gaussian",
+                                "scale": 2e-3,
+                                "realization_policy": "fixed_per_experiment",
+                            },
                         },
                     ]
                 }
@@ -65,12 +79,14 @@ def test_extract_detector_knowledge_error_metadata_from_inference_layers():
     meta = module.extract_detector_knowledge_error_metadata(prescription)
 
     assert meta["inference_system_present"] is True
-    assert meta["pixel_offsets_knowledge_error_scale"] == 1e-3
-    assert meta["pixel_offsets_knowledge_error_model"] == "gaussian"
+    assert meta["pixel_offsets_configured_scale"] == 1e-3
+    assert meta["pixel_offsets_configured_model"] == "gaussian"
+    assert meta["pixel_offsets_configured_realization_policy"] == "per_run"
     assert meta["pixel_offsets_dx_path"] == "dx.fits"
     assert meta["pixel_offsets_dy_path"] == "dy.fits"
-    assert meta["pixel_response_knowledge_error_scale"] == 2e-3
-    assert meta["pixel_response_knowledge_error_model"] == "gaussian"
+    assert meta["pixel_response_configured_scale"] == 2e-3
+    assert meta["pixel_response_configured_model"] == "gaussian"
+    assert meta["pixel_response_configured_realization_policy"] == "fixed_per_experiment"
     assert meta["pixel_response_prf_path"] == "prf.fits"
 
 
@@ -81,10 +97,12 @@ def test_extract_detector_knowledge_error_metadata_defaults_when_inference_missi
     meta = module.extract_detector_knowledge_error_metadata(prescription)
 
     assert meta["inference_system_present"] is False
-    assert meta["pixel_offsets_knowledge_error_scale"] == 0.0
-    assert meta["pixel_offsets_knowledge_error_model"] is None
-    assert meta["pixel_response_knowledge_error_scale"] == 0.0
-    assert meta["pixel_response_knowledge_error_model"] is None
+    assert meta["pixel_offsets_configured_scale"] == 0.0
+    assert meta["pixel_offsets_configured_model"] is None
+    assert meta["pixel_offsets_configured_realization_policy"] is None
+    assert meta["pixel_response_configured_scale"] == 0.0
+    assert meta["pixel_response_configured_model"] is None
+    assert meta["pixel_response_configured_realization_policy"] is None
 
 
 def test_compute_component_error_prefers_final_delta_then_falls_back():
@@ -104,6 +122,69 @@ def test_compute_component_error_prefers_final_delta_then_falls_back():
     fallback = module.compute_component_error(row_without_delta, "source.separation_as")
     assert fallback is not None
     assert abs(fallback - 0.2) < 1e-12
+
+
+def test_extract_realized_detector_ke_metadata_from_meta_payload():
+    module = _load_script_module()
+    meta_payload = {
+        "prescribed": {
+            "detector_ke_realization_mode": "per_run",
+            "inference_cfg_hash": "cfg_hash_123",
+            "inference_forward_spec_hash": "spec_hash_456",
+        },
+        "detector_knowledge_error": {
+            "inference": {
+                "layers": {
+                    "pixel_offsets": {
+                        "name": "pixel_offsets",
+                        "model": "gaussian",
+                        "scale": "1e-2",
+                        "realization_policy": "per_run",
+                        "seed": 101,
+                        "seed_source": "run_seed",
+                    },
+                    "pixel_response": {
+                        "name": "pixel_response",
+                        "model": "gaussian",
+                        "scale": 5e-3,
+                        "realization_policy": "fixed_per_experiment",
+                        "seed": 202,
+                        "seed_source": "experiment_seed",
+                    },
+                }
+            }
+        },
+    }
+
+    realized = module.extract_realized_detector_knowledge_error_metadata(meta_payload)
+    assert realized["run_meta_present"] is True
+    assert realized["detector_ke_realization_mode"] == "per_run"
+    assert realized["inference_cfg_hash"] == "cfg_hash_123"
+    assert realized["inference_forward_spec_hash"] == "spec_hash_456"
+    assert realized["pixel_offsets_realized_model"] == "gaussian"
+    assert realized["pixel_offsets_realized_scale"] == 1e-2
+    assert realized["pixel_offsets_realized_realization_policy"] == "per_run"
+    assert realized["pixel_offsets_realized_seed"] == 101
+    assert realized["pixel_offsets_realized_seed_source"] == "run_seed"
+    assert realized["pixel_response_realized_model"] == "gaussian"
+    assert realized["pixel_response_realized_scale"] == 5e-3
+    assert realized["pixel_response_realized_realization_policy"] == "fixed_per_experiment"
+    assert realized["pixel_response_realized_seed"] == 202
+    assert realized["pixel_response_realized_seed_source"] == "experiment_seed"
+
+
+def test_extract_realized_detector_ke_metadata_handles_missing_detector_section():
+    module = _load_script_module()
+    meta_payload = {
+        "run_id": "mc_0001",
+        "prescribed": {"detector_ke_realization_mode": "fixed_per_experiment"},
+    }
+
+    realized = module.extract_realized_detector_knowledge_error_metadata(meta_payload)
+    assert realized["run_meta_present"] is True
+    assert realized["detector_ke_realization_mode"] == "fixed_per_experiment"
+    assert realized["pixel_offsets_realized_model"] is None
+    assert realized["pixel_offsets_realized_seed"] is None
 
 
 def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
@@ -127,6 +208,7 @@ def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
                   knowledge_error:
                     model: gaussian
                     scale: 0.0
+                    realization_policy: fixed_per_experiment
         """,
     )
     _write_row_results(
@@ -145,6 +227,31 @@ def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
             ["run_0001", "ok", "1", "0.01", "", "", "1.0", "-1.0"],
             ["run_0002", "ok", "2", "", "1.10", "1.00", "2.0", "2.0"],
         ],
+    )
+    _write_json(
+        ke0 / "runs" / "run_0001" / "meta.json",
+        {
+            "run_id": "run_0001",
+            "prescribed": {
+                "detector_ke_realization_mode": "fixed_per_experiment",
+                "inference_cfg_hash": "cfg-ke0",
+                "inference_forward_spec_hash": "spec-ke0",
+            },
+            "detector_knowledge_error": {
+                "inference": {
+                    "layers": {
+                        "pixel_offsets": {
+                            "name": "pixel_offsets",
+                            "model": "gaussian",
+                            "scale": 0.0,
+                            "realization_policy": "fixed_per_experiment",
+                            "seed": 1234,
+                            "seed_source": "experiment_seed",
+                        }
+                    }
+                }
+            },
+        },
     )
 
     # Partial experiment (missing results.csv) should be skipped by default.
@@ -207,6 +314,22 @@ def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
     assert abs(sep_by_run["run_0001"] - 0.01) < 1e-12
     assert abs(sep_by_run["run_0002"] - 0.1) < 1e-12
 
+    rows_by_run = {row["run_id"]: row for row in run_rows}
+    assert rows_by_run["run_0001"]["pixel_offsets_configured_scale"] == 0.0
+    assert rows_by_run["run_0001"]["pixel_offsets_configured_model"] == "gaussian"
+    assert (
+        rows_by_run["run_0001"]["pixel_offsets_configured_realization_policy"]
+        == "fixed_per_experiment"
+    )
+    assert rows_by_run["run_0001"]["run_meta_present"] is True
+    assert rows_by_run["run_0001"]["pixel_offsets_realized_seed"] == 1234
+    assert (
+        rows_by_run["run_0001"]["pixel_offsets_realized_realization_policy"]
+        == "fixed_per_experiment"
+    )
+    assert rows_by_run["run_0002"]["run_meta_present"] is False
+    assert rows_by_run["run_0002"]["pixel_offsets_realized_seed"] is None
+
 
 def test_build_sweep_summary_rows_handles_vector_components():
     module = _load_script_module()
@@ -215,10 +338,12 @@ def test_build_sweep_summary_rows_handles_vector_components():
             "status": "ok",
             "sweep_label": "ke_a",
             "experiment_dir": "ke_a",
-            "pixel_offsets_knowledge_error_scale": 0.001,
-            "pixel_offsets_knowledge_error_model": "gaussian",
-            "pixel_response_knowledge_error_scale": 0.0,
-            "pixel_response_knowledge_error_model": None,
+            "pixel_offsets_configured_scale": 0.001,
+            "pixel_offsets_configured_model": "gaussian",
+            "pixel_offsets_configured_realization_policy": "per_run",
+            "pixel_response_configured_scale": 0.0,
+            "pixel_response_configured_model": None,
+            "pixel_response_configured_realization_policy": None,
             "final_delta.optics.primary.zernike_coeffs_nm[0]": "1.0",
             "final_delta.optics.primary.zernike_coeffs_nm[1]": "2.0",
         },
@@ -226,10 +351,12 @@ def test_build_sweep_summary_rows_handles_vector_components():
             "status": "ok",
             "sweep_label": "ke_a",
             "experiment_dir": "ke_a",
-            "pixel_offsets_knowledge_error_scale": 0.001,
-            "pixel_offsets_knowledge_error_model": "gaussian",
-            "pixel_response_knowledge_error_scale": 0.0,
-            "pixel_response_knowledge_error_model": None,
+            "pixel_offsets_configured_scale": 0.001,
+            "pixel_offsets_configured_model": "gaussian",
+            "pixel_offsets_configured_realization_policy": "per_run",
+            "pixel_response_configured_scale": 0.0,
+            "pixel_response_configured_model": None,
+            "pixel_response_configured_realization_policy": None,
             "final_delta.optics.primary.zernike_coeffs_nm[0]": "-1.0",
             "final_delta.optics.primary.zernike_coeffs_nm[1]": "2.0",
         },

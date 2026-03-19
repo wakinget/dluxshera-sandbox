@@ -78,6 +78,10 @@ recipes/runners.
   into cross-experiment `sweep_runs.csv` and `sweep_summary.csv`.
   - Use this when each sweep point is its own experiment directory and you want
     one outer table for all runs plus grouped per-KE statistics.
+  - The aggregator reads configured detector KE settings from each
+    `prescription.*`, run outcomes from row-oriented `results.csv`, and
+    per-run realized detector KE metadata from `runs*/<run_id>/meta.json` when
+    available (older runs without meta KE fields are still supported).
   - How to run:
 
     ```bash
