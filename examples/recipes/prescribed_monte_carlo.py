@@ -143,6 +143,57 @@ def _get_pixel_response_map(binder: SheraBinder):
         return None
     return np.asarray(layer.pixel_response)
 
+
+def _refresh_preserving_derived_infer_keys(store, *, infer_keys: tuple[str, ...], spec):
+    """Refresh derived values while preserving sampled values for derived infer keys."""
+    sampled_derived: dict[str, Any] = {}
+    for key in infer_keys:
+        if key not in spec:
+            continue
+        if spec.get(key).kind != "derived":
+            continue
+        try:
+            sampled_derived[key] = store.get(key)
+        except KeyError:
+            continue
+
+    refreshed = store.refresh_derived(spec)
+    if sampled_derived:
+        refreshed = refreshed.replace(sampled_derived)
+    return refreshed
+
+
+def _trace_with_initial_point(
+    trace: dict[str, Any],
+    *,
+    theta0: np.ndarray,
+    loss0: float | None = None,
+) -> dict[str, Any]:
+    """Return a trace copy with iteration-0 (sampled init) prepended."""
+    theta_hist = np.asarray(trace["theta"])
+    theta0_arr = np.asarray(theta0)
+
+    prepend_theta0 = True
+    if theta_hist.shape[0] > 0 and np.allclose(theta_hist[0], theta0_arr, rtol=0.0, atol=0.0):
+        prepend_theta0 = False
+
+    trace_with_init = dict(trace)
+    if prepend_theta0:
+        trace_with_init["theta"] = np.concatenate((theta0_arr[None, ...], theta_hist), axis=0)
+
+        if "loss" in trace:
+            loss_hist = np.asarray(trace["loss"])
+            loss0_value = np.nan if loss0 is None else float(loss0)
+            trace_with_init["loss"] = np.concatenate(
+                (np.asarray([loss0_value], dtype=loss_hist.dtype), loss_hist),
+                axis=0,
+            )
+    else:
+        trace_with_init["theta"] = theta_hist
+
+    return trace_with_init
+
+
 def _require_experiment_seed(experiment_cfg: dict[str, Any]) -> int:
     seed = experiment_cfg.get("seed")
     if seed is None:
@@ -2371,7 +2422,11 @@ def main() -> None:
         else:
             raise ValueError(f"Unknown init.mode '{init_mode}'")
         if init_mode == "prior":
-            init_store = init_store.refresh_derived(forward_spec_infer)
+            init_store = _refresh_preserving_derived_infer_keys(
+                init_store,
+                infer_keys=infer_keys,
+                spec=forward_spec_infer,
+            )
 
         _, theta0 = make_binder_nll_fn(
             binder=binder_infer,
@@ -2785,7 +2840,13 @@ def main() -> None:
                     else:
                         print("Skipping pixel_response_maps.png: pixel_response layer missing.")
 
-                    losses = np.asarray(trace["loss"])
+                    trace_for_signals = _trace_with_initial_point(
+                        trace,
+                        theta0=theta0_opt,
+                        loss0=loss_init,
+                    )
+                    losses = np.asarray(trace_for_signals["loss"])
+                    iterations = np.arange(losses.shape[0])
                     fig, axes = plt.subplots(1, 2, figsize=(9, 4))
                     axes = axes.flatten()
                     plot_parameter_history(
@@ -2797,8 +2858,9 @@ def main() -> None:
                         show=False,
                         close=False,
                     )
-                    window = min(10, n_iter)
-                    axes[1].plot(np.arange(n_iter - window, n_iter) + 1, losses[-window:])
+                    window = min(10, losses.shape[0])
+                    start = losses.shape[0] - window
+                    axes[1].plot(iterations[start:], losses[start:])
                     axes[1].set_title(f"Last {window} Iterations, Final= {losses[-1]:.3f}")
                     axes[1].set_xlabel("Iteration")
                     axes[1].set_ylabel("Loss")
@@ -2811,20 +2873,28 @@ def main() -> None:
                     plt.close(fig)
 
                     if use_eigen and eigen_map is not None:
-                        decoder = lambda z: store_unpack_params(
-                            inference_subspec,
-                            eigen_map.theta_from_z(z),
-                            init_store,
-                        ).refresh_derived(forward_spec_infer)
+                        decoder = lambda z: _refresh_preserving_derived_infer_keys(
+                            store_unpack_params(
+                                inference_subspec,
+                                eigen_map.theta_from_z(z),
+                                init_store,
+                            ),
+                            infer_keys=infer_keys,
+                            spec=forward_spec_infer,
+                        )
                     else:
-                        decoder = lambda theta: store_unpack_params(
-                            inference_subspec,
-                            theta,
-                            init_store,
-                        ).refresh_derived(forward_spec_infer)
+                        decoder = lambda theta: _refresh_preserving_derived_infer_keys(
+                            store_unpack_params(
+                                inference_subspec,
+                                theta,
+                                init_store,
+                            ),
+                            infer_keys=infer_keys,
+                            spec=forward_spec_infer,
+                        )
 
                     signals = build_signals(
-                        trace,
+                        trace_for_signals,
                         meta={},
                         decoder=decoder,
                         truth=truth_store_data,
@@ -2834,6 +2904,7 @@ def main() -> None:
                         signals,
                         plots_dir,
                         include_zernike_rms=False,
+                        show_final_values=True,
                         figsize=(15, 10),
                         show=False,
                     )

@@ -167,23 +167,63 @@ def _plot_lines_on_ax(
     labels,
     title: str,
     ylabel: str,
+    *,
+    show_final_values: bool = False,
 ) -> None:
-    for y, label in zip(ys, labels):
-        ax.plot(x, y, label=label)
+    legend_labels: list[str | None] = []
+    for i, y in enumerate(ys):
+        label = labels[i] if i < len(labels) else None
+        plot_label = label
+        if show_final_values:
+            arr = onp.asarray(y)
+            base_label = label if label else f"y{i + 1}"
+            if arr.size == 0:
+                plot_label = f"{base_label}=nan"
+            else:
+                final_val = float(arr.reshape(-1)[-1])
+                plot_label = f"{base_label}={_format_scalar_for_legend(final_val)}"
+        ax.plot(x, y, label=plot_label)
+        legend_labels.append(plot_label)
+
     ax.axhline(0, linestyle="--", color="k", alpha=0.6)
     ax.set_title(title)
     ax.set_xlabel("Step")
     ax.set_ylabel(ylabel)
-    if labels:
+    if any(lbl is not None for lbl in legend_labels):
         ax.legend()
 
 
-def _plot_lines(x, ys, labels, title: str, ylabel: str, save_path: Path) -> None:
+def _plot_lines(
+    x,
+    ys,
+    labels,
+    title: str,
+    ylabel: str,
+    save_path: Path,
+    *,
+    show_final_values: bool = False,
+) -> None:
     fig, ax = plt.subplots()
-    _plot_lines_on_ax(ax, x, ys, labels, title, ylabel)
+    _plot_lines_on_ax(
+        ax,
+        x,
+        ys,
+        labels,
+        title,
+        ylabel,
+        show_final_values=show_final_values,
+    )
     fig.tight_layout()
     fig.savefig(save_path, dpi=200)
     plt.close(fig)
+
+
+def _format_scalar_for_legend(value: float) -> str:
+    if not onp.isfinite(value):
+        return "nan"
+    if value == 0.0:
+        return "0"
+    return f"{value:.3g}"
 
 
 def _iter_signal_panels(
@@ -446,6 +486,7 @@ def plot_signals_panels(
     *,
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
+    show_final_values: bool = False,
 ) -> PanelPaths:
     """
     Render standard diagnostic panels from Signals.
@@ -460,6 +501,8 @@ def plot_signals_panels(
         Optional prefix applied to each panel title.
     include_zernike_rms:
         Whether to include M1/M2 Zernike RMS panels (default False).
+    show_final_values:
+        Whether to append per-series final values to legend labels.
 
     Returns
     -------
@@ -478,7 +521,15 @@ def plot_signals_panels(
         include_zernike_rms=include_zernike_rms,
     ):
         path = Path(out_dir / panel["filename"] )
-        _plot_lines(x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"], path)
+        _plot_lines(
+            x,
+            panel["ys"],
+            panel["labels"],
+            panel["title"],
+            panel["ylabel"],
+            path,
+            show_final_values=show_final_values,
+        )
         saved.append(path)
 
     return saved
@@ -490,6 +541,7 @@ def plot_signals_grid(
     *,
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
+    show_final_values: bool = False,
     figsize: Optional[Tuple[float, float]] = None,
     show: bool = False,
     close: bool = True,
@@ -507,6 +559,8 @@ def plot_signals_grid(
         Optional prefix applied to each panel title.
     include_zernike_rms:
         Whether to include M1/M2 Zernike RMS panels (default False).
+    show_final_values:
+        Whether to append per-series final values to legend labels.
     figsize:
         Optional explicit figure size.
     show:
@@ -540,7 +594,15 @@ def plot_signals_grid(
     axes_flat = axes.flatten()
 
     for ax, panel in zip(axes_flat, panels):
-        _plot_lines_on_ax(ax, x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"])
+        _plot_lines_on_ax(
+            ax,
+            x,
+            panel["ys"],
+            panel["labels"],
+            panel["title"],
+            panel["ylabel"],
+            show_final_values=show_final_values,
+        )
 
     for ax in axes_flat[len(panels):]:
         fig.delaxes(ax)

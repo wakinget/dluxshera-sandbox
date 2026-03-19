@@ -100,3 +100,91 @@ def test_get_pixel_response_map_handles_missing_layer():
             self.detector = DummyDetector()
 
     assert m._get_pixel_response_map(DummyBinder()) is None
+
+
+def test_refresh_preserving_derived_infer_keys_reapplies_derived_samples():
+    m = _load_module()
+
+    class DummyField:
+        def __init__(self, kind: str):
+            self.kind = kind
+
+    class DummySpec:
+        def __init__(self):
+            self._fields = {
+                "derived_key": DummyField("derived"),
+                "primitive_key": DummyField("primitive"),
+            }
+
+        def __contains__(self, key):
+            return key in self._fields
+
+        def get(self, key):
+            return self._fields[key]
+
+    class DummyStore:
+        def __init__(self, values, refreshed_values):
+            self._values = dict(values)
+            self._refreshed_values = dict(refreshed_values)
+
+        def get(self, key):
+            if key not in self._values:
+                raise KeyError(key)
+            return self._values[key]
+
+        def refresh_derived(self, _spec):
+            return DummyStore(self._refreshed_values, self._refreshed_values)
+
+        def replace(self, updates):
+            merged = dict(self._values)
+            merged.update(updates)
+            return DummyStore(merged, self._refreshed_values)
+
+    spec = DummySpec()
+    sampled = DummyStore(
+        {"derived_key": 1.234, "primitive_key": 9.876},
+        {"derived_key": 0.111, "primitive_key": 9.876},
+    )
+
+    refreshed = m._refresh_preserving_derived_infer_keys(
+        sampled,
+        infer_keys=("derived_key", "primitive_key"),
+        spec=spec,
+    )
+
+    assert refreshed.get("derived_key") == 1.234
+    assert refreshed.get("primitive_key") == 9.876
+
+
+def test_trace_with_initial_point_prepends_theta_and_loss():
+    m = _load_module()
+
+    trace = {
+        "theta": jnp.asarray([[1.0, 2.0], [3.0, 4.0]]),
+        "loss": jnp.asarray([10.0, 5.0]),
+    }
+    theta0 = jnp.asarray([0.5, 1.5])
+    loss0 = 12.0
+
+    trace_with_init = m._trace_with_initial_point(trace, theta0=theta0, loss0=loss0)
+
+    assert trace_with_init["theta"].shape == (3, 2)
+    assert jnp.allclose(trace_with_init["theta"][0], theta0)
+    assert trace_with_init["loss"].shape == (3,)
+    assert float(trace_with_init["loss"][0]) == loss0
+
+
+def test_trace_with_initial_point_does_not_duplicate_existing_iter0():
+    m = _load_module()
+
+    theta0 = jnp.asarray([0.5, 1.5])
+    trace = {
+        "theta": jnp.asarray([[0.5, 1.5], [1.0, 2.0]]),
+        "loss": jnp.asarray([12.0, 10.0]),
+    }
+
+    trace_with_init = m._trace_with_initial_point(trace, theta0=theta0, loss0=12.0)
+
+    assert trace_with_init["theta"].shape == (2, 2)
+    assert jnp.allclose(trace_with_init["theta"][0], theta0)
+    assert trace_with_init["loss"].shape == (2,)
