@@ -150,6 +150,37 @@ python examples/recipes/prescribed_monte_carlo.py \
 - If `--outdir` is provided without `--prescription`, the script looks for `prescription.*` (yaml/yml/json) under that directory. This discovery step only helps locate the prescription; `--outdir` still wins as the experiment root once execution starts.
 - If `--prescription` is provided and `experiment.outputs.outdir` is set, you can omit `--outdir` and let the prescription control the experiment root.
 
+## Multi-YAML detector KE sweep scaffolding
+- If you run detector knowledge-error sweeps as separate experiment directories
+  (`ke_*` folders), use the scaffold generator to create the sweep tree from one
+  base prescription:
+
+```bash
+python examples/scripts/generate_prescribed_mc_sweep.py \
+  --base examples/recipes/prescribed_mc_template/prescription.yaml \
+  --scales 0 1e-4 3e-4 1e-3 3e-3 1e-2 \
+  --layer pixel_offsets \
+  --realization-policy per_run \
+  --results-orientation row
+```
+
+- The generator writes a timestamped root (for example
+  `Results/detector_ke_sweep_20260320-113500/`) with:
+  - `prescription_base.yaml`
+  - `sweep_manifest.json`
+  - one `ke_<scale>/prescription.yaml` per scale
+- Generated prescriptions force `experiment.outputs.outdir: .` so each sweep
+  point writes into its own directory.
+- Run the generated sweep with the existing batch loop:
+
+```bash
+for d in Results/detector_ke_sweep_*/ke_*; do
+  PYTHONPATH=src python examples/recipes/prescribed_monte_carlo.py \
+    --outdir "$d" \
+    --results-orientation row
+done
+```
+
 ## Outer sweep aggregation (multiple experiment directories)
 - The prescribed-MC recipe already aggregates runs *within one experiment root*
   (`results.csv`, `manifest.json`).

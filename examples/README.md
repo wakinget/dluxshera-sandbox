@@ -89,6 +89,32 @@ recipes/runners.
     python examples/scripts/aggregate_detector_ke_sweep.py \
       --root Results/detector_ke_sweep
     ```
+- **generate_prescribed_mc_sweep.py** — Scaffold a multi-YAML detector
+  knowledge-error sweep from one base prescription by creating a timestamped
+  root, `ke_*` subdirectories, per-point `prescription.yaml` files, and a
+  root-level `sweep_manifest.json`.
+  - Use this when each sweep point should be a separate prescribed-MC
+    experiment directory (no `run_plan.csv` patching).
+  - How to run:
+
+    ```bash
+    python examples/scripts/generate_prescribed_mc_sweep.py \
+      --base examples/recipes/prescribed_mc_template/prescription.yaml \
+      --scales 0 1e-4 3e-4 1e-3 3e-3 1e-2 \
+      --layer pixel_offsets \
+      --realization-policy per_run \
+      --results-orientation row
+    ```
+
+  - Then run the generated sweep:
+
+    ```bash
+    for d in Results/detector_ke_sweep_*/ke_*; do
+      PYTHONPATH=src python examples/recipes/prescribed_monte_carlo.py \
+        --outdir "$d" \
+        --results-orientation row
+    done
+    ```
 
 ## Artifact outputs (what to look for)
 
