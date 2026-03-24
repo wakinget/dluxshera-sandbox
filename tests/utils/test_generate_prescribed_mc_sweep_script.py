@@ -61,6 +61,26 @@ def _base_prescription_payload() -> dict:
     }
 
 
+def _scalar_base_prescription_payload() -> dict:
+    return {
+        "system": {
+            "preset": "SHERA_FLIGHT_3P",
+            "optics": {"psf_npix": 256},
+        },
+        "experiment": {
+            "kind": "prescribed_mc",
+            "notes": "Detector Testing - psf_npix sweep",
+            "seed": 42,
+            "monte_carlo": {
+                "n_runs": 5,
+                "results_orientation": "col",
+                "run_plan": None,
+            },
+            "outputs": {"outdir": "Results/original"},
+        },
+    }
+
+
 def _write_yaml(path: Path, payload: dict) -> None:
     import yaml
 
@@ -273,3 +293,212 @@ def test_manifest_and_generated_files(tmp_path):
     assert ke_cfg["scale"] == 1e-4
     assert ke_cfg["realization_policy"] == "per_run"
     assert generated["experiment"]["outputs"]["outdir"] == "."
+
+
+def test_scalar_timestamped_root_generation(tmp_path):
+    module = _load_script_module()
+    root = module.resolve_root_dir(
+        root_dir=None,
+        results_root=tmp_path / "Results",
+        sweep_name="detector_crop_sweep",
+        now=dt.datetime(2026, 3, 20, 11, 35, 0),
+    )
+    assert root == tmp_path / "Results" / "detector_crop_sweep_20260320-113500"
+
+
+def test_scalar_folder_labels_for_psf_npix_values():
+    module = _load_script_module()
+    points = module.parse_scalar_sweep_points(
+        ["256", "224", "192", "160", "128", "96", "64"],
+        field_path="system.optics.psf_npix",
+        existing_value=256,
+        label_prefix=None,
+    )
+    assert [point.dirname for point in points] == [
+        "psf_npix_256",
+        "psf_npix_224",
+        "psf_npix_192",
+        "psf_npix_160",
+        "psf_npix_128",
+        "psf_npix_96",
+        "psf_npix_64",
+    ]
+
+
+def test_scalar_patch_updates_psf_npix_preserving_integer_and_no_inference_required():
+    module = _load_script_module()
+    base_cfg = _scalar_base_prescription_payload()
+    point = module.parse_scalar_sweep_points(
+        ["128"],
+        field_path="system.optics.psf_npix",
+        existing_value=256,
+        label_prefix=None,
+    )[0]
+
+    patched = module.patch_prescription_for_scalar_field_point(
+        base_cfg,
+        field_path="system.optics.psf_npix",
+        sweep_point=point,
+        sweep_target="system.optics.psf_npix",
+        results_orientation=None,
+        n_runs=None,
+        notes_suffix=None,
+    )
+
+    assert patched["system"]["optics"]["psf_npix"] == 128
+    assert isinstance(patched["system"]["optics"]["psf_npix"], int)
+    assert "inference_system" not in patched["experiment"]
+    assert patched["experiment"]["outputs"]["outdir"] == "."
+
+
+def test_scalar_mode_fails_clearly_when_field_path_missing(tmp_path, capsys):
+    module = _load_script_module()
+    base_path = tmp_path / "detector_crop_template.yaml"
+    _write_yaml(base_path, _scalar_base_prescription_payload())
+
+    exit_code = module.main(
+        [
+            "--base",
+            str(base_path),
+            "--mode",
+            "scalar_field",
+            "--field-path",
+            "system.optics.not_present",
+            "--values",
+            "256",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "does not exist in base config" in captured.out
+    assert "system.optics.not_present" in captured.out
+
+
+def test_scalar_generation_respects_results_orientation_and_n_runs(tmp_path):
+    module = _load_script_module()
+    base_cfg = _scalar_base_prescription_payload()
+    base_path = tmp_path / "detector_crop_template.yaml"
+    _write_yaml(base_path, base_cfg)
+    output_root = tmp_path / "Results" / "detector_crop_sweep_20260320-113500"
+
+    points = module.parse_scalar_sweep_points(
+        ["256", "128"],
+        field_path="system.optics.psf_npix",
+        existing_value=256,
+        label_prefix=None,
+    )
+    module.generate_scalar_field_sweep_scaffold(
+        base_cfg=base_cfg,
+        base_path=base_path,
+        output_root=output_root,
+        sweep_name="detector_crop_sweep",
+        field_path="system.optics.psf_npix",
+        label_prefix="psf_npix",
+        sweep_target="system.optics.psf_npix",
+        sweep_points=points,
+        results_orientation="row",
+        n_runs=9,
+        notes_suffix=None,
+        now=dt.datetime(2026, 3, 20, 11, 35, 0),
+        dry_run=False,
+        force=False,
+    )
+
+    generated = module.load_config_file(output_root / "psf_npix_128" / "prescription.yaml")
+    assert generated["system"]["optics"]["psf_npix"] == 128
+    assert generated["experiment"]["monte_carlo"]["results_orientation"] == "row"
+    assert generated["experiment"]["monte_carlo"]["n_runs"] == 9
+    assert generated["experiment"]["outputs"]["outdir"] == "."
+
+
+def test_scalar_dry_run_does_not_write_files_and_manifest_has_mode_metadata(tmp_path):
+    module = _load_script_module()
+    base_cfg = _scalar_base_prescription_payload()
+    base_path = tmp_path / "detector_crop_template.yaml"
+    _write_yaml(base_path, base_cfg)
+    output_root = tmp_path / "Results" / "detector_crop_sweep_20260320-113500"
+    points = module.parse_scalar_sweep_points(
+        ["256", "224", "192"],
+        field_path="system.optics.psf_npix",
+        existing_value=256,
+        label_prefix="psf_npix",
+    )
+
+    manifest = module.generate_scalar_field_sweep_scaffold(
+        base_cfg=base_cfg,
+        base_path=base_path,
+        output_root=output_root,
+        sweep_name="detector_crop_sweep",
+        field_path="system.optics.psf_npix",
+        label_prefix="psf_npix",
+        sweep_target="psf_npix",
+        sweep_points=points,
+        results_orientation="row",
+        n_runs=7,
+        notes_suffix="dry run note",
+        now=dt.datetime(2026, 3, 20, 11, 35, 0),
+        dry_run=True,
+        force=False,
+    )
+
+    assert output_root.exists() is False
+    assert manifest["mode"] == "scalar_field"
+    assert manifest["field_path"] == "system.optics.psf_npix"
+    assert manifest["values"] == [256, 224, 192]
+    assert manifest["label_prefix"] == "psf_npix"
+    assert [item["label"] for item in manifest["experiments"]] == [
+        "psf_npix_256",
+        "psf_npix_224",
+        "psf_npix_192",
+    ]
+
+
+def test_scalar_manifest_and_generated_files(tmp_path):
+    module = _load_script_module()
+    base_cfg = _scalar_base_prescription_payload()
+    base_path = tmp_path / "detector_crop_template.yaml"
+    _write_yaml(base_path, base_cfg)
+    output_root = tmp_path / "Results" / "detector_crop_sweep_20260320-113500"
+    points = module.parse_scalar_sweep_points(
+        ["256", "128"],
+        field_path="system.optics.psf_npix",
+        existing_value=256,
+        label_prefix=None,
+    )
+
+    module.generate_scalar_field_sweep_scaffold(
+        base_cfg=base_cfg,
+        base_path=base_path,
+        output_root=output_root,
+        sweep_name="detector_crop_sweep",
+        field_path="system.optics.psf_npix",
+        label_prefix="psf_npix",
+        sweep_target="system.optics.psf_npix",
+        sweep_points=points,
+        results_orientation="row",
+        n_runs=11,
+        notes_suffix="manifest-check",
+        now=dt.datetime(2026, 3, 20, 11, 35, 0),
+        dry_run=False,
+        force=False,
+    )
+
+    assert (output_root / "prescription_base.yaml").exists()
+    assert (output_root / "psf_npix_256" / "prescription.yaml").exists()
+    assert (output_root / "psf_npix_128" / "prescription.yaml").exists()
+
+    manifest_path = output_root / "sweep_manifest.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["timestamp_label"] == "20260320-113500"
+    assert manifest["mode"] == "scalar_field"
+    assert manifest["field_path"] == "system.optics.psf_npix"
+    assert manifest["label_prefix"] == "psf_npix"
+    assert manifest["results_orientation_override"] == "row"
+    assert manifest["n_runs_override"] == 11
+    assert manifest["values"] == [256, 128]
+    assert [item["label"] for item in manifest["experiments"]] == [
+        "psf_npix_256",
+        "psf_npix_128",
+    ]
