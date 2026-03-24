@@ -97,6 +97,7 @@ from dluxshera.plot.plotting import (
     plot_eigenvalue_spectrum,
     plot_fim,
     plot_parameter_history,
+    plot_pixel_response_maps,
     plot_psf_comparison,
     plot_signals_grid,
     plot_pixel_offset_maps,
