@@ -35,10 +35,9 @@ from dluxshera.utils.obs_subblock_io import (
     write_obs_subblock_truth_csv,
 )
 from dluxshera.utils.obs_subblock_trace import (
+    APPLIED_V1_VARYING_KEYS,
     REQUIRED_TRACE_COLUMNS,
-    V1_VARYING_KEYS,
     load_obs_subblock_trace_csv,
-    require_v1_varying_keys,
 )
 
 
@@ -131,14 +130,16 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     subblock_cfg = _required_dict(
         experiment_cfg, "observation_subblock", path="experiment"
     )
-    varying_keys = subblock_cfg.get("varying_keys")
-    if not isinstance(varying_keys, list) or not all(
-        isinstance(item, str) for item in varying_keys
-    ):
-        raise ValueError(
-            "experiment.observation_subblock.varying_keys must be a list[str]."
-        )
-    varying_keys_tuple = require_v1_varying_keys(varying_keys)
+    varying_keys_value = subblock_cfg.get("varying_keys")
+    requested_varying_keys: tuple[str, ...] | None = None
+    if varying_keys_value is not None:
+        if not isinstance(varying_keys_value, list) or not all(
+            isinstance(item, str) for item in varying_keys_value
+        ):
+            raise ValueError(
+                "experiment.observation_subblock.varying_keys must be a list[str] when provided."
+            )
+        requested_varying_keys = tuple(varying_keys_value)
 
     trace_cfg = _required_dict(subblock_cfg, "trace", path="experiment.observation_subblock")
     trace_format = trace_cfg.get("format", "csv")
@@ -161,14 +162,6 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(require_monotonic, bool):
         raise ValueError(
             "experiment.observation_subblock.validate.require_monotonic_time must be a bool."
-        )
-    if not require_contiguous:
-        raise ValueError(
-            "v1 contract requires contiguous frame_index validation to remain enabled."
-        )
-    if not require_monotonic:
-        raise ValueError(
-            "v1 contract requires monotonic time_s validation to remain enabled."
         )
 
     noise = experiment_cfg.get("noise", {})
@@ -210,11 +203,12 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         "seed": seed,
         "truth": truth,
         "observation_subblock": {
-            "varying_keys": varying_keys_tuple,
+            "requested_varying_keys": requested_varying_keys,
+            "applied_varying_keys": APPLIED_V1_VARYING_KEYS,
             "trace": {"format": "csv", "path": trace_path},
             "validate": {
-                "require_contiguous_frame_index": True,
-                "require_monotonic_time": True,
+                "require_contiguous_frame_index": require_contiguous,
+                "require_monotonic_time": require_monotonic,
             },
         },
         "noise": noise_cfg,
@@ -285,7 +279,22 @@ def generate_obs_subblock(
         config_path=cfg_path,
         field_name="experiment.observation_subblock.trace.path",
     )
-    trace = load_obs_subblock_trace_csv(trace_path)
+    validate_cfg = experiment["observation_subblock"]["validate"]
+    trace = load_obs_subblock_trace_csv(
+        trace_path,
+        require_contiguous_frame_index=validate_cfg["require_contiguous_frame_index"],
+        require_monotonic_time=validate_cfg["require_monotonic_time"],
+    )
+    requested_varying_keys = experiment["observation_subblock"]["requested_varying_keys"]
+    applied_varying_keys = experiment["observation_subblock"]["applied_varying_keys"]
+    if requested_varying_keys is not None and tuple(requested_varying_keys) != tuple(
+        applied_varying_keys
+    ):
+        print(
+            "Note: requested varying_keys differs from applied v1 renderer keys; "
+            "rendering still applies source.x_position_as/source.y_position_as/"
+            "source.position_angle_deg only."
+        )
 
     configured_outdir = experiment["outputs"]["outdir"]
     if results_dir is not None:
@@ -346,7 +355,7 @@ def generate_obs_subblock(
     frame_images: list[np.ndarray] = []
     resolved_truth_rows: list[dict[str, Any]] = []
     for trace_row in trace.rows:
-        frame_overrides = {key: trace_row[key] for key in V1_VARYING_KEYS}
+        frame_overrides = {key: trace_row[key] for key in APPLIED_V1_VARYING_KEYS}
         frame_store = base_store.replace(frame_overrides).refresh_derived(forward_spec)
         frame_delta = binder.strip_structural(frame_store)
 
@@ -404,7 +413,9 @@ def generate_obs_subblock(
         created_at=now_iso_local_ms(),
         generator=GENERATOR_ID,
         frame_count=trace.frame_count,
-        varying_keys=experiment["observation_subblock"]["varying_keys"],
+        varying_keys=applied_varying_keys,
+        requested_varying_keys=requested_varying_keys,
+        applied_varying_keys=applied_varying_keys,
         trace_format="csv",
         trace_path=trace.source_path,
         trace_extra_columns=trace.extra_columns,

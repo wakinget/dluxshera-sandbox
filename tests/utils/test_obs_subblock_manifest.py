@@ -28,6 +28,12 @@ def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(t
             "source.y_position_as",
             "source.position_angle_deg",
         ),
+        requested_varying_keys=("source.x_position_as",),
+        applied_varying_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ),
         trace_format="csv",
         trace_path=Path("/tmp/trace.csv"),
         trace_extra_columns=("note",),
@@ -48,6 +54,8 @@ def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(t
         "source.y_position_as",
         "source.position_angle_deg",
     ]
+    assert manifest["applied_varying_keys"] == manifest["varying_keys"]
+    assert manifest["requested_varying_keys"] == ["source.x_position_as"]
     assert manifest["trace"]["format"] == "csv"
     assert manifest["trace"]["extra_columns"] == ["note"]
     assert manifest["artifacts"]["manifest_json"] == "manifest.json"

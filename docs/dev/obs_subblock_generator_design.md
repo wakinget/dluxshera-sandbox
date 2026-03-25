@@ -54,7 +54,9 @@ The scope is intentionally narrow so later inference/aggregation layers can rely
   - `source.y_position_as`
   - `source.position_angle_deg`
 - All non-varying keys stay at shared base values for the whole sub-block.
-- `experiment.observation_subblock.varying_keys` is present for explicitness, but v1 validation should require it to match the fixed `x/y/PA` set.
+- `experiment.observation_subblock.varying_keys` is advisory in v1:
+  - if omitted, renderer defaults to applied `x/y/PA` keys
+  - if provided, renderer may preserve it as requested metadata, but still applies fixed `x/y/PA` keys
 
 ## 4. Recommended Config Shape
 
@@ -78,17 +80,17 @@ experiment:
       exposure_time_s: 0.05
 
   observation_subblock:
-    varying_keys:
+    varying_keys:               # optional metadata in v1; renderer still applies fixed x/y/PA keys
       - source.x_position_as
       - source.y_position_as
       - source.position_angle_deg
     trace:
-      format: csv                # v1 canonical input format
+      format: csv                # currently supported v1 input format
       path: path/to/frame_truth.csv
       # inline_rows: [...]       # optional tiny-test fallback; mutually exclusive with path
     validate:
-      require_contiguous_frame_index: true
-      require_monotonic_time: true
+      require_contiguous_frame_index: true   # default true; honored if set false
+      require_monotonic_time: true           # default true; honored if set false
 
   noise:
     enabled: false
@@ -121,8 +123,12 @@ Required fields (v1):
 | `source.position_angle_deg` | float | Per-frame source PA (deg) |
 
 Recommended validation rules:
-- `frame_index` must be contiguous (`0..N-1`) after sorting.
-- `time_s` must be finite and monotonic non-decreasing.
+- duplicate `frame_index` values are always invalid.
+- non-finite required numeric values are always invalid.
+- `frame_index` contiguous check defaults to enabled, and is controlled by
+  `validate.require_contiguous_frame_index`.
+- monotonic `time_s` check defaults to enabled, and is controlled by
+  `validate.require_monotonic_time`.
 - Required fields must be present for every row.
 
 Extensibility rule:
@@ -154,7 +160,9 @@ Minimum `manifest.json` fields (v1 recommendation):
 | `created_at` | ISO timestamp |
 | `generator` | Script/module id (for example recipe path) |
 | `system` | Preset label and/or resolved config hash |
-| `varying_keys` | Applied frame-varying key list (`x/y/PA` in v1) |
+| `varying_keys` | Applied frame-varying key list (`x/y/PA` in v1; compatibility alias) |
+| `applied_varying_keys` | Explicit applied renderer key list |
+| `requested_varying_keys` | Optional user-provided varying-key metadata (if provided in config) |
 | `frame_count` | Number of rendered frames |
 | `time_start_s` / `time_stop_s` | From trace table |
 | `trace` | Trace source metadata (`format`, `path` or `inline`, extra columns) |
@@ -191,7 +199,7 @@ Important execution note:
 - Explicit per-frame traces are the primary v1 interface.
 - Trace helper generators (for example linear drift/random walk/iid jitter) are separate utilities, not renderer internals.
 - v1 output is one central-field image cube, not the eventual 5-ROI mission product.
-- v1 frame-varying parameters are exactly:
+- v1 applied frame-varying renderer parameters are exactly:
   - `source.x_position_as`
   - `source.y_position_as`
   - `source.position_angle_deg`

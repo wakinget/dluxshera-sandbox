@@ -58,7 +58,77 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
         "generator",
         "frame_count",
         "varying_keys",
+        "applied_varying_keys",
         "trace",
         "artifacts",
     ):
         assert key in manifest
+    assert manifest["applied_varying_keys"] == [
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.position_angle_deg",
+    ]
+
+
+def test_observation_subblock_varying_keys_metadata_is_advisory(tmp_path):
+    recipe = _load_recipe_module()
+
+    trace_path = tmp_path / "frame_truth.csv"
+    trace_path.write_text(
+        "\n".join(
+            [
+                "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg",
+                "0,0.0,0.0,0.0,90.0",
+                "1,0.1,0.1,-0.1,90.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    base_cfg = {
+        "system": {"preset": "SHERA_TESTBED_3P"},
+        "experiment": {
+            "kind": "observation_subblock",
+            "seed": 42,
+            "truth": {"source": {"exposure_time_s": 0.05}},
+            "observation_subblock": {
+                "trace": {"format": "csv", "path": str(trace_path)},
+                "validate": {
+                    "require_contiguous_frame_index": True,
+                    "require_monotonic_time": True,
+                },
+            },
+            "outputs": {
+                "outdir": str(tmp_path / "out"),
+                "file_prefix": "obs_subblock",
+                "frame_truth_format": "csv",
+            },
+            "noise": {"enabled": False},
+        },
+    }
+
+    cfg_missing_varying = tmp_path / "prescription_missing_varying.json"
+    cfg_missing_varying.write_text(json.dumps(base_cfg, indent=2), encoding="utf-8")
+    result_missing = recipe.generate_obs_subblock(
+        config_path=cfg_missing_varying,
+        dry_run=True,
+    )
+    assert result_missing["frame_count"] == 2
+
+    cfg_custom = dict(base_cfg)
+    cfg_custom["experiment"] = dict(base_cfg["experiment"])
+    cfg_custom["experiment"]["observation_subblock"] = dict(
+        base_cfg["experiment"]["observation_subblock"]
+    )
+    cfg_custom["experiment"]["observation_subblock"]["varying_keys"] = [
+        "source.x_position_as",
+        "custom.metadata.key",
+    ]
+    cfg_custom_path = tmp_path / "prescription_custom_varying.json"
+    cfg_custom_path.write_text(json.dumps(cfg_custom, indent=2), encoding="utf-8")
+    result_custom = recipe.generate_obs_subblock(
+        config_path=cfg_custom_path,
+        dry_run=True,
+    )
+    assert result_custom["frame_count"] == 2

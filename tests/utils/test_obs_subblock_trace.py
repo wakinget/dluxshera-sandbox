@@ -39,6 +39,23 @@ def test_trace_non_contiguous_frame_index_raises(tmp_path):
         load_obs_subblock_trace_csv(trace_path)
 
 
+def test_trace_non_contiguous_allowed_when_flag_disabled(tmp_path):
+    trace_path = _write_trace(
+        tmp_path / "trace_non_contiguous_allowed.csv",
+        """
+        frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg
+        0,0.0,0.0,0.0,90.0
+        2,0.1,0.1,-0.1,90.2
+        """,
+    )
+
+    trace = load_obs_subblock_trace_csv(
+        trace_path, require_contiguous_frame_index=False
+    )
+    assert trace.frame_count == 2
+    assert [row["frame_index"] for row in trace.rows] == [0, 2]
+
+
 def test_trace_non_monotonic_time_raises(tmp_path):
     trace_path = _write_trace(
         tmp_path / "trace_non_monotonic.csv",
@@ -51,6 +68,39 @@ def test_trace_non_monotonic_time_raises(tmp_path):
 
     with pytest.raises(ValueError, match="time_s must be monotonic"):
         load_obs_subblock_trace_csv(trace_path)
+
+
+def test_trace_non_monotonic_allowed_when_flag_disabled(tmp_path):
+    trace_path = _write_trace(
+        tmp_path / "trace_non_monotonic_allowed.csv",
+        """
+        frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg
+        0,0.1,0.0,0.0,90.0
+        1,0.0,0.1,-0.1,90.2
+        """,
+    )
+
+    trace = load_obs_subblock_trace_csv(trace_path, require_monotonic_time=False)
+    assert trace.frame_count == 2
+    assert [row["time_s"] for row in trace.rows] == [0.1, 0.0]
+
+
+def test_trace_duplicate_frame_index_is_always_hard_error(tmp_path):
+    trace_path = _write_trace(
+        tmp_path / "trace_duplicate_frame_index.csv",
+        """
+        frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg
+        0,0.0,0.0,0.0,90.0
+        0,0.1,0.1,-0.1,90.2
+        """,
+    )
+
+    with pytest.raises(ValueError, match="duplicate frame_index"):
+        load_obs_subblock_trace_csv(
+            trace_path,
+            require_contiguous_frame_index=False,
+            require_monotonic_time=False,
+        )
 
 
 def test_trace_extra_columns_preserved(tmp_path):

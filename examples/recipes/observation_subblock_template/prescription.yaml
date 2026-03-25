@@ -19,6 +19,7 @@ experiment:
       contrast: 3.0
 
   observation_subblock:
+    # Optional metadata in v1. Renderer applies fixed x/y/PA keys regardless.
     varying_keys:
       - source.x_position_as
       - source.y_position_as
@@ -27,6 +28,7 @@ experiment:
       format: csv
       path: frame_truth.csv
     validate:
+      # Defaults are true; set false to relax each check.
       require_contiguous_frame_index: true
       require_monotonic_time: true
 

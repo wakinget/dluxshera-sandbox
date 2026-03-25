@@ -12,16 +12,21 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from collections import Counter
 from typing import Any
 
 
-V1_VARYING_KEYS: tuple[str, ...] = (
+APPLIED_V1_VARYING_KEYS: tuple[str, ...] = (
     "source.x_position_as",
     "source.y_position_as",
     "source.position_angle_deg",
 )
 
-REQUIRED_TRACE_COLUMNS: tuple[str, ...] = ("frame_index", "time_s", *V1_VARYING_KEYS)
+REQUIRED_TRACE_COLUMNS: tuple[str, ...] = (
+    "frame_index",
+    "time_s",
+    *APPLIED_V1_VARYING_KEYS,
+)
 
 
 @dataclass(frozen=True)
@@ -68,18 +73,6 @@ class ObsSubblockTrace:
         if not self.rows:
             return None
         return float(self.rows[-1]["time_s"])
-
-
-def require_v1_varying_keys(varying_keys: list[str] | tuple[str, ...]) -> tuple[str, ...]:
-    """Validate that configured varying keys exactly match the fixed v1 set."""
-
-    keys_tuple = tuple(varying_keys)
-    if keys_tuple != V1_VARYING_KEYS:
-        raise ValueError(
-            "experiment.observation_subblock.varying_keys must match exactly "
-            f"{list(V1_VARYING_KEYS)} for v1, got {list(keys_tuple)}."
-        )
-    return keys_tuple
 
 
 def _require_cell(row: dict[str, str | None], key: str, *, row_number: int) -> str:
@@ -131,7 +124,12 @@ def _normalize_extra_cell(text: str | None) -> str | None:
     return stripped
 
 
-def load_obs_subblock_trace_csv(path: Path) -> ObsSubblockTrace:
+def load_obs_subblock_trace_csv(
+    path: Path,
+    *,
+    require_contiguous_frame_index: bool = True,
+    require_monotonic_time: bool = True,
+) -> ObsSubblockTrace:
     """Load and validate a v1 observation sub-block trace CSV.
 
     Parameters
@@ -149,8 +147,8 @@ def load_obs_subblock_trace_csv(path: Path) -> ObsSubblockTrace:
     FileNotFoundError
         If the CSV path does not exist.
     ValueError
-        If required columns are missing, rows are malformed, frame indices are
-        non-contiguous, or ``time_s`` is non-monotonic after frame sorting.
+        If required columns are missing, rows are malformed, duplicate
+        ``frame_index`` values are present, or enabled validation checks fail.
     """
 
     if not path.exists():
@@ -207,16 +205,26 @@ def load_obs_subblock_trace_csv(path: Path) -> ObsSubblockTrace:
 
     sorted_rows = sorted(parsed_rows, key=lambda item: int(item["frame_index"]))
     frame_indices = [int(row["frame_index"]) for row in sorted_rows]
-    expected = list(range(len(sorted_rows)))
-    if frame_indices != expected:
+    counts = Counter(frame_indices)
+    duplicate_values = sorted(value for value, count in counts.items() if count > 1)
+    if duplicate_values:
         raise ValueError(
-            "Trace frame_index must be contiguous 0..N-1 after sorting, "
-            f"got {frame_indices}."
+            "Trace contains duplicate frame_index values: "
+            + ", ".join(str(value) for value in duplicate_values)
         )
 
-    times = [float(row["time_s"]) for row in sorted_rows]
-    if any(t2 < t1 for t1, t2 in zip(times, times[1:])):
-        raise ValueError("Trace time_s must be monotonic non-decreasing.")
+    if require_contiguous_frame_index:
+        expected = list(range(len(sorted_rows)))
+        if frame_indices != expected:
+            raise ValueError(
+                "Trace frame_index must be contiguous 0..N-1 after sorting, "
+                f"got {frame_indices}."
+            )
+
+    if require_monotonic_time:
+        times = [float(row["time_s"]) for row in sorted_rows]
+        if any(t2 < t1 for t1, t2 in zip(times, times[1:])):
+            raise ValueError("Trace time_s must be monotonic non-decreasing.")
 
     return ObsSubblockTrace(
         rows=tuple(sorted_rows),
@@ -227,9 +235,8 @@ def load_obs_subblock_trace_csv(path: Path) -> ObsSubblockTrace:
 
 
 __all__ = [
+    "APPLIED_V1_VARYING_KEYS",
     "ObsSubblockTrace",
     "REQUIRED_TRACE_COLUMNS",
-    "V1_VARYING_KEYS",
     "load_obs_subblock_trace_csv",
-    "require_v1_varying_keys",
 ]

@@ -96,6 +96,8 @@ def build_obs_subblock_manifest(
     generator: str,
     frame_count: int,
     varying_keys: tuple[str, ...] | list[str],
+    requested_varying_keys: tuple[str, ...] | list[str] | None = None,
+    applied_varying_keys: tuple[str, ...] | list[str] | None = None,
     trace_format: str,
     trace_path: Path,
     trace_extra_columns: tuple[str, ...] | list[str],
@@ -114,6 +116,11 @@ def build_obs_subblock_manifest(
         "generator": generator,
         "frame_count": int(frame_count),
         "varying_keys": list(varying_keys),
+        "applied_varying_keys": (
+            list(applied_varying_keys)
+            if applied_varying_keys is not None
+            else list(varying_keys)
+        ),
         "trace": {
             "format": trace_format,
             "path": str(trace_path),
@@ -130,6 +137,8 @@ def build_obs_subblock_manifest(
         manifest["system"] = dict(system_info)
     if notes is not None:
         manifest["notes"] = str(notes)
+    if requested_varying_keys is not None:
+        manifest["requested_varying_keys"] = list(requested_varying_keys)
     return manifest
 
 
