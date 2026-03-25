@@ -18,6 +18,18 @@ This template demonstrates the Phase 2 observation sub-block renderer:
 
 Use this folder as a starting point for small explicit-trace rendering runs.
 
+## Recommended workflow (Phase 3)
+
+Observation sub-block runs are now a two-step flow:
+
+1. build a canonical trace CSV with
+   `examples/recipes/observation_subblock_trace.py`
+2. render the sub-block cube with
+   `examples/recipes/observation_subblock.py`
+
+The renderer still accepts hand-authored CSV traces directly, but the trace
+builder recipe is now the recommended way to create reproducible traces.
+
 ## Files in this template
 
 - `prescription.yaml` — canonical nested config (`system` + `experiment`)
@@ -118,6 +130,17 @@ PYTHONPATH=src python examples/recipes/observation_subblock.py \
   --results-dir Results/observation_subblock \
   --run-name demo_run
 ```
+
+### 4) Generate a trace first, then render
+
+```bash
+PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
+  --config examples/recipes/observation_subblock_trace_template/prescription.yaml \
+  --run-name trace_run
+```
+
+Then set `experiment.observation_subblock.trace.path` in your renderer
+prescription to the generated `*_frame_truth.csv`, and run the renderer recipe.
 
 ## Output layout
 

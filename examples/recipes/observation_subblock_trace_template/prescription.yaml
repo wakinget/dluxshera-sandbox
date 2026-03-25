@@ -1,0 +1,26 @@
+experiment:
+  kind: observation_subblock_trace
+  seed: 42
+  notes: "Minimal trace-builder template (3 frames)."
+
+  observation_subblock_trace:
+    n_frames: 3
+    dt_s: 0.05
+    keys:
+      source.x_position_as:
+        mode: linear_drift
+        start: 0.000
+        rate_per_s: 0.100
+      source.y_position_as:
+        mode: random_walk
+        start: 0.000
+        sigma_step: 0.002
+      source.position_angle_deg:
+        mode: iid_jitter
+        center: 90.0
+        sigma: 0.15
+
+  outputs:
+    outdir: Results/observation_subblock_trace
+    file_prefix: obs_subblock_trace
+    write_manifest: true

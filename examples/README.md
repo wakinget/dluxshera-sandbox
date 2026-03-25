@@ -34,6 +34,15 @@ under `examples/runners/`.
     python examples/runners/run_twoplane_astrometry.py
     python examples/runners/run_twoplane_astrometry.py --fast
     ```
+- **Observation sub-block trace + renderer recipes** — Two-step time-domain
+  workflow for short frame stacks:
+  1) generate explicit per-frame trace CSV (`observation_subblock_trace.py`),
+  2) render a central-field sub-block cube (`observation_subblock.py`).
+  - Trace recipe: `examples/recipes/observation_subblock_trace.py`
+  - Renderer recipe: `examples/recipes/observation_subblock.py`
+  - Template directories:
+    - `examples/recipes/observation_subblock_trace_template/`
+    - `examples/recipes/observation_subblock_template/`
 
 ## Notebooks
 

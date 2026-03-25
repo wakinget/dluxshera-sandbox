@@ -1,12 +1,20 @@
 # Observation Sub-Block Generator Design (Phase 1 Contract)
 
-Status: design contract for Phase 2 implementation (no generator implementation in this phase).
+Status: Phase 1 contract document, with Phase 3 notes on implemented workflow separation.
 
 ## 1. Purpose and Scope
 
 The observation sub-block generator produces a short, time-ordered image stack from one resolved dLuxShera system configuration plus an explicit per-frame trace table.
 
 It is the first bridge from current single-frame recipes to later multi-frame inference workflows.
+
+Phase 3 workflow note:
+- Trace construction is now implemented as a separate helper/recipe path
+  (`examples/recipes/observation_subblock_trace.py` +
+  `src/dluxshera/utils/obs_subblock_trace_builders.py`) that emits canonical
+  explicit CSV traces for the renderer.
+- Rendering remains in `examples/recipes/observation_subblock.py` and still
+  consumes explicit CSV traces only.
 
 In scope for v1:
 - Generate one analysis-oriented, central-field image cube (single ROI stream).

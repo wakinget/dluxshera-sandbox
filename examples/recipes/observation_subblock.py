@@ -286,14 +286,14 @@ def generate_obs_subblock(
         require_monotonic_time=validate_cfg["require_monotonic_time"],
     )
     requested_varying_keys = experiment["observation_subblock"]["requested_varying_keys"]
-    applied_varying_keys = experiment["observation_subblock"]["applied_varying_keys"]
+    applied_varying_keys = tuple(experiment["observation_subblock"]["applied_varying_keys"])
     if requested_varying_keys is not None and tuple(requested_varying_keys) != tuple(
         applied_varying_keys
     ):
+        applied_keys_text = ", ".join(applied_varying_keys)
         print(
             "Note: requested varying_keys differs from applied v1 renderer keys; "
-            "rendering still applies source.x_position_as/source.y_position_as/"
-            "source.position_angle_deg only."
+            f"rendering still applies {applied_keys_text} only."
         )
 
     configured_outdir = experiment["outputs"]["outdir"]
@@ -355,7 +355,7 @@ def generate_obs_subblock(
     frame_images: list[np.ndarray] = []
     resolved_truth_rows: list[dict[str, Any]] = []
     for trace_row in trace.rows:
-        frame_overrides = {key: trace_row[key] for key in APPLIED_V1_VARYING_KEYS}
+        frame_overrides = {key: trace_row[key] for key in applied_varying_keys}
         frame_store = base_store.replace(frame_overrides).refresh_derived(forward_spec)
         frame_delta = binder.strip_structural(frame_store)
 

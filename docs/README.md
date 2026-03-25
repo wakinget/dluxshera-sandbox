@@ -19,6 +19,9 @@ Working practices, priorities, and lessons learned.
 - [Lessons learned](dev/lessons_learned.md)
 - [ML training dataset V2 workflow](dev/ml_training_dataset_v2.md)
 - [Observation sub-block generator design (Phase 1 contract)](dev/obs_subblock_generator_design.md)
+- Observation sub-block recipes:
+  - `examples/recipes/observation_subblock_trace.py` (trace builder)
+  - `examples/recipes/observation_subblock.py` (renderer)
 
 ## Tutorials
 Hands-on guides for common workflows.
