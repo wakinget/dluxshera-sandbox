@@ -722,6 +722,7 @@ Status: docs housekeeping (dev-facing)
 - Concept/architecture sources of truth: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,params_and_store.md}`. Use these for detailed design rather than duplicating content here.
 - Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md`, `examples/recipes/canonical_astrometry.py`, `examples/recipes/twoplane_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, and `examples/runners/run_twoplane_astrometry.py` for runnable flows).
 - Dev-facing planning: this file (`docs/dev/working_plan.md`) and any future dev notes under `docs/dev/`. Keep cross-links back to the architecture docs for specifics.
+- Time-domain design contract (Phase 1): `docs/dev/obs_subblock_generator_design.md` captures the observation sub-block generator interface and artifact layout before implementation.
 - Navigation helpers: `devtools/generate_context_snapshot.py` and `devtools/print_tree.py` remain the authoritative way to browse the live tree and ParamSpec/transform snapshots.
 
 Near-term doc housekeeping:

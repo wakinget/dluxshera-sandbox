@@ -18,6 +18,7 @@ Working practices, priorities, and lessons learned.
 - [Code structure](dev/code_structure.md)
 - [Lessons learned](dev/lessons_learned.md)
 - [ML training dataset V2 workflow](dev/ml_training_dataset_v2.md)
+- [Observation sub-block generator design (Phase 1 contract)](dev/obs_subblock_generator_design.md)
 
 ## Tutorials
 Hands-on guides for common workflows.
