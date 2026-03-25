@@ -26,6 +26,8 @@ Observation sub-block runs are now a two-step flow:
    `examples/recipes/observation_subblock_trace.py`
 2. render the sub-block cube with
    `examples/recipes/observation_subblock.py`
+3. inspect quick-look diagnostics with
+   `examples/scripts/visualize_obs_subblock.py`
 
 The renderer still accepts hand-authored CSV traces directly, but the trace
 builder recipe is now the recommended way to create reproducible traces.
@@ -142,6 +144,21 @@ PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
 
 Then set `experiment.observation_subblock.trace.path` in your renderer
 prescription to the generated `*_frame_truth.csv`, and run the renderer recipe.
+
+### 5) Generate quick-look visualization products
+
+```bash
+PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
+  --cube Results/observation_subblock/demo_run/obs_subblock_*_cube.fits \
+  --manifest Results/observation_subblock/demo_run/manifest.json
+```
+
+Default quick-look outputs are written to a `quicklook/` folder alongside the
+cube and include:
+
+- `preview.gif`
+- `summary.png`
+- `trace_summary.png` (when a trace CSV is provided or inferred from manifest)
 
 ## Output layout
 
