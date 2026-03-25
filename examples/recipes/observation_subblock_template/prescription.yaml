@@ -1,0 +1,42 @@
+system:
+  preset: SHERA_TESTBED_3P
+  source:
+    n_lambda: 1
+  detector:
+    layers:
+      - name: downsample
+        kernel_size: 3
+
+experiment:
+  kind: observation_subblock
+  seed: 42
+  notes: "Minimal 3-frame observation sub-block template."
+
+  truth:
+    source:
+      exposure_time_s: 0.05
+      separation_as: 10.0
+      contrast: 3.0
+
+  observation_subblock:
+    varying_keys:
+      - source.x_position_as
+      - source.y_position_as
+      - source.position_angle_deg
+    trace:
+      format: csv
+      path: frame_truth.csv
+    validate:
+      require_contiguous_frame_index: true
+      require_monotonic_time: true
+
+  noise:
+    enabled: false
+    photon_noise: true
+    read_noise: false
+    dark_current: false
+
+  outputs:
+    outdir: Results/observation_subblock
+    file_prefix: obs_subblock
+    frame_truth_format: csv
