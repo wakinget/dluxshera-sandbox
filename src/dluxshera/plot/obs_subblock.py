@@ -131,29 +131,112 @@ def _trace_rows(trace: ObsSubblockTrace | Sequence[Mapping[str, float]] | None):
     return tuple(trace)
 
 
-def _preview_text(
+def _preview_text_segments(
     *,
     frame_index: int,
     trace_rows: Sequence[Mapping[str, float]] | None,
-) -> str:
-    lines = [f"frame={frame_index}"]
+) -> list[str]:
+    segments = [f"frame={frame_index}"]
     if trace_rows is None:
-        return " | ".join(lines)
+        return segments
 
     row = trace_rows[frame_index]
     if "time_s" in row:
-        lines.append(f"t={float(row['time_s']):.3f}s")
+        segments.append(f"t={float(row['time_s']):.3f}s")
     if "source.x_position_as" in row and "source.y_position_as" in row:
-        lines.append(
-            "x={:.5f} as, y={:.5f} as".format(
+        segments.append(
+            "x={:.4f}, y={:.4f} as".format(
                 float(row["source.x_position_as"]),
                 float(row["source.y_position_as"]),
             )
         )
     if "source.position_angle_deg" in row:
-        lines.append(f"PA={float(row['source.position_angle_deg']):.3f} deg")
+        segments.append(f"PA={float(row['source.position_angle_deg']):.2f} deg")
 
-    return " | ".join(lines)
+    return segments
+
+
+def _measure_text_size(draw: ImageDraw.ImageDraw, text: str) -> tuple[int, int]:
+    if hasattr(draw, "textbbox"):
+        left, top, right, bottom = draw.textbbox((0, 0), text)
+        return right - left, bottom - top
+    return draw.textsize(text)
+
+
+def _truncate_text_to_width(
+    text: str,
+    *,
+    draw: ImageDraw.ImageDraw,
+    max_width: int,
+) -> str:
+    if max_width <= 0:
+        return ""
+    width, _ = _measure_text_size(draw, text)
+    if width <= max_width:
+        return text
+
+    ellipsis = "..."
+    ellipsis_width, _ = _measure_text_size(draw, ellipsis)
+    if ellipsis_width > max_width:
+        return ""
+
+    clipped = text.rstrip()
+    while clipped:
+        candidate = f"{clipped}{ellipsis}"
+        candidate_width, _ = _measure_text_size(draw, candidate)
+        if candidate_width <= max_width:
+            return candidate
+        clipped = clipped[:-1].rstrip()
+
+    return ellipsis
+
+
+def _preview_annotation_lines(
+    *,
+    frame_index: int,
+    trace_rows: Sequence[Mapping[str, float]] | None,
+    draw: ImageDraw.ImageDraw,
+    max_width: int,
+    max_lines: int,
+) -> list[str]:
+    """Build wrapped annotation lines that fit within the frame width."""
+
+    segments = _preview_text_segments(frame_index=frame_index, trace_rows=trace_rows)
+    if not segments or max_lines <= 0:
+        return []
+
+    wrapped: list[str] = []
+    current = ""
+    for segment in segments:
+        candidate = segment if not current else f"{current} | {segment}"
+        candidate_width, _ = _measure_text_size(draw, candidate)
+        if current and candidate_width > max_width:
+            wrapped.append(current)
+            current = segment
+        else:
+            current = candidate
+
+    if current:
+        wrapped.append(current)
+
+    if len(wrapped) > max_lines:
+        overflow = " | ".join(wrapped[max_lines - 1 :])
+        wrapped = wrapped[: max_lines - 1] + [overflow]
+
+    return [
+        _truncate_text_to_width(line, draw=draw, max_width=max_width)
+        for line in wrapped
+    ]
+
+
+def _preview_text(
+    *,
+    frame_index: int,
+    trace_rows: Sequence[Mapping[str, float]] | None,
+) -> str:
+    """Backward-compatible single-line annotation text."""
+
+    return " | ".join(_preview_text_segments(frame_index=frame_index, trace_rows=trace_rows))
 
 
 def _preview_rgb_frames(
@@ -170,6 +253,19 @@ def _preview_rgb_frames(
     vmin, vmax = compute_cube_display_limits(cube, pmin=pmin, pmax=pmax)
     cmap_obj = matplotlib.colormaps.get_cmap(cmap)
     rows = _trace_rows(trace)
+    annotation_line_slots = 2 if rows is not None else 1
+    text_pad_x = 4
+    text_pad_y = 2
+    line_spacing = 2
+
+    metrics_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    _, line_height = _measure_text_size(metrics_draw, "Ag")
+    line_height = max(int(line_height), 1)
+    banner_height = (
+        (2 * text_pad_y)
+        + (annotation_line_slots * line_height)
+        + (max(annotation_line_slots - 1, 0) * line_spacing)
+    )
 
     frames: list[np.ndarray] = []
     for frame_index in indices:
@@ -183,10 +279,27 @@ def _preview_rgb_frames(
         rgb = np.asarray((255.0 * rgba[..., :3]).astype(np.uint8))
 
         image = Image.fromarray(rgb)
-        draw = ImageDraw.Draw(image)
-        draw.rectangle([(0, 0), (image.width, 18)], fill=(0, 0, 0))
-        draw.text((4, 3), _preview_text(frame_index=frame_index, trace_rows=rows), fill=(255, 255, 255))
-        frames.append(np.asarray(image))
+        max_annotation_width = max(image.width - (2 * text_pad_x), 1)
+        annotation_lines = _preview_annotation_lines(
+            frame_index=frame_index,
+            trace_rows=rows,
+            draw=metrics_draw,
+            max_width=max_annotation_width,
+            max_lines=annotation_line_slots,
+        )
+        while len(annotation_lines) < annotation_line_slots:
+            annotation_lines.append("")
+
+        annotated = Image.new("RGB", (image.width, image.height + banner_height), color=(0, 0, 0))
+        annotated.paste(image, (0, banner_height))
+        draw = ImageDraw.Draw(annotated)
+        ypos = text_pad_y
+        for line in annotation_lines:
+            if line:
+                draw.text((text_pad_x, ypos), line, fill=(255, 255, 255))
+            ypos += line_height + line_spacing
+
+        frames.append(np.asarray(annotated))
 
     return frames
 

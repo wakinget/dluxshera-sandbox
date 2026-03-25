@@ -4,8 +4,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image, ImageDraw
 
 from dluxshera.plot.obs_subblock import (
+    _preview_annotation_lines,
     apply_intensity_stretch,
     compute_cube_display_limits,
     make_obs_subblock_summary_figure,
@@ -103,3 +105,26 @@ def test_preview_gif_writes_file(tmp_path: Path):
     )
     assert gif_path.exists()
     assert gif_path.stat().st_size > 0
+
+    with Image.open(gif_path) as image:
+        assert image.width == cube.shape[2]
+        assert image.height > cube.shape[1]
+
+
+def test_preview_annotation_lines_wrap_to_width():
+    trace = _toy_trace(n_frame=1)
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    max_width = 90
+
+    lines = _preview_annotation_lines(
+        frame_index=0,
+        trace_rows=trace.rows,
+        draw=draw,
+        max_width=max_width,
+        max_lines=2,
+    )
+
+    assert len(lines) == 2
+    for line in lines:
+        left, top, right, bottom = draw.textbbox((0, 0), line)
+        assert right - left <= max_width

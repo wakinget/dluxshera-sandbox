@@ -1,4 +1,64 @@
-"""Quick-look visualizer for observation sub-block artifacts."""
+"""Generate quick-look visualizations for an observation sub-block cube.
+
+This script reads an observation cube FITS file (typically ``*_cube.fits``) and
+produces visual diagnostics to quickly sanity-check simulated or measured data.
+
+What this includes
+------------------
+By default, outputs are written under ``<cube-parent>/quicklook/``:
+
+- ``preview.gif``: animated frame preview (unless ``--no-gif``)
+- ``summary.png``: static cube summary panel (unless ``--no-summary``)
+- ``trace_summary.png``: trace-only summary plot (when trace is available and
+  ``--no-trace-summary`` is not set)
+- ``preview.mp4``: optional MP4 animation (only when ``--mp4`` is used)
+
+Trace and manifest handling
+---------------------------
+- ``--trace`` explicitly provides the frame-truth CSV.
+- If ``--trace`` is omitted and ``--manifest`` is provided, trace discovery is:
+  1. ``manifest["artifacts"]["frame_truth_csv"]``
+  2. ``manifest["trace"]["path"]``
+- Manifest metadata is also used to enrich figure titles (for example,
+  generator and system preset).
+
+Usage examples
+--------------
+Basic quick-look (GIF + summary PNG):
+
+    python examples/scripts/visualize_obs_subblock.py \\
+        --cube Results/run_001/observation_cube.fits
+
+Use manifest-assisted trace discovery:
+
+    python examples/scripts/visualize_obs_subblock.py \\
+        --cube Results/run_001/observation_cube.fits \\
+        --manifest Results/run_001/manifest.json
+
+Explicit trace CSV, custom output directory, and MP4 export:
+
+    python examples/scripts/visualize_obs_subblock.py \\
+        --cube Results/run_001/observation_cube.fits \\
+        --trace Results/run_001/frame_truth.csv \\
+        --outdir Results/run_001/quicklook_custom \\
+        --mp4 --stride 2 --stretch sqrt --pmin 0.5 --pmax 99.5 --fps 12
+
+CLI options
+-----------
+- ``--cube PATH``: required cube FITS input.
+- ``--trace PATH``: optional frame-truth CSV input.
+- ``--manifest PATH``: optional manifest JSON for metadata and trace inference.
+- ``--outdir PATH``: optional output directory override.
+- ``--no-gif``: skip ``preview.gif``.
+- ``--mp4``: also attempt ``preview.mp4`` export.
+- ``--no-summary``: skip ``summary.png``.
+- ``--no-trace-summary``: skip ``trace_summary.png``.
+- ``--stride N``: use every Nth frame for animations.
+- ``--stretch {linear,sqrt,log}``: display stretch used for rendering.
+- ``--pmin VALUE``: lower display percentile.
+- ``--pmax VALUE``: upper display percentile.
+- ``--fps N``: animation frame rate.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +81,13 @@ from dluxshera.utils.obs_subblock_trace import ObsSubblockTrace, load_obs_subblo
 
 
 DEFAULT_OUTDIR_NAME = "quicklook"
+
+
+class _CliHelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter,
+    argparse.RawDescriptionHelpFormatter,
+):
+    """Keep multiline epilog formatting and include default values in help."""
 
 
 def _load_manifest(path: Path | None) -> dict[str, Any] | None:
@@ -108,27 +175,101 @@ def _title_prefix(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate quick-look artifacts for an observation sub-block cube."
+        description="Generate quick-look artifacts for an observation sub-block cube.",
+        formatter_class=_CliHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python examples/scripts/visualize_obs_subblock.py --cube Results/run/cube.fits\n"
+            "  python examples/scripts/visualize_obs_subblock.py --cube Results/run/cube.fits --manifest Results/run/manifest.json\n"
+            "  python examples/scripts/visualize_obs_subblock.py --cube Results/run/cube.fits --trace Results/run/frame_truth.csv --mp4\n\n"
+            "Trace resolution order:\n"
+            "  1) --trace\n"
+            "  2) manifest artifacts.frame_truth_csv\n"
+            "  3) manifest trace.path\n\n"
+            f"Default output directory:\n  <cube-parent>/{DEFAULT_OUTDIR_NAME}\n\n"
+            "Generated files:\n"
+            "  preview.gif        (unless --no-gif)\n"
+            "  summary.png        (unless --no-summary)\n"
+            "  trace_summary.png  (if trace is available and --no-trace-summary is not set)\n"
+            "  preview.mp4        (only when --mp4 is requested)"
+        ),
     )
-    parser.add_argument("--cube", type=Path, required=True, help="Path to *_cube.fits")
-    parser.add_argument("--trace", type=Path, default=None, help="Optional path to frame-truth CSV")
-    parser.add_argument("--manifest", type=Path, default=None, help="Optional path to manifest.json")
-    parser.add_argument("--outdir", type=Path, default=None, help="Optional output directory override")
+    parser.add_argument(
+        "--cube",
+        type=Path,
+        required=True,
+        help="Path to observation cube FITS file (typically *_cube.fits).",
+    )
+    parser.add_argument(
+        "--trace",
+        type=Path,
+        default=None,
+        help="Optional frame-truth CSV path. If omitted, inferred from --manifest when possible.",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Optional manifest JSON used for trace discovery and title metadata.",
+    )
+    parser.add_argument(
+        "--outdir",
+        type=Path,
+        default=None,
+        help=f"Output directory. Defaults to <cube-parent>/{DEFAULT_OUTDIR_NAME}.",
+    )
 
-    parser.add_argument("--no-gif", action="store_true", help="Disable preview GIF generation")
-    parser.add_argument("--mp4", action="store_true", help="Also attempt MP4 export")
-    parser.add_argument("--no-summary", action="store_true", help="Disable static summary panel")
+    parser.add_argument(
+        "--no-gif",
+        action="store_true",
+        help="Skip preview GIF generation (preview.gif).",
+    )
+    parser.add_argument(
+        "--mp4",
+        action="store_true",
+        help="Also attempt MP4 export (preview.mp4); depends on animation backend support.",
+    )
+    parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Skip static summary figure generation (summary.png).",
+    )
     parser.add_argument(
         "--no-trace-summary",
         action="store_true",
-        help="Disable trace summary figure generation",
+        help="Skip trace summary figure generation (trace_summary.png).",
     )
 
-    parser.add_argument("--stride", type=int, default=1, help="Frame stride for animation outputs")
-    parser.add_argument("--stretch", choices=["linear", "sqrt", "log"], default="linear")
-    parser.add_argument("--pmin", type=float, default=1.0, help="Lower percentile for global scaling")
-    parser.add_argument("--pmax", type=float, default=99.0, help="Upper percentile for global scaling")
-    parser.add_argument("--fps", type=int, default=10, help="Animation frames-per-second")
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="Use every Nth frame for animation outputs.",
+    )
+    parser.add_argument(
+        "--stretch",
+        choices=["linear", "sqrt", "log"],
+        default="linear",
+        help="Intensity stretch used for rendering.",
+    )
+    parser.add_argument(
+        "--pmin",
+        type=float,
+        default=1.0,
+        help="Lower percentile for global display scaling.",
+    )
+    parser.add_argument(
+        "--pmax",
+        type=float,
+        default=99.0,
+        help="Upper percentile for global display scaling.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=10,
+        help="Animation frame rate in frames-per-second.",
+    )
     return parser
 
 
