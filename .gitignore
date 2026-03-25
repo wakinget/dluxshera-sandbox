@@ -203,6 +203,8 @@ Results/
 
 # Calibration map previews
 src/dluxshera/data/pixel_offsets/*.png
+src/dluxshera/data/pixel_response/*.png
+src/dluxshera/data/pupils/*.png
 
 # Mac folder files
 *.DS_Store

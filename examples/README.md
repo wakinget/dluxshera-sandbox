@@ -94,6 +94,31 @@ recipes/runners.
       --cube Results/observation_subblock/<run>/obs_subblock_*_cube.fits \
       --manifest Results/observation_subblock/<run>/manifest.json
     ```
+- **generate_binary_rois.py** — Generate a static two-circle binary-star ROI
+  mask as a detector `pixel_response` FITS map, plus a PNG quick-look preview.
+  - Uses geometry from a resolved `--system-preset` and supports optional
+    source overrides (`--separation-as`, `--position-angle-deg`,
+    `--x-position-as`, `--y-position-as`) for quick studies.
+  - Core controls include `--npix`, `--oversample`, and `--roi-diameter-as`;
+    output paths are set by `--outfile` and `--preview`.
+  - Binary clipping defaults to enabled (`--clip-to-binary`): output mask values
+    are forced to `{0,1}` at threshold `0.5`. Use `--no-clip-to-binary` to keep
+    anti-aliased soft edges.
+  - Valid ranges: `--npix > 0`, `--oversample > 0`, `--roi-diameter-as > 0`,
+    and `--separation-as >= 0` (if provided).
+  - Ensure the image field of view is large enough for your geometry and ROI
+    diameter; otherwise the generated mask can be all zeros.
+  - How to run:
+
+    ```bash
+    python examples/scripts/generate_binary_rois.py --help
+    python examples/scripts/generate_binary_rois.py
+    python examples/scripts/generate_binary_rois.py \
+      --system-preset SHERA_TESTBED_3P \
+      --npix 192 --oversample 8 --roi-diameter-as 6.0 \
+      --outfile Results/roi_mask_testbed.fits \
+      --preview Results/roi_mask_testbed.png
+    ```
 - **aggregate_detector_ke_sweep.py** — Aggregate multiple prescribed-MC detector
   knowledge-error experiment directories (for example `ke_0`, `ke_1e-3`, ...)
   into cross-experiment `sweep_runs.csv` and `sweep_summary.csv`.
