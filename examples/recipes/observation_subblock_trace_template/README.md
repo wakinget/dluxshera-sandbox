@@ -3,7 +3,7 @@
 ## Purpose
 
 This template builds canonical explicit trace CSV files for the observation
-sub-block renderer. It is the first step in the Phase 3 two-step workflow:
+sub-block renderer. It is the first step in the workflow:
 
 1. generate an explicit trace CSV
 2. render an image cube from that CSV
@@ -43,14 +43,14 @@ Each key chooses one mode:
 Generate a trace from the template:
 
 ```bash
-PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
+python examples/recipes/observation_subblock_trace.py \
   --config examples/recipes/observation_subblock_trace_template/prescription.yaml
 ```
 
 Validate only:
 
 ```bash
-PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
+python examples/recipes/observation_subblock_trace.py \
   --config examples/recipes/observation_subblock_trace_template/prescription.yaml \
   --dry-run
 ```

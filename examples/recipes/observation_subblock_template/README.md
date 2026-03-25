@@ -18,7 +18,7 @@ This template demonstrates the Phase 2 observation sub-block renderer:
 
 Use this folder as a starting point for small explicit-trace rendering runs.
 
-## Recommended workflow (Phase 3)
+## Recommended workflow
 
 Observation sub-block runs are now a two-step flow:
 
@@ -93,7 +93,7 @@ v1 rendering behavior.
 Run with:
 
 ```bash
-PYTHONPATH=src python examples/recipes/observation_subblock.py [options]
+python examples/recipes/observation_subblock.py [options]
 ```
 
 Supported options:
@@ -104,6 +104,7 @@ Supported options:
 - `--results-dir <path>`: output root override
 - `--run-name <name>`: run directory label under output root
 - `--dry-run`: validate config + trace and print expected outputs without rendering
+- `--no-progress`: disable frame-level tqdm progress output
 
 ## Usage examples
 

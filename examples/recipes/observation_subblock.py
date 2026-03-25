@@ -12,12 +12,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import jax.random as jr
 import numpy as np
+from tqdm import tqdm
 
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
@@ -228,6 +230,7 @@ def generate_obs_subblock(
     results_dir: Path | None = None,
     run_name: str | None = None,
     dry_run: bool = False,
+    show_progress: bool | None = None,
 ) -> dict[str, Any]:
     """Render one observation sub-block from an explicit per-frame trace CSV.
 
@@ -247,6 +250,9 @@ def generate_obs_subblock(
         timestamp tag.
     dry_run : bool, optional
         Validate config/trace and report expected outputs without rendering.
+    show_progress : bool | None, optional
+        Controls tqdm progress output during per-frame rendering. ``None``
+        auto-detects from terminal interactivity.
 
     Returns
     -------
@@ -255,6 +261,9 @@ def generate_obs_subblock(
     """
 
     cfg_path = Path(config_path) if config_path is not None else DEFAULT_PRESCRIPTION_PATH
+    progress_enabled = bool(sys.stderr.isatty()) if show_progress is None else bool(show_progress)
+
+    print(f"Loading observation sub-block config from: {cfg_path}")
     user_cfg = load_user_config(
         config_path=cfg_path,
         system_preset=system_preset,
@@ -279,6 +288,7 @@ def generate_obs_subblock(
         config_path=cfg_path,
         field_name="experiment.observation_subblock.trace.path",
     )
+    print(f"Loading trace CSV from: {trace_path}")
     validate_cfg = experiment["observation_subblock"]["validate"]
     trace = load_obs_subblock_trace_csv(
         trace_path,
@@ -316,6 +326,7 @@ def generate_obs_subblock(
         file_prefix=experiment["outputs"]["file_prefix"],
         timestamp=stamp,
     )
+    print(f"Preparing output directory: {outdir}")
 
     if dry_run:
         print("Dry run: validated configuration and trace.")
@@ -333,6 +344,7 @@ def generate_obs_subblock(
 
     outdir.mkdir(parents=True, exist_ok=True)
 
+    print("Building forward specification and base truth state...")
     forward_spec = compose_forward_spec(system_cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec)
 
@@ -347,14 +359,28 @@ def generate_obs_subblock(
         base_store = base_store.replace(truth_overrides)
     base_store = base_store.refresh_derived(forward_spec)
 
+    print("Constructing binder...")
     binder = SheraBinder(system_cfg, forward_spec, base_store)
 
     noise_cfg = experiment["noise"]
     rng_key = jr.PRNGKey(int(experiment["seed"]))
 
+    print(
+        "Rendering frames..."
+        + (" (first frame may include JIT compilation)" if trace.frame_count > 0 else "")
+    )
     frame_images: list[np.ndarray] = []
     resolved_truth_rows: list[dict[str, Any]] = []
-    for trace_row in trace.rows:
+    frame_iter = trace.rows
+    if progress_enabled:
+        frame_iter = tqdm(
+            trace.rows,
+            total=trace.frame_count,
+            desc="obs_subblock frames",
+            unit="frame",
+            leave=False,
+        )
+    for trace_row in frame_iter:
         frame_overrides = {key: trace_row[key] for key in applied_varying_keys}
         frame_store = base_store.replace(frame_overrides).refresh_derived(forward_spec)
         frame_delta = binder.strip_structural(frame_store)
@@ -384,6 +410,7 @@ def generate_obs_subblock(
         )
         resolved_truth_rows.append(resolved_row)
 
+    print("Writing FITS cube, truth CSV, and manifest...")
     cube = np.stack(frame_images, axis=0)
     write_obs_subblock_cube_fits(
         output_path=artifacts["cube_fits"],
@@ -471,6 +498,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Validate config/trace and print expected outputs without rendering.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        default=False,
+        help="Disable tqdm frame progress output.",
+    )
     return parser
 
 
@@ -484,6 +517,7 @@ def main() -> None:
         results_dir=args.results_dir,
         run_name=args.run_name,
         dry_run=bool(args.dry_run),
+        show_progress=False if bool(args.no_progress) else None,
     )
 
 
