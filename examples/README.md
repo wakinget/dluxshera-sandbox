@@ -82,6 +82,18 @@ recipes/runners.
     python examples/scripts/analyze_checkpoint_gradients.py --help
     python examples/scripts/analyze_checkpoint_gradients.py Results/<run_dir>
     ```
+- **visualize_obs_subblock.py** — Generate quick-look diagnostics for
+  observation sub-block renderer outputs (`*_cube.fits` plus optional trace CSV
+  and manifest).
+  - Writes `preview.gif`, `summary.png`, and `trace_summary.png` (when trace is
+    available).
+  - How to run:
+
+    ```bash
+    PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
+      --cube Results/observation_subblock/<run>/obs_subblock_*_cube.fits \
+      --manifest Results/observation_subblock/<run>/manifest.json
+    ```
 - **aggregate_detector_ke_sweep.py** — Aggregate multiple prescribed-MC detector
   knowledge-error experiment directories (for example `ke_0`, `ke_1e-3`, ...)
   into cross-experiment `sweep_runs.csv` and `sweep_summary.csv`.
