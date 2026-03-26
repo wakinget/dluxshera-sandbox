@@ -79,3 +79,10 @@ Point the renderer config to the generated CSV via
 PYTHONPATH=src python examples/recipes/observation_subblock.py \
   --config <renderer_prescription.yaml>
 ```
+
+Then run registration-only block inference on the rendered cube with:
+
+```bash
+PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
+  --config <inference_prescription.yaml>
+```

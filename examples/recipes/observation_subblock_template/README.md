@@ -20,13 +20,15 @@ Use this folder as a starting point for small explicit-trace rendering runs.
 
 ## Recommended workflow
 
-Observation sub-block runs are now a two-step flow:
+Observation sub-block runs are now a three-step flow:
 
 1. build a canonical trace CSV with
    `examples/recipes/observation_subblock_trace.py`
 2. render the sub-block cube with
    `examples/recipes/observation_subblock.py`
-3. inspect quick-look diagnostics with
+3. infer per-frame registration from the rendered cube with
+   `examples/recipes/observation_subblock_inference.py`
+4. inspect quick-look diagnostics with
    `examples/scripts/visualize_obs_subblock.py`
 
 The renderer still accepts hand-authored CSV traces directly, but the trace
@@ -159,6 +161,16 @@ cube and include:
 - `preview.gif`
 - `summary.png`
 - `trace_summary.png` (when a trace CSV is provided or inferred from manifest)
+
+### 6) Run registration-only block inference on the rendered cube
+
+```bash
+PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
+  --config examples/recipes/observation_subblock_inference_template/prescription.yaml
+```
+
+Inference outputs include a recovered per-frame registration CSV, optional
+truth-vs-recovered comparison CSV, diagnostic plots, and a run manifest.
 
 ## Output layout
 

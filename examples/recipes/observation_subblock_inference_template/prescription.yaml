@@ -1,0 +1,56 @@
+system:
+  preset: SHERA_TESTBED_3P
+  source:
+    n_lambda: 1
+  detector:
+    layers:
+      - name: downsample
+        kernel_size: 3
+
+experiment:
+  kind: observation_subblock_inference
+  notes: "Registration-only observation sub-block inference template."
+
+  # Shared fixed model overrides (optional)
+  truth:
+    source:
+      exposure_time_s: 0.05
+
+  observation_subblock_inference:
+    inputs:
+      # Required: path to an observation sub-block cube FITS artifact.
+      cube: CHANGE_ME/obs_subblock_YYYYMMDD-HHMMSS_cube.fits
+      # Optional: explicit frame-truth CSV for comparison diagnostics.
+      trace: CHANGE_ME/obs_subblock_YYYYMMDD-HHMMSS_frame_truth.csv
+      # Optional: manifest can also be used to infer trace path.
+      # manifest: CHANGE_ME/manifest.json
+
+    validate:
+      require_contiguous_frame_index: true
+      require_monotonic_time: true
+
+    # Initialize all frames from one shared registration guess.
+    init:
+      x_position_as: 0.0
+      y_position_as: 0.0
+      position_angle_deg: 90.0
+
+    loss:
+      reduce: sum
+      variance: 1.0
+
+    optimizer:
+      kind: adam
+      base_lr: 0.01
+      n_iter: 80
+      kwargs:
+        b1: 0.9
+        b2: 0.999
+        eps: 1.0e-8
+
+    diagnostics:
+      plots: true
+
+  outputs:
+    outdir: Results/observation_subblock_inference
+    file_prefix: obs_subblock_inference
