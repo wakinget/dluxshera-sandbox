@@ -1,133 +1,42 @@
-"""Aggregate detector knowledge-error sweeps across prescribed-MC experiments.
+"""Aggregate outer prescribed-MC sweeps across many experiment directories.
 
-This script combines multiple *experiment directories* (for example `ke_1e-3`,
-`ke_1e-2`, ...) into two outer-sweep CSVs:
+This script combines multiple experiment directories under one sweep root into:
 
-- `sweep_runs.csv`: one row per run across all loaded experiments.
-- `sweep_summary.csv`: one row per detector knowledge-error setting with grouped
-  error statistics across all infer quantities present in the run tables.
+- `sweep_runs.csv`: one row per run across all loaded experiments
+- `sweep_summary.csv`: one grouped summary row per sweep point
 
-Expected layout
----------------
+Inputs
+------
 Each experiment directory is expected to contain:
 
-- `prescription.yaml` (or `prescription.yml` / `prescription.json`)
-- `results.csv` written by `examples/recipes/prescribed_monte_carlo.py`
-  in **row orientation** (`run_id` is a data column).
+- `prescription.yaml` (or `.yml` / `.json`)
+- row-oriented `results.csv` from `examples/recipes/prescribed_monte_carlo.py`
 
-Typical sweep root layout:
+When a root-level `sweep_manifest.json` is present, it is used to guide
+experiment discovery and to define the outer sweep axis. This supports both:
 
-```
-Results/detector_ke_sweep/
-  ke_0/
-    prescription.yaml
-    results.csv
-    manifest.json
-    runs/
-  ke_1e-3/
-    prescription.yaml
-    results.csv
-    ...
-```
+- detector KE sweeps generated with `--mode detector_ke`
+- scalar-field sweeps generated with `--mode scalar_field`
 
-What is read from each `prescription.*`
----------------------------------------
-Detector mismatch metadata is sourced from:
+When no root manifest is present, the script falls back to detector-KE metadata
+found in experiment prescriptions and remains compatible with older detector KE
+sweep layouts.
 
-- `experiment.inference_system.detector.layers[*]`
+Outputs
+-------
+The run table preserves the row-oriented results columns and enriches them with:
 
-for `pixel_offsets` and `pixel_response` (when present), including:
+- generic sweep columns (`sweep_mode`, `sweep_target`, `sweep_value`, ...)
+- configured detector metadata from prescriptions when present
+- realized detector metadata from `runs/*/meta.json` when present
+- derived separation error columns (`sep_error_as`, `abs_sep_error_as`)
 
-- `knowledge_error.model`
-- `knowledge_error.scale`
-- `knowledge_error.realization_policy`
-- calibration paths (`dx_path`, `dy_path`, `prf_path`)
-
-When `experiment.inference_system` is absent, this script treats the experiment
-as having no inference-side detector mismatch and records:
-
-- `pixel_offsets_configured_scale = 0.0`
-- `pixel_response_configured_scale = 0.0`
-- model/path columns as null
-
-What is read from each `results.csv`
-------------------------------------
-Run-level columns are preserved as written by prescribed-MC (row orientation),
-including flattened scalar/vector infer-key outputs like:
-
-- `truth.<infer_key>`
-- `init.<infer_key>`
-- `final.<infer_key>`
-- `init_delta.<infer_key>`
-- `final_delta.<infer_key>`
-
-For vector-valued infer keys (for example Zernikes), row-oriented outputs are
-already flattened into component columns such as
-`final_delta.optics.primary.zernike_coeffs_nm[0]`. This script summarizes each
-component independently.
-
-What is read from each `runs/*/meta.json`
------------------------------------------
-When present, run metadata is read from run artifact directories (`runs/` or
-`runs*`) and used to enrich each run row with realized detector KE fields from:
-
-- `detector_knowledge_error.inference.layers`
-- selected `prescribed.*` audit fields (for example realization mode/hashes)
-
-Configured values (from prescription) and realized values (from run metadata)
-are stored in separate columns so intended vs realized behavior remains explicit.
-
-Derived outputs
----------------
-`sweep_runs.csv` adds sweep metadata plus:
-
-- `sep_error_as`
-- `abs_sep_error_as`
-- configured detector KE columns (for example
-  `pixel_offsets_configured_model/scale/realization_policy`)
-- realized detector KE columns from run metadata when available (for example
-  `pixel_offsets_realized_model/scale/realization_policy/seed/seed_source`)
-
-where separation error uses:
-
-1. `final_delta.source.separation_as` when available
-2. fallback `final.source.separation_as - truth.source.separation_as`
-
-`sweep_summary.csv` groups by detector KE setting and reports:
+The summary table groups rows by the resolved outer sweep axis and reports:
 
 - `n_total`
 - `n_success`
-- per-quantity metrics:
-  - `<quantity>_mean_bias`
-  - `<quantity>_std_bias`
-  - `<quantity>_mean_abs_error`
-  - `<quantity>_median_abs_error`
-  - `<quantity>_rmse`
-
-Backward compatibility
-----------------------
-- Older sweeps with only `prescription.*` + row-oriented `results.csv` are
-  supported.
-- Missing `runs/` or missing `meta.json` for some runs leaves realized columns
-  null by default.
-- `--strict` upgrades missing/malformed run metadata to hard errors.
-
-Examples
---------
-Aggregate a default sweep root:
-
-```
-python examples/scripts/aggregate_detector_ke_sweep.py \
-  --root Results/detector_ke_sweep
-```
-
-Strict mode (fail on missing/malformed experiments):
-
-```
-python examples/scripts/aggregate_detector_ke_sweep.py \
-  --root Results/detector_ke_sweep \
-  --strict
-```
+- per-component bias/error metrics for each infer quantity discovered in
+  `results.csv`
 """
 from __future__ import annotations
 
@@ -150,6 +59,8 @@ ERROR_METRIC_SUFFIXES = (
     "median_abs_error",
     "rmse",
 )
+MODE_DETECTOR_KE = "detector_ke"
+MODE_SCALAR_FIELD = "scalar_field"
 
 
 class AggregationStats:
@@ -161,12 +72,41 @@ class AggregationStats:
         self.skipped = int(skipped)
 
 
+class SweepSpec:
+    """Lightweight sweep-root metadata used to generalize grouping/discovery."""
+
+    def __init__(
+        self,
+        *,
+        manifest_path: Path,
+        mode: str | None = None,
+        sweep_name: str | None = None,
+        layer: str | None = None,
+        field_path: str | None = None,
+        experiments_by_dir: dict[str, dict[str, Any]] | None = None,
+        experiment_order: list[str] | None = None,
+    ) -> None:
+        self.manifest_path = manifest_path
+        self.mode = mode
+        self.sweep_name = sweep_name
+        self.layer = layer
+        self.field_path = field_path
+        self.experiments_by_dir = (
+            dict(experiments_by_dir) if experiments_by_dir is not None else {}
+        )
+        self.experiment_order = list(experiment_order) if experiment_order is not None else []
+
+    @property
+    def manifest_present(self) -> bool:
+        return True
+
+
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for detector KE sweep aggregation."""
+    """Parse CLI arguments for outer prescribed-MC sweep aggregation."""
     parser = argparse.ArgumentParser(
         description=(
-            "Aggregate many prescribed-MC detector knowledge-error experiment "
-            "directories into sweep_runs.csv and sweep_summary.csv."
+            "Aggregate many prescribed-MC experiment directories into "
+            "sweep_runs.csv and sweep_summary.csv."
         )
     )
     parser.add_argument(
@@ -178,8 +118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pattern",
         type=str,
-        default="ke_*",
-        help="Glob pattern for experiment directories under --root (default: ke_*).",
+        default="*",
+        help="Glob pattern for experiment directories under --root (default: *).",
     )
     parser.add_argument(
         "--out-runs",
@@ -289,6 +229,255 @@ def _get_nested(mapping: Any, dotted_key: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _format_sweep_value_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return format(value, ".12g")
+    text = str(value).strip()
+    return text if text else None
+
+
+def _default_sweep_metadata(*, sweep_name: str | None = None) -> dict[str, Any]:
+    return {
+        "sweep_manifest_present": False,
+        "sweep_mode": None,
+        "sweep_name": sweep_name,
+        "sweep_target": None,
+        "sweep_layer": None,
+        "sweep_field_path": None,
+        "sweep_value": None,
+        "sweep_value_label": None,
+        "sweep_value_numeric": None,
+    }
+
+
+def _layer_metadata_prefix(layer_name: str) -> str | None:
+    mapping = {
+        "pixel_offsets": "pixel_offsets",
+        "pixel_response": "pixel_response",
+    }
+    return mapping.get(layer_name)
+
+
+def _configured_detector_ke_value(
+    metadata: dict[str, Any],
+    *,
+    layer_name: str,
+) -> Any:
+    prefix = _layer_metadata_prefix(layer_name)
+    if prefix is None:
+        return None
+    return metadata.get(f"{prefix}_configured_scale")
+
+
+def _detector_layer_has_configured_ke(metadata: dict[str, Any], *, layer_name: str) -> bool:
+    prefix = _layer_metadata_prefix(layer_name)
+    if prefix is None:
+        return False
+
+    scale = _coerce_float(metadata.get(f"{prefix}_configured_scale"))
+    model = _string_or_none(metadata.get(f"{prefix}_configured_model"))
+    policy = _string_or_none(metadata.get(f"{prefix}_configured_realization_policy"))
+    if layer_name == "pixel_offsets":
+        path_present = any(
+            _string_or_none(metadata.get(key)) is not None
+            for key in ("pixel_offsets_dx_path", "pixel_offsets_dy_path")
+        )
+    else:
+        path_present = _string_or_none(metadata.get("pixel_response_prf_path")) is not None
+
+    return (
+        model is not None
+        or policy is not None
+        or path_present
+        or (scale is not None and scale != 0.0)
+    )
+
+
+def _infer_detector_sweep_layer(metadata: dict[str, Any]) -> str | None:
+    offsets_present = _detector_layer_has_configured_ke(metadata, layer_name="pixel_offsets")
+    response_present = _detector_layer_has_configured_ke(metadata, layer_name="pixel_response")
+    if offsets_present and not response_present:
+        return "pixel_offsets"
+    if response_present and not offsets_present:
+        return "pixel_response"
+    if offsets_present:
+        return "pixel_offsets"
+    if response_present:
+        return "pixel_response"
+    return None
+
+
+def _detector_sweep_target(layer_name: str | None) -> str | None:
+    if layer_name is None:
+        return None
+    return f"detector.{layer_name}.knowledge_error.scale"
+
+
+def load_sweep_spec(
+    root: Path,
+    *,
+    strict: bool,
+    verbose: bool,
+) -> SweepSpec | None:
+    """Load optional root-level sweep metadata used to guide aggregation."""
+    manifest_path = root / "sweep_manifest.json"
+    if not manifest_path.exists():
+        return None
+
+    try:
+        payload = _read_json_dict(manifest_path)
+    except Exception as exc:
+        _fail_or_warn(
+            f"{manifest_path}: failed to load sweep manifest ({exc}); falling back to directory scan.",
+            strict=strict,
+        )
+        return None
+
+    mode = _string_or_none(payload.get("mode"))
+    sweep_name = _string_or_none(payload.get("sweep_name")) or root.name
+    layer = _string_or_none(payload.get("layer"))
+    field_path = _string_or_none(payload.get("field_path"))
+
+    experiments_by_dir: dict[str, dict[str, Any]] = {}
+    experiment_order: list[str] = []
+    experiments_payload = payload.get("experiments")
+    if isinstance(experiments_payload, list):
+        for entry in experiments_payload:
+            if not isinstance(entry, dict):
+                continue
+            directory = _string_or_none(entry.get("directory"))
+            if directory is None or directory in experiments_by_dir:
+                continue
+            experiments_by_dir[directory] = dict(entry)
+            experiment_order.append(directory)
+
+    spec = SweepSpec(
+        manifest_path=manifest_path,
+        mode=mode,
+        sweep_name=sweep_name,
+        layer=layer,
+        field_path=field_path,
+        experiments_by_dir=experiments_by_dir,
+        experiment_order=experiment_order,
+    )
+    _log(
+        f"[sweep] loaded manifest {manifest_path.name} mode={spec.mode or 'unknown'}",
+        verbose=verbose,
+    )
+    return spec
+
+
+def _discover_experiment_dirs(
+    *,
+    root: Path,
+    pattern: str,
+    sweep_spec: SweepSpec | None,
+    strict: bool,
+    verbose: bool,
+) -> list[Path]:
+    discovered_dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    if sweep_spec is not None:
+        for directory in sweep_spec.experiment_order:
+            candidate = root / directory
+            if candidate.exists() and candidate.is_dir():
+                discovered_dirs.append(candidate)
+                seen.add(candidate)
+                continue
+            _fail_or_warn(
+                f"{root}: sweep manifest references missing experiment directory '{directory}'.",
+                strict=strict,
+            )
+
+    for candidate in sorted(path for path in root.glob(pattern) if path.is_dir()):
+        if candidate in seen:
+            continue
+        discovered_dirs.append(candidate)
+        seen.add(candidate)
+
+    if sweep_spec is not None and discovered_dirs:
+        _log(
+            f"[sweep] discovered {len(discovered_dirs)} experiment directories",
+            verbose=verbose,
+        )
+    return discovered_dirs
+
+
+def extract_sweep_axis_metadata(
+    prescription: dict[str, Any],
+    *,
+    experiment_dir_name: str,
+    sweep_spec: SweepSpec | None,
+    detector_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Extract generic sweep-axis metadata for grouping and sorting."""
+    out = _default_sweep_metadata(
+        sweep_name=sweep_spec.sweep_name if sweep_spec is not None else None
+    )
+    record = None
+    if sweep_spec is not None:
+        out["sweep_manifest_present"] = True
+        out["sweep_mode"] = sweep_spec.mode
+        out["sweep_name"] = sweep_spec.sweep_name
+        record = sweep_spec.experiments_by_dir.get(experiment_dir_name)
+
+    raw_value: Any = None
+    value_label: str | None = None
+
+    if sweep_spec is not None and sweep_spec.mode == MODE_SCALAR_FIELD:
+        out["sweep_field_path"] = sweep_spec.field_path
+        out["sweep_target"] = sweep_spec.field_path
+        if record is not None:
+            raw_value = record.get("value")
+            value_label = _string_or_none(record.get("value_label"))
+        if raw_value is None and sweep_spec.field_path is not None:
+            raw_value = _get_nested(prescription, sweep_spec.field_path)
+        if value_label is None:
+            value_label = _format_sweep_value_label(raw_value)
+    else:
+        layer_name = sweep_spec.layer if sweep_spec is not None else None
+        if layer_name is None:
+            layer_name = _infer_detector_sweep_layer(detector_metadata)
+        if layer_name is not None:
+            out["sweep_mode"] = out["sweep_mode"] or MODE_DETECTOR_KE
+            out["sweep_layer"] = layer_name
+            out["sweep_target"] = _detector_sweep_target(layer_name)
+            if record is not None:
+                raw_value = record.get("scale")
+                value_label = _string_or_none(record.get("scale_label"))
+            if raw_value is None:
+                raw_value = _configured_detector_ke_value(
+                    detector_metadata,
+                    layer_name=layer_name,
+                )
+            if value_label is None:
+                value_label = _format_sweep_value_label(raw_value)
+
+    if raw_value is None and record is not None:
+        raw_value = record.get("value", record.get("scale"))
+    if value_label is None and record is not None:
+        value_label = _string_or_none(record.get("value_label"))
+        if value_label is None:
+            value_label = _string_or_none(record.get("scale_label"))
+
+    if value_label is None:
+        value_label = experiment_dir_name
+
+    out["sweep_value"] = raw_value
+    out["sweep_value_label"] = value_label
+    out["sweep_value_numeric"] = _coerce_float(raw_value)
+    return out
 
 
 def extract_detector_knowledge_error_metadata(prescription: dict[str, Any]) -> dict[str, Any]:
@@ -614,27 +803,65 @@ def _is_success_status(value: Any) -> bool:
     return status in {"ok", "success", "succeeded", "complete", "completed"}
 
 
-def _group_sort_key(group_row: dict[str, Any]) -> tuple[float, str]:
-    scale = _coerce_float(group_row.get("pixel_offsets_configured_scale"))
-    scale_sort = scale if scale is not None else float("inf")
-    model = _string_or_none(group_row.get("pixel_offsets_configured_model")) or ""
-    return scale_sort, model
+def _row_sweep_value_numeric(row: dict[str, Any]) -> float | None:
+    value = _coerce_float(row.get("sweep_value_numeric"))
+    if value is not None:
+        return value
+    return _coerce_float(row.get("pixel_offsets_configured_scale"))
+
+
+def _row_sweep_value_label(row: dict[str, Any]) -> str:
+    label = _string_or_none(row.get("sweep_value_label"))
+    if label is not None:
+        return label
+    fallback = _format_sweep_value_label(row.get("sweep_value"))
+    if fallback is not None:
+        return fallback
+    return _string_or_none(row.get("sweep_label")) or ""
+
+
+def _row_sweep_target(row: dict[str, Any]) -> str:
+    target = _string_or_none(row.get("sweep_target"))
+    if target is not None:
+        return target
+
+    response_present = _detector_layer_has_configured_ke(row, layer_name="pixel_response")
+    offsets_present = _detector_layer_has_configured_ke(row, layer_name="pixel_offsets")
+    if response_present and not offsets_present:
+        return _detector_sweep_target("pixel_response") or ""
+    if offsets_present:
+        return _detector_sweep_target("pixel_offsets") or ""
+    return ""
+
+
+def _sort_key_for_sweep_value(numeric: float | None, label: str) -> tuple[int, float, str]:
+    if numeric is not None:
+        return 0, numeric, label
+    return 1, float("inf"), label
+
+
+def _group_sort_key(group_row: dict[str, Any]) -> tuple[str, int, float, str]:
+    target = _row_sweep_target(group_row)
+    label = _row_sweep_value_label(group_row)
+    numeric = _row_sweep_value_numeric(group_row)
+    kind, numeric_sort, label_sort = _sort_key_for_sweep_value(numeric, label)
+    return target, kind, numeric_sort, label_sort
 
 
 def build_sweep_summary_rows(
     run_rows: list[dict[str, Any]],
     components: list[str],
 ) -> list[dict[str, Any]]:
-    """Build grouped summary rows keyed by pixel-offsets KE setting."""
-    grouped: dict[tuple[float | None, str | None, str | None], list[dict[str, Any]]] = {}
+    """Build grouped summary rows keyed by the inferred/declared sweep axis."""
+    grouped: dict[tuple[str, float | None, str], list[dict[str, Any]]] = {}
     for row in run_rows:
-        scale = _coerce_float(row.get("pixel_offsets_configured_scale"))
-        model = _string_or_none(row.get("pixel_offsets_configured_model"))
-        policy = _string_or_none(row.get("pixel_offsets_configured_realization_policy"))
-        grouped.setdefault((scale, model, policy), []).append(row)
+        target = _row_sweep_target(row)
+        numeric_value = _row_sweep_value_numeric(row)
+        label = _row_sweep_value_label(row)
+        grouped.setdefault((target, numeric_value, label), []).append(row)
 
     summary_rows: list[dict[str, Any]] = []
-    for (scale, model, policy), rows in grouped.items():
+    for (target, numeric_value, label), rows in grouped.items():
         sweep_labels = sorted(
             {
                 str(value)
@@ -656,17 +883,33 @@ def build_sweep_summary_rows(
                 if value not in (None, "")
             }
         )
+        first_row = rows[0]
         base_row: dict[str, Any] = {
-            "pixel_offsets_configured_scale": scale,
-            "pixel_offsets_configured_model": model,
-            "pixel_offsets_configured_realization_policy": policy,
-            "pixel_response_configured_scale": _coerce_float(
-                rows[0].get("pixel_response_configured_scale")
+            "sweep_manifest_present": first_row.get("sweep_manifest_present"),
+            "sweep_mode": first_row.get("sweep_mode"),
+            "sweep_name": first_row.get("sweep_name"),
+            "sweep_target": target,
+            "sweep_layer": first_row.get("sweep_layer"),
+            "sweep_field_path": first_row.get("sweep_field_path"),
+            "sweep_value": first_row.get("sweep_value"),
+            "sweep_value_label": label,
+            "sweep_value_numeric": numeric_value,
+            "pixel_offsets_configured_scale": _coerce_float(
+                first_row.get("pixel_offsets_configured_scale")
             ),
-            "pixel_response_configured_model": rows[0].get(
+            "pixel_offsets_configured_model": first_row.get(
+                "pixel_offsets_configured_model"
+            ),
+            "pixel_offsets_configured_realization_policy": first_row.get(
+                "pixel_offsets_configured_realization_policy"
+            ),
+            "pixel_response_configured_scale": _coerce_float(
+                first_row.get("pixel_response_configured_scale")
+            ),
+            "pixel_response_configured_model": first_row.get(
                 "pixel_response_configured_model"
             ),
-            "pixel_response_configured_realization_policy": rows[0].get(
+            "pixel_response_configured_realization_policy": first_row.get(
                 "pixel_response_configured_realization_policy"
             ),
             "sweep_labels": ";".join(sweep_labels),
@@ -716,7 +959,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) ->
 def aggregate_detector_ke_sweep(
     *,
     root: Path,
-    pattern: str = "ke_*",
+    pattern: str = "*",
     strict: bool = False,
     verbose: bool = False,
 ) -> tuple[
@@ -726,8 +969,15 @@ def aggregate_detector_ke_sweep(
     list[str],
     AggregationStats,
 ]:
-    """Aggregate run rows and grouped summary rows for a detector KE sweep."""
-    discovered_dirs = sorted(path for path in root.glob(pattern) if path.is_dir())
+    """Aggregate run rows and grouped summary rows for an outer sweep root."""
+    sweep_spec = load_sweep_spec(root, strict=strict, verbose=verbose)
+    discovered_dirs = _discover_experiment_dirs(
+        root=root,
+        pattern=pattern,
+        sweep_spec=sweep_spec,
+        strict=strict,
+        verbose=verbose,
+    )
     discovered = len(discovered_dirs)
     loaded = 0
     skipped = 0
@@ -758,6 +1008,12 @@ def aggregate_detector_ke_sweep(
         try:
             prescription = load_config_file(prescription_path)
             metadata = extract_detector_knowledge_error_metadata(prescription)
+            sweep_metadata = extract_sweep_axis_metadata(
+                prescription,
+                experiment_dir_name=experiment_dir.name,
+                sweep_spec=sweep_spec,
+                detector_metadata=metadata,
+            )
             run_rows, fieldnames = _read_row_results_csv(results_path)
         except Exception as exc:
             skipped += 1
@@ -781,6 +1037,7 @@ def aggregate_detector_ke_sweep(
         for row in run_rows:
             merged_row: dict[str, Any] = dict(row)
             merged_row.update(metadata)
+            merged_row.update(sweep_metadata)
             merged_row["experiment_dir"] = rel_dir
             merged_row["sweep_label"] = sweep_label
             merged_row["prescription_path"] = prescription_path.name
@@ -840,16 +1097,26 @@ def aggregate_detector_ke_sweep(
     return merged_rows, summary_rows, components, result_columns, stats
 
 
-def _run_sort_key(row: dict[str, Any]) -> tuple[float, str, str]:
-    scale = _coerce_float(row.get("pixel_offsets_configured_scale"))
-    scale_sort = scale if scale is not None else float("inf")
-    sweep_label = _string_or_none(row.get("sweep_label")) or ""
+def _run_sort_key(row: dict[str, Any]) -> tuple[str, int, float, str, str]:
+    numeric = _row_sweep_value_numeric(row)
+    label = _row_sweep_value_label(row)
+    target = _row_sweep_target(row)
+    kind, scale_sort, sweep_label = _sort_key_for_sweep_value(numeric, label)
     run_id = _string_or_none(row.get("run_id")) or ""
-    return scale_sort, sweep_label, run_id
+    return target, kind, scale_sort, sweep_label, run_id
 
 
 def _run_fieldnames(result_columns: list[str]) -> list[str]:
     metadata_columns = [
+        "sweep_manifest_present",
+        "sweep_mode",
+        "sweep_name",
+        "sweep_target",
+        "sweep_layer",
+        "sweep_field_path",
+        "sweep_value",
+        "sweep_value_label",
+        "sweep_value_numeric",
         "experiment_dir",
         "sweep_label",
         "prescription_path",
@@ -901,6 +1168,15 @@ def _run_fieldnames(result_columns: list[str]) -> list[str]:
 
 def _summary_fieldnames(components: list[str]) -> list[str]:
     base = [
+        "sweep_manifest_present",
+        "sweep_mode",
+        "sweep_name",
+        "sweep_target",
+        "sweep_layer",
+        "sweep_field_path",
+        "sweep_value",
+        "sweep_value_label",
+        "sweep_value_numeric",
         "pixel_offsets_configured_scale",
         "pixel_offsets_configured_model",
         "pixel_offsets_configured_realization_policy",

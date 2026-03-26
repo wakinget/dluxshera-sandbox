@@ -377,6 +377,164 @@ def test_build_sweep_summary_rows_handles_vector_components():
     assert row["optics.primary.zernike_coeffs_nm[1]_std_bias"] == 0.0
 
 
+def test_aggregate_detector_ke_sweep_groups_detector_prf_sweep_from_manifest(tmp_path):
+    module = _load_script_module()
+    root = tmp_path / "detector_prf_ke_sweep"
+    root.mkdir(parents=True, exist_ok=True)
+
+    _write_json(
+        root / "sweep_manifest.json",
+        {
+            "mode": "detector_ke",
+            "sweep_name": "detector_prf_ke_sweep",
+            "layer": "pixel_response",
+            "experiments": [
+                {
+                    "directory": "ke_1e-4",
+                    "scale": 1e-4,
+                    "scale_label": "1e-4",
+                },
+                {
+                    "directory": "ke_1e-3",
+                    "scale": 1e-3,
+                    "scale_label": "1e-3",
+                },
+            ],
+        },
+    )
+
+    for dirname, scale in (("ke_1e-4", "1e-4"), ("ke_1e-3", "1e-3")):
+        experiment_dir = root / dirname
+        experiment_dir.mkdir()
+        _write_yaml(
+            experiment_dir / "prescription.yaml",
+            f"""
+            experiment:
+              inference_system:
+                detector:
+                  layers:
+                    - name: pixel_response
+                      prf_path: prf.fits
+                      knowledge_error:
+                        model: gaussian
+                        scale: {scale}
+                        realization_policy: per_run
+            """,
+        )
+        _write_row_results(
+            experiment_dir / "results.csv",
+            header=[
+                "run_id",
+                "status",
+                "final_delta.source.separation_as",
+            ],
+            rows=[
+                [f"{dirname}_run", "ok", scale],
+            ],
+        )
+
+    run_rows, summary_rows, components, result_columns, stats = module.aggregate_detector_ke_sweep(
+        root=root,
+        strict=False,
+        verbose=False,
+    )
+
+    assert stats.discovered == 2
+    assert stats.loaded == 2
+    assert stats.skipped == 0
+    assert len(run_rows) == 2
+    assert len(summary_rows) == 2
+    assert "run_id" in result_columns
+    assert "source.separation_as" in components
+
+    targets = {row["sweep_target"] for row in summary_rows}
+    assert targets == {"detector.pixel_response.knowledge_error.scale"}
+    labels = {row["sweep_value_label"] for row in summary_rows}
+    assert labels == {"1e-4", "1e-3"}
+    numeric_values = {row["sweep_value_numeric"] for row in summary_rows}
+    assert numeric_values == {1e-4, 1e-3}
+    response_scales = {row["pixel_response_configured_scale"] for row in summary_rows}
+    assert response_scales == {1e-4, 1e-3}
+
+
+def test_aggregate_detector_ke_sweep_groups_scalar_field_sweep_from_manifest(tmp_path):
+    module = _load_script_module()
+    root = tmp_path / "psf_crop_sweep"
+    root.mkdir(parents=True, exist_ok=True)
+
+    _write_json(
+        root / "sweep_manifest.json",
+        {
+            "mode": "scalar_field",
+            "sweep_name": "psf_crop_sweep",
+            "field_path": "system.optics.psf_npix",
+            "label_prefix": "psf_npix",
+            "experiments": [
+                {
+                    "directory": "psf_npix_128",
+                    "value": 128,
+                    "value_label": "128",
+                },
+                {
+                    "directory": "psf_npix_256",
+                    "value": 256,
+                    "value_label": "256",
+                },
+            ],
+        },
+    )
+
+    for dirname, psf_npix in (("psf_npix_128", 128), ("psf_npix_256", 256)):
+        experiment_dir = root / dirname
+        experiment_dir.mkdir()
+        _write_yaml(
+            experiment_dir / "prescription.yaml",
+            f"""
+system:
+  optics:
+    psf_npix: {psf_npix}
+experiment:
+  kind: prescribed_mc
+            """,
+        )
+        _write_row_results(
+            experiment_dir / "results.csv",
+            header=[
+                "run_id",
+                "status",
+                "final_delta.source.separation_as",
+            ],
+            rows=[
+                [f"{dirname}_run", "ok", "0.01"],
+            ],
+        )
+
+    run_rows, summary_rows, components, result_columns, stats = module.aggregate_detector_ke_sweep(
+        root=root,
+        strict=False,
+        verbose=False,
+    )
+
+    assert stats.discovered == 2
+    assert stats.loaded == 2
+    assert stats.skipped == 0
+    assert len(run_rows) == 2
+    assert len(summary_rows) == 2
+    assert "source.separation_as" in components
+    assert "run_id" in result_columns
+
+    for row in run_rows:
+        assert row["sweep_mode"] == "scalar_field"
+        assert row["sweep_target"] == "system.optics.psf_npix"
+        assert row["sweep_field_path"] == "system.optics.psf_npix"
+
+    labels = {row["sweep_value_label"] for row in summary_rows}
+    assert labels == {"128", "256"}
+    numeric_values = {row["sweep_value_numeric"] for row in summary_rows}
+    assert numeric_values == {128.0, 256.0}
+    assert {row["sweep_target"] for row in summary_rows} == {"system.optics.psf_npix"}
+
+
 def test_aggregate_detector_ke_sweep_strict_raises_on_partial_inputs(tmp_path):
     module = _load_script_module()
     root = tmp_path / "detector_ke_sweep"
