@@ -1,10 +1,8 @@
-"""Observation sub-block renderer (Phase 2 minimal implementation).
+"""Observation sub-block renderer.
 
-This recipe renders a short, explicit-trace image stack from one resolved
-system configuration. It is intentionally narrow in v1:
-- explicit CSV trace input (no motion-model helpers),
-- frame-varying ``source.x/y`` and ``source.position_angle_deg`` only,
-- one central-field image cube output.
+This recipe renders a short explicit-trace image stack from one resolved
+system configuration. The renderer consumes canonical CSV traces and applies
+frame overrides for configured, supported non-structural varying keys.
 """
 
 from __future__ import annotations
@@ -27,6 +25,16 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.noise import apply_observation_noise
+from dluxshera.utils.obs_subblock_keys import (
+    OBS_SUBBLOCK_V1_DEFAULT_VARYING_KEYS,
+    apply_obs_subblock_overrides_preserving_derived,
+    canonical_obs_subblock_varying_keys,
+    get_obs_subblock_store_value,
+    parse_obs_subblock_varying_keys,
+    partition_obs_subblock_overrides_by_kind,
+    split_obs_subblock_frame_overrides,
+    validate_supported_obs_subblock_key_addresses,
+)
 from dluxshera.utils.obs_subblock_io import (
     build_obs_subblock_artifact_paths,
     build_obs_subblock_manifest,
@@ -37,8 +45,6 @@ from dluxshera.utils.obs_subblock_io import (
     write_obs_subblock_truth_csv,
 )
 from dluxshera.utils.obs_subblock_trace import (
-    APPLIED_V1_VARYING_KEYS,
-    REQUIRED_TRACE_COLUMNS,
     load_obs_subblock_trace_csv,
 )
 
@@ -134,20 +140,24 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     )
     varying_keys_value = subblock_cfg.get("varying_keys")
     requested_varying_keys: tuple[str, ...] | None = None
-    if varying_keys_value is not None:
-        if not isinstance(varying_keys_value, list) or not all(
-            isinstance(item, str) for item in varying_keys_value
-        ):
+    if varying_keys_value is None:
+        varying_keys_input = list(OBS_SUBBLOCK_V1_DEFAULT_VARYING_KEYS)
+    else:
+        if not isinstance(varying_keys_value, list):
             raise ValueError(
                 "experiment.observation_subblock.varying_keys must be a list[str] when provided."
             )
+        varying_keys_input = list(varying_keys_value)
         requested_varying_keys = tuple(varying_keys_value)
+    varying_addresses = parse_obs_subblock_varying_keys(varying_keys_input)
+    validate_supported_obs_subblock_key_addresses(varying_addresses)
+    applied_varying_keys = canonical_obs_subblock_varying_keys(varying_addresses)
 
     trace_cfg = _required_dict(subblock_cfg, "trace", path="experiment.observation_subblock")
     trace_format = trace_cfg.get("format", "csv")
     if trace_format != "csv":
         raise ValueError(
-            "experiment.observation_subblock.trace.format must be 'csv' in v1."
+            "experiment.observation_subblock.trace.format currently supports only 'csv'."
         )
     trace_path = _required_str(trace_cfg, "path", path="experiment.observation_subblock.trace")
 
@@ -188,7 +198,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     frame_truth_format = outputs.get("frame_truth_format", "csv")
     if frame_truth_format != "csv":
         raise ValueError(
-            "experiment.outputs.frame_truth_format must be 'csv' in v1."
+            "experiment.outputs.frame_truth_format currently supports only 'csv'."
         )
     outdir_value = outputs.get("outdir")
     if outdir_value is not None and (
@@ -206,7 +216,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         "truth": truth,
         "observation_subblock": {
             "requested_varying_keys": requested_varying_keys,
-            "applied_varying_keys": APPLIED_V1_VARYING_KEYS,
+            "applied_varying_keys": applied_varying_keys,
             "trace": {"format": "csv", "path": trace_path},
             "validate": {
                 "require_contiguous_frame_index": require_contiguous,
@@ -282,6 +292,9 @@ def generate_obs_subblock(
 
     experiment = _validate_experiment_cfg(experiment_cfg)
 
+    requested_varying_keys = experiment["observation_subblock"]["requested_varying_keys"]
+    applied_varying_keys = tuple(experiment["observation_subblock"]["applied_varying_keys"])
+    varying_addresses = parse_obs_subblock_varying_keys(list(applied_varying_keys))
     trace_cfg = experiment["observation_subblock"]["trace"]
     trace_path = _resolve_relative_path(
         trace_cfg["path"],
@@ -289,21 +302,14 @@ def generate_obs_subblock(
         field_name="experiment.observation_subblock.trace.path",
     )
     print(f"Loading trace CSV from: {trace_path}")
-    validate_cfg = experiment["observation_subblock"]["validate"]
-    trace = load_obs_subblock_trace_csv(
-        trace_path,
-        require_contiguous_frame_index=validate_cfg["require_contiguous_frame_index"],
-        require_monotonic_time=validate_cfg["require_monotonic_time"],
-    )
-    requested_varying_keys = experiment["observation_subblock"]["requested_varying_keys"]
-    applied_varying_keys = tuple(experiment["observation_subblock"]["applied_varying_keys"])
     if requested_varying_keys is not None and tuple(requested_varying_keys) != tuple(
         applied_varying_keys
     ):
-        applied_keys_text = ", ".join(applied_varying_keys)
+        requested_text = ", ".join(str(key) for key in requested_varying_keys)
+        applied_text = ", ".join(applied_varying_keys)
         print(
-            "Note: requested varying_keys differs from applied v1 renderer keys; "
-            f"rendering still applies {applied_keys_text} only."
+            "Note: varying_keys were normalized to canonical renderer keys. "
+            f"requested=[{requested_text}] applied=[{applied_text}]"
         )
 
     configured_outdir = experiment["outputs"]["outdir"]
@@ -328,6 +334,45 @@ def generate_obs_subblock(
     )
     print(f"Preparing output directory: {outdir}")
 
+    print("Building forward specification and base truth state...")
+    forward_spec = compose_forward_spec(system_cfg)
+    base_store = ParameterStore.from_spec_defaults(forward_spec)
+    validate_supported_obs_subblock_key_addresses(
+        varying_addresses,
+        forward_spec=forward_spec,
+        reference_store=base_store,
+    )
+
+    truth_overrides = _flatten_truth_overrides(experiment["truth"])
+    (
+        primitive_truth_overrides,
+        derived_truth_overrides,
+        unknown_truth_keys,
+    ) = partition_obs_subblock_overrides_by_kind(
+        truth_overrides,
+        forward_spec=forward_spec,
+    )
+    if unknown_truth_keys:
+        raise ValueError(
+            "experiment.truth contains keys not present or unsupported in "
+            "forward_spec: "
+            + ", ".join(sorted(unknown_truth_keys.keys()))
+        )
+    base_store = apply_obs_subblock_overrides_preserving_derived(
+        base_store,
+        forward_spec=forward_spec,
+        primitive_overrides=primitive_truth_overrides,
+        derived_overrides=derived_truth_overrides,
+    )
+
+    validate_cfg = experiment["observation_subblock"]["validate"]
+    trace = load_obs_subblock_trace_csv(
+        trace_path,
+        required_varying_keys=applied_varying_keys,
+        require_contiguous_frame_index=validate_cfg["require_contiguous_frame_index"],
+        require_monotonic_time=validate_cfg["require_monotonic_time"],
+    )
+
     if dry_run:
         print("Dry run: validated configuration and trace.")
         print(f"  frames: {trace.frame_count}")
@@ -343,21 +388,6 @@ def generate_obs_subblock(
         }
 
     outdir.mkdir(parents=True, exist_ok=True)
-
-    print("Building forward specification and base truth state...")
-    forward_spec = compose_forward_spec(system_cfg)
-    base_store = ParameterStore.from_spec_defaults(forward_spec)
-
-    truth_overrides = _flatten_truth_overrides(experiment["truth"])
-    unknown_truth_keys = sorted(key for key in truth_overrides if key not in forward_spec)
-    if unknown_truth_keys:
-        raise ValueError(
-            "experiment.truth contains keys not present in forward_spec: "
-            + ", ".join(unknown_truth_keys)
-        )
-    if truth_overrides:
-        base_store = base_store.replace(truth_overrides)
-    base_store = base_store.refresh_derived(forward_spec)
 
     print("Constructing binder...")
     binder = SheraBinder(system_cfg, forward_spec, base_store)
@@ -381,8 +411,18 @@ def generate_obs_subblock(
             leave=False,
         )
     for trace_row in frame_iter:
-        frame_overrides = {key: trace_row[key] for key in applied_varying_keys}
-        frame_store = base_store.replace(frame_overrides).refresh_derived(forward_spec)
+        primitive_overrides, derived_overrides = split_obs_subblock_frame_overrides(
+            base_store=base_store,
+            forward_spec=forward_spec,
+            addresses=varying_addresses,
+            values_by_key=trace_row,
+        )
+        frame_store = apply_obs_subblock_overrides_preserving_derived(
+            base_store,
+            forward_spec=forward_spec,
+            primitive_overrides=primitive_overrides,
+            derived_overrides=derived_overrides,
+        )
         frame_delta = binder.strip_structural(frame_store)
 
         frame_image = binder.model(frame_delta)
@@ -399,15 +439,11 @@ def generate_obs_subblock(
         frame_images.append(np.asarray(frame_image))
 
         resolved_row = dict(trace_row)
-        resolved_row["source.x_position_as"] = float(
-            np.asarray(frame_store.get("source.x_position_as"))
-        )
-        resolved_row["source.y_position_as"] = float(
-            np.asarray(frame_store.get("source.y_position_as"))
-        )
-        resolved_row["source.position_angle_deg"] = float(
-            np.asarray(frame_store.get("source.position_angle_deg"))
-        )
+        for address in varying_addresses:
+            resolved_row[address.canonical] = get_obs_subblock_store_value(
+                frame_store,
+                address=address,
+            )
         resolved_truth_rows.append(resolved_row)
 
     print("Writing FITS cube, truth CSV, and manifest...")
@@ -421,10 +457,7 @@ def generate_obs_subblock(
         },
     )
 
-    truth_columns = tuple(
-        column
-        for column in (*REQUIRED_TRACE_COLUMNS, *trace.extra_columns)
-    )
+    truth_columns = tuple((*trace.required_columns, *trace.extra_columns))
     write_obs_subblock_truth_csv(
         output_path=artifacts["frame_truth_csv"],
         rows=resolved_truth_rows,

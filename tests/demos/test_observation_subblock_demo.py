@@ -70,16 +70,16 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
     ]
 
 
-def test_observation_subblock_varying_keys_metadata_is_advisory(tmp_path):
+def test_observation_subblock_varying_keys_are_applied_and_validated(tmp_path):
     recipe = _load_recipe_module()
 
     trace_path = tmp_path / "frame_truth.csv"
     trace_path.write_text(
         "\n".join(
             [
-                "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg",
-                "0,0.0,0.0,0.0,90.0",
-                "1,0.1,0.1,-0.1,90.2",
+                "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg,optics.plate_scale_as_per_pix",
+                "0,0.0,0.0,0.0,90.0,0.11",
+                "1,0.1,0.1,-0.1,90.2,0.12",
             ]
         )
         + "\n",
@@ -123,7 +123,7 @@ def test_observation_subblock_varying_keys_metadata_is_advisory(tmp_path):
     )
     cfg_custom["experiment"]["observation_subblock"]["varying_keys"] = [
         "source.x_position_as",
-        "custom.metadata.key",
+        "optics.plate_scale_as_per_pix",
     ]
     cfg_custom_path = tmp_path / "prescription_custom_varying.json"
     cfg_custom_path.write_text(json.dumps(cfg_custom, indent=2), encoding="utf-8")
@@ -132,3 +132,23 @@ def test_observation_subblock_varying_keys_metadata_is_advisory(tmp_path):
         dry_run=True,
     )
     assert result_custom["frame_count"] == 2
+
+    cfg_invalid = dict(base_cfg)
+    cfg_invalid["experiment"] = dict(base_cfg["experiment"])
+    cfg_invalid["experiment"]["observation_subblock"] = dict(
+        base_cfg["experiment"]["observation_subblock"]
+    )
+    cfg_invalid["experiment"]["observation_subblock"]["varying_keys"] = [
+        "metadata.only",
+    ]
+    cfg_invalid_path = tmp_path / "prescription_invalid_varying.json"
+    cfg_invalid_path.write_text(json.dumps(cfg_invalid, indent=2), encoding="utf-8")
+    try:
+        recipe.generate_obs_subblock(
+            config_path=cfg_invalid_path,
+            dry_run=True,
+        )
+    except ValueError as exc:
+        assert "Unsupported observation-subblock varying key" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported varying key to raise ValueError.")

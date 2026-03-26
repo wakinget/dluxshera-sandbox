@@ -1,12 +1,12 @@
 """Trace-construction helpers for observation sub-block rendering.
 
-This helper layer generates canonical explicit per-frame traces that are
-consumed by ``examples/recipes/observation_subblock.py``. It intentionally
-keeps motion construction separate from rendering.
+This helper layer generates explicit per-frame trace rows consumed by
+``examples/recipes/observation_subblock.py``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -14,10 +14,22 @@ from typing import Any
 
 import numpy as np
 
-from .obs_subblock_trace import APPLIED_V1_VARYING_KEYS
+from .obs_subblock_keys import (
+    canonical_obs_subblock_varying_keys,
+    parse_obs_subblock_varying_keys,
+    validate_supported_obs_subblock_key_addresses,
+)
 
 
-SUPPORTED_TRACE_MODES: tuple[str, ...] = (
+SUPPORTED_TRACE_EFFECT_KINDS: tuple[str, ...] = (
+    "constant_offset",
+    "linear_drift",
+    "random_walk",
+    "iid_jitter",
+    "explicit",
+)
+
+_SUPPORTED_LEGACY_MODES: tuple[str, ...] = (
     "explicit",
     "linear_drift",
     "random_walk",
@@ -26,27 +38,23 @@ SUPPORTED_TRACE_MODES: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
-class ObsSubblockTraceBuildPlan:
-    """Normalized trace-generation plan.
+class ObsSubblockKeyTracePlan:
+    """Per-key trace plan for one varying key."""
 
-    Parameters
-    ----------
-    n_frames : int
-        Number of frames to generate.
-    dt_s : float
-        Frame cadence in seconds.
-    seed : int | None
-        Optional deterministic seed for stochastic modes.
-    key_specs : dict[str, dict[str, Any]]
-        Per-key normalized generation specs for
-        ``source.x_position_as``, ``source.y_position_as``,
-        and ``source.position_angle_deg``.
-    """
+    key: str
+    base: float | None
+    effects: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ObsSubblockTraceBuildPlan:
+    """Normalized trace-generation plan."""
 
     n_frames: int
     dt_s: float
     seed: int | None
-    key_specs: dict[str, dict[str, Any]]
+    varying_keys: tuple[str, ...]
+    key_plans: Mapping[str, ObsSubblockKeyTracePlan]
 
     @property
     def time_s(self) -> np.ndarray:
@@ -79,72 +87,277 @@ def _require_finite_float(value: Any, *, path: str) -> float:
     return parsed
 
 
-def _normalize_explicit_spec(
-    payload: dict[str, Any],
+def _normalize_explicit_values(
     *,
-    key: str,
+    values: Any,
     n_frames: int,
-) -> dict[str, Any]:
-    values = payload.get("values")
+    path: str,
+) -> list[float]:
     if not isinstance(values, list):
-        raise ValueError(f"{key}: explicit mode requires a list field 'values'.")
+        raise ValueError(f"{path} must be a list.")
     if len(values) != n_frames:
         raise ValueError(
-            f"{key}: explicit.values length must equal n_frames ({n_frames}), "
-            f"got {len(values)}."
+            f"{path} length must equal n_frames ({n_frames}), got {len(values)}."
         )
-    normalized = [
-        _require_finite_float(item, path=f"{key}.values[{idx}]")
+    return [
+        _require_finite_float(item, path=f"{path}[{idx}]")
         for idx, item in enumerate(values)
     ]
-    return {"mode": "explicit", "values": normalized}
 
 
-def _normalize_linear_drift_spec(payload: dict[str, Any], *, key: str) -> dict[str, Any]:
-    start = _require_finite_float(payload.get("start"), path=f"{key}.start")
-    rate_per_s = _require_finite_float(
-        payload.get("rate_per_s"), path=f"{key}.rate_per_s"
-    )
-    return {"mode": "linear_drift", "start": start, "rate_per_s": rate_per_s}
-
-
-def _normalize_random_walk_spec(payload: dict[str, Any], *, key: str) -> dict[str, Any]:
-    start = _require_finite_float(payload.get("start"), path=f"{key}.start")
-    sigma_step = _require_finite_float(payload.get("sigma_step"), path=f"{key}.sigma_step")
-    if sigma_step < 0.0:
-        raise ValueError(f"{key}.sigma_step must be >= 0.")
-    return {"mode": "random_walk", "start": start, "sigma_step": sigma_step}
-
-
-def _normalize_iid_jitter_spec(payload: dict[str, Any], *, key: str) -> dict[str, Any]:
-    center = _require_finite_float(payload.get("center"), path=f"{key}.center")
-    sigma = _require_finite_float(payload.get("sigma"), path=f"{key}.sigma")
-    if sigma < 0.0:
-        raise ValueError(f"{key}.sigma must be >= 0.")
-    return {"mode": "iid_jitter", "center": center, "sigma": sigma}
-
-
-def _normalize_key_spec(
-    key: str,
+def _normalize_effect(
     *,
-    payload: dict[str, Any],
+    payload: Mapping[str, Any],
+    key: str,
+    effect_index: int,
     n_frames: int,
 ) -> dict[str, Any]:
-    mode_value = payload.get("mode")
-    if not isinstance(mode_value, str) or not mode_value.strip():
-        raise ValueError(f"{key}.mode must be a non-empty string.")
-    mode = mode_value.strip()
-    if mode not in SUPPORTED_TRACE_MODES:
+    item = _require_mapping(payload, path=f"trace_plan.{key}.effects[{effect_index}]")
+    kind_value = item.get("kind")
+    if not isinstance(kind_value, str) or not kind_value.strip():
         raise ValueError(
-            f"{key}.mode must be one of {SUPPORTED_TRACE_MODES}, got {mode!r}."
+            f"trace_plan.{key}.effects[{effect_index}].kind must be a non-empty string."
         )
+    kind = kind_value.strip()
+    if kind not in SUPPORTED_TRACE_EFFECT_KINDS:
+        raise ValueError(
+            f"trace_plan.{key}.effects[{effect_index}].kind must be one of "
+            f"{SUPPORTED_TRACE_EFFECT_KINDS}, got {kind!r}."
+        )
+
+    path_prefix = f"trace_plan.{key}.effects[{effect_index}]"
+    if kind == "constant_offset":
+        return {
+            "kind": kind,
+            "offset": _require_finite_float(item.get("offset"), path=f"{path_prefix}.offset"),
+        }
+    if kind == "linear_drift":
+        return {
+            "kind": kind,
+            "start": _require_finite_float(item.get("start"), path=f"{path_prefix}.start"),
+            "rate_per_s": _require_finite_float(
+                item.get("rate_per_s"), path=f"{path_prefix}.rate_per_s"
+            ),
+        }
+    if kind == "random_walk":
+        sigma_step = _require_finite_float(
+            item.get("sigma_step"),
+            path=f"{path_prefix}.sigma_step",
+        )
+        if sigma_step < 0.0:
+            raise ValueError(f"{path_prefix}.sigma_step must be >= 0.")
+        return {
+            "kind": kind,
+            "start": _require_finite_float(item.get("start"), path=f"{path_prefix}.start"),
+            "sigma_step": sigma_step,
+        }
+    if kind == "iid_jitter":
+        sigma = _require_finite_float(item.get("sigma"), path=f"{path_prefix}.sigma")
+        if sigma < 0.0:
+            raise ValueError(f"{path_prefix}.sigma must be >= 0.")
+        return {
+            "kind": kind,
+            "center": _require_finite_float(item.get("center"), path=f"{path_prefix}.center"),
+            "sigma": sigma,
+        }
+
+    return {
+        "kind": kind,
+        "values": _normalize_explicit_values(
+            values=item.get("values"),
+            n_frames=n_frames,
+            path=f"{path_prefix}.values",
+        ),
+    }
+
+
+def _normalize_trace_plan_entry(
+    *,
+    key: str,
+    payload: Mapping[str, Any],
+    n_frames: int,
+) -> ObsSubblockKeyTracePlan:
+    item = _require_mapping(payload, path=f"trace_plan.{key}")
+    base_value = item.get("base")
+    base = (
+        None
+        if base_value is None
+        else _require_finite_float(base_value, path=f"trace_plan.{key}.base")
+    )
+    effects_raw = item.get("effects", [])
+    if effects_raw is None:
+        effects_raw = []
+    if not isinstance(effects_raw, list):
+        raise ValueError(f"trace_plan.{key}.effects must be a list when provided.")
+    effects = tuple(
+        _normalize_effect(
+            payload=effect_payload,
+            key=key,
+            effect_index=idx,
+            n_frames=n_frames,
+        )
+        for idx, effect_payload in enumerate(effects_raw)
+    )
+    return ObsSubblockKeyTracePlan(key=key, base=base, effects=effects)
+
+
+def _normalize_general_plan(
+    cfg: dict[str, Any],
+    *,
+    n_frames: int,
+) -> tuple[tuple[str, ...], dict[str, ObsSubblockKeyTracePlan]]:
+    trace_plan_cfg = _require_mapping(
+        cfg.get("trace_plan"),
+        path="experiment.observation_subblock_trace.trace_plan",
+    )
+    varying_keys_value = cfg.get("varying_keys")
+    if varying_keys_value is None:
+        requested_keys = list(trace_plan_cfg.keys())
+    else:
+        if not isinstance(varying_keys_value, list):
+            raise ValueError(
+                "experiment.observation_subblock_trace.varying_keys must be a "
+                "list[str] when provided."
+            )
+        requested_keys = list(varying_keys_value)
+
+    addresses = parse_obs_subblock_varying_keys(requested_keys)
+    validate_supported_obs_subblock_key_addresses(addresses)
+    varying_keys = canonical_obs_subblock_varying_keys(addresses)
+    if not varying_keys:
+        raise ValueError("At least one varying key is required.")
+
+    missing = [key for key in varying_keys if key not in trace_plan_cfg]
+    if missing:
+        raise ValueError(
+            "experiment.observation_subblock_trace.trace_plan is missing entries for: "
+            + ", ".join(missing)
+        )
+    extra = sorted(key for key in trace_plan_cfg if key not in varying_keys)
+    if extra:
+        raise ValueError(
+            "experiment.observation_subblock_trace.trace_plan has keys not declared in "
+            "varying_keys: " + ", ".join(extra)
+        )
+
+    key_plans = {
+        key: _normalize_trace_plan_entry(
+            key=key,
+            payload=_require_mapping(trace_plan_cfg[key], path=f"trace_plan.{key}"),
+            n_frames=n_frames,
+        )
+        for key in varying_keys
+    }
+    return varying_keys, key_plans
+
+
+def _legacy_mode_to_effect(
+    *,
+    key: str,
+    payload: Mapping[str, Any],
+    n_frames: int,
+) -> dict[str, Any]:
+    item = _require_mapping(payload, path=f"keys.{key}")
+    mode_value = item.get("mode")
+    if not isinstance(mode_value, str) or not mode_value.strip():
+        raise ValueError(f"keys.{key}.mode must be a non-empty string.")
+    mode = mode_value.strip()
+    if mode not in _SUPPORTED_LEGACY_MODES:
+        raise ValueError(
+            f"keys.{key}.mode must be one of {_SUPPORTED_LEGACY_MODES}, got {mode!r}."
+        )
+
     if mode == "explicit":
-        return _normalize_explicit_spec(payload, key=key, n_frames=n_frames)
+        return {
+            "kind": "explicit",
+            "values": _normalize_explicit_values(
+                values=item.get("values"),
+                n_frames=n_frames,
+                path=f"keys.{key}.values",
+            ),
+        }
     if mode == "linear_drift":
-        return _normalize_linear_drift_spec(payload, key=key)
+        return {
+            "kind": "linear_drift",
+            "start": _require_finite_float(item.get("start"), path=f"keys.{key}.start"),
+            "rate_per_s": _require_finite_float(
+                item.get("rate_per_s"), path=f"keys.{key}.rate_per_s"
+            ),
+        }
     if mode == "random_walk":
-        return _normalize_random_walk_spec(payload, key=key)
-    return _normalize_iid_jitter_spec(payload, key=key)
+        sigma_step = _require_finite_float(
+            item.get("sigma_step"),
+            path=f"keys.{key}.sigma_step",
+        )
+        if sigma_step < 0.0:
+            raise ValueError(f"keys.{key}.sigma_step must be >= 0.")
+        return {
+            "kind": "random_walk",
+            "start": _require_finite_float(item.get("start"), path=f"keys.{key}.start"),
+            "sigma_step": sigma_step,
+        }
+    sigma = _require_finite_float(item.get("sigma"), path=f"keys.{key}.sigma")
+    if sigma < 0.0:
+        raise ValueError(f"keys.{key}.sigma must be >= 0.")
+    return {
+        "kind": "iid_jitter",
+        "center": _require_finite_float(item.get("center"), path=f"keys.{key}.center"),
+        "sigma": sigma,
+    }
+
+
+def _normalize_legacy_plan(
+    cfg: dict[str, Any],
+    *,
+    n_frames: int,
+) -> tuple[tuple[str, ...], dict[str, ObsSubblockKeyTracePlan]]:
+    keys_cfg = _require_mapping(
+        cfg.get("keys"),
+        path="experiment.observation_subblock_trace.keys",
+    )
+    varying_keys_value = cfg.get("varying_keys")
+    if varying_keys_value is None:
+        requested_keys = list(keys_cfg.keys())
+    else:
+        if not isinstance(varying_keys_value, list):
+            raise ValueError(
+                "experiment.observation_subblock_trace.varying_keys must be a "
+                "list[str] when provided."
+            )
+        requested_keys = list(varying_keys_value)
+
+    addresses = parse_obs_subblock_varying_keys(requested_keys)
+    validate_supported_obs_subblock_key_addresses(addresses)
+    varying_keys = canonical_obs_subblock_varying_keys(addresses)
+
+    missing = [key for key in varying_keys if key not in keys_cfg]
+    if missing:
+        raise ValueError(
+            "experiment.observation_subblock_trace.keys is missing entries for: "
+            + ", ".join(missing)
+        )
+    extra = sorted(key for key in keys_cfg if key not in varying_keys)
+    if extra:
+        raise ValueError(
+            "experiment.observation_subblock_trace.keys has keys not declared in "
+            "varying_keys: " + ", ".join(extra)
+        )
+
+    key_plans = {
+        key: ObsSubblockKeyTracePlan(
+            key=key,
+            base=0.0,
+            effects=(
+                _legacy_mode_to_effect(
+                    key=key,
+                    payload=keys_cfg[key],
+                    n_frames=n_frames,
+                ),
+            ),
+        )
+        for key in varying_keys
+    }
+    return varying_keys, key_plans
 
 
 def build_obs_subblock_trace_plan(
@@ -152,10 +365,13 @@ def build_obs_subblock_trace_plan(
     *,
     seed: int | None = None,
 ) -> ObsSubblockTraceBuildPlan:
-    """Validate and normalize a trace-generation config block."""
+    """Validate and normalize trace-generation config."""
 
     cfg = _require_mapping(trace_cfg, path="experiment.observation_subblock_trace")
-    n_frames = _require_int(cfg.get("n_frames"), path="experiment.observation_subblock_trace.n_frames")
+    n_frames = _require_int(
+        cfg.get("n_frames"),
+        path="experiment.observation_subblock_trace.n_frames",
+    )
     if n_frames < 1:
         raise ValueError("experiment.observation_subblock_trace.n_frames must be >= 1.")
 
@@ -165,24 +381,6 @@ def build_obs_subblock_trace_plan(
     )
     if dt_s <= 0.0:
         raise ValueError("experiment.observation_subblock_trace.dt_s must be > 0.")
-
-    key_specs_value = cfg.get("keys")
-    key_specs_raw = _require_mapping(
-        key_specs_value,
-        path="experiment.observation_subblock_trace.keys",
-    )
-    unknown_keys = sorted(set(key_specs_raw) - set(APPLIED_V1_VARYING_KEYS))
-    if unknown_keys:
-        raise ValueError(
-            "experiment.observation_subblock_trace.keys contains unsupported keys: "
-            + ", ".join(unknown_keys)
-        )
-    missing_keys = [key for key in APPLIED_V1_VARYING_KEYS if key not in key_specs_raw]
-    if missing_keys:
-        raise ValueError(
-            "experiment.observation_subblock_trace.keys is missing required v1 keys: "
-            + ", ".join(missing_keys)
-        )
 
     seed_value = cfg.get("seed", seed)
     normalized_seed: int | None
@@ -195,91 +393,140 @@ def build_obs_subblock_trace_plan(
             )
         normalized_seed = int(seed_value)
 
-    normalized_key_specs = {
-        key: _normalize_key_spec(
-            key,
-            payload=_require_mapping(
-                key_specs_raw[key],
-                path=f"experiment.observation_subblock_trace.keys.{key}",
-            ),
-            n_frames=n_frames,
+    if "trace_plan" in cfg:
+        varying_keys, key_plans = _normalize_general_plan(cfg, n_frames=n_frames)
+    elif "keys" in cfg:
+        varying_keys, key_plans = _normalize_legacy_plan(cfg, n_frames=n_frames)
+    else:
+        raise ValueError(
+            "experiment.observation_subblock_trace must define either "
+            "'trace_plan' (preferred) or legacy 'keys'."
         )
-        for key in APPLIED_V1_VARYING_KEYS
-    }
+
     return ObsSubblockTraceBuildPlan(
         n_frames=n_frames,
         dt_s=float(dt_s),
         seed=normalized_seed,
-        key_specs=normalized_key_specs,
+        varying_keys=varying_keys,
+        key_plans=key_plans,
     )
 
 
-def _spawn_key_rngs(seed: int | None) -> dict[str, np.random.Generator]:
-    if seed is None:
-        return {
-            key: np.random.default_rng()
-            for key in APPLIED_V1_VARYING_KEYS
-        }
-    seed_seq = np.random.SeedSequence(seed)
-    child_seqs = seed_seq.spawn(len(APPLIED_V1_VARYING_KEYS))
-    return {
-        key: np.random.default_rng(child_seq)
-        for key, child_seq in zip(APPLIED_V1_VARYING_KEYS, child_seqs)
-    }
-
-
-def _generate_key_values(
+def resolve_obs_subblock_trace_anchors(
+    plan: ObsSubblockTraceBuildPlan,
     *,
-    mode_spec: dict[str, Any],
+    nominal_anchors: Mapping[str, Any] | None = None,
+) -> dict[str, float]:
+    """Resolve per-key anchor values from explicit base or nominal anchors."""
+
+    anchors: dict[str, float] = {}
+    for key in plan.varying_keys:
+        key_plan = plan.key_plans[key]
+        if key_plan.base is not None:
+            anchors[key] = float(key_plan.base)
+            continue
+        if nominal_anchors is not None and key in nominal_anchors:
+            anchors[key] = _require_finite_float(
+                nominal_anchors[key],
+                path=f"nominal_anchors.{key}",
+            )
+            continue
+        raise ValueError(
+            f"trace_plan.{key}.base is required when no nominal anchor is available."
+        )
+    return anchors
+
+
+def _derive_effect_seed(
+    *,
+    seed: int | None,
+    key: str,
+    effect_index: int,
+    effect_kind: str,
+) -> int | None:
+    if seed is None:
+        return None
+    payload = f"{seed}|{key}|{effect_index}|{effect_kind}".encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:8], "big") % (2**32)
+
+
+def _generate_effect_series(
+    *,
+    effect: Mapping[str, Any],
+    n_frames: int,
     time_s: np.ndarray,
-    rng: np.random.Generator,
+    seed: int | None,
+    key: str,
+    effect_index: int,
 ) -> np.ndarray:
-    mode = str(mode_spec["mode"])
-    n_frames = int(time_s.shape[0])
-    if mode == "explicit":
-        return np.asarray(mode_spec["values"], dtype=float)
-    if mode == "linear_drift":
-        start = float(mode_spec["start"])
-        rate_per_s = float(mode_spec["rate_per_s"])
-        return start + rate_per_s * time_s
-    if mode == "random_walk":
-        start = float(mode_spec["start"])
-        sigma_step = float(mode_spec["sigma_step"])
+    kind = str(effect["kind"])
+    if kind == "constant_offset":
+        return np.full(n_frames, float(effect["offset"]), dtype=float)
+    if kind == "linear_drift":
+        return float(effect["start"]) + (float(effect["rate_per_s"]) * time_s)
+
+    if kind == "random_walk":
+        rng = np.random.default_rng(
+            _derive_effect_seed(
+                seed=seed,
+                key=key,
+                effect_index=effect_index,
+                effect_kind=kind,
+            )
+        )
         values = np.empty(n_frames, dtype=float)
-        values[0] = start
+        values[0] = float(effect["start"])
         if n_frames > 1:
+            sigma_step = float(effect["sigma_step"])
             steps = rng.normal(loc=0.0, scale=sigma_step, size=n_frames - 1)
-            values[1:] = start + np.cumsum(steps)
+            values[1:] = float(effect["start"]) + np.cumsum(steps)
         return values
 
-    center = float(mode_spec["center"])
-    sigma = float(mode_spec["sigma"])
-    return rng.normal(loc=center, scale=sigma, size=n_frames)
+    if kind == "iid_jitter":
+        rng = np.random.default_rng(
+            _derive_effect_seed(
+                seed=seed,
+                key=key,
+                effect_index=effect_index,
+                effect_kind=kind,
+            )
+        )
+        return rng.normal(
+            loc=float(effect["center"]),
+            scale=float(effect["sigma"]),
+            size=n_frames,
+        )
+
+    return np.asarray(effect["values"], dtype=float)
 
 
 def generate_obs_subblock_trace_rows(
     plan: ObsSubblockTraceBuildPlan,
+    *,
+    anchors: Mapping[str, Any],
 ) -> list[dict[str, float | int]]:
-    """Generate canonical explicit-trace rows from a normalized plan."""
+    """Generate explicit trace rows from plan + resolved anchors."""
 
     time_s = plan.time_s
-    rngs = _spawn_key_rngs(plan.seed)
-    values_by_key = {
-        key: _generate_key_values(
-            mode_spec=plan.key_specs[key],
-            time_s=time_s,
-            rng=rngs[key],
-        )
-        for key in APPLIED_V1_VARYING_KEYS
-    }
-
-    for key, values in values_by_key.items():
-        if values.shape != time_s.shape:
-            raise RuntimeError(
-                f"Generated values for {key} have shape {values.shape}, expected {time_s.shape}."
+    n_frames = int(plan.n_frames)
+    series_by_key: dict[str, np.ndarray] = {}
+    for key in plan.varying_keys:
+        anchor_value = _require_finite_float(anchors.get(key), path=f"anchors.{key}")
+        key_plan = plan.key_plans[key]
+        series = np.full(n_frames, anchor_value, dtype=float)
+        for effect_index, effect in enumerate(key_plan.effects):
+            series = series + _generate_effect_series(
+                effect=effect,
+                n_frames=n_frames,
+                time_s=time_s,
+                seed=plan.seed,
+                key=key,
+                effect_index=effect_index,
             )
-        if not np.isfinite(values).all():
-            raise ValueError(f"Generated non-finite values for {key}.")
+        if not np.isfinite(series).all():
+            raise ValueError(f"Generated non-finite values for key {key!r}.")
+        series_by_key[key] = series
 
     rows: list[dict[str, float | int]] = []
     for frame_index, frame_time in enumerate(time_s):
@@ -287,15 +534,17 @@ def generate_obs_subblock_trace_rows(
             "frame_index": int(frame_index),
             "time_s": float(frame_time),
         }
-        for key in APPLIED_V1_VARYING_KEYS:
-            row[key] = float(values_by_key[key][frame_index])
+        for key in plan.varying_keys:
+            row[key] = float(series_by_key[key][frame_index])
         rows.append(row)
     return rows
 
 
 __all__ = [
+    "ObsSubblockKeyTracePlan",
     "ObsSubblockTraceBuildPlan",
-    "SUPPORTED_TRACE_MODES",
+    "SUPPORTED_TRACE_EFFECT_KINDS",
     "build_obs_subblock_trace_plan",
     "generate_obs_subblock_trace_rows",
+    "resolve_obs_subblock_trace_anchors",
 ]

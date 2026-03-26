@@ -288,7 +288,25 @@ def main() -> None:
         manifest=manifest,
         manifest_path=manifest_path,
     )
-    trace = load_obs_subblock_trace_csv(trace_path) if trace_path is not None else None
+    trace_varying_keys: list[str] | None = None
+    if manifest is not None:
+        varying_keys_value = (
+            manifest.get("applied_varying_keys")
+            if manifest.get("applied_varying_keys") is not None
+            else manifest.get("varying_keys")
+        )
+        if isinstance(varying_keys_value, list) and all(
+            isinstance(item, str) for item in varying_keys_value
+        ):
+            trace_varying_keys = list(varying_keys_value)
+    trace = (
+        load_obs_subblock_trace_csv(
+            trace_path,
+            required_varying_keys=trace_varying_keys,
+        )
+        if trace_path is not None
+        else None
+    )
 
     outdir = args.outdir.resolve() if args.outdir is not None else cube_path.parent / DEFAULT_OUTDIR_NAME
     outdir.mkdir(parents=True, exist_ok=True)

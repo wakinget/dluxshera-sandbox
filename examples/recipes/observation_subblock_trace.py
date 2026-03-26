@@ -1,4 +1,4 @@
-"""Observation sub-block trace-builder recipe (Phase 3).
+"""Observation sub-block trace-builder recipe.
 
 This recipe generates canonical explicit per-frame CSV traces for
 ``examples/recipes/observation_subblock.py``. It intentionally does not render
@@ -9,25 +9,35 @@ from __future__ import annotations
 
 import argparse
 import os
+import hashlib
+import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
+from dluxshera.params.store import ParameterStore
+from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import (
     now_iso_local_ms,
     timestamp_tag,
     write_obs_subblock_manifest,
     write_obs_subblock_truth_csv,
 )
-from dluxshera.utils.obs_subblock_trace import (
-    APPLIED_V1_VARYING_KEYS,
-    REQUIRED_TRACE_COLUMNS,
+from dluxshera.utils.obs_subblock_keys import (
+    apply_obs_subblock_overrides_preserving_derived,
+    canonical_obs_subblock_varying_keys,
+    collect_obs_subblock_anchor_values,
+    parse_obs_subblock_varying_keys,
+    partition_obs_subblock_overrides_by_kind,
+    validate_supported_obs_subblock_key_addresses,
 )
 from dluxshera.utils.obs_subblock_trace_builders import (
-    SUPPORTED_TRACE_MODES,
+    SUPPORTED_TRACE_EFFECT_KINDS,
     build_obs_subblock_trace_plan,
     generate_obs_subblock_trace_rows,
+    resolve_obs_subblock_trace_anchors,
 )
 
 
@@ -51,6 +61,21 @@ def _required_str(parent: dict[str, Any], key: str, *, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path}.{key} must be a non-empty string.")
     return value
+
+
+def _flatten_truth_overrides(payload: dict[str, Any]) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+
+    def _walk(prefix: str, value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                joined = f"{prefix}.{key}" if prefix else str(key)
+                _walk(joined, child)
+        else:
+            flattened[prefix] = value
+
+    _walk("", payload)
+    return flattened
 
 
 def _resolve_relative_path(
@@ -92,6 +117,9 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         experiment_cfg, "observation_subblock_trace", path="experiment"
     )
     trace_plan = build_obs_subblock_trace_plan(trace_cfg, seed=seed_value)
+    truth = experiment_cfg.get("truth", {})
+    if not isinstance(truth, dict):
+        raise ValueError("experiment.truth must be a mapping/dict.")
 
     outputs = experiment_cfg.get("outputs", {})
     if not isinstance(outputs, dict):
@@ -115,6 +143,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": kind,
         "trace_plan": trace_plan,
+        "truth": truth,
         "outputs": {
             "outdir": outdir_value,
             "file_prefix": file_prefix.strip(),
@@ -138,6 +167,11 @@ def _build_trace_artifact_paths(
     }
 
 
+def _stable_hash_payload(payload: Any) -> str:
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def generate_obs_subblock_trace(
     *,
     config_path: Path | None = None,
@@ -154,6 +188,7 @@ def generate_obs_subblock_trace(
         experiment_preset=None,
     )
     resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
     experiment_cfg = resolved_cfg.get("experiment")
     if experiment_cfg is None:
         raise ValueError(
@@ -162,6 +197,61 @@ def generate_obs_subblock_trace(
 
     experiment = _validate_experiment_cfg(experiment_cfg)
     trace_plan = experiment["trace_plan"]
+    varying_addresses = parse_obs_subblock_varying_keys(list(trace_plan.varying_keys))
+    varying_keys = canonical_obs_subblock_varying_keys(varying_addresses)
+    if varying_keys != tuple(trace_plan.varying_keys):
+        raise ValueError("Internal varying-key canonicalization mismatch in trace plan.")
+
+    nominal_anchors: dict[str, float] | None = None
+    system_info: dict[str, Any] | None = None
+    if system_cfg is not None:
+        forward_spec = compose_forward_spec(system_cfg)
+        base_store = ParameterStore.from_spec_defaults(forward_spec)
+
+        truth_overrides = _flatten_truth_overrides(experiment["truth"])
+        primitive_overrides, derived_overrides, unknown_truth_keys = (
+            partition_obs_subblock_overrides_by_kind(
+                truth_overrides,
+                forward_spec=forward_spec,
+            )
+        )
+        if unknown_truth_keys:
+            raise ValueError(
+                "experiment.truth contains keys not present or unsupported in "
+                "forward_spec: " + ", ".join(sorted(unknown_truth_keys.keys()))
+            )
+        base_store = apply_obs_subblock_overrides_preserving_derived(
+            base_store,
+            forward_spec=forward_spec,
+            primitive_overrides=primitive_overrides,
+            derived_overrides=derived_overrides,
+        )
+
+        validate_supported_obs_subblock_key_addresses(
+            varying_addresses,
+            forward_spec=forward_spec,
+            reference_store=base_store,
+        )
+        nominal_anchors = collect_obs_subblock_anchor_values(
+            base_store,
+            addresses=varying_addresses,
+        )
+        system_info = {
+            "preset": (user_cfg.get("system") or {}).get("preset"),
+            "config_hash": _stable_hash_payload(system_cfg),
+        }
+    else:
+        if experiment["truth"]:
+            raise ValueError(
+                "experiment.truth requires a top-level system block in "
+                "observation_subblock_trace recipe."
+            )
+        validate_supported_obs_subblock_key_addresses(varying_addresses)
+
+    anchors = resolve_obs_subblock_trace_anchors(
+        trace_plan,
+        nominal_anchors=nominal_anchors,
+    )
 
     configured_outdir = experiment["outputs"]["outdir"]
     if results_dir is not None:
@@ -201,14 +291,21 @@ def generate_obs_subblock_trace(
 
     outdir.mkdir(parents=True, exist_ok=True)
 
-    rows = generate_obs_subblock_trace_rows(trace_plan)
+    rows = generate_obs_subblock_trace_rows(trace_plan, anchors=anchors)
     write_obs_subblock_truth_csv(
         output_path=artifacts["trace_csv"],
         rows=rows,
-        fieldnames=REQUIRED_TRACE_COLUMNS,
+        fieldnames=("frame_index", "time_s", *trace_plan.varying_keys),
     )
 
     if experiment["outputs"]["write_manifest"]:
+        trace_plan_manifest = {
+            key: {
+                "base": key_plan.base,
+                "effects": [dict(effect) for effect in key_plan.effects],
+            }
+            for key, key_plan in trace_plan.key_plans.items()
+        }
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "created_at": now_iso_local_ms(),
@@ -217,24 +314,29 @@ def generate_obs_subblock_trace(
             "dt_s": trace_plan.dt_s,
             "time_start_s": float(rows[0]["time_s"]),
             "time_stop_s": float(rows[-1]["time_s"]),
-            "supported_modes": list(SUPPORTED_TRACE_MODES),
-            "applied_varying_keys": list(APPLIED_V1_VARYING_KEYS),
+            "supported_effect_kinds": list(SUPPORTED_TRACE_EFFECT_KINDS),
+            "varying_keys": list(trace_plan.varying_keys),
+            "applied_varying_keys": list(trace_plan.varying_keys),
+            "anchors": {key: float(value) for key, value in anchors.items()},
             "trace_spec": {
                 "n_frames": trace_plan.n_frames,
                 "dt_s": trace_plan.dt_s,
                 "seed": trace_plan.seed,
-                "keys": trace_plan.key_specs,
+                "varying_keys": list(trace_plan.varying_keys),
+                "trace_plan": trace_plan_manifest,
             },
             "trace": {
                 "format": "csv",
                 "path": _relative_path(artifacts["trace_csv"], outdir=outdir),
-                "required_columns": list(REQUIRED_TRACE_COLUMNS),
+                "required_columns": ["frame_index", "time_s", *trace_plan.varying_keys],
             },
             "artifacts": {
                 name: _relative_path(path, outdir=outdir)
                 for name, path in artifacts.items()
             },
         }
+        if system_info is not None:
+            manifest["system"] = system_info
         if experiment["notes"] is not None:
             manifest["notes"] = experiment["notes"]
         write_obs_subblock_manifest(

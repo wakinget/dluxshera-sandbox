@@ -2,87 +2,107 @@
 
 ## Purpose
 
-This template builds canonical explicit trace CSV files for the observation
-sub-block renderer. It is the first step in the workflow:
+This template generates canonical explicit trace CSV files for
+`examples/recipes/observation_subblock.py`.
 
-1. generate an explicit trace CSV
-2. render an image cube from that CSV
+Recommended workflow:
 
-## Files in this template
+1. generate trace CSV with `observation_subblock_trace.py`
+2. render cube with `observation_subblock.py`
 
-- `prescription.yaml` — trace-generation config (`experiment` block only)
+## Files
 
-## Config contract
+- `prescription.yaml`: generalized trace-generation example
 
-Set `experiment.kind: observation_subblock_trace` and define
-`experiment.observation_subblock_trace`:
+## Config shape
 
-- `n_frames` (required): number of frames
-- `dt_s` (required): frame cadence in seconds
-- `seed` (optional): reproducible seed (at `experiment.seed` or in the trace block)
-- `keys` (required): per-key generation specs for:
-  - `source.x_position_as`
-  - `source.y_position_as`
-  - `source.position_angle_deg`
+Set:
 
-Each key chooses one mode:
+- `experiment.kind: observation_subblock_trace`
+- `experiment.observation_subblock_trace`:
+  - `n_frames` (required)
+  - `dt_s` (required)
+  - `varying_keys` (required list of key strings)
+  - `trace_plan` (required mapping keyed by each varying key)
 
-- `explicit`: `values` list with length = `n_frames`
+Optional:
+
+- `experiment.seed` or `experiment.observation_subblock_trace.seed`
+- `system` + `experiment.truth` (required when any varying key omits `base`)
+- `experiment.outputs.{outdir,file_prefix,write_manifest}`
+
+## Supported varying keys
+
+Scalar keys:
+
+- `source.x_position_as`
+- `source.y_position_as`
+- `source.position_angle_deg`
+- `source.separation_as`
+- `source.contrast`
+- `source.log_flux_total`
+- `optics.plate_scale_as_per_pix`
+
+Indexed keys:
+
+- `optics.primary.zernike_coeffs_nm[i]`
+- `optics.secondary.zernike_coeffs_nm[i]`
+
+Use one syntax everywhere: `base.path` or `base.path[index]`.
+
+## Anchor and effects semantics
+
+For each varying key:
+
+- anchor = `base` if provided
+- otherwise anchor = resolved/refreshed nominal store value
+- trace value per frame = `anchor + sum(effects)`
+
+Effects supported in `trace_plan.<key>.effects`:
+
+- `constant_offset`: `offset`
 - `linear_drift`: `start`, `rate_per_s`
 - `random_walk`: `start`, `sigma_step`
 - `iid_jitter`: `center`, `sigma`
+- `explicit`: `values` (length must equal `n_frames`)
 
-`outputs` controls where files are written:
-
-- `outdir` (optional)
-- `file_prefix` (optional)
-- `write_manifest` (optional, default `true`)
+Effect outputs are additive and order-independent in meaning.
 
 ## Usage
 
-Generate a trace from the template:
+Generate trace:
 
 ```bash
-python examples/recipes/observation_subblock_trace.py \
+PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
   --config examples/recipes/observation_subblock_trace_template/prescription.yaml
 ```
 
 Validate only:
 
 ```bash
-python examples/recipes/observation_subblock_trace.py \
+PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
   --config examples/recipes/observation_subblock_trace_template/prescription.yaml \
   --dry-run
 ```
 
 ## Output contract
 
-The recipe writes:
+Artifacts:
 
 - `<file_prefix>_<timestamp>_frame_truth.csv`
 - `manifest.json` (unless `write_manifest: false`)
 
-The CSV schema matches renderer expectations:
+CSV columns:
 
-- `frame_index`
-- `time_s`
-- `source.x_position_as`
-- `source.y_position_as`
-- `source.position_angle_deg`
+- always: `frame_index`, `time_s`
+- plus: one column per configured `varying_keys`
 
-## Next step: render a cube
+## Next step: render
 
-Point the renderer config to the generated CSV via
-`experiment.observation_subblock.trace.path`, then run:
+Set the renderer trace path:
+`experiment.observation_subblock.trace.path: <generated_csv>`, then run:
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock.py \
   --config <renderer_prescription.yaml>
-```
-
-Then run registration-only block inference on the rendered cube with:
-
-```bash
-PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
-  --config <inference_prescription.yaml>
 ```

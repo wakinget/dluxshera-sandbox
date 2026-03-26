@@ -2,68 +2,70 @@
 
 ## Purpose
 
-This template demonstrates the Phase 2 observation sub-block renderer:
+This template demonstrates the observation-subblock renderer:
 
 - one resolved base `system`
 - one explicit per-frame trace CSV
-- frame-varying keys fixed to:
-  - `source.x_position_as`
-  - `source.y_position_as`
-  - `source.position_angle_deg`
+- configurable per-frame varying keys
 - one central-field image per frame
 - outputs:
   - timestamped FITS cube
   - `manifest.json`
   - timestamped frame-truth CSV
 
-Use this folder as a starting point for small explicit-trace rendering runs.
+Use this folder as a starting point for explicit-trace rendering runs.
 
 ## Recommended workflow
-
-Observation sub-block runs are now a three-step flow:
 
 1. build a canonical trace CSV with
    `examples/recipes/observation_subblock_trace.py`
 2. render the sub-block cube with
    `examples/recipes/observation_subblock.py`
-3. infer per-frame registration from the rendered cube with
-   `examples/recipes/observation_subblock_inference.py`
-4. inspect quick-look diagnostics with
-   `examples/scripts/visualize_obs_subblock.py`
 
-The renderer still accepts hand-authored CSV traces directly, but the trace
-builder recipe is now the recommended way to create reproducible traces.
+Optional follow-ons:
+
+- infer per-frame registration with
+  `examples/recipes/observation_subblock_inference.py`
+- inspect quick-look diagnostics with
+  `examples/scripts/visualize_obs_subblock.py`
 
 ## Files in this template
 
-- `prescription.yaml` — canonical nested config (`system` + `experiment`)
-- `frame_truth.csv` — minimal 3-frame explicit trace
+- `prescription.yaml`: canonical nested config (`system` + `experiment`)
+- `frame_truth.csv`: minimal explicit trace example
 
 ## Config contract (current behavior)
 
-The recipe expects a top-level `system` and `experiment` block.
+The recipe expects top-level `system` and `experiment` blocks.
 
 ### `system`
 
-- Use `preset` (for example `SHERA_TESTBED_3P`) and optional overrides.
-- The template keeps a minimal detector layer list for lightweight runs.
+- use `preset` (for example `SHERA_TESTBED_3P`) and optional overrides
+- this template keeps a minimal detector layer list for lightweight runs
 
 ### `experiment`
 
-- `kind` must be `observation_subblock`.
-- `seed` controls optional noise sampling.
-- `truth` defines shared sub-block truth overrides.
+- `kind` must be `observation_subblock`
+- `seed` controls optional noise sampling
+- `truth` defines shared sub-block truth overrides
 - `observation_subblock` controls trace input and validation:
-  - `varying_keys` is optional metadata in v1.
-  - if omitted, renderer defaults to applied keys (`x/y/PA`).
-  - if provided and different, renderer still applies fixed `x/y/PA` keys and
-    records requested vs applied keys in manifest metadata.
-  - `trace.format` is currently `csv` in v1.
-  - `trace.path` points to the explicit trace file.
+  - `varying_keys` is the applied per-frame varying-key list
+  - if omitted, renderer defaults to:
+    - `source.x_position_as`
+    - `source.y_position_as`
+    - `source.position_angle_deg`
+  - supported key syntax:
+    - scalar: `a.b.c`
+    - indexed vector component: `a.b.c[index]`
+  - supported key family includes non-structural runtime/inference-facing keys
+    (source/runtime scalars, plate scale, and indexed primary/secondary
+    Zernike coefficients)
+  - `trace.format` currently supports `csv`
+  - `trace.path` points to explicit trace CSV
   - `validate.require_contiguous_frame_index` and
-    `validate.require_monotonic_time` are honored and default to `true`.
+    `validate.require_monotonic_time` are honored and default to `true`
 - `noise` uses the existing recipe noise path; set `enabled: false` for
-  deterministic/noiseless output.
+  deterministic/noiseless output
 - `outputs` controls:
   - `outdir`
   - `file_prefix`
@@ -75,22 +77,20 @@ Required columns:
 
 - `frame_index`
 - `time_s`
-- `source.x_position_as`
-- `source.y_position_as`
-- `source.position_angle_deg`
+- one column for each configured `varying_keys` entry
 
 Validation rules:
 
 - rows are sorted by `frame_index` internally
 - duplicate `frame_index` values are always invalid
 - required numeric fields must be finite
-- `frame_index` contiguous check is controlled by
+- contiguous check is controlled by
   `validate.require_contiguous_frame_index` (default `true`)
-- `time_s` monotonic non-decreasing check is controlled by
+- monotonic time check is controlled by
   `validate.require_monotonic_time` (default `true`)
 
-Extra columns are allowed and preserved in the output truth CSV, but ignored for
-v1 rendering behavior.
+Extra columns are allowed and preserved in output truth CSV, but they do not
+drive rendering updates unless included in `varying_keys`.
 
 ## CLI options
 
@@ -104,7 +104,7 @@ Supported options:
 
 - `--config <path>`: prescription YAML/JSON path  
   default: `examples/recipes/observation_subblock_template/prescription.yaml`
-- `--system-preset <name>`: optional system preset override merged before config
+- `--system-preset <name>`: optional preset override merged before config
 - `--results-dir <path>`: output root override
 - `--run-name <name>`: run directory label under output root
 - `--dry-run`: validate config + trace and print expected outputs without rendering
@@ -144,10 +144,10 @@ PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
   --run-name trace_run
 ```
 
-Then set `experiment.observation_subblock.trace.path` in your renderer
-prescription to the generated `*_frame_truth.csv`, and run the renderer recipe.
+Then set `experiment.observation_subblock.trace.path` in your renderer config to
+the generated `*_frame_truth.csv`, and run the renderer recipe.
 
-### 5) Generate quick-look visualization products
+### 5) Generate quick-look diagnostics
 
 ```bash
 PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
@@ -156,49 +156,29 @@ PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
 ```
 
 Default quick-look outputs are written to a `quicklook/` folder alongside the
-cube and include:
+cube and include `preview.gif`, `summary.png`, and `trace_summary.png`.
 
-- `preview.gif`
-- `summary.png`
-- `trace_summary.png` (when a trace CSV is provided or inferred from manifest)
-
-### 6) Run registration-only block inference on the rendered cube
+### 6) Run registration-only inference on the rendered cube
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
   --config examples/recipes/observation_subblock_inference_template/prescription.yaml
 ```
 
-Inference outputs include a recovered per-frame registration CSV, optional
-truth-vs-recovered comparison CSV, diagnostic plots, and a run manifest.
-
 ## Output layout
 
-The recipe writes into:
-
-`<output_root>/<run_name_or_timestamp>/`
-
-Artifacts:
+Artifacts under `<output_root>/<run_name_or_timestamp>/`:
 
 - `manifest.json`
 - `<file_prefix>_<timestamp>_cube.fits`
 - `<file_prefix>_<timestamp>_frame_truth.csv`
 
-`manifest.json` includes at least:
+`manifest.json` includes schema version, generator info, frame count,
+varying-key metadata, trace metadata, time bounds, and artifact relative paths.
 
-- schema version
-- created timestamp
-- generator id
-- frame count
-- varying keys
-- applied/requested varying key metadata
-- trace metadata
-- time start/stop
-- relative artifact paths
+## Current limits
 
-## Current v1 limits
-
-- Only explicit CSV traces are supported.
-- Only `x/y/PA` are allowed as frame-varying rendering keys.
-- No built-in motion helper generation in this renderer.
-- Single central-field cube only (no multi-ROI payload yet).
+- only explicit CSV traces are supported
+- structural per-frame keys are rejected
+- no motion-helper generation inside renderer (use trace-builder recipe)
+- single central-field cube only (no multi-ROI payload yet)

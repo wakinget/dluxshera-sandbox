@@ -1,9 +1,9 @@
 """Trace loading and validation helpers for observation sub-block rendering.
 
-This module intentionally stays narrow for Phase 2:
-- CSV-backed explicit traces are the canonical input.
-- The renderer supports frame-varying ``x/y/PA`` only.
-- Extra trace columns are preserved but ignored by v1 rendering.
+CSV-backed explicit traces are the canonical interface for observation-subblock
+rendering. The required per-frame value columns are caller-configurable via
+``required_varying_keys`` so this loader works for both v1 ``x/y/PA`` traces
+and generalized Phase 4 varying-key sets.
 """
 
 from __future__ import annotations
@@ -13,19 +13,26 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
+from .obs_subblock_keys import OBS_SUBBLOCK_V1_DEFAULT_VARYING_KEYS
 
-APPLIED_V1_VARYING_KEYS: tuple[str, ...] = (
-    "source.x_position_as",
-    "source.y_position_as",
-    "source.position_angle_deg",
+DEFAULT_TRACE_VARYING_KEYS: tuple[str, ...] = (
+    *OBS_SUBBLOCK_V1_DEFAULT_VARYING_KEYS,
+)
+
+# Backward-compatible alias retained for older internal imports.
+APPLIED_V1_VARYING_KEYS: tuple[str, ...] = DEFAULT_TRACE_VARYING_KEYS
+
+TRACE_BASE_COLUMNS: tuple[str, ...] = (
+    "frame_index",
+    "time_s",
 )
 
 REQUIRED_TRACE_COLUMNS: tuple[str, ...] = (
-    "frame_index",
-    "time_s",
-    *APPLIED_V1_VARYING_KEYS,
+    *TRACE_BASE_COLUMNS,
+    *DEFAULT_TRACE_VARYING_KEYS,
 )
 
 
@@ -40,7 +47,8 @@ class ObsSubblockTrace:
         as ``int``/``float``; extra columns are preserved as strings or
         ``None``.
     required_columns : tuple[str, ...]
-        Required v1 trace columns.
+        Required trace columns for this load operation (base columns plus
+        requested varying-key columns).
     extra_columns : tuple[str, ...]
         Input trace columns that are not required by v1 rendering.
     source_path : Path
@@ -124,18 +132,49 @@ def _normalize_extra_cell(text: str | None) -> str | None:
     return stripped
 
 
+def _normalize_required_varying_keys(
+    required_varying_keys: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if required_varying_keys is None:
+        return DEFAULT_TRACE_VARYING_KEYS
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for idx, key in enumerate(required_varying_keys):
+        if not isinstance(key, str):
+            raise ValueError(
+                "required_varying_keys must contain only strings; "
+                f"index {idx} has {type(key).__name__}."
+            )
+        text = key.strip()
+        if not text:
+            raise ValueError(
+                f"required_varying_keys[{idx}] is blank after stripping."
+            )
+        if text in seen:
+            raise ValueError(f"Duplicate entry in required_varying_keys: {text!r}.")
+        seen.add(text)
+        normalized.append(text)
+    return tuple(normalized)
+
+
 def load_obs_subblock_trace_csv(
     path: Path,
     *,
+    required_varying_keys: Sequence[str] | None = None,
     require_contiguous_frame_index: bool = True,
     require_monotonic_time: bool = True,
 ) -> ObsSubblockTrace:
-    """Load and validate a v1 observation sub-block trace CSV.
+    """Load and validate an observation sub-block trace CSV.
 
     Parameters
     ----------
     path : Path
-        CSV path containing required v1 trace columns.
+        CSV path containing required trace columns.
+    required_varying_keys : Sequence[str] | None, optional
+        Varying-key columns required in addition to ``frame_index`` and
+        ``time_s``. When omitted, defaults to ``x/y/PA`` for backward
+        compatibility.
 
     Returns
     -------
@@ -154,12 +193,15 @@ def load_obs_subblock_trace_csv(
     if not path.exists():
         raise FileNotFoundError(f"Trace CSV not found: {path}")
 
+    varying_keys = _normalize_required_varying_keys(required_varying_keys)
+    required_columns = (*TRACE_BASE_COLUMNS, *varying_keys)
+
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise ValueError(f"Trace CSV has no header row: {path}")
         fieldnames = [name.strip() for name in reader.fieldnames if name is not None]
-        missing = [column for column in REQUIRED_TRACE_COLUMNS if column not in fieldnames]
+        missing = [column for column in required_columns if column not in fieldnames]
         if missing:
             raise ValueError(
                 "Trace CSV is missing required columns: "
@@ -167,34 +209,24 @@ def load_obs_subblock_trace_csv(
             )
 
         extra_columns = tuple(
-            column for column in fieldnames if column not in REQUIRED_TRACE_COLUMNS
+            column for column in fieldnames if column not in required_columns
         )
         parsed_rows: list[dict[str, Any]] = []
 
         for row_number, row in enumerate(reader, start=2):
             frame_index_text = _require_cell(row, "frame_index", row_number=row_number)
             time_text = _require_cell(row, "time_s", row_number=row_number)
-            x_text = _require_cell(row, "source.x_position_as", row_number=row_number)
-            y_text = _require_cell(row, "source.y_position_as", row_number=row_number)
-            pa_text = _require_cell(
-                row, "source.position_angle_deg", row_number=row_number
-            )
 
             parsed_row: dict[str, Any] = {
                 "frame_index": _parse_frame_index(frame_index_text, row_number=row_number),
                 "time_s": _parse_float(time_text, key="time_s", row_number=row_number),
-                "source.x_position_as": _parse_float(
-                    x_text, key="source.x_position_as", row_number=row_number
-                ),
-                "source.y_position_as": _parse_float(
-                    y_text, key="source.y_position_as", row_number=row_number
-                ),
-                "source.position_angle_deg": _parse_float(
-                    pa_text,
-                    key="source.position_angle_deg",
-                    row_number=row_number,
-                ),
             }
+            for key in varying_keys:
+                parsed_row[key] = _parse_float(
+                    _require_cell(row, key, row_number=row_number),
+                    key=key,
+                    row_number=row_number,
+                )
             for column in extra_columns:
                 parsed_row[column] = _normalize_extra_cell(row.get(column, ""))
 
@@ -228,7 +260,7 @@ def load_obs_subblock_trace_csv(
 
     return ObsSubblockTrace(
         rows=tuple(sorted_rows),
-        required_columns=REQUIRED_TRACE_COLUMNS,
+        required_columns=required_columns,
         extra_columns=extra_columns,
         source_path=path.resolve(),
     )
@@ -236,7 +268,9 @@ def load_obs_subblock_trace_csv(
 
 __all__ = [
     "APPLIED_V1_VARYING_KEYS",
+    "DEFAULT_TRACE_VARYING_KEYS",
     "ObsSubblockTrace",
     "REQUIRED_TRACE_COLUMNS",
+    "TRACE_BASE_COLUMNS",
     "load_obs_subblock_trace_csv",
 ]

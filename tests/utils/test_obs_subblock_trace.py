@@ -121,3 +121,54 @@ def test_trace_extra_columns_preserved(tmp_path):
     assert trace.rows[0]["tag"] == "a"
     assert trace.rows[1]["frame_index"] == 1
     assert trace.rows[1]["mode"] == "science"
+
+
+def test_trace_generalized_required_varying_columns_are_parsed(tmp_path):
+    trace_path = _write_trace(
+        tmp_path / "trace_generalized.csv",
+        """
+        frame_index,time_s,source.x_position_as,optics.plate_scale_as_per_pix,optics.primary.zernike_coeffs_nm[3],tag
+        0,0.00,0.0,0.11,1.0,a
+        1,0.05,0.1,0.12,1.5,b
+        """,
+    )
+
+    trace = load_obs_subblock_trace_csv(
+        trace_path,
+        required_varying_keys=(
+            "source.x_position_as",
+            "optics.plate_scale_as_per_pix",
+            "optics.primary.zernike_coeffs_nm[3]",
+        ),
+    )
+
+    assert trace.required_columns == (
+        "frame_index",
+        "time_s",
+        "source.x_position_as",
+        "optics.plate_scale_as_per_pix",
+        "optics.primary.zernike_coeffs_nm[3]",
+    )
+    assert trace.rows[0]["optics.plate_scale_as_per_pix"] == 0.11
+    assert trace.rows[1]["optics.primary.zernike_coeffs_nm[3]"] == 1.5
+    assert trace.extra_columns == ("tag",)
+
+
+def test_trace_generalized_required_column_must_be_finite(tmp_path):
+    trace_path = _write_trace(
+        tmp_path / "trace_non_finite_generalized.csv",
+        """
+        frame_index,time_s,source.x_position_as,optics.plate_scale_as_per_pix
+        0,0.00,0.0,0.11
+        1,0.05,0.1,nan
+        """,
+    )
+
+    with pytest.raises(ValueError, match="must be finite"):
+        load_obs_subblock_trace_csv(
+            trace_path,
+            required_varying_keys=(
+                "source.x_position_as",
+                "optics.plate_scale_as_per_pix",
+            ),
+        )
