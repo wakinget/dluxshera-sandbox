@@ -29,6 +29,22 @@ def _gaussian_kernel(
     }
 
 
+def _box_kernel(
+    *,
+    width_x: float,
+    width_y: float,
+    kernel_size: int = 9,
+    units: str = "psf_pix",
+):
+    return {
+        "kind": "box",
+        "width_x": width_x,
+        "width_y": width_y,
+        "kernel_size": kernel_size,
+        "units": units,
+    }
+
+
 def test_build_detector_accepts_repeated_layer_kinds_and_preserves_order():
     cfg = {
         "system": {
@@ -189,31 +205,87 @@ def test_build_detector_missing_layer_kind_raises_clear_error():
         build_detector(cfg)
 
 
-def test_build_detector_rejects_non_gaussian_apply_convolution_kernel_kind():
+def test_build_detector_rejects_unsupported_apply_convolution_kernel_kind():
     cfg = {
         "system": {
             "optics": {"psf_npix": 8},
             "detector": {
                 "layers": [
-                    _layer(
-                        "diffusion",
-                        "ApplyConvolution",
-                        kernel={
-                            "kind": "box",
-                            "sigma_x": 0.2,
-                            "sigma_y": 0.2,
-                            "theta_deg": 0.0,
-                            "kernel_size": 5,
-                            "units": "psf_pix",
-                        },
-                    )
+                        _layer(
+                            "diffusion",
+                            "ApplyConvolution",
+                            kernel={
+                                "kind": "triangle",
+                                "kernel_size": 5,
+                                "units": "psf_pix",
+                            },
+                        )
                 ]
             },
         }
     }
 
-    with pytest.raises(ValueError, match="kernel.kind='gaussian'"):
+    with pytest.raises(ValueError, match="supports kernel.kind values"):
         build_detector(cfg)
+
+
+def test_build_detector_supports_box_apply_convolution_kernel_kind():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 16},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "pixel_mtf",
+                        "ApplyConvolution",
+                        kernel=_box_kernel(
+                            width_x=1.0,
+                            width_y=0.8,
+                            kernel_size=9,
+                            units="detector_pix",
+                        ),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector, detector_contract = build_detector(cfg)
+
+    assert isinstance(detector.layers["pixel_mtf"], ApplyConvolution)
+    assert detector.layers["pixel_mtf"].kernel_kind == "box"
+    assert float(detector.layers["pixel_mtf"].width_x) == 1.0
+    assert float(detector.layers["pixel_mtf"].width_y) == 0.8
+    assert "detector.layers.pixel_mtf.width_x" in detector_contract
+    assert "detector.layers.pixel_mtf.width_y" in detector_contract
+
+
+def test_build_detector_accepts_repeated_box_apply_convolution_layers_with_distinct_names():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 16},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "pixel_mtf_a",
+                        "ApplyConvolution",
+                        kernel=_box_kernel(width_x=1.0, width_y=1.0, kernel_size=9),
+                    ),
+                    _layer(
+                        "pixel_mtf_b",
+                        "ApplyConvolution",
+                        kernel=_box_kernel(width_x=1.4, width_y=0.6, kernel_size=11),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector, _contract = build_detector(cfg)
+
+    assert list(detector.layers.keys()) == ["pixel_mtf_a", "pixel_mtf_b"]
+    assert detector.layers["pixel_mtf_a"].kernel_kind == "box"
+    assert detector.layers["pixel_mtf_b"].kernel_kind == "box"
 
 
 def test_build_detector_computes_detector_pix_convolution_scale_from_downstream_downsample():

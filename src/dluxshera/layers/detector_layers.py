@@ -20,11 +20,14 @@ class ApplyConvolution(DetectorLayer):
       - ``mode="same"``
       - no auto-padding
 
-    Only anisotropic Gaussian kernels are supported in this first version.
+    Supported kernel families:
+      - ``gaussian``: anisotropic Gaussian with optional in-plane rotation
+      - ``box``: axis-aligned rectangular pixel-aperture response
 
     Units
     -----
-    ``sigma_x`` and ``sigma_y`` are declared either in:
+    Gaussian ``sigma_x``/``sigma_y`` and box ``width_x``/``width_y`` are
+    declared either in:
       - ``psf_pix``: current PSF-array pixel units
       - ``detector_pix``: detector-pixel units
 
@@ -35,12 +38,14 @@ class ApplyConvolution(DetectorLayer):
     position in the stack. Direct callers may provide that scale manually.
     """
 
-    _SUPPORTED_KERNEL_KINDS = {"gaussian"}
+    _SUPPORTED_KERNEL_KINDS = {"gaussian", "box"}
     _SUPPORTED_UNITS = {"detector_pix", "psf_pix"}
 
     kernel_kind: str
     sigma_x: float
     sigma_y: float
+    width_x: float
+    width_y: float
     theta_deg: float
     kernel_size: int
     units: str
@@ -50,9 +55,11 @@ class ApplyConvolution(DetectorLayer):
         self: DetectorLayer,
         *,
         kernel_kind: str,
-        sigma_x: float,
-        sigma_y: float,
-        theta_deg: float,
+        sigma_x: float = 1.0,
+        sigma_y: float = 1.0,
+        width_x: float = 1.0,
+        width_y: float = 1.0,
+        theta_deg: float = 0.0,
         kernel_size: int,
         units: str,
         detector_to_psf_scale: float = 1.0,
@@ -62,6 +69,8 @@ class ApplyConvolution(DetectorLayer):
         self.kernel_kind = str(kernel_kind)
         self.sigma_x = float(sigma_x)
         self.sigma_y = float(sigma_y)
+        self.width_x = float(width_x)
+        self.width_y = float(width_y)
         self.theta_deg = float(theta_deg)
         self.kernel_size = int(kernel_size)
         self.units = str(units)
@@ -69,13 +78,19 @@ class ApplyConvolution(DetectorLayer):
 
         if self.kernel_kind not in self._SUPPORTED_KERNEL_KINDS:
             raise ValueError(
-                "ApplyConvolution currently supports only "
-                "kernel_kind='gaussian'."
+                "ApplyConvolution supports kernel_kind values: "
+                f"{sorted(self._SUPPORTED_KERNEL_KINDS)}."
             )
-        if self.sigma_x <= 0.0:
-            raise ValueError("sigma_x must be positive.")
-        if self.sigma_y <= 0.0:
-            raise ValueError("sigma_y must be positive.")
+        if self.kernel_kind == "gaussian":
+            if self.sigma_x <= 0.0:
+                raise ValueError("sigma_x must be positive.")
+            if self.sigma_y <= 0.0:
+                raise ValueError("sigma_y must be positive.")
+        if self.kernel_kind == "box":
+            if self.width_x <= 0.0:
+                raise ValueError("width_x must be positive.")
+            if self.width_y <= 0.0:
+                raise ValueError("width_y must be positive.")
         if self.kernel_size <= 0 or self.kernel_size % 2 == 0:
             raise ValueError("kernel_size must be a positive odd integer.")
         if self.units not in self._SUPPORTED_UNITS:
@@ -96,22 +111,37 @@ class ApplyConvolution(DetectorLayer):
             self.sigma_y * self.detector_to_psf_scale,
         )
 
+    def _width_in_psf_pixels(self: DetectorLayer) -> tuple[float, float]:
+        """Return box widths in the current PSF array's pixel units."""
+        if self.units == "psf_pix":
+            return self.width_x, self.width_y
+        return (
+            self.width_x * self.detector_to_psf_scale,
+            self.width_y * self.detector_to_psf_scale,
+        )
+
     def generate_kernel(self: DetectorLayer) -> Array:
         """Generate the normalized image-space convolution kernel."""
-        sigma_x, sigma_y = self._sigma_in_psf_pixels()
-
         coords = np.arange(self.kernel_size, dtype=float) - (self.kernel_size - 1) / 2.0
         y, x = np.meshgrid(coords, coords, indexing="ij")
 
-        theta = np.deg2rad(self.theta_deg)
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
+        if self.kernel_kind == "gaussian":
+            sigma_x, sigma_y = self._sigma_in_psf_pixels()
+            theta = np.deg2rad(self.theta_deg)
+            cos_theta = np.cos(theta)
+            sin_theta = np.sin(theta)
 
-        x_rot = cos_theta * x + sin_theta * y
-        y_rot = -sin_theta * x + cos_theta * y
+            x_rot = cos_theta * x + sin_theta * y
+            y_rot = -sin_theta * x + cos_theta * y
 
-        exponent = -0.5 * ((x_rot / sigma_x) ** 2 + (y_rot / sigma_y) ** 2)
-        kernel = np.exp(exponent)
+            exponent = -0.5 * ((x_rot / sigma_x) ** 2 + (y_rot / sigma_y) ** 2)
+            kernel = np.exp(exponent)
+            return kernel / np.sum(kernel)
+
+        width_x, width_y = self._width_in_psf_pixels()
+        inside_x = np.abs(x) <= (width_x / 2.0)
+        inside_y = np.abs(y) <= (width_y / 2.0)
+        kernel = np.where(inside_x & inside_y, 1.0, 0.0)
         return kernel / np.sum(kernel)
 
     def apply(self: DetectorLayer, psf: PSF) -> PSF:
