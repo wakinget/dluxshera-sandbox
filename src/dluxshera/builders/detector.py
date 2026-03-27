@@ -32,11 +32,11 @@ from ..utils.noise import apply_knowledge_error
 # Runtime bindings for detectors are currently empty; detector runtime updates are
 # limited to jitter (handled explicitly in apply_runtime_bindings).
 DETECTOR_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
-SUPPORTED_DETECTOR_LAYERS: tuple[str, ...] = (
-    "downsample",
-    "pixel_offsets",
-    "pixel_response",
-    "jitter",
+SUPPORTED_DETECTOR_LAYER_KINDS: tuple[str, ...] = (
+    "Downsample",
+    "ApplyPixelOffsets",
+    "ApplyPixelResponse",
+    "ApplyJitter",
 )
 
 
@@ -205,21 +205,28 @@ def _load_array(path: Path) -> jnp.ndarray:
 # ---------------------------------------------------------------------------
 # Layer construction helpers
 # ---------------------------------------------------------------------------
+def _layer_contract_prefix(layer_name: str) -> str:
+    """Return the detector contract prefix for a named detector layer."""
+    return f"detector.layers.{layer_name}"
+
+
 def build_detector_layer(
-    name: str,
     layer_cfg: Mapping,
     *,
     target_shape: tuple[int, int],
     base_seed: int | None = None,
 ) -> tuple[str, object]:
     """Build a detector layer from declarative layer config."""
-    if name == "downsample":
+    name = layer_cfg["name"]
+    kind = layer_cfg["kind"]
+
+    if kind == "Downsample":
         kernel_size = layer_cfg.get("kernel_size", layer_cfg.get("factor", None))
         if kernel_size is None:
             raise ValueError("downsample layer requires `kernel_size` (or alias `factor`).")
-        return ("downsample", Downsample(int(kernel_size)))
+        return (name, Downsample(int(kernel_size)))
 
-    if name == "pixel_offsets":
+    if kind == "ApplyPixelOffsets":
         dx_path = _resolve_repo_path(layer_cfg.get("dx_path", None))
         dy_path = _resolve_repo_path(layer_cfg.get("dy_path", None))
         interp_method = layer_cfg.get("interp_method", "cubic")
@@ -264,11 +271,11 @@ def build_detector_layer(
                 token=f"{name}.dy",
             )
         return (
-            "pixel_offsets",
+            name,
             ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method),
         )
 
-    if name == "pixel_response":
+    if kind == "ApplyPixelResponse":
         prf_path = _resolve_repo_path(layer_cfg.get("prf_path", None))
         if prf_path is None:
             pixel_response_raw = jnp.ones(target_shape, dtype=float)
@@ -286,15 +293,17 @@ def build_detector_layer(
                 base_seed=base_seed,
                 token=f"{name}.prf",
             )
-        return ("pixel_response", ApplyPixelResponse(pixel_response))
+        return (name, ApplyPixelResponse(pixel_response))
 
-    if name == "jitter":
+    if kind == "ApplyJitter":
         sigma = float(layer_cfg.get("sigma", 1e-12))
         kernel_size = int(layer_cfg.get("kernel_size", 3))
-        return ("jitter", ApplyJitter(sigma=sigma, kernel_size=kernel_size))
+        return (name, ApplyJitter(sigma=sigma, kernel_size=kernel_size))
 
-    supported = ", ".join(SUPPORTED_DETECTOR_LAYERS)
-    raise ValueError(f"Unknown detector layer name {name!r}. Supported layers: {supported}.")
+    supported = ", ".join(SUPPORTED_DETECTOR_LAYER_KINDS)
+    raise ValueError(
+        f"Unknown detector layer kind {kind!r}. Supported kinds: {supported}."
+    )
 
 
 def _normalize_detector_cfg(detector_cfg) -> Mapping:
@@ -350,11 +359,22 @@ def _validate_layers_cfg(layers_cfg: object) -> list[Mapping]:
         raise ValueError("system.detector.layers must be a list of layer dictionaries.")
 
     validated: list[Mapping] = []
+    seen_names: set[str] = set()
     for idx, layer in enumerate(layers_cfg):
         if not isinstance(layer, Mapping):
             raise ValueError(f"system.detector.layers[{idx}] must be a mapping/dict.")
-        if "name" not in layer:
+        name = layer.get("name")
+        if not isinstance(name, str) or not name.strip():
             raise ValueError(f"Missing required config key: system.detector.layers[{idx}].name")
+        kind = layer.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError(f"Missing required config key: system.detector.layers[{idx}].kind")
+        if name in seen_names:
+            raise ValueError(
+                f"Duplicate detector layer name {name!r} at system.detector.layers[{idx}]. "
+                "Detector layer names must be unique."
+            )
+        seen_names.add(name)
         validated.append(layer)
     return validated
 
@@ -427,114 +447,123 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
     ]
 
     layers_cfg = _validate_layers_cfg(cfg.get("layers", None) if isinstance(cfg, Mapping) else None)
-    layer_map: dict[str, Mapping] = {layer["name"]: layer for layer in layers_cfg}
 
     def _path_default(raw):
         resolved = _resolve_repo_path(raw)
         return str(resolved) if resolved is not None else None
 
-    jitter_cfg = layer_map.get("jitter")
-    if jitter_cfg is not None:
-        sigma_val = jitter_cfg.get("sigma", 1e-12)
-        if sigma_val is None:
-            sigma_val = 1e-12
-        kernel_val = jitter_cfg.get("kernel_size", 3)
-        if kernel_val is None:
-            kernel_val = 3
-        sigma = float(sigma_val)
-        kernel_size = int(kernel_val)
-        fields.extend(
-            [
+    for layer_cfg in layers_cfg:
+        layer_name = layer_cfg["name"]
+        layer_kind = layer_cfg["kind"]
+        prefix = _layer_contract_prefix(layer_name)
+
+        if layer_kind == "ApplyJitter":
+            sigma_val = layer_cfg.get("sigma", 1e-12)
+            if sigma_val is None:
+                sigma_val = 1e-12
+            kernel_val = layer_cfg.get("kernel_size", 3)
+            if kernel_val is None:
+                kernel_val = 3
+            sigma = float(sigma_val)
+            kernel_size = int(kernel_val)
+            fields.extend(
+                [
+                    ParamField(
+                        key=f"{prefix}.sigma",
+                        group="detector",
+                        kind="primitive",
+                        dtype=float,
+                        shape=(),
+                        default=sigma,
+                        bounds=(0.0, None),
+                        structural=False,
+                        doc="Detector jitter sigma [pixels], runtime-overridable from the store.",
+                    ),
+                    ParamField(
+                        key=f"{prefix}.kernel_size",
+                        group="detector",
+                        kind="primitive",
+                        dtype=int,
+                        shape=(),
+                        default=kernel_size,
+                        structural=True,
+                    ),
+                ]
+            )
+            continue
+
+        if layer_kind == "ApplyPixelOffsets":
+            interp_method = layer_cfg.get("interp_method", "cubic") or "cubic"
+            dx_path = _path_default(layer_cfg.get("dx_path", None))
+            dy_path = _path_default(layer_cfg.get("dy_path", None))
+            fields.extend(
+                [
+                    ParamField(
+                        key=f"{prefix}.interp_method",
+                        group="detector",
+                        kind="primitive",
+                        dtype=str,
+                        shape=(),
+                        default=interp_method,
+                        structural=False,
+                    ),
+                    ParamField(
+                        key=f"{prefix}.dx_path",
+                        group="detector",
+                        kind="primitive",
+                        dtype=str,
+                        shape=(),
+                        default=dx_path,
+                        structural=True,
+                    ),
+                    ParamField(
+                        key=f"{prefix}.dy_path",
+                        group="detector",
+                        kind="primitive",
+                        dtype=str,
+                        shape=(),
+                        default=dy_path,
+                        structural=True,
+                    ),
+                ]
+            )
+            continue
+
+        if layer_kind == "ApplyPixelResponse":
+            prf_path = _path_default(layer_cfg.get("prf_path", None))
+            fields.append(
                 ParamField(
-                    key="detector.jitter.sigma",
+                    key=f"{prefix}.prf_path",
                     group="detector",
                     kind="primitive",
-                    dtype=float,
+                    dtype=str,
                     shape=(),
-                    default=sigma,
-                    bounds=(0.0, None),
-                    structural=False,
-                    doc="Detector jitter sigma [pixels], runtime-overridable from the store.",
-                ),
+                    default=prf_path,
+                    structural=True,
+                )
+            )
+            continue
+
+        if layer_kind == "Downsample":
+            kernel_size = layer_cfg.get("kernel_size", layer_cfg.get("factor", 1))
+            if kernel_size is None:
+                kernel_size = 1
+            fields.append(
                 ParamField(
-                    key="detector.jitter.kernel_size",
+                    key=f"{prefix}.kernel_size",
                     group="detector",
                     kind="primitive",
                     dtype=int,
                     shape=(),
-                    default=kernel_size,
-                    structural=True,
-                ),
-            ]
-        )
-
-    pixel_offsets_cfg = layer_map.get("pixel_offsets")
-    if pixel_offsets_cfg is not None:
-        interp_method = pixel_offsets_cfg.get("interp_method", "cubic") or "cubic"
-        dx_path = _path_default(pixel_offsets_cfg.get("dx_path", None))
-        dy_path = _path_default(pixel_offsets_cfg.get("dy_path", None))
-        fields.extend(
-            [
-                ParamField(
-                    key="detector.pixel_offsets.interp_method",
-                    group="detector",
-                    kind="primitive",
-                    dtype=str,
-                    shape=(),
-                    default=interp_method,
+                    default=int(kernel_size),
                     structural=False,
-                ),
-                ParamField(
-                    key="detector.pixel_offsets.dx_path",
-                    group="detector",
-                    kind="primitive",
-                    dtype=str,
-                    shape=(),
-                    default=dx_path,
-                    structural=True,
-                ),
-                ParamField(
-                    key="detector.pixel_offsets.dy_path",
-                    group="detector",
-                    kind="primitive",
-                    dtype=str,
-                    shape=(),
-                    default=dy_path,
-                    structural=True,
-                ),
-            ]
-        )
-
-    pixel_response_cfg = layer_map.get("pixel_response")
-    if pixel_response_cfg is not None:
-        prf_path = _path_default(pixel_response_cfg.get("prf_path", None))
-        fields.append(
-            ParamField(
-                key="detector.pixel_response.prf_path",
-                group="detector",
-                kind="primitive",
-                dtype=str,
-                shape=(),
-                default=prf_path,
-                structural=True,
+                )
             )
-        )
+            continue
 
-    downsample_cfg = layer_map.get("downsample")
-    if downsample_cfg is not None:
-        kernel_size = downsample_cfg.get("kernel_size", downsample_cfg.get("factor", 1))
-        if kernel_size is None:
-            kernel_size = 1
-        fields.append(
-            ParamField(
-                key="detector.downsample.kernel_size",
-                group="detector",
-                kind="primitive",
-                dtype=int,
-                shape=(),
-                default=int(kernel_size),
-                structural=False,
-            )
+        supported = ", ".join(SUPPORTED_DETECTOR_LAYER_KINDS)
+        raise ValueError(
+            f"Unknown detector layer kind {layer_kind!r}. Supported kinds: {supported}."
         )
 
     return ParamSpec(fields)
@@ -570,7 +599,6 @@ def build_detector(cfg, *, base_seed: int | None = None) -> tuple[SheraDetector,
     target_shape = (int(psf_npix), int(psf_npix))
     layers = [
         build_detector_layer(
-            layer_cfg["name"],
             layer_cfg,
             target_shape=target_shape,
             base_seed=base_seed,
@@ -581,7 +609,7 @@ def build_detector(cfg, *, base_seed: int | None = None) -> tuple[SheraDetector,
     spec = _resolve_detector_spec(detector_cfg_block)
 
     detector = SheraDetector(layers=layers, spec=spec)
-    detector_contract = build_detector_contract(detector_cfg_block)
+    detector_contract = build_detector_contract(cfg)
     return detector, detector_contract
 
 
@@ -601,23 +629,25 @@ def apply_runtime_bindings(
     if store is None:
         return detector
 
-    runtime_sigma = store.get("detector.jitter.sigma", default=None)
-    if runtime_sigma is not None and "jitter" in detector.layers:
-        jitter_layer = detector.layers["jitter"]
-        rebuilt_layers = []
-        for layer_name, layer in detector.layers.items():
-            if layer_name == "jitter":
-                rebuilt_layers.append(
-                    (
-                        "jitter",
-                        ApplyJitter(
-                            sigma=float(runtime_sigma),
-                            kernel_size=int(jitter_layer.kernel_size),
-                        ),
-                    )
+    rebuilt_layers = []
+    detector_updated = False
+    for layer_name, layer in detector.layers.items():
+        runtime_sigma = store.get(f"detector.layers.{layer_name}.sigma", default=None)
+        if runtime_sigma is not None and isinstance(layer, ApplyJitter):
+            detector_updated = True
+            rebuilt_layers.append(
+                (
+                    layer_name,
+                    ApplyJitter(
+                        sigma=float(runtime_sigma),
+                        kernel_size=int(layer.kernel_size),
+                    ),
                 )
-            else:
-                rebuilt_layers.append((layer_name, layer))
+            )
+        else:
+            rebuilt_layers.append((layer_name, layer))
+
+    if detector_updated:
         detector = SheraDetector(layers=rebuilt_layers, spec=detector.spec)
 
     for store_key, set_path in bindings:

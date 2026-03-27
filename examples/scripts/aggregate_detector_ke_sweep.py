@@ -320,7 +320,7 @@ def _infer_detector_sweep_layer(metadata: dict[str, Any]) -> str | None:
 def _detector_sweep_target(layer_name: str | None) -> str | None:
     if layer_name is None:
         return None
-    return f"detector.{layer_name}.knowledge_error.scale"
+    return f"detector.layers.{layer_name}.knowledge_error.scale"
 
 
 def load_sweep_spec(

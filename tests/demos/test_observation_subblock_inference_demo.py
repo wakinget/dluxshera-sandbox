@@ -28,7 +28,7 @@ def _base_system_block() -> dict[str, object]:
     return {
         "preset": "SHERA_TESTBED_3P",
         "source": {"n_lambda": 1},
-        "detector": {"layers": [{"name": "downsample", "kernel_size": 3}]},
+        "detector": {"layers": [{"name": "downsample", "kind": "Downsample", "kernel_size": 3}]},
     }
 
 

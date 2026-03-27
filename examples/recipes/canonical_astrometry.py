@@ -185,9 +185,11 @@ def main(
     # --- Optional explicit override: replace detector.layers within config ---
     # Demonstrates how we might manually change the detector layers
     # detector_cfg = system_cfg.get("detector", {}) # Copy the default detector config
-    # detector_cfg["layers"] = [{"name": "downsample","factor": 3}] # Update the detector layers field
-    # detector_cfg["layers"] = [{"name": "downsample", "factor": 3}, # This example defines two layers
-    #                           {"name": "jitter", "sigma": 1.0e-1},]
+    # detector_cfg["layers"] = [{"name": "downsample", "kind": "Downsample", "factor": 3}]
+    # detector_cfg["layers"] = [  # This example defines two named layers
+    #     {"name": "downsample", "kind": "Downsample", "factor": 3},
+    #     {"name": "jitter", "kind": "ApplyJitter", "sigma": 1.0e-1},
+    # ]
     # system_cfg["detector"] = detector_cfg # Insert into the system config
     # -------------------------------------------------------------
 

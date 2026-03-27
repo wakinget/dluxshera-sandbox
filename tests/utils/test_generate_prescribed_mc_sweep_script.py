@@ -43,9 +43,10 @@ def _base_prescription_payload() -> dict:
                 "preset": "SHERA_TESTBED_3P",
                 "detector": {
                     "layers": [
-                        {"name": "downsample", "kernel_size": 3},
+                        {"name": "downsample", "kind": "Downsample", "kernel_size": 3},
                         {
                             "name": "pixel_offsets",
+                            "kind": "ApplyPixelOffsets",
                             "dx_path": "dx.fits",
                             "dy_path": "dy.fits",
                             "knowledge_error": {
@@ -202,7 +203,7 @@ def test_fails_when_requested_layer_missing():
     module = _load_script_module()
     bad_cfg = _base_prescription_payload()
     bad_cfg["experiment"]["inference_system"]["detector"]["layers"] = [
-        {"name": "downsample", "kernel_size": 3}
+        {"name": "downsample", "kind": "Downsample", "kernel_size": 3}
     ]
     point = module.parse_sweep_points(["1e-3"])[0]
 

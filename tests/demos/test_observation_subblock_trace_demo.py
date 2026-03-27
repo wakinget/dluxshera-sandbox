@@ -130,7 +130,7 @@ def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tm
             "source": {"n_lambda": 1},
             "detector": {
                 "layers": [
-                    {"name": "downsample", "kernel_size": 3},
+                    {"name": "downsample", "kind": "Downsample", "kernel_size": 3},
                 ]
             },
         },
@@ -234,7 +234,7 @@ def test_trace_recipe_omitted_base_uses_refreshed_system_anchor(tmp_path):
         "system": {
             "preset": "SHERA_TESTBED_3P",
             "source": {"n_lambda": 1},
-            "detector": {"layers": [{"name": "downsample", "kernel_size": 3}]},
+            "detector": {"layers": [{"name": "downsample", "kind": "Downsample", "kernel_size": 3}]},
         },
         "experiment": {
             "kind": "observation_subblock_trace",

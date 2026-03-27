@@ -49,12 +49,16 @@ system:
     model: HWK4123
     layers:
     - name: downsample
+      kind: Downsample
       kernel_size: 3
     - name: pixel_offsets
+      kind: ApplyPixelOffsets
       dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
       dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
     - name: pixel_response
+      kind: ApplyPixelResponse
       prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
     - name: jitter
+      kind: ApplyJitter
       sigma: 1.0e-12
       kernel_size: 3

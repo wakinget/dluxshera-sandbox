@@ -66,7 +66,11 @@ def test_seed_detector_knowledge_errors_inserts_seed():
     system_cfg = {
         "detector": {
             "layers": [
-                {"name": "pixel_offsets", "knowledge_error": {"model": "gaussian", "scale": 1e-3}},
+                {
+                    "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
+                    "knowledge_error": {"model": "gaussian", "scale": 1e-3},
+                },
             ]
         }
     }
@@ -92,6 +96,7 @@ def test_detector_ke_policy_default_matches_fixed_per_experiment():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {"model": "gaussian", "scale": 1e-3},
                 }
             ]
@@ -125,6 +130,7 @@ def test_detector_ke_policy_fixed_per_experiment_is_run_invariant():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {
                         "model": "gaussian",
                         "scale": 1e-3,
@@ -160,6 +166,7 @@ def test_detector_ke_policy_per_run_uses_run_seed_and_is_reproducible():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {
                         "model": "gaussian",
                         "scale": 1e-3,
@@ -204,6 +211,7 @@ def test_detector_ke_per_run_policy_inspection_keeps_base_config_pristine():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {
                         "model": "gaussian",
                         "scale": 1e-3,
@@ -243,6 +251,7 @@ def test_detector_ke_policy_explicit_seed_wins_over_policy():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {
                         "model": "gaussian",
                         "scale": 1e-3,
@@ -273,6 +282,7 @@ def test_detector_ke_metadata_includes_model_scale_policy_and_seed():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {
                         "model": "gaussian",
                         "scale": 2e-3,
@@ -332,6 +342,7 @@ def test_detector_ke_policy_invalid_value_raises():
             "layers": [
                 {
                     "name": "pixel_offsets",
+                    "kind": "ApplyPixelOffsets",
                     "knowledge_error": {
                         "model": "gaussian",
                         "scale": 1e-3,

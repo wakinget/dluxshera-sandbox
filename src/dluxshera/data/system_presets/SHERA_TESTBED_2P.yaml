@@ -36,9 +36,13 @@ system:
     model: GSENSE2020BSI
     layers:
     - name: downsample
+      kind: Downsample
       kernel_size: 2
     - name: pixel_offsets
+      kind: ApplyPixelOffsets
     - name: pixel_response
+      kind: ApplyPixelResponse
     - name: jitter
+      kind: ApplyJitter
       sigma: 1.0e-12
       kernel_size: 3

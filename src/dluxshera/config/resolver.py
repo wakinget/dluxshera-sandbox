@@ -140,7 +140,8 @@ def _validate_layer_list(layers: object) -> None:
     ------------
     - Must be a list.
     - Each entry must be a mapping/dict.
-    - Each layer mapping must contain a ``name`` key.
+    - Each layer mapping must contain non-empty ``name`` and ``kind`` keys.
+    - Layer names must be unique within the detector stack.
 
     Notes
     -----
@@ -149,13 +150,18 @@ def _validate_layer_list(layers: object) -> None:
     """
     if not isinstance(layers, list):
         raise ValueError("system.detector.layers must be a list of layer dictionaries.")
+    seen_names: set[str] = set()
     for idx, layer in enumerate(layers):
         if not isinstance(layer, Mapping):
             raise ValueError(f"system.detector.layers[{idx}] must be a mapping/dict.")
-        if "name" not in layer:
+        name = _required_nonempty_string(f"system.detector.layers[{idx}]", layer, "name")
+        _required_nonempty_string(f"system.detector.layers[{idx}]", layer, "kind")
+        if name in seen_names:
             raise ValueError(
-                f"Missing required config key: system.detector.layers[{idx}].name"
+                f"Duplicate detector layer name {name!r} at system.detector.layers[{idx}]. "
+                "Detector layer names must be unique."
             )
+        seen_names.add(name)
 
 
 def _validate_system_schema(system: object) -> None:

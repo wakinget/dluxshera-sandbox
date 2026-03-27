@@ -822,18 +822,22 @@ class SheraBinder:
         paths: str | Sequence[str],
         default: object | None = None,
     ) -> object | list[object]:
-        """Retrieve values from the configuration or base store.
+        """Retrieve values from the configuration, base store, or runtime objects.
 
         This method is a convenience accessor that reads configuration fields
-        (by attribute name) or store values (by key). Use it when you need a
-        uniform accessor that works for both config fields and store entries.
-        When ``paths`` is a sequence, a list of resolved values is returned.
+        (by attribute name), store values (by key), or explicit component
+        runtime paths such as ``detector.layers.pixel_offsets.dx_map``. Use it
+        when you need a uniform accessor that works across config, store, and
+        binder-owned runtime objects. When ``paths`` is a sequence, a list of
+        resolved values is returned.
 
         Parameters
         ----------
         paths : str | Sequence[str]
             A single config attribute name or store key, or a sequence of them.
-            Store keys containing ``"."`` are treated as fully-qualified keys.
+            Dotted paths are first resolved against the base store and then,
+            when absent there, against ``source``, ``optics``, or ``detector``
+            runtime objects.
         default : Any, optional
             Default to return if the store key is missing. When ``None``, a
             missing key raises the underlying store error.
@@ -856,9 +860,20 @@ class SheraBinder:
 
         path = paths
         if isinstance(path, str) and "." in path:
+            value = self.base_forward_store.get(path, _RUNTIME_MISSING)
+            if value is not _RUNTIME_MISSING:
+                return value
+
+            component_name, _, runtime_path = path.partition(".")
+            if runtime_path and component_name in {"source", "optics", "detector"}:
+                component = getattr(self, component_name)
+                runtime_value = self._resolve_runtime_path(component, runtime_path)
+                if runtime_value is not _RUNTIME_MISSING:
+                    return runtime_value
+
             if default is None:
                 return self.base_forward_store.get(path)
-            return self.base_forward_store.get(path, default)
+            return default
 
         if hasattr(self.cfg, path):
             return getattr(self.cfg, path)

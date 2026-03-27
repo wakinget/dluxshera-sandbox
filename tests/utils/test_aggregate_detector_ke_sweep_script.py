@@ -53,6 +53,7 @@ def test_extract_detector_knowledge_error_metadata_from_inference_layers():
                     "layers": [
                         {
                             "name": "pixel_offsets",
+                            "kind": "ApplyPixelOffsets",
                             "dx_path": "dx.fits",
                             "dy_path": "dy.fits",
                             "knowledge_error": {
@@ -63,6 +64,7 @@ def test_extract_detector_knowledge_error_metadata_from_inference_layers():
                         },
                         {
                             "name": "pixel_response",
+                            "kind": "ApplyPixelResponse",
                             "prf_path": "prf.fits",
                             "knowledge_error": {
                                 "model": "gaussian",
@@ -203,6 +205,7 @@ def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
             detector:
               layers:
                 - name: pixel_offsets
+                  kind: ApplyPixelOffsets
                   dx_path: dx0.fits
                   dy_path: dy0.fits
                   knowledge_error:
@@ -265,6 +268,7 @@ def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
             detector:
               layers:
                 - name: pixel_offsets
+                  kind: ApplyPixelOffsets
                   knowledge_error:
                     model: gaussian
                     scale: 0.001
@@ -282,6 +286,7 @@ def test_aggregate_detector_ke_sweep_skips_partial_or_bad_experiments(tmp_path):
             detector:
               layers:
                 - name: pixel_offsets
+                  kind: ApplyPixelOffsets
                   knowledge_error:
                     model: gaussian
                     scale: 0.01
@@ -414,6 +419,7 @@ def test_aggregate_detector_ke_sweep_groups_detector_prf_sweep_from_manifest(tmp
                 detector:
                   layers:
                     - name: pixel_response
+                      kind: ApplyPixelResponse
                       prf_path: prf.fits
                       knowledge_error:
                         model: gaussian
@@ -448,7 +454,7 @@ def test_aggregate_detector_ke_sweep_groups_detector_prf_sweep_from_manifest(tmp
     assert "source.separation_as" in components
 
     targets = {row["sweep_target"] for row in summary_rows}
-    assert targets == {"detector.pixel_response.knowledge_error.scale"}
+    assert targets == {"detector.layers.pixel_response.knowledge_error.scale"}
     labels = {row["sweep_value_label"] for row in summary_rows}
     assert labels == {"1e-4", "1e-3"}
     numeric_values = {row["sweep_value_numeric"] for row in summary_rows}
@@ -550,6 +556,7 @@ def test_aggregate_detector_ke_sweep_strict_raises_on_partial_inputs(tmp_path):
             detector:
               layers:
                 - name: pixel_offsets
+                  kind: ApplyPixelOffsets
                   knowledge_error:
                     model: gaussian
                     scale: 0.001

@@ -234,10 +234,10 @@ class SheraThreePlaneConfig(BaseConfig):
     def __post_init__(self):
         if self.detector_layers is None:
             default_layers = [
-                {"name": "downsample", "kernel_size": int(self.oversample)},
-                {"name": "pixel_offsets"},
-                {"name": "pixel_response"},
-                {"name": "jitter", "sigma": 1e-12, "kernel_size": 3},
+                {"name": "downsample", "kind": "Downsample", "kernel_size": int(self.oversample)},
+                {"name": "pixel_offsets", "kind": "ApplyPixelOffsets"},
+                {"name": "pixel_response", "kind": "ApplyPixelResponse"},
+                {"name": "jitter", "kind": "ApplyJitter", "sigma": 1e-12, "kernel_size": 3},
             ]
             object.__setattr__(self, "detector_layers", default_layers)
         elif not isinstance(self.detector_layers, list):

@@ -76,7 +76,7 @@ def test_optics_kind_matches_preset_suffix():
         assert kind == expected
 
 
-def test_detector_layers_have_name_keys():
+def test_detector_layers_have_name_and_kind_keys():
     for name in SYSTEM_PRESET_NAMES:
         loaded = load_system_preset(name, presets_dir=_system_presets_dir())
         layers = loaded["system"]["detector"]["layers"]
@@ -85,6 +85,7 @@ def test_detector_layers_have_name_keys():
         for layer in layers:
             assert isinstance(layer, dict)
             assert "name" in layer
+            assert "kind" in layer
 
 
 def test_preset_files_are_block_scoped():

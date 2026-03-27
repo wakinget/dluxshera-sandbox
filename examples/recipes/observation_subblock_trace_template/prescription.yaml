@@ -5,6 +5,7 @@ system:
   detector:
     layers:
       - name: downsample
+        kind: Downsample
         kernel_size: 3
 
 experiment:

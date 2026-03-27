@@ -77,3 +77,13 @@ def test_store_fallback_when_runtime_missing(monkeypatch):
     monkeypatch.setattr(binder, "_read_runtime_value", lambda field: (False, None))
 
     assert binder.plate_scale_as_per_pix == expected
+
+
+def test_binder_get_supports_detector_runtime_paths():
+    binder = _make_binder()
+
+    dx_map = binder.get("detector.layers.pixel_offsets.dx_map")
+    pixel_response = binder.get("detector.layers.pixel_response.pixel_response")
+
+    assert dx_map.shape == binder.detector.layers["pixel_offsets"].dx_map.shape
+    assert pixel_response.shape == binder.detector.layers["pixel_response"].pixel_response.shape

@@ -19,11 +19,14 @@ system:
     model: GSENSE2020BSI
     layers:
       - name: downsample
+        kind: Downsample
         kernel_size: 3
       - name: pixel_offsets
+        kind: ApplyPixelOffsets
         dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
         dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
       - name: pixel_response
+        kind: ApplyPixelResponse
         prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
 
 experiment:
@@ -63,8 +66,10 @@ experiment:
       model: GSENSE2020BSI
       layers:
         - name: downsample
+          kind: Downsample
           kernel_size: 3
         - name: pixel_offsets
+          kind: ApplyPixelOffsets
           dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
           dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
           knowledge_error:
@@ -72,6 +77,7 @@ experiment:
             scale: 1e-3
             realization_policy: per_run # fixed_per_experiment | per_run
         - name: pixel_response
+          kind: ApplyPixelResponse
           prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
           knowledge_error:
             model: gaussian

@@ -37,7 +37,7 @@ def preset_dirs(tmp_path):
             },
             "detector": {
                 "model": "gsense2020",
-                "layers": [{"name": "downsample", "factor": 2}],
+                "layers": [{"name": "downsample", "kind": "Downsample", "factor": 2}],
             },
         }
     }
@@ -114,7 +114,7 @@ def test_resolve_system_config_loads_preset_and_user_override_wins(preset_dirs):
             "preset": "TEST_PRESET",
             "source": {"n_lambda": 5},
             "optics": {"psf_npix": 256, "oversample": "4"},
-            "detector": {"layers": [{"name": "jitter", "sigma": 1e-3}]},
+            "detector": {"layers": [{"name": "jitter", "kind": "ApplyJitter", "sigma": 1e-3}]},
         },
         presets_dir=system_dir,
     )
@@ -122,7 +122,9 @@ def test_resolve_system_config_loads_preset_and_user_override_wins(preset_dirs):
     assert resolved["source"]["n_lambda"] == 5
     assert resolved["optics"]["psf_npix"] == 256
     assert resolved["optics"]["oversample"] == 4
-    assert resolved["detector"]["layers"] == [{"name": "jitter", "sigma": 1e-3}]
+    assert resolved["detector"]["layers"] == [
+        {"name": "jitter", "kind": "ApplyJitter", "sigma": 1e-3}
+    ]
 
 
 def test_resolve_experiment_config_loads_preset(preset_dirs):
@@ -246,3 +248,34 @@ def test_resolved_config_to_system_config(preset_dirs):
     assert isinstance(cfg, SheraThreePlaneConfig)
     assert cfg.psf_npix == 128
     assert cfg.oversample == 2
+
+
+def test_resolve_system_config_rejects_detector_layer_missing_kind(preset_dirs):
+    system_dir, _ = preset_dirs
+
+    with pytest.raises(ValueError, match=r"system\.detector\.layers\[0\]\.kind"):
+        resolve_system_config(
+            {
+                "preset": "TEST_PRESET",
+                "detector": {"layers": [{"name": "downsample", "kernel_size": 2}]},
+            },
+            presets_dir=system_dir,
+        )
+
+
+def test_resolve_system_config_rejects_duplicate_detector_layer_names(preset_dirs):
+    system_dir, _ = preset_dirs
+
+    with pytest.raises(ValueError, match="Duplicate detector layer name 'shared'"):
+        resolve_system_config(
+            {
+                "preset": "TEST_PRESET",
+                "detector": {
+                    "layers": [
+                        {"name": "shared", "kind": "Downsample", "kernel_size": 2},
+                        {"name": "shared", "kind": "ApplyJitter", "sigma": 1e-3},
+                    ]
+                },
+            },
+            presets_dir=system_dir,
+        )

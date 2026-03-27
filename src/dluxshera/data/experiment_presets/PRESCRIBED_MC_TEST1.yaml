@@ -4,18 +4,23 @@ system:
 #    model: HWK4123
 #    layers:
 #      - name: downsample
+#        kind: Downsample
 #        kernel_size: 3
   detector:
     model: GSENSE2020BSI
     layers:
       - name: downsample
+        kind: Downsample
         kernel_size: 3
       - name: pixel_offsets
+        kind: ApplyPixelOffsets
         dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
         dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
       - name: pixel_response
+        kind: ApplyPixelResponse
         prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
       - name: jitter
+        kind: ApplyJitter
 
 experiment:
   kind: prescribed_mc
@@ -53,14 +58,17 @@ experiment:
 #      model: GSENSE2020BSI
 #      layers:
 #        - name: downsample
+#          kind: Downsample
 #          kernel_size: 3
 #        - name: pixel_offsets
+#          kind: ApplyPixelOffsets
 #          dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
 #          dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
 #          knowledge_error:
 #            model: gaussian # gaussian | uniform
 #            scale: 1e-3
 #        - name: pixel_response
+#          kind: ApplyPixelResponse
 #          prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
 #          knowledge_error:
 #            model: gaussian

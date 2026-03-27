@@ -47,8 +47,10 @@ Outputs live under the experiment directory:
             detector:
               layers:
                 - name: downsample
+                  kind: Downsample
                   kernel_size: 3
                 - name: pixel_offsets
+                  kind: ApplyPixelOffsets
                   dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
                   dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
           
@@ -60,8 +62,10 @@ Outputs live under the experiment directory:
               detector:
                 layers:
                   - name: downsample
+                    kind: Downsample
                     kernel_size: 3        # <-- this too
                   - name: pixel_offsets
+                    kind: ApplyPixelOffsets
                     dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
                     dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
                     knowledge_error:

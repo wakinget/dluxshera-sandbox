@@ -129,8 +129,7 @@ def test_apply_pixel_offsets_grad_stable_for_cubic_identity():
 
 def test_build_detector_layer_pixel_offsets_default_interp_is_cubic():
     layer_name, layer_obj = build_detector_layer(
-        "pixel_offsets",
-        {"name": "pixel_offsets"},
+        {"name": "pixel_offsets", "kind": "ApplyPixelOffsets"},
         target_shape=(5, 5),
         base_seed=None,
     )

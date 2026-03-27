@@ -19,8 +19,10 @@ system:
     model: GSENSE2020BSI
     layers:
       - name: downsample
+        kind: Downsample
         kernel_size: 3
       - name: pixel_offsets
+        kind: ApplyPixelOffsets
         dx_path: data/pixel_offsets/DX_CAL_YYYYmmDD.npy
         dy_path: data/pixel_offsets/DY_CAL_YYYYmmDD.npy
 
