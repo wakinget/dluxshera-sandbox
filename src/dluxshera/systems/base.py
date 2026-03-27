@@ -26,7 +26,7 @@ def compose_forward_spec(system_cfg) -> ParamSpec:
     """
 
     from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
-    from ..components.sources import build_alpha_cen_contract
+    from ..components.sources import build_alpha_cen_contract, build_binary_target_contract
     from ..builders.detector import build_detector_contract
 
     system_block = system_cfg.get("system") if isinstance(system_cfg, Mapping) else None
@@ -64,6 +64,8 @@ def compose_forward_spec(system_cfg) -> ParamSpec:
 
     source_contract_builders: dict[str, Callable[..., ParamSpec]] = {
         "alpha_cen": build_alpha_cen_contract,
+        "binary": build_binary_target_contract,
+        "binary_target": build_binary_target_contract,
     }
     optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
         "two_plane": SheraTwoPlaneOptics.contract,
@@ -475,10 +477,11 @@ class SheraBinder:
         Source construction is typically lightweight; it is rebuilt for
         runtime updates even when optics are updated via bindings.
         """
-        from ..builders.source import build_alpha_cen_source
+        from ..builders.source import build_alpha_cen_source, build_binary_target_source
 
         source_builders: dict[str, Callable[..., object]] = {
-            "binary": build_alpha_cen_source,
+            "binary": build_binary_target_source,
+            "binary_target": build_binary_target_source,
             "alpha_cen": build_alpha_cen_source,
         }
 
