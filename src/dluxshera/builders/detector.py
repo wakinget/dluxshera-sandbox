@@ -253,10 +253,10 @@ def _parse_apply_convolution_kernel_cfg(
     kernel_kind = kernel_cfg.get("kind")
     if not isinstance(kernel_kind, str) or not kernel_kind.strip():
         raise ValueError(f"Missing required config key: {context}.kernel.kind")
-    if kernel_kind != "gaussian":
+    if kernel_kind not in {"gaussian", "box"}:
         raise ValueError(
             f"{context}.kernel.kind={kernel_kind!r} is not supported. "
-            "ApplyConvolution currently supports only kernel.kind='gaussian'."
+            "ApplyConvolution supports kernel.kind values ['gaussian', 'box']."
         )
 
     def _positive_float(key: str) -> float:
@@ -299,14 +299,20 @@ def _parse_apply_convolution_kernel_cfg(
             f"{context}.kernel.units must be one of ['detector_pix', 'psf_pix']."
         )
 
-    return {
+    parsed: dict[str, object] = {
         "kernel_kind": kernel_kind,
-        "sigma_x": _positive_float("sigma_x"),
-        "sigma_y": _positive_float("sigma_y"),
-        "theta_deg": _any_float("theta_deg"),
         "kernel_size": kernel_size,
         "units": units,
     }
+    if kernel_kind == "gaussian":
+        parsed["sigma_x"] = _positive_float("sigma_x")
+        parsed["sigma_y"] = _positive_float("sigma_y")
+        parsed["theta_deg"] = _any_float("theta_deg")
+    else:
+        parsed["width_x"] = _positive_float("width_x")
+        parsed["width_y"] = _positive_float("width_y")
+        parsed["theta_deg"] = 0.0
+    return parsed
 
 
 def build_detector_layer(
@@ -410,9 +416,11 @@ def build_detector_layer(
             name,
             ApplyConvolution(
                 kernel_kind=kernel_cfg["kernel_kind"],
-                sigma_x=kernel_cfg["sigma_x"],
-                sigma_y=kernel_cfg["sigma_y"],
-                theta_deg=kernel_cfg["theta_deg"],
+                sigma_x=kernel_cfg.get("sigma_x", 1.0),
+                sigma_y=kernel_cfg.get("sigma_y", 1.0),
+                width_x=kernel_cfg.get("width_x", 1.0),
+                width_y=kernel_cfg.get("width_y", 1.0),
+                theta_deg=kernel_cfg.get("theta_deg", 0.0),
                 kernel_size=kernel_cfg["kernel_size"],
                 units=kernel_cfg["units"],
                 detector_to_psf_scale=detector_to_psf_scale,
@@ -686,40 +694,83 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
                 layer_cfg,
                 context=f"system.detector.layers[{idx}]",
             )
+            fields.append(
+                ParamField(
+                    key=f"{prefix}.kernel_kind",
+                    group="detector",
+                    kind="primitive",
+                    dtype=str,
+                    shape=(),
+                    default=kernel_cfg["kernel_kind"],
+                    structural=True,
+                )
+            )
+            if kernel_cfg["kernel_kind"] == "gaussian":
+                fields.extend(
+                    [
+                        ParamField(
+                            key=f"{prefix}.sigma_x",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["sigma_x"],
+                            bounds=(0.0, None),
+                            structural=False,
+                            doc="Gaussian convolution sigma along x [runtime-overridable].",
+                        ),
+                        ParamField(
+                            key=f"{prefix}.sigma_y",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["sigma_y"],
+                            bounds=(0.0, None),
+                            structural=False,
+                            doc="Gaussian convolution sigma along y [runtime-overridable].",
+                        ),
+                        ParamField(
+                            key=f"{prefix}.theta_deg",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["theta_deg"],
+                            structural=False,
+                            doc="Gaussian convolution rotation angle [degrees, runtime-overridable].",
+                        ),
+                    ]
+                )
+            else:
+                fields.extend(
+                    [
+                        ParamField(
+                            key=f"{prefix}.width_x",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["width_x"],
+                            bounds=(0.0, None),
+                            structural=False,
+                            doc="Box convolution width along x [runtime-overridable].",
+                        ),
+                        ParamField(
+                            key=f"{prefix}.width_y",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["width_y"],
+                            bounds=(0.0, None),
+                            structural=False,
+                            doc="Box convolution width along y [runtime-overridable].",
+                        ),
+                    ]
+                )
             fields.extend(
                 [
-                    ParamField(
-                        key=f"{prefix}.sigma_x",
-                        group="detector",
-                        kind="primitive",
-                        dtype=float,
-                        shape=(),
-                        default=kernel_cfg["sigma_x"],
-                        bounds=(0.0, None),
-                        structural=False,
-                        doc="Gaussian convolution sigma along x [runtime-overridable].",
-                    ),
-                    ParamField(
-                        key=f"{prefix}.sigma_y",
-                        group="detector",
-                        kind="primitive",
-                        dtype=float,
-                        shape=(),
-                        default=kernel_cfg["sigma_y"],
-                        bounds=(0.0, None),
-                        structural=False,
-                        doc="Gaussian convolution sigma along y [runtime-overridable].",
-                    ),
-                    ParamField(
-                        key=f"{prefix}.theta_deg",
-                        group="detector",
-                        kind="primitive",
-                        dtype=float,
-                        shape=(),
-                        default=kernel_cfg["theta_deg"],
-                        structural=False,
-                        doc="Gaussian convolution rotation angle [degrees, runtime-overridable].",
-                    ),
                     ParamField(
                         key=f"{prefix}.kernel_size",
                         group="detector",
@@ -832,10 +883,17 @@ def apply_runtime_bindings(
             runtime_sigma_x = store.get(f"detector.layers.{layer_name}.sigma_x", default=None)
             runtime_sigma_y = store.get(f"detector.layers.{layer_name}.sigma_y", default=None)
             runtime_theta_deg = store.get(f"detector.layers.{layer_name}.theta_deg", default=None)
-            if (
-                runtime_sigma_x is not None
-                or runtime_sigma_y is not None
-                or runtime_theta_deg is not None
+            runtime_width_x = store.get(f"detector.layers.{layer_name}.width_x", default=None)
+            runtime_width_y = store.get(f"detector.layers.{layer_name}.width_y", default=None)
+            if any(
+                v is not None
+                for v in (
+                    runtime_sigma_x,
+                    runtime_sigma_y,
+                    runtime_theta_deg,
+                    runtime_width_x,
+                    runtime_width_y,
+                )
             ):
                 detector_updated = True
                 rebuilt_layers.append(
@@ -857,6 +915,16 @@ def apply_runtime_bindings(
                                 float(runtime_theta_deg)
                                 if runtime_theta_deg is not None
                                 else float(layer.theta_deg)
+                            ),
+                            width_x=(
+                                float(runtime_width_x)
+                                if runtime_width_x is not None
+                                else float(layer.width_x)
+                            ),
+                            width_y=(
+                                float(runtime_width_y)
+                                if runtime_width_y is not None
+                                else float(layer.width_y)
                             ),
                             kernel_size=int(layer.kernel_size),
                             units=str(layer.units),

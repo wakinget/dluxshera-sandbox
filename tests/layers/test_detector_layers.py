@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("interpax")
 
 from dLux.psfs import PSF
+from dLux.layers.detector_layers import Downsample
 
 from dluxshera.builders.detector import build_detector_layer
 from dluxshera.layers.detector_layers import ApplyConvolution, ApplyPixelOffsets
@@ -140,15 +141,124 @@ def test_apply_convolution_detector_pix_units_scale_to_psf_pixels():
 
 
 def test_apply_convolution_invalid_kernel_kind_raises():
-    with pytest.raises(ValueError, match="kernel_kind='gaussian'"):
+    with pytest.raises(ValueError, match="kernel_kind values"):
         ApplyConvolution(
-            kernel_kind="box",
+            kernel_kind="triangle",
             sigma_x=1.0,
             sigma_y=1.0,
             theta_deg=0.0,
             kernel_size=5,
             units="psf_pix",
         )
+
+
+def test_apply_convolution_box_preserves_shape_and_flux_for_well_padded_psf():
+    psf = _delta_psf(n=51)
+    layer = ApplyConvolution(
+        kernel_kind="box",
+        width_x=2.0,
+        width_y=4.0,
+        kernel_size=13,
+        units="psf_pix",
+    )
+
+    out = layer.apply(psf)
+
+    assert out.data.shape == psf.data.shape
+    assert jnp.isclose(jnp.sum(out.data), 1.0, atol=1e-6, rtol=1e-6)
+
+
+def test_apply_convolution_box_symmetry_for_equal_widths():
+    psf = _delta_psf(n=41)
+    layer = ApplyConvolution(
+        kernel_kind="box",
+        width_x=5.0,
+        width_y=5.0,
+        kernel_size=11,
+        units="psf_pix",
+    )
+
+    kernel = layer.generate_kernel()
+    assert jnp.allclose(kernel, kernel.T, atol=1e-7, rtol=1e-7)
+
+
+def test_apply_convolution_box_anisotropic_widths_change_axis_variance():
+    psf = _delta_psf(n=51)
+    layer = ApplyConvolution(
+        kernel_kind="box",
+        width_x=7.0,
+        width_y=3.0,
+        kernel_size=15,
+        units="psf_pix",
+    )
+
+    out = layer.apply(psf)
+    var_x, var_y, cov_xy = _weighted_moments(out.data)
+    assert abs(cov_xy) < 1e-6
+    assert var_x > 2.0 * var_y
+
+
+def test_apply_convolution_box_detector_pix_units_scale_to_psf_pixels():
+    detector_units = ApplyConvolution(
+        kernel_kind="box",
+        width_x=1.0,
+        width_y=0.5,
+        kernel_size=9,
+        units="detector_pix",
+        detector_to_psf_scale=3.0,
+    )
+    psf_units = ApplyConvolution(
+        kernel_kind="box",
+        width_x=3.0,
+        width_y=1.5,
+        kernel_size=9,
+        units="psf_pix",
+    )
+
+    assert jnp.allclose(
+        detector_units.generate_kernel(),
+        psf_units.generate_kernel(),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize(("width_x", "width_y"), [(0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, -1.0)])
+def test_apply_convolution_box_invalid_widths_raise(width_x, width_y):
+    with pytest.raises(ValueError, match="must be positive"):
+        ApplyConvolution(
+            kernel_kind="box",
+            width_x=width_x,
+            width_y=width_y,
+            kernel_size=7,
+            units="psf_pix",
+        )
+
+
+def test_apply_convolution_box_is_close_to_downsample_on_oversampled_grid():
+    # A 4x oversampled detector pixel aperture is approximated by a 4-PSF-pixel box.
+    # Exact equality is not expected because convolution+downsample and block-sum
+    # downsample order of operations differ at finite support.
+    n = 64
+    oversample = 4
+    image = _gaussian_image(n=n, sigma=5.0)
+    image = image / jnp.sum(image)
+    psf = PSF(data=image, pixel_scale=1.0)
+
+    box_layer = ApplyConvolution(
+        kernel_kind="box",
+        width_x=1.0,
+        width_y=1.0,
+        kernel_size=11,
+        units="detector_pix",
+        detector_to_psf_scale=oversample,
+    )
+    conv_then_down = Downsample(oversample).apply(box_layer.apply(psf)).data
+    down_only = Downsample(oversample).apply(psf).data
+
+    assert conv_then_down.shape == down_only.shape
+    assert jnp.isclose(jnp.sum(conv_then_down), jnp.sum(down_only), atol=1e-6, rtol=1e-6)
+    assert jnp.allclose(conv_then_down, down_only, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("kernel_size", [0, 2, -3])
@@ -330,3 +440,30 @@ def test_build_detector_layer_apply_convolution_builds_gaussian_layer():
     assert int(layer_obj.kernel_size) == 9
     assert layer_obj.units == "detector_pix"
     assert float(layer_obj.detector_to_psf_scale) == 3.0
+
+
+def test_build_detector_layer_apply_convolution_builds_box_layer():
+    layer_name, layer_obj = build_detector_layer(
+        {
+            "name": "pixel_mtf",
+            "kind": "ApplyConvolution",
+            "kernel": {
+                "kind": "box",
+                "width_x": 1.0,
+                "width_y": 0.7,
+                "kernel_size": 9,
+                "units": "detector_pix",
+            },
+        },
+        target_shape=(9, 9),
+        base_seed=None,
+        detector_to_psf_scale=2.0,
+    )
+
+    assert layer_name == "pixel_mtf"
+    assert isinstance(layer_obj, ApplyConvolution)
+    assert layer_obj.kernel_kind == "box"
+    assert float(layer_obj.width_x) == 1.0
+    assert float(layer_obj.width_y) == 0.7
+    assert int(layer_obj.kernel_size) == 9
+    assert layer_obj.units == "detector_pix"
