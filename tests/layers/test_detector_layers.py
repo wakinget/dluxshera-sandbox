@@ -7,13 +7,177 @@ pytest.importorskip("interpax")
 from dLux.psfs import PSF
 
 from dluxshera.builders.detector import build_detector_layer
-from dluxshera.layers.detector_layers import ApplyPixelOffsets
+from dluxshera.layers.detector_layers import ApplyConvolution, ApplyPixelOffsets
 
 
 def _gaussian_image(n: int = 17, sigma: float = 2.5):
     y, x = jnp.meshgrid(jnp.arange(n), jnp.arange(n), indexing="ij")
     c = (n - 1) / 2
     return jnp.exp(-((x - c) ** 2 + (y - c) ** 2) / (2 * sigma**2))
+
+
+def _delta_psf(n: int = 41) -> PSF:
+    data = jnp.zeros((n, n), dtype=float)
+    center = n // 2
+    data = data.at[center, center].set(1.0)
+    return PSF(data=data, pixel_scale=1.0)
+
+
+def _weighted_moments(image: jnp.ndarray) -> tuple[float, float, float]:
+    y, x = jnp.meshgrid(
+        jnp.arange(image.shape[0], dtype=float),
+        jnp.arange(image.shape[1], dtype=float),
+        indexing="ij",
+    )
+    total = jnp.sum(image)
+    x_mean = jnp.sum(image * x) / total
+    y_mean = jnp.sum(image * y) / total
+    dx = x - x_mean
+    dy = y - y_mean
+    var_x = jnp.sum(image * dx * dx) / total
+    var_y = jnp.sum(image * dy * dy) / total
+    cov_xy = jnp.sum(image * dx * dy) / total
+    return float(var_x), float(var_y), float(cov_xy)
+
+
+def _principal_axis_angle_deg(image: jnp.ndarray) -> float:
+    var_x, var_y, cov_xy = _weighted_moments(image)
+    return float(0.5 * jnp.rad2deg(jnp.arctan2(2.0 * cov_xy, var_x - var_y)))
+
+
+def test_apply_convolution_preserves_shape_and_flux_for_well_padded_psf():
+    psf = _delta_psf(n=51)
+    layer = ApplyConvolution(
+        kernel_kind="gaussian",
+        sigma_x=2.0,
+        sigma_y=1.5,
+        theta_deg=0.0,
+        kernel_size=11,
+        units="psf_pix",
+    )
+
+    out = layer.apply(psf)
+
+    assert out.data.shape == psf.data.shape
+    assert jnp.isclose(jnp.sum(out.data), 1.0, atol=1e-6, rtol=1e-6)
+
+
+def test_apply_convolution_axis_aligned_anisotropic_gaussian_behaves_as_expected():
+    psf = _delta_psf(n=51)
+    layer = ApplyConvolution(
+        kernel_kind="gaussian",
+        sigma_x=3.0,
+        sigma_y=1.0,
+        theta_deg=0.0,
+        kernel_size=17,
+        units="psf_pix",
+    )
+
+    out = layer.apply(psf)
+    var_x, var_y, cov_xy = _weighted_moments(out.data)
+
+    assert abs(cov_xy) < 1e-6
+    assert var_x > 2.0 * var_y
+
+
+def test_apply_convolution_rotation_changes_anisotropic_blur_orientation():
+    psf = _delta_psf(n=51)
+    theta_zero = ApplyConvolution(
+        kernel_kind="gaussian",
+        sigma_x=3.0,
+        sigma_y=1.0,
+        theta_deg=0.0,
+        kernel_size=17,
+        units="psf_pix",
+    )
+    theta_rot = ApplyConvolution(
+        kernel_kind="gaussian",
+        sigma_x=3.0,
+        sigma_y=1.0,
+        theta_deg=45.0,
+        kernel_size=17,
+        units="psf_pix",
+    )
+
+    out_zero = theta_zero.apply(psf)
+    out_rot = theta_rot.apply(psf)
+
+    _, _, cov_zero = _weighted_moments(out_zero.data)
+    _, _, cov_rot = _weighted_moments(out_rot.data)
+    angle_rot = abs(_principal_axis_angle_deg(out_rot.data))
+
+    assert abs(cov_zero) < 1e-6
+    assert abs(cov_rot) > 0.1
+    assert 30.0 < angle_rot < 60.0
+    assert not jnp.allclose(out_zero.data, out_rot.data)
+
+
+def test_apply_convolution_detector_pix_units_scale_to_psf_pixels():
+    detector_units = ApplyConvolution(
+        kernel_kind="gaussian",
+        sigma_x=0.5,
+        sigma_y=0.25,
+        theta_deg=15.0,
+        kernel_size=9,
+        units="detector_pix",
+        detector_to_psf_scale=3.0,
+    )
+    psf_units = ApplyConvolution(
+        kernel_kind="gaussian",
+        sigma_x=1.5,
+        sigma_y=0.75,
+        theta_deg=15.0,
+        kernel_size=9,
+        units="psf_pix",
+    )
+
+    assert jnp.allclose(
+        detector_units.generate_kernel(),
+        psf_units.generate_kernel(),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+def test_apply_convolution_invalid_kernel_kind_raises():
+    with pytest.raises(ValueError, match="kernel_kind='gaussian'"):
+        ApplyConvolution(
+            kernel_kind="box",
+            sigma_x=1.0,
+            sigma_y=1.0,
+            theta_deg=0.0,
+            kernel_size=5,
+            units="psf_pix",
+        )
+
+
+@pytest.mark.parametrize("kernel_size", [0, 2, -3])
+def test_apply_convolution_invalid_kernel_size_raises(kernel_size):
+    with pytest.raises(ValueError, match="positive odd integer"):
+        ApplyConvolution(
+            kernel_kind="gaussian",
+            sigma_x=1.0,
+            sigma_y=1.0,
+            theta_deg=0.0,
+            kernel_size=kernel_size,
+            units="psf_pix",
+        )
+
+
+@pytest.mark.parametrize(
+    ("sigma_x", "sigma_y"),
+    [(0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, -1.0)],
+)
+def test_apply_convolution_invalid_sigma_raises(sigma_x, sigma_y):
+    with pytest.raises(ValueError, match="must be positive"):
+        ApplyConvolution(
+            kernel_kind="gaussian",
+            sigma_x=sigma_x,
+            sigma_y=sigma_y,
+            theta_deg=0.0,
+            kernel_size=5,
+            units="psf_pix",
+        )
 
 
 def test_apply_pixel_offsets_init_validation():
@@ -136,3 +300,33 @@ def test_build_detector_layer_pixel_offsets_default_interp_is_cubic():
     assert layer_name == "pixel_offsets"
     assert isinstance(layer_obj, ApplyPixelOffsets)
     assert layer_obj.interp_method == "cubic"
+
+
+def test_build_detector_layer_apply_convolution_builds_gaussian_layer():
+    layer_name, layer_obj = build_detector_layer(
+        {
+            "name": "diffusion",
+            "kind": "ApplyConvolution",
+            "kernel": {
+                "kind": "gaussian",
+                "sigma_x": 0.3,
+                "sigma_y": 0.2,
+                "theta_deg": 15.0,
+                "kernel_size": 9,
+                "units": "detector_pix",
+            },
+        },
+        target_shape=(9, 9),
+        base_seed=None,
+        detector_to_psf_scale=3.0,
+    )
+
+    assert layer_name == "diffusion"
+    assert isinstance(layer_obj, ApplyConvolution)
+    assert layer_obj.kernel_kind == "gaussian"
+    assert float(layer_obj.sigma_x) == 0.3
+    assert float(layer_obj.sigma_y) == 0.2
+    assert float(layer_obj.theta_deg) == 15.0
+    assert int(layer_obj.kernel_size) == 9
+    assert layer_obj.units == "detector_pix"
+    assert float(layer_obj.detector_to_psf_scale) == 3.0

@@ -6,7 +6,7 @@ objects. It owns:
   - calibration/path resolution for detector maps
   - detector-layer construction from declarative layers
   - detector contract construction (ParamSpec)
-  - lightweight runtime patching for detector jitters/bindings
+  - lightweight runtime patching for detector-layer bindings
 """
 
 from __future__ import annotations
@@ -24,19 +24,20 @@ from ..components.detectors import (
     SheraDetector,
 )
 from ..params.spec import ParamField, ParamSpec
-from ..layers.detector_layers import ApplyPixelOffsets
+from ..layers.detector_layers import ApplyConvolution, ApplyPixelOffsets
 from dLux.layers.detector_layers import ApplyJitter, ApplyPixelResponse, Downsample
 from ..utils.noise import apply_knowledge_error
 
 
-# Runtime bindings for detectors are currently empty; detector runtime updates are
-# limited to jitter (handled explicitly in apply_runtime_bindings).
+# Runtime bindings for detectors are currently empty; supported detector runtime
+# updates are handled explicitly in ``apply_runtime_bindings``.
 DETECTOR_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
 SUPPORTED_DETECTOR_LAYER_KINDS: tuple[str, ...] = (
     "Downsample",
     "ApplyPixelOffsets",
     "ApplyPixelResponse",
     "ApplyJitter",
+    "ApplyConvolution",
 )
 
 
@@ -210,21 +211,121 @@ def _layer_contract_prefix(layer_name: str) -> str:
     return f"detector.layers.{layer_name}"
 
 
+def _downsample_kernel_size(layer_cfg: Mapping, *, context: str) -> int:
+    """Return the configured downsample factor for a detector layer."""
+    kernel_size = layer_cfg.get("kernel_size", layer_cfg.get("factor", None))
+    if kernel_size is None:
+        raise ValueError(f"{context} requires `kernel_size` (or alias `factor`).")
+    return int(kernel_size)
+
+
+def _detector_to_psf_scale_by_layer_name(layers_cfg: list[Mapping]) -> dict[str, float]:
+    """Return detector-pixel to current-grid scaling factors for each layer.
+
+    The current detector stack changes sampling only via ``Downsample`` layers,
+    so the number of current-grid pixels per detector pixel at a given layer is
+    the product of downstream downsample factors.
+    """
+    scale_by_name: dict[str, float] = {}
+    downstream_scale = 1.0
+    for idx in range(len(layers_cfg) - 1, -1, -1):
+        layer_cfg = layers_cfg[idx]
+        layer_name = layer_cfg["name"]
+        scale_by_name[layer_name] = downstream_scale
+        if layer_cfg["kind"] == "Downsample":
+            downstream_scale *= _downsample_kernel_size(
+                layer_cfg,
+                context=f"system.detector.layers[{idx}]",
+            )
+    return scale_by_name
+
+
+def _parse_apply_convolution_kernel_cfg(
+    layer_cfg: Mapping,
+    *,
+    context: str,
+) -> dict[str, object]:
+    """Parse and validate the nested ``ApplyConvolution.kernel`` mapping."""
+    kernel_cfg = layer_cfg.get("kernel", None)
+    if not isinstance(kernel_cfg, Mapping):
+        raise ValueError(f"{context}.kernel must be a mapping/dict.")
+
+    kernel_kind = kernel_cfg.get("kind")
+    if not isinstance(kernel_kind, str) or not kernel_kind.strip():
+        raise ValueError(f"Missing required config key: {context}.kernel.kind")
+    if kernel_kind != "gaussian":
+        raise ValueError(
+            f"{context}.kernel.kind={kernel_kind!r} is not supported. "
+            "ApplyConvolution currently supports only kernel.kind='gaussian'."
+        )
+
+    def _positive_float(key: str) -> float:
+        if key not in kernel_cfg:
+            raise ValueError(f"Missing required config key: {context}.kernel.{key}")
+        try:
+            value = float(kernel_cfg[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context}.kernel.{key} must be a positive number.") from exc
+        if value <= 0.0:
+            raise ValueError(f"{context}.kernel.{key} must be a positive number.")
+        return value
+
+    def _any_float(key: str) -> float:
+        if key not in kernel_cfg:
+            raise ValueError(f"Missing required config key: {context}.kernel.{key}")
+        try:
+            return float(kernel_cfg[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context}.kernel.{key} must be numeric.") from exc
+
+    if "kernel_size" not in kernel_cfg:
+        raise ValueError(f"Missing required config key: {context}.kernel.kernel_size")
+    raw_kernel_size = kernel_cfg["kernel_size"]
+    try:
+        kernel_size = int(raw_kernel_size)
+        kernel_size_float = float(raw_kernel_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{context}.kernel.kernel_size must be a positive odd integer."
+        ) from exc
+    if kernel_size_float != float(kernel_size) or kernel_size <= 0 or kernel_size % 2 == 0:
+        raise ValueError(f"{context}.kernel.kernel_size must be a positive odd integer.")
+
+    units = kernel_cfg.get("units")
+    if not isinstance(units, str) or not units.strip():
+        raise ValueError(f"Missing required config key: {context}.kernel.units")
+    if units not in {"detector_pix", "psf_pix"}:
+        raise ValueError(
+            f"{context}.kernel.units must be one of ['detector_pix', 'psf_pix']."
+        )
+
+    return {
+        "kernel_kind": kernel_kind,
+        "sigma_x": _positive_float("sigma_x"),
+        "sigma_y": _positive_float("sigma_y"),
+        "theta_deg": _any_float("theta_deg"),
+        "kernel_size": kernel_size,
+        "units": units,
+    }
+
+
 def build_detector_layer(
     layer_cfg: Mapping,
     *,
     target_shape: tuple[int, int],
     base_seed: int | None = None,
+    detector_to_psf_scale: float = 1.0,
 ) -> tuple[str, object]:
     """Build a detector layer from declarative layer config."""
     name = layer_cfg["name"]
     kind = layer_cfg["kind"]
 
     if kind == "Downsample":
-        kernel_size = layer_cfg.get("kernel_size", layer_cfg.get("factor", None))
-        if kernel_size is None:
-            raise ValueError("downsample layer requires `kernel_size` (or alias `factor`).")
-        return (name, Downsample(int(kernel_size)))
+        kernel_size = _downsample_kernel_size(
+            layer_cfg,
+            context=f"detector layer {name!r}",
+        )
+        return (name, Downsample(kernel_size))
 
     if kind == "ApplyPixelOffsets":
         dx_path = _resolve_repo_path(layer_cfg.get("dx_path", None))
@@ -299,6 +400,24 @@ def build_detector_layer(
         sigma = float(layer_cfg.get("sigma", 1e-12))
         kernel_size = int(layer_cfg.get("kernel_size", 3))
         return (name, ApplyJitter(sigma=sigma, kernel_size=kernel_size))
+
+    if kind == "ApplyConvolution":
+        kernel_cfg = _parse_apply_convolution_kernel_cfg(
+            layer_cfg,
+            context=f"detector layer {name!r}",
+        )
+        return (
+            name,
+            ApplyConvolution(
+                kernel_kind=kernel_cfg["kernel_kind"],
+                sigma_x=kernel_cfg["sigma_x"],
+                sigma_y=kernel_cfg["sigma_y"],
+                theta_deg=kernel_cfg["theta_deg"],
+                kernel_size=kernel_cfg["kernel_size"],
+                units=kernel_cfg["units"],
+                detector_to_psf_scale=detector_to_psf_scale,
+            ),
+        )
 
     supported = ", ".join(SUPPORTED_DETECTOR_LAYER_KINDS)
     raise ValueError(
@@ -452,7 +571,7 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
         resolved = _resolve_repo_path(raw)
         return str(resolved) if resolved is not None else None
 
-    for layer_cfg in layers_cfg:
+    for idx, layer_cfg in enumerate(layers_cfg):
         layer_name = layer_cfg["name"]
         layer_kind = layer_cfg["kind"]
         prefix = _layer_contract_prefix(layer_name)
@@ -545,9 +664,10 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
             continue
 
         if layer_kind == "Downsample":
-            kernel_size = layer_cfg.get("kernel_size", layer_cfg.get("factor", 1))
-            if kernel_size is None:
-                kernel_size = 1
+            kernel_size = _downsample_kernel_size(
+                layer_cfg,
+                context=f"system.detector.layers[{idx}]",
+            )
             fields.append(
                 ParamField(
                     key=f"{prefix}.kernel_size",
@@ -558,6 +678,67 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
                     default=int(kernel_size),
                     structural=False,
                 )
+            )
+            continue
+
+        if layer_kind == "ApplyConvolution":
+            kernel_cfg = _parse_apply_convolution_kernel_cfg(
+                layer_cfg,
+                context=f"system.detector.layers[{idx}]",
+            )
+            fields.extend(
+                [
+                    ParamField(
+                        key=f"{prefix}.sigma_x",
+                        group="detector",
+                        kind="primitive",
+                        dtype=float,
+                        shape=(),
+                        default=kernel_cfg["sigma_x"],
+                        bounds=(0.0, None),
+                        structural=False,
+                        doc="Gaussian convolution sigma along x [runtime-overridable].",
+                    ),
+                    ParamField(
+                        key=f"{prefix}.sigma_y",
+                        group="detector",
+                        kind="primitive",
+                        dtype=float,
+                        shape=(),
+                        default=kernel_cfg["sigma_y"],
+                        bounds=(0.0, None),
+                        structural=False,
+                        doc="Gaussian convolution sigma along y [runtime-overridable].",
+                    ),
+                    ParamField(
+                        key=f"{prefix}.theta_deg",
+                        group="detector",
+                        kind="primitive",
+                        dtype=float,
+                        shape=(),
+                        default=kernel_cfg["theta_deg"],
+                        structural=False,
+                        doc="Gaussian convolution rotation angle [degrees, runtime-overridable].",
+                    ),
+                    ParamField(
+                        key=f"{prefix}.kernel_size",
+                        group="detector",
+                        kind="primitive",
+                        dtype=int,
+                        shape=(),
+                        default=kernel_cfg["kernel_size"],
+                        structural=True,
+                    ),
+                    ParamField(
+                        key=f"{prefix}.units",
+                        group="detector",
+                        kind="primitive",
+                        dtype=str,
+                        shape=(),
+                        default=kernel_cfg["units"],
+                        structural=True,
+                    ),
+                ]
             )
             continue
 
@@ -597,11 +778,13 @@ def build_detector(cfg, *, base_seed: int | None = None) -> tuple[SheraDetector,
         raise ValueError("system.optics.psf_npix is required to build the detector.")
 
     target_shape = (int(psf_npix), int(psf_npix))
+    detector_to_psf_scale = _detector_to_psf_scale_by_layer_name(detector_layers_cfg)
     layers = [
         build_detector_layer(
             layer_cfg,
             target_shape=target_shape,
             base_seed=base_seed,
+            detector_to_psf_scale=detector_to_psf_scale[layer_cfg["name"]],
         )
         for layer_cfg in detector_layers_cfg
     ]
@@ -620,10 +803,11 @@ def apply_runtime_bindings(
 ) -> SheraDetector:
     """Apply runtime ParameterStore overrides onto a cached detector.
 
-    Scope is intentionally narrow: jitter sigma can be overridden directly,
-    and any explicit detector bindings (currently none) would be applied via
-    ``detector.set``. Structural detector changes are still handled via
-    binder-level rebuilds.
+    Scope is intentionally narrow: selected detector-layer primitives such as
+    jitter sigma and convolution Gaussian parameters can be overridden
+    directly, and any explicit detector bindings (currently none) would be
+    applied via ``detector.set``. Structural detector changes are still
+    handled via binder-level rebuilds.
     """
 
     if store is None:
@@ -644,6 +828,44 @@ def apply_runtime_bindings(
                     ),
                 )
             )
+        elif isinstance(layer, ApplyConvolution):
+            runtime_sigma_x = store.get(f"detector.layers.{layer_name}.sigma_x", default=None)
+            runtime_sigma_y = store.get(f"detector.layers.{layer_name}.sigma_y", default=None)
+            runtime_theta_deg = store.get(f"detector.layers.{layer_name}.theta_deg", default=None)
+            if (
+                runtime_sigma_x is not None
+                or runtime_sigma_y is not None
+                or runtime_theta_deg is not None
+            ):
+                detector_updated = True
+                rebuilt_layers.append(
+                    (
+                        layer_name,
+                        ApplyConvolution(
+                            kernel_kind=layer.kernel_kind,
+                            sigma_x=(
+                                float(runtime_sigma_x)
+                                if runtime_sigma_x is not None
+                                else float(layer.sigma_x)
+                            ),
+                            sigma_y=(
+                                float(runtime_sigma_y)
+                                if runtime_sigma_y is not None
+                                else float(layer.sigma_y)
+                            ),
+                            theta_deg=(
+                                float(runtime_theta_deg)
+                                if runtime_theta_deg is not None
+                                else float(layer.theta_deg)
+                            ),
+                            kernel_size=int(layer.kernel_size),
+                            units=str(layer.units),
+                            detector_to_psf_scale=float(layer.detector_to_psf_scale),
+                        ),
+                    )
+                )
+            else:
+                rebuilt_layers.append((layer_name, layer))
         else:
             rebuilt_layers.append((layer_name, layer))
 

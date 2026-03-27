@@ -189,6 +189,18 @@ def main(
     # detector_cfg["layers"] = [  # This example defines two named layers
     #     {"name": "downsample", "kind": "Downsample", "factor": 3},
     #     {"name": "jitter", "kind": "ApplyJitter", "sigma": 1.0e-1},
+    #     {
+    #         "name": "diffusion",
+    #         "kind": "ApplyConvolution",
+    #         "kernel": {
+    #             "kind": "gaussian",
+    #             "sigma_x": 0.30,
+    #             "sigma_y": 0.20,
+    #             "theta_deg": 15.0,
+    #             "kernel_size": 9,
+    #             "units": "detector_pix",
+    #         },
+    #     },
     # ]
     # system_cfg["detector"] = detector_cfg # Insert into the system config
     # -------------------------------------------------------------

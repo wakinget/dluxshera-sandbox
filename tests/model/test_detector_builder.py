@@ -4,10 +4,29 @@ import pytest
 
 from dluxshera.builders.detector import build_detector, build_detector_contract
 from dluxshera.components.detectors import GSENSE2020BSI_SPEC, HWK4123_SPEC, SheraDetector
+from dluxshera.layers import ApplyConvolution
 
 
 def _layer(name: str, kind: str, **kwargs):
     return {"name": name, "kind": kind, **kwargs}
+
+
+def _gaussian_kernel(
+    *,
+    sigma_x: float,
+    sigma_y: float,
+    theta_deg: float = 0.0,
+    kernel_size: int = 9,
+    units: str = "psf_pix",
+):
+    return {
+        "kind": "gaussian",
+        "sigma_x": sigma_x,
+        "sigma_y": sigma_y,
+        "theta_deg": theta_deg,
+        "kernel_size": kernel_size,
+        "units": units,
+    }
 
 
 def test_build_detector_accepts_repeated_layer_kinds_and_preserves_order():
@@ -38,6 +57,47 @@ def test_build_detector_accepts_repeated_layer_kinds_and_preserves_order():
     assert int(detector.layers["jitter_b"].kernel_size) == 5
 
 
+def test_build_detector_accepts_repeated_apply_convolution_layers_with_distinct_names():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 16},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "diffusion_a",
+                        "ApplyConvolution",
+                        kernel=_gaussian_kernel(
+                            sigma_x=0.30,
+                            sigma_y=0.20,
+                            theta_deg=0.0,
+                            kernel_size=9,
+                        ),
+                    ),
+                    _layer(
+                        "diffusion_b",
+                        "ApplyConvolution",
+                        kernel=_gaussian_kernel(
+                            sigma_x=0.60,
+                            sigma_y=0.10,
+                            theta_deg=35.0,
+                            kernel_size=11,
+                        ),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector, _contract = build_detector(cfg)
+
+    assert list(detector.layers.keys()) == ["diffusion_a", "diffusion_b"]
+    assert isinstance(detector.layers["diffusion_a"], ApplyConvolution)
+    assert isinstance(detector.layers["diffusion_b"], ApplyConvolution)
+    assert float(detector.layers["diffusion_a"].sigma_x) == 0.30
+    assert float(detector.layers["diffusion_b"].theta_deg) == 35.0
+    assert int(detector.layers["diffusion_b"].kernel_size) == 11
+
+
 def test_detector_contract_uses_name_scoped_layer_keys_for_repeated_kinds():
     cfg = {
         "system": {
@@ -56,6 +116,36 @@ def test_detector_contract_uses_name_scoped_layer_keys_for_repeated_kinds():
     assert "detector.layers.jitter_a.sigma" in detector_contract
     assert "detector.layers.jitter_b.sigma" in detector_contract
     assert "detector.jitter.sigma" not in detector_contract
+
+
+def test_detector_contract_uses_name_scoped_convolution_keys_for_repeated_kinds():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 8},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "diffusion_a",
+                        "ApplyConvolution",
+                        kernel=_gaussian_kernel(sigma_x=0.2, sigma_y=0.1),
+                    ),
+                    _layer(
+                        "diffusion_b",
+                        "ApplyConvolution",
+                        kernel=_gaussian_kernel(sigma_x=0.4, sigma_y=0.3),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector_contract = build_detector_contract(cfg)
+
+    assert "detector.layers.diffusion_a.sigma_x" in detector_contract
+    assert "detector.layers.diffusion_a.sigma_y" in detector_contract
+    assert "detector.layers.diffusion_b.theta_deg" in detector_contract
+    assert "detector.layers.diffusion_b.kernel_size" in detector_contract
+    assert "detector.layers.ApplyConvolution.sigma_x" not in detector_contract
 
 
 def test_build_detector_duplicate_layer_names_raise_clear_error():
@@ -97,6 +187,69 @@ def test_build_detector_missing_layer_kind_raises_clear_error():
 
     with pytest.raises(ValueError, match=r"system\.detector\.layers\[0\]\.kind"):
         build_detector(cfg)
+
+
+def test_build_detector_rejects_non_gaussian_apply_convolution_kernel_kind():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 8},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "diffusion",
+                        "ApplyConvolution",
+                        kernel={
+                            "kind": "box",
+                            "sigma_x": 0.2,
+                            "sigma_y": 0.2,
+                            "theta_deg": 0.0,
+                            "kernel_size": 5,
+                            "units": "psf_pix",
+                        },
+                    )
+                ]
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="kernel.kind='gaussian'"):
+        build_detector(cfg)
+
+
+def test_build_detector_computes_detector_pix_convolution_scale_from_downstream_downsample():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 24},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "diffusion_pre",
+                        "ApplyConvolution",
+                        kernel=_gaussian_kernel(
+                            sigma_x=0.3,
+                            sigma_y=0.2,
+                            units="detector_pix",
+                        ),
+                    ),
+                    _layer("downsample", "Downsample", kernel_size=4),
+                    _layer(
+                        "diffusion_post",
+                        "ApplyConvolution",
+                        kernel=_gaussian_kernel(
+                            sigma_x=0.3,
+                            sigma_y=0.2,
+                            units="detector_pix",
+                        ),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector, _contract = build_detector(cfg)
+
+    assert float(detector.layers["diffusion_pre"].detector_to_psf_scale) == 4.0
+    assert float(detector.layers["diffusion_post"].detector_to_psf_scale) == 1.0
 
 
 def test_build_detector_conditions_larger_maps_with_center_crop_and_warns(tmp_path):

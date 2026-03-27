@@ -127,6 +127,48 @@ def test_resolve_system_config_loads_preset_and_user_override_wins(preset_dirs):
     ]
 
 
+def test_resolve_system_config_preserves_apply_convolution_kernel_mapping(preset_dirs):
+    system_dir, _ = preset_dirs
+
+    resolved = resolve_system_config(
+        {
+            "preset": "TEST_PRESET",
+            "detector": {
+                "layers": [
+                    {
+                        "name": "diffusion",
+                        "kind": "ApplyConvolution",
+                        "kernel": {
+                            "kind": "gaussian",
+                            "sigma_x": 0.3,
+                            "sigma_y": 0.2,
+                            "theta_deg": 15.0,
+                            "kernel_size": 9,
+                            "units": "detector_pix",
+                        },
+                    }
+                ]
+            },
+        },
+        presets_dir=system_dir,
+    )
+
+    assert resolved["detector"]["layers"] == [
+        {
+            "name": "diffusion",
+            "kind": "ApplyConvolution",
+            "kernel": {
+                "kind": "gaussian",
+                "sigma_x": 0.3,
+                "sigma_y": 0.2,
+                "theta_deg": 15.0,
+                "kernel_size": 9,
+                "units": "detector_pix",
+            },
+        }
+    ]
+
+
 def test_resolve_experiment_config_loads_preset(preset_dirs):
     _, experiment_dir = preset_dirs
     resolved = resolve_experiment_config(
