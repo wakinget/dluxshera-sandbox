@@ -1,6 +1,7 @@
 system:
   source:
     kind: alpha_cen
+    target: ALPHA_CEN
     wavelength_m: 5.5e-07
     bandwidth_m: 1.1e-07
     n_lambda: 3

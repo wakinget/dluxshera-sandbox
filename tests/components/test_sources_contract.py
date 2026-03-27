@@ -1,4 +1,8 @@
-from dluxshera.components.sources import build_alpha_cen_contract
+from dluxshera.components.sources import (
+    build_alpha_cen_contract,
+    build_binary_target_contract,
+    get_target_spec,
+)
 from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 
 
@@ -26,3 +30,22 @@ def test_alpha_cen_contract_keys_and_structural_flags():
         expected_shape = (2,) if key == "source.raw_fluxes" else ()
         assert field.shape == expected_shape
         assert field.structural is structural
+
+
+def test_binary_target_contract_uses_target_seed_defaults():
+    spec = build_binary_target_contract(
+        {
+            "source": {
+                "kind": "binary_target",
+                "target": "ALPHA_CEN",
+                "wavelength_m": 550e-9,
+                "bandwidth_m": 100e-9,
+                "n_lambda": 3,
+            }
+        }
+    )
+
+    alpha = get_target_spec("ALPHA_CEN")
+    assert spec.get("source.separation_as").default == alpha.nominal_separation_as
+    assert spec.get("source.position_angle_deg").default == alpha.nominal_position_angle_deg
+    assert spec.get("source.contrast").default == alpha.nominal_contrast
