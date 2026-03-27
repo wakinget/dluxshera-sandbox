@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import pytest
 
 pytest.importorskip("interpax")
+import interpax
 
 from dLux.psfs import PSF
 from dLux.layers.detector_layers import Downsample
@@ -44,6 +45,36 @@ def _weighted_moments(image: jnp.ndarray) -> tuple[float, float, float]:
 def _principal_axis_angle_deg(image: jnp.ndarray) -> float:
     var_x, var_y, cov_xy = _weighted_moments(image)
     return float(0.5 * jnp.rad2deg(jnp.arctan2(2.0 * cov_xy, var_x - var_y)))
+
+
+def _projected_variance(image: jnp.ndarray, theta_deg: float) -> float:
+    var_x, var_y, cov_xy = _weighted_moments(image)
+    theta = jnp.deg2rad(theta_deg)
+    c = jnp.cos(theta)
+    s = jnp.sin(theta)
+    return float(c * c * var_x + s * s * var_y + 2.0 * c * s * cov_xy)
+
+
+def _shift_image_linear(image: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
+    height, width = image.shape
+    y, x = jnp.meshgrid(
+        jnp.arange(height, dtype=float),
+        jnp.arange(width, dtype=float),
+        indexing="ij",
+    )
+    xq = jnp.clip(x - dx, 0.0, width - 1.0)
+    yq = jnp.clip(y - dy, 0.0, height - 1.0)
+    f = image.T
+    shifted_flat = interpax.interp2d(
+        xq.reshape(-1),
+        yq.reshape(-1),
+        jnp.arange(width, dtype=float),
+        jnp.arange(height, dtype=float),
+        f,
+        method="linear",
+        extrap=False,
+    )
+    return shifted_flat.reshape(height, width)
 
 
 def test_apply_convolution_preserves_shape_and_flux_for_well_padded_psf():
@@ -259,6 +290,177 @@ def test_apply_convolution_box_is_close_to_downsample_on_oversampled_grid():
     assert conv_then_down.shape == down_only.shape
     assert jnp.isclose(jnp.sum(conv_then_down), jnp.sum(down_only), atol=1e-6, rtol=1e-6)
     assert jnp.allclose(conv_then_down, down_only, atol=2e-2, rtol=2e-2)
+
+
+def test_apply_convolution_line_preserves_shape_and_flux_for_well_padded_psf():
+    psf = _delta_psf(n=71)
+    layer = ApplyConvolution(
+        kernel_kind="line",
+        length=7.0,
+        theta_deg=25.0,
+        sigma_perp=0.7,
+        kernel_size=31,
+        units="psf_pix",
+    )
+
+    out = layer.apply(psf)
+
+    assert out.data.shape == psf.data.shape
+    assert jnp.isclose(jnp.sum(out.data), 1.0, atol=1e-6, rtol=1e-6)
+
+
+def test_apply_convolution_line_orientation_tracks_theta():
+    psf = _delta_psf(n=71)
+    layer = ApplyConvolution(
+        kernel_kind="line",
+        length=9.0,
+        theta_deg=35.0,
+        sigma_perp=0.6,
+        kernel_size=33,
+        units="psf_pix",
+    )
+    out = layer.apply(psf)
+    angle = abs(_principal_axis_angle_deg(out.data))
+    assert 20.0 < angle < 50.0
+
+
+def test_apply_convolution_line_longer_length_increases_along_track_extent():
+    psf = _delta_psf(n=71)
+    theta = 30.0
+    short = ApplyConvolution(
+        kernel_kind="line",
+        length=4.0,
+        theta_deg=theta,
+        sigma_perp=0.4,
+        kernel_size=31,
+        units="psf_pix",
+    ).apply(psf)
+    long = ApplyConvolution(
+        kernel_kind="line",
+        length=10.0,
+        theta_deg=theta,
+        sigma_perp=0.4,
+        kernel_size=31,
+        units="psf_pix",
+    ).apply(psf)
+
+    along_short = _projected_variance(short.data, theta)
+    along_long = _projected_variance(long.data, theta)
+    assert along_long > along_short
+
+
+def test_apply_convolution_line_larger_sigma_perp_increases_cross_track_thickness():
+    psf = _delta_psf(n=71)
+    theta = 12.0
+    thin = ApplyConvolution(
+        kernel_kind="line",
+        length=8.0,
+        theta_deg=theta,
+        sigma_perp=0.2,
+        kernel_size=31,
+        units="psf_pix",
+    ).apply(psf)
+    thick = ApplyConvolution(
+        kernel_kind="line",
+        length=8.0,
+        theta_deg=theta,
+        sigma_perp=1.0,
+        kernel_size=31,
+        units="psf_pix",
+    ).apply(psf)
+
+    cross_theta = theta + 90.0
+    cross_thin = _projected_variance(thin.data, cross_theta)
+    cross_thick = _projected_variance(thick.data, cross_theta)
+    assert cross_thick > cross_thin
+
+
+def test_apply_convolution_line_detector_pix_units_scale_to_psf_pixels():
+    detector_units = ApplyConvolution(
+        kernel_kind="line",
+        length=2.0,
+        theta_deg=20.0,
+        sigma_perp=0.25,
+        kernel_size=21,
+        units="detector_pix",
+        detector_to_psf_scale=3.0,
+    )
+    psf_units = ApplyConvolution(
+        kernel_kind="line",
+        length=6.0,
+        theta_deg=20.0,
+        sigma_perp=0.75,
+        kernel_size=21,
+        units="psf_pix",
+    )
+
+    assert jnp.allclose(
+        detector_units.generate_kernel(),
+        psf_units.generate_kernel(),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+def test_apply_convolution_line_is_reasonable_approximation_to_shift_and_coadd_smear():
+    # Approximate equivalence test: line-kernel convolution integrates motion
+    # continuously, while this reference uses a small discrete shift-and-coadd.
+    # We only require close agreement to modest tolerance.
+    psf0 = _gaussian_image(n=81, sigma=2.0)
+    psf0 = psf0 / jnp.sum(psf0)
+    psf = PSF(data=psf0, pixel_scale=1.0)
+
+    length = 6.0
+    theta_deg = 30.0
+    sigma_perp = 0.25
+    conv_layer = ApplyConvolution(
+        kernel_kind="line",
+        length=length,
+        theta_deg=theta_deg,
+        sigma_perp=sigma_perp,
+        kernel_size=31,
+        units="psf_pix",
+    )
+    conv_out = conv_layer.apply(psf).data
+
+    theta = jnp.deg2rad(theta_deg)
+    ux = jnp.cos(theta)
+    uy = jnp.sin(theta)
+    samples = 25
+    offsets = jnp.linspace(-0.5 * length, 0.5 * length, samples)
+    coadd = jnp.zeros_like(psf0)
+    for t in offsets:
+        coadd = coadd + _shift_image_linear(psf0, dx=float(t * ux), dy=float(t * uy))
+    coadd = coadd / jnp.sum(coadd)
+
+    assert jnp.isclose(jnp.sum(conv_out), jnp.sum(coadd), atol=1e-6, rtol=1e-6)
+    assert jnp.allclose(conv_out, coadd, atol=3e-2, rtol=6e-2)
+
+
+@pytest.mark.parametrize("length", [0.0, -1.0])
+def test_apply_convolution_line_invalid_length_raises(length):
+    with pytest.raises(ValueError, match="length must be positive"):
+        ApplyConvolution(
+            kernel_kind="line",
+            length=length,
+            theta_deg=0.0,
+            sigma_perp=0.5,
+            kernel_size=9,
+            units="psf_pix",
+        )
+
+
+@pytest.mark.parametrize("sigma_perp", [0.0, -0.1])
+def test_apply_convolution_line_invalid_sigma_perp_raises(sigma_perp):
+    with pytest.raises(ValueError, match="sigma_perp must be positive"):
+        ApplyConvolution(
+            kernel_kind="line",
+            length=3.0,
+            theta_deg=0.0,
+            sigma_perp=sigma_perp,
+            kernel_size=9,
+            units="psf_pix",
+        )
 
 
 @pytest.mark.parametrize("kernel_size", [0, 2, -3])

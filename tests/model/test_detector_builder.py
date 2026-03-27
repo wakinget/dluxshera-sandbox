@@ -45,6 +45,24 @@ def _box_kernel(
     }
 
 
+def _line_kernel(
+    *,
+    length: float,
+    theta_deg: float,
+    sigma_perp: float,
+    kernel_size: int = 15,
+    units: str = "psf_pix",
+):
+    return {
+        "kind": "line",
+        "length": length,
+        "theta_deg": theta_deg,
+        "sigma_perp": sigma_perp,
+        "kernel_size": kernel_size,
+        "units": units,
+    }
+
+
 def test_build_detector_accepts_repeated_layer_kinds_and_preserves_order():
     cfg = {
         "system": {
@@ -286,6 +304,68 @@ def test_build_detector_accepts_repeated_box_apply_convolution_layers_with_disti
     assert list(detector.layers.keys()) == ["pixel_mtf_a", "pixel_mtf_b"]
     assert detector.layers["pixel_mtf_a"].kernel_kind == "box"
     assert detector.layers["pixel_mtf_b"].kernel_kind == "box"
+
+
+def test_build_detector_supports_line_apply_convolution_kernel_kind():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 16},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "smear",
+                        "ApplyConvolution",
+                        kernel=_line_kernel(
+                            length=1.5,
+                            theta_deg=20.0,
+                            sigma_perp=0.15,
+                            kernel_size=15,
+                            units="detector_pix",
+                        ),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector, detector_contract = build_detector(cfg)
+
+    assert isinstance(detector.layers["smear"], ApplyConvolution)
+    assert detector.layers["smear"].kernel_kind == "line"
+    assert float(detector.layers["smear"].length) == 1.5
+    assert float(detector.layers["smear"].theta_deg) == 20.0
+    assert float(detector.layers["smear"].sigma_perp) == 0.15
+    assert "detector.layers.smear.length" in detector_contract
+    assert "detector.layers.smear.sigma_perp" in detector_contract
+    assert "detector.layers.smear.theta_deg" in detector_contract
+
+
+def test_build_detector_accepts_repeated_line_apply_convolution_layers_with_distinct_names():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 16},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "smear_a",
+                        "ApplyConvolution",
+                        kernel=_line_kernel(length=1.2, theta_deg=5.0, sigma_perp=0.1),
+                    ),
+                    _layer(
+                        "smear_b",
+                        "ApplyConvolution",
+                        kernel=_line_kernel(length=2.4, theta_deg=35.0, sigma_perp=0.2),
+                    ),
+                ]
+            },
+        }
+    }
+
+    detector, _contract = build_detector(cfg)
+
+    assert list(detector.layers.keys()) == ["smear_a", "smear_b"]
+    assert detector.layers["smear_a"].kernel_kind == "line"
+    assert detector.layers["smear_b"].kernel_kind == "line"
 
 
 def test_build_detector_computes_detector_pix_convolution_scale_from_downstream_downsample():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import interpax
 import jax.numpy as np
 from jax import Array
+from jax.scipy.special import erf
 
 from dLux.layers.detector_layers import DetectorLayer
 from dLux.psfs import PSF
@@ -23,11 +24,12 @@ class ApplyConvolution(DetectorLayer):
     Supported kernel families:
       - ``gaussian``: anisotropic Gaussian with optional in-plane rotation
       - ``box``: axis-aligned rectangular pixel-aperture response
+      - ``line``: finite linear smear with Gaussian cross-track softness
 
     Units
     -----
-    Gaussian ``sigma_x``/``sigma_y`` and box ``width_x``/``width_y`` are
-    declared either in:
+    Gaussian ``sigma_x``/``sigma_y``, box ``width_x``/``width_y``, and line
+    ``length``/``sigma_perp`` are declared either in:
       - ``psf_pix``: current PSF-array pixel units
       - ``detector_pix``: detector-pixel units
 
@@ -38,7 +40,7 @@ class ApplyConvolution(DetectorLayer):
     position in the stack. Direct callers may provide that scale manually.
     """
 
-    _SUPPORTED_KERNEL_KINDS = {"gaussian", "box"}
+    _SUPPORTED_KERNEL_KINDS = {"gaussian", "box", "line"}
     _SUPPORTED_UNITS = {"detector_pix", "psf_pix"}
 
     kernel_kind: str
@@ -47,6 +49,8 @@ class ApplyConvolution(DetectorLayer):
     width_x: float
     width_y: float
     theta_deg: float
+    length: float
+    sigma_perp: float
     kernel_size: int
     units: str
     detector_to_psf_scale: float
@@ -60,6 +64,8 @@ class ApplyConvolution(DetectorLayer):
         width_x: float = 1.0,
         width_y: float = 1.0,
         theta_deg: float = 0.0,
+        length: float = 1.0,
+        sigma_perp: float = 0.25,
         kernel_size: int,
         units: str,
         detector_to_psf_scale: float = 1.0,
@@ -72,6 +78,8 @@ class ApplyConvolution(DetectorLayer):
         self.width_x = float(width_x)
         self.width_y = float(width_y)
         self.theta_deg = float(theta_deg)
+        self.length = float(length)
+        self.sigma_perp = float(sigma_perp)
         self.kernel_size = int(kernel_size)
         self.units = str(units)
         self.detector_to_psf_scale = float(detector_to_psf_scale)
@@ -91,6 +99,11 @@ class ApplyConvolution(DetectorLayer):
                 raise ValueError("width_x must be positive.")
             if self.width_y <= 0.0:
                 raise ValueError("width_y must be positive.")
+        if self.kernel_kind == "line":
+            if self.length <= 0.0:
+                raise ValueError("length must be positive.")
+            if self.sigma_perp <= 0.0:
+                raise ValueError("sigma_perp must be positive.")
         if self.kernel_size <= 0 or self.kernel_size % 2 == 0:
             raise ValueError("kernel_size must be a positive odd integer.")
         if self.units not in self._SUPPORTED_UNITS:
@@ -120,6 +133,15 @@ class ApplyConvolution(DetectorLayer):
             self.width_y * self.detector_to_psf_scale,
         )
 
+    def _line_params_in_psf_pixels(self: DetectorLayer) -> tuple[float, float]:
+        """Return line-kernel length and cross-track sigma in PSF pixel units."""
+        if self.units == "psf_pix":
+            return self.length, self.sigma_perp
+        return (
+            self.length * self.detector_to_psf_scale,
+            self.sigma_perp * self.detector_to_psf_scale,
+        )
+
     def generate_kernel(self: DetectorLayer) -> Array:
         """Generate the normalized image-space convolution kernel."""
         coords = np.arange(self.kernel_size, dtype=float) - (self.kernel_size - 1) / 2.0
@@ -138,10 +160,33 @@ class ApplyConvolution(DetectorLayer):
             kernel = np.exp(exponent)
             return kernel / np.sum(kernel)
 
-        width_x, width_y = self._width_in_psf_pixels()
-        inside_x = np.abs(x) <= (width_x / 2.0)
-        inside_y = np.abs(y) <= (width_y / 2.0)
-        kernel = np.where(inside_x & inside_y, 1.0, 0.0)
+        if self.kernel_kind == "box":
+            width_x, width_y = self._width_in_psf_pixels()
+            inside_x = np.abs(x) <= (width_x / 2.0)
+            inside_y = np.abs(y) <= (width_y / 2.0)
+            kernel = np.where(inside_x & inside_y, 1.0, 0.0)
+            return kernel / np.sum(kernel)
+
+        length, sigma_perp = self._line_params_in_psf_pixels()
+        theta = np.deg2rad(self.theta_deg)
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+
+        # Rotate to along-track (u) / cross-track (v) coordinates.
+        u = cos_theta * x + sin_theta * y
+        v = -sin_theta * x + cos_theta * y
+
+        # Anti-aliased finite-support line segment:
+        # along-track weight is a softly windowed top-hat (fixed half-pixel edge),
+        # cross-track profile is Gaussian with configurable thickness.
+        edge_sigma = 0.5
+        sqrt2 = np.sqrt(2.0)
+        along = 0.5 * (
+            erf((u + 0.5 * length) / (sqrt2 * edge_sigma))
+            - erf((u - 0.5 * length) / (sqrt2 * edge_sigma))
+        )
+        cross = np.exp(-0.5 * (v / sigma_perp) ** 2)
+        kernel = along * cross
         return kernel / np.sum(kernel)
 
     def apply(self: DetectorLayer, psf: PSF) -> PSF:

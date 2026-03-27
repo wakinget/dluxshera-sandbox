@@ -253,10 +253,10 @@ def _parse_apply_convolution_kernel_cfg(
     kernel_kind = kernel_cfg.get("kind")
     if not isinstance(kernel_kind, str) or not kernel_kind.strip():
         raise ValueError(f"Missing required config key: {context}.kernel.kind")
-    if kernel_kind not in {"gaussian", "box"}:
+    if kernel_kind not in {"gaussian", "box", "line"}:
         raise ValueError(
             f"{context}.kernel.kind={kernel_kind!r} is not supported. "
-            "ApplyConvolution supports kernel.kind values ['gaussian', 'box']."
+            "ApplyConvolution supports kernel.kind values ['gaussian', 'box', 'line']."
         )
 
     def _positive_float(key: str) -> float:
@@ -308,10 +308,14 @@ def _parse_apply_convolution_kernel_cfg(
         parsed["sigma_x"] = _positive_float("sigma_x")
         parsed["sigma_y"] = _positive_float("sigma_y")
         parsed["theta_deg"] = _any_float("theta_deg")
-    else:
+    elif kernel_kind == "box":
         parsed["width_x"] = _positive_float("width_x")
         parsed["width_y"] = _positive_float("width_y")
         parsed["theta_deg"] = 0.0
+    else:
+        parsed["length"] = _positive_float("length")
+        parsed["sigma_perp"] = _positive_float("sigma_perp")
+        parsed["theta_deg"] = _any_float("theta_deg")
     return parsed
 
 
@@ -421,6 +425,8 @@ def build_detector_layer(
                 width_x=kernel_cfg.get("width_x", 1.0),
                 width_y=kernel_cfg.get("width_y", 1.0),
                 theta_deg=kernel_cfg.get("theta_deg", 0.0),
+                length=kernel_cfg.get("length", 1.0),
+                sigma_perp=kernel_cfg.get("sigma_perp", 0.25),
                 kernel_size=kernel_cfg["kernel_size"],
                 units=kernel_cfg["units"],
                 detector_to_psf_scale=detector_to_psf_scale,
@@ -742,7 +748,7 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
                         ),
                     ]
                 )
-            else:
+            elif kernel_cfg["kernel_kind"] == "box":
                 fields.extend(
                     [
                         ParamField(
@@ -766,6 +772,43 @@ def build_detector_contract(detector_cfg) -> ParamSpec:
                             bounds=(0.0, None),
                             structural=False,
                             doc="Box convolution width along y [runtime-overridable].",
+                        ),
+                    ]
+                )
+            else:
+                fields.extend(
+                    [
+                        ParamField(
+                            key=f"{prefix}.length",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["length"],
+                            bounds=(0.0, None),
+                            structural=False,
+                            doc="Line-smear total length [runtime-overridable].",
+                        ),
+                        ParamField(
+                            key=f"{prefix}.sigma_perp",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["sigma_perp"],
+                            bounds=(0.0, None),
+                            structural=False,
+                            doc="Line-smear cross-track Gaussian sigma [runtime-overridable].",
+                        ),
+                        ParamField(
+                            key=f"{prefix}.theta_deg",
+                            group="detector",
+                            kind="primitive",
+                            dtype=float,
+                            shape=(),
+                            default=kernel_cfg["theta_deg"],
+                            structural=False,
+                            doc="Line-smear orientation angle [degrees, runtime-overridable].",
                         ),
                     ]
                 )
@@ -885,6 +928,10 @@ def apply_runtime_bindings(
             runtime_theta_deg = store.get(f"detector.layers.{layer_name}.theta_deg", default=None)
             runtime_width_x = store.get(f"detector.layers.{layer_name}.width_x", default=None)
             runtime_width_y = store.get(f"detector.layers.{layer_name}.width_y", default=None)
+            runtime_length = store.get(f"detector.layers.{layer_name}.length", default=None)
+            runtime_sigma_perp = store.get(
+                f"detector.layers.{layer_name}.sigma_perp", default=None
+            )
             if any(
                 v is not None
                 for v in (
@@ -893,6 +940,8 @@ def apply_runtime_bindings(
                     runtime_theta_deg,
                     runtime_width_x,
                     runtime_width_y,
+                    runtime_length,
+                    runtime_sigma_perp,
                 )
             ):
                 detector_updated = True
@@ -925,6 +974,16 @@ def apply_runtime_bindings(
                                 float(runtime_width_y)
                                 if runtime_width_y is not None
                                 else float(layer.width_y)
+                            ),
+                            length=(
+                                float(runtime_length)
+                                if runtime_length is not None
+                                else float(layer.length)
+                            ),
+                            sigma_perp=(
+                                float(runtime_sigma_perp)
+                                if runtime_sigma_perp is not None
+                                else float(layer.sigma_perp)
                             ),
                             kernel_size=int(layer.kernel_size),
                             units=str(layer.units),
