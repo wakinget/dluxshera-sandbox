@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import asdict, is_dataclass
+from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +23,24 @@ from ..params.store import ParameterStore
 
 SOURCE_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
 
-TARGET_SED_DIR = Path(__file__).resolve().parents[1] / "data" / "target_seds"
+
+def _target_sed_root() -> resources.abc.Traversable:
+    """Return the package-local directory containing curated target SED files.
+
+    Returns
+    -------
+    importlib.resources.abc.Traversable
+        Traversable directory rooted at ``dluxshera/data/target_seds``.
+
+    Notes
+    -----
+    The implementation resolves from the installed/imported package via
+    ``importlib.resources`` so lookup remains independent of the process CWD.
+    During local source-tree execution this still points to the same on-disk
+    directory under ``src/dluxshera/data/target_seds``.
+    """
+
+    return resources.files("dluxshera").joinpath("data", "target_seds")
 
 
 def _cfg_get(root: Any, path: str, default=None):
@@ -151,16 +170,20 @@ def _resolve_component_weights(
     if not target_spec.sed_a_file or not target_spec.sed_b_file:
         return None
 
-    sed_a_path = TARGET_SED_DIR / target_spec.sed_a_file
-    sed_b_path = TARGET_SED_DIR / target_spec.sed_b_file
+    sed_root = _target_sed_root()
+    sed_a_ref = sed_root.joinpath(target_spec.sed_a_file)
+    sed_b_ref = sed_root.joinpath(target_spec.sed_b_file)
 
     # Lean fallback behaviour: if either curated file is unavailable, use the
     # source model's default uniform weighting instead of failing construction.
-    if not sed_a_path.exists() or not sed_b_path.exists():
+    if not sed_a_ref.is_file() or not sed_b_ref.is_file():
         return None
 
-    weights_a = load_normalized_sed_weights(sed_a_path, wavelength_grid_m=wavelength_grid_m)
-    weights_b = load_normalized_sed_weights(sed_b_path, wavelength_grid_m=wavelength_grid_m)
+    with ExitStack() as stack:
+        sed_a_path = stack.enter_context(resources.as_file(sed_a_ref))
+        sed_b_path = stack.enter_context(resources.as_file(sed_b_ref))
+        weights_a = load_normalized_sed_weights(sed_a_path, wavelength_grid_m=wavelength_grid_m)
+        weights_b = load_normalized_sed_weights(sed_b_path, wavelength_grid_m=wavelength_grid_m)
 
     return jnp.asarray(np.stack([weights_a, weights_b], axis=0))
 
