@@ -1,5 +1,6 @@
 # tests/test_universe_builder.py
 
+from dataclasses import replace
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -14,6 +15,7 @@ from dluxshera.builders.source import (
     build_binary_target_source,
     load_normalized_sed_weights,
 )
+from dluxshera.components.sources import TARGET_SPECS
 from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 
 
@@ -169,3 +171,55 @@ def test_build_binary_target_source_uses_uniform_weights_without_target_seds():
     source = build_binary_target_source(store, cfg=cfg)
     expected = np.full((2, 4), 0.25)
     assert np.allclose(np.asarray(source.weights), expected)
+
+
+@pytest.mark.parametrize("target_key", ["ALPHA_CEN", "61_CYG"])
+def test_build_binary_target_source_uses_curated_target_sed_weights(target_key: str):
+    cfg = SHERA_TESTBED_CONFIG.replace(
+        system={"source": {"kind": "binary_target", "target": target_key}},
+        n_lambda=4,
+    )
+    store = ParameterStore.from_dict(
+        {
+            "source.wavelength_m": cfg.wavelength_m,
+            "source.bandwidth_m": cfg.bandwidth_m,
+            "source.n_lambda": cfg.n_lambda,
+            "source.log_flux_total": 7.0,
+        }
+    )
+
+    source = build_binary_target_source(store, cfg=cfg)
+    weights = np.asarray(source.weights)
+
+    assert weights.shape == (2, 4)
+    assert np.allclose(np.sum(weights, axis=1), np.ones(2))
+    assert not np.allclose(weights, np.full((2, 4), 0.25))
+
+
+def test_build_binary_target_source_falls_back_when_curated_sed_files_are_missing(monkeypatch):
+    alpha = TARGET_SPECS["ALPHA_CEN"]
+    monkeypatch.setitem(
+        TARGET_SPECS,
+        "ALPHA_CEN",
+        replace(
+            alpha,
+            sed_a_file="does_not_exist_a.dat",
+            sed_b_file="does_not_exist_b.dat",
+        ),
+    )
+
+    cfg = SHERA_TESTBED_CONFIG.replace(
+        system={"source": {"kind": "binary_target", "target": "ALPHA_CEN"}},
+        n_lambda=4,
+    )
+    store = ParameterStore.from_dict(
+        {
+            "source.wavelength_m": cfg.wavelength_m,
+            "source.bandwidth_m": cfg.bandwidth_m,
+            "source.n_lambda": cfg.n_lambda,
+            "source.log_flux_total": 7.0,
+        }
+    )
+
+    source = build_binary_target_source(store, cfg=cfg)
+    assert np.allclose(np.asarray(source.weights), np.full((2, 4), 0.25))
