@@ -210,6 +210,10 @@ class ApplyPixelOffsets(DetectorLayer):
         'cardinal', 'monotonic', 'monotonic-0', 'akima'.
     clip_nonnegative : bool
         If True, clip warped output values to be non-negative.
+    detector_to_psf_scale : float
+        Number of current-PSF pixels per detector pixel at this layer.
+        When greater than 1, the layer samples the oversampled PSF back onto
+        the detector grid using detector-pixel center coordinates.
     """
 
     _ALLOWED_METHODS = {
@@ -227,6 +231,7 @@ class ApplyPixelOffsets(DetectorLayer):
     dy_map: Array
     interp_method: str
     clip_nonnegative: bool
+    detector_to_psf_scale: float
 
     def __init__(
         self: DetectorLayer,
@@ -234,12 +239,14 @@ class ApplyPixelOffsets(DetectorLayer):
         dy_map: Array,
         interp_method: str = "cubic",
         clip_nonnegative: bool = False,
+        detector_to_psf_scale: float = 1.0,
     ):
         super().__init__()
         self.dx_map = np.asarray(dx_map, dtype=float)
         self.dy_map = np.asarray(dy_map, dtype=float)
         self.interp_method = str(interp_method)
         self.clip_nonnegative = bool(clip_nonnegative)
+        self.detector_to_psf_scale = float(detector_to_psf_scale)
 
         if self.dx_map.ndim != 2:
             raise ValueError("dx_map must be a 2D array.")
@@ -253,39 +260,62 @@ class ApplyPixelOffsets(DetectorLayer):
                 "interp_method must be one of "
                 f"{sorted(self._ALLOWED_METHODS)}."
             )
+        if self.detector_to_psf_scale <= 0.0:
+            raise ValueError("detector_to_psf_scale must be positive.")
 
     def apply(self: DetectorLayer, psf: PSF) -> PSF:
         """Apply detector-pixel offset warping to the PSF via ``interpax.interp2d``."""
-        if self.dx_map.shape != psf.data.shape:
+        detector_height, detector_width = self.dx_map.shape
+        psf_shape = tuple(int(v) for v in psf.data.shape)
+        scale = float(self.detector_to_psf_scale)
+        oversampled_shape = (
+            int(round(detector_height * scale)),
+            int(round(detector_width * scale)),
+        )
+
+        if psf_shape == (detector_height, detector_width):
+            y0 = np.arange(detector_height, dtype=float)
+            x0 = np.arange(detector_width, dtype=float)
+            output_pixel_scale = psf.pixel_scale
+            offset_scale = 1.0
+            flux_scale = 1.0
+        elif psf_shape == oversampled_shape:
+            y0 = (np.arange(detector_height, dtype=float) + 0.5) * scale - 0.5
+            x0 = (np.arange(detector_width, dtype=float) + 0.5) * scale - 0.5
+            output_pixel_scale = psf.pixel_scale * scale
+            offset_scale = scale
+            flux_scale = scale**2
+        else:
             raise ValueError(
-                "dx_map/dy_map shape must match psf.data.shape; "
-                f"got {self.dx_map.shape} vs {psf.data.shape}."
+                "dx_map/dy_map shape must match psf.data.shape, or "
+                "psf.data.shape must equal detector_to_psf_scale * map shape; "
+                f"got {self.dx_map.shape} vs {psf.data.shape} with "
+                f"detector_to_psf_scale={scale}."
             )
 
-        height, width = psf.data.shape
-
-        # Build detector pixel coordinate grid (y, x)
         y, x = np.meshgrid(
-            np.arange(height, dtype=float),
-            np.arange(width, dtype=float),
+            y0,
+            x0,
             indexing="ij",
         )
 
-        # Query points in (x, y) coordinates
-        xq = x + self.dx_map
-        yq = y + self.dy_map
+        # Offsets are defined in detector-pixel units; scale them into the
+        # current PSF grid when sampling an oversampled image.
+        xq = x + self.dx_map * offset_scale
+        yq = y + self.dy_map * offset_scale
 
         # Clamp-to-edge to emulate ndimage mode="nearest" boundary behavior.
-        xq = np.clip(xq, 0.0, width - 1.0)
-        yq = np.clip(yq, 0.0, height - 1.0)
+        input_height, input_width = psf_shape
+        xq = np.clip(xq, 0.0, input_width - 1.0)
+        yq = np.clip(yq, 0.0, input_height - 1.0)
 
         # Regular grid in x and y
-        xk = np.arange(width, dtype=float)
-        yk = np.arange(height, dtype=float)
+        xk = np.arange(input_width, dtype=float)
+        yk = np.arange(input_height, dtype=float)
 
-        # interpax.interp2d expects f to be shaped (Nx, Ny, ...)
-        # Our PSF is (Ny, Nx) = (height, width), so transpose it.
-        f = psf.data.T  # shape (width, height)
+        # interpax.interp2d expects f to be shaped (Nx, Ny, ...), so transpose
+        # the PSF data from (Ny, Nx) to (Nx, Ny).
+        f = psf.data.T
 
         # Query points are expected as 1D arrays (Nq,)
         xq_flat = xq.reshape(-1)
@@ -301,9 +331,10 @@ class ApplyPixelOffsets(DetectorLayer):
             extrap=False,  # safe since we clamp
         )
 
-        warped = warped_flat.reshape(height, width)
+        warped = warped_flat.reshape(detector_height, detector_width)
+        warped = warped * flux_scale
 
         if self.clip_nonnegative:
             warped = np.clip(warped, 0.0)
 
-        return PSF(data=warped, pixel_scale=psf.pixel_scale)
+        return PSF(data=warped, pixel_scale=output_pixel_scale)

@@ -505,6 +505,13 @@ def test_apply_pixel_offsets_init_validation():
     with pytest.raises(ValueError, match="interp_method must be one of"):
         ApplyPixelOffsets(dx_map=jnp.zeros((4, 4)), dy_map=jnp.zeros((4, 4)), interp_method="bad")
 
+    with pytest.raises(ValueError, match="detector_to_psf_scale must be positive"):
+        ApplyPixelOffsets(
+            dx_map=jnp.zeros((4, 4)),
+            dy_map=jnp.zeros((4, 4)),
+            detector_to_psf_scale=0.0,
+        )
+
 
 def test_apply_pixel_offsets_shape_mismatch_raises():
     image = _gaussian_image(n=17)
@@ -530,6 +537,43 @@ def test_apply_pixel_offsets_identity(method):
 
     assert out.data.shape == image.shape
     assert jnp.allclose(out.data, image, atol=1e-5, rtol=1e-5)
+
+
+def test_apply_pixel_offsets_samples_oversampled_psf_back_to_detector_grid():
+    detector_height = 6
+    detector_width = 8
+    scale = 3.0
+
+    y_os, x_os = jnp.meshgrid(
+        jnp.arange(int(detector_height * scale), dtype=float),
+        jnp.arange(int(detector_width * scale), dtype=float),
+        indexing="ij",
+    )
+    image = x_os + 10.0 * y_os
+    psf = PSF(data=image, pixel_scale=1.0 / scale)
+
+    zeros = jnp.zeros((detector_height, detector_width), dtype=float)
+    layer = ApplyPixelOffsets(
+        dx_map=zeros,
+        dy_map=zeros,
+        interp_method="linear",
+        detector_to_psf_scale=scale,
+    )
+
+    out = layer.apply(psf)
+
+    y_det, x_det = jnp.meshgrid(
+        jnp.arange(detector_height, dtype=float),
+        jnp.arange(detector_width, dtype=float),
+        indexing="ij",
+    )
+    expected = (
+        ((x_det + 0.5) * scale - 0.5) + 10.0 * ((y_det + 0.5) * scale - 0.5)
+    ) * scale**2
+
+    assert out.data.shape == zeros.shape
+    assert float(out.pixel_scale) == pytest.approx(1.0)
+    assert jnp.allclose(out.data, expected, atol=1e-6, rtol=1e-6)
 
 
 def test_apply_pixel_offsets_boundary_clamping_finite_and_edge_like():

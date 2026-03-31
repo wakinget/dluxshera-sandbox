@@ -219,21 +219,24 @@ def _downsample_kernel_size(layer_cfg: Mapping, *, context: str) -> int:
     return int(kernel_size)
 
 
-def _detector_to_psf_scale_by_layer_name(layers_cfg: list[Mapping]) -> dict[str, float]:
-    """Return detector-pixel to current-grid scaling factors for each layer.
+def _detector_to_psf_scale_by_layer_name(
+    layers_cfg: list[Mapping],
+    *,
+    optics_oversample: float = 1.0,
+) -> dict[str, float]:
+    """Return current-grid pixels per detector pixel at each layer.
 
-    The current detector stack changes sampling only via ``Downsample`` layers,
-    so the number of current-grid pixels per detector pixel at a given layer is
-    the product of downstream downsample factors.
+    The detector stack begins on the optics oversampled PSF grid. Each
+    ``Downsample`` layer reduces the current-grid sampling for all subsequent
+    layers by its kernel size.
     """
     scale_by_name: dict[str, float] = {}
-    downstream_scale = 1.0
-    for idx in range(len(layers_cfg) - 1, -1, -1):
-        layer_cfg = layers_cfg[idx]
+    current_scale = float(optics_oversample)
+    for idx, layer_cfg in enumerate(layers_cfg):
         layer_name = layer_cfg["name"]
-        scale_by_name[layer_name] = downstream_scale
+        scale_by_name[layer_name] = current_scale
         if layer_cfg["kind"] == "Downsample":
-            downstream_scale *= _downsample_kernel_size(
+            current_scale /= _downsample_kernel_size(
                 layer_cfg,
                 context=f"system.detector.layers[{idx}]",
             )
@@ -383,7 +386,12 @@ def build_detector_layer(
             )
         return (
             name,
-            ApplyPixelOffsets(dx_map=dx_map, dy_map=dy_map, interp_method=interp_method),
+            ApplyPixelOffsets(
+                dx_map=dx_map,
+                dy_map=dy_map,
+                interp_method=interp_method,
+                detector_to_psf_scale=detector_to_psf_scale,
+            ),
         )
 
     if kind == "ApplyPixelResponse":
@@ -871,8 +879,32 @@ def build_detector(cfg, *, base_seed: int | None = None) -> tuple[SheraDetector,
     if psf_npix is None:
         raise ValueError("system.optics.psf_npix is required to build the detector.")
 
+    optics_oversample = None
+    if isinstance(cfg, Mapping):
+        optics_block = cfg.get("optics", None)
+        if isinstance(optics_block, Mapping):
+            optics_oversample = optics_block.get("oversample", None)
+    if optics_oversample is None:
+        optics_oversample = _cfg_get(cfg, "system.optics.oversample", default=None)
+    if optics_oversample is None:
+        optics_oversample = getattr(cfg, "oversample", None)
+    if optics_oversample is None:
+        optics_oversample = 1.0
+        for idx, layer_cfg in enumerate(detector_layers_cfg):
+            if layer_cfg["kind"] == "Downsample":
+                optics_oversample *= _downsample_kernel_size(
+                    layer_cfg,
+                    context=f"system.detector.layers[{idx}]",
+                )
+    optics_oversample = float(optics_oversample)
+    if optics_oversample <= 0.0:
+        raise ValueError("system.optics.oversample must be positive when building the detector.")
+
     target_shape = (int(psf_npix), int(psf_npix))
-    detector_to_psf_scale = _detector_to_psf_scale_by_layer_name(detector_layers_cfg)
+    detector_to_psf_scale = _detector_to_psf_scale_by_layer_name(
+        detector_layers_cfg,
+        optics_oversample=optics_oversample,
+    )
     layers = [
         build_detector_layer(
             layer_cfg,

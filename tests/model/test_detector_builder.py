@@ -4,7 +4,7 @@ import pytest
 
 from dluxshera.builders.detector import build_detector, build_detector_contract
 from dluxshera.components.detectors import GSENSE2020BSI_SPEC, HWK4123_SPEC, SheraDetector
-from dluxshera.layers import ApplyConvolution
+from dluxshera.layers import ApplyConvolution, ApplyPixelOffsets
 
 
 def _layer(name: str, kind: str, **kwargs):
@@ -276,6 +276,36 @@ def test_build_detector_supports_box_apply_convolution_kernel_kind():
     assert float(detector.layers["pixel_mtf"].width_y) == 0.8
     assert "detector.layers.pixel_mtf.width_x" in detector_contract
     assert "detector.layers.pixel_mtf.width_y" in detector_contract
+
+
+def test_build_detector_uses_optics_oversample_for_detector_pix_layers_without_downsample():
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 16, "oversample": 3},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "pixel_mtf",
+                        "ApplyConvolution",
+                        kernel=_box_kernel(
+                            width_x=1.0,
+                            width_y=1.0,
+                            kernel_size=9,
+                            units="detector_pix",
+                        ),
+                    ),
+                    _layer("pixel_offsets", "ApplyPixelOffsets"),
+                ]
+            },
+        }
+    }
+
+    detector, _contract = build_detector(cfg)
+
+    assert isinstance(detector.layers["pixel_mtf"], ApplyConvolution)
+    assert float(detector.layers["pixel_mtf"].detector_to_psf_scale) == 3.0
+    assert isinstance(detector.layers["pixel_offsets"], ApplyPixelOffsets)
+    assert float(detector.layers["pixel_offsets"].detector_to_psf_scale) == 3.0
 
 
 def test_build_detector_accepts_repeated_box_apply_convolution_layers_with_distinct_names():
