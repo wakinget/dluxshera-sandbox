@@ -1,37 +1,7 @@
-system:
-  preset: SHERA_TESTBED_3P
-  # Optional overrides (just one example)
-  source:
-    x_position_as: 0.0
-    y_position_as: 0.0
-    position_angle_deg: 90.0
-    separation_as: 10.0
-    contrast: 3.0
-    exposure_time_s: 1800.0
-  optics:
-    primary:
-      noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
-      zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
-    secondary:
-      noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
-      zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
-  detector:
-    model: GSENSE2020BSI
-    layers:
-      - name: downsample
-        kind: Downsample
-        kernel_size: 3
-
 experiment:
   kind: ml_training_dataset_v2
   notes: "Fisher-scaled one-parameter-at-a-time training dataset."
   seed: 0
-
-  noise:
-    enabled: false
-    photon_noise: true
-    read_noise: false
-    dark_current: false
 
   sweep_keys:
     - source.separation_as
@@ -44,58 +14,67 @@ experiment:
     - optics.primary.zernike_coeffs_nm
     - optics.secondary.zernike_coeffs_nm
 
+  noise:
+    enabled: false
+
   outputs:
     outdir: null
 
+  # Use this block for non-structural nominal values that should seed the
+  # baseline sample and Fisher calculation.
+  nominal_values:
+    optics.primary.zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+    optics.secondary.zernike_coeffs_nm: [0, 0, 0, 0, 0, 0, 0, 0]
+
   sweeps:
-    default: # Default if a parameter in sweep_keys is not specified below
+    default:
       min_sigma: 1e0
       max_sigma: 1e3
-      n_sigma: 5
+      n_magnitudes: 20
       spacing: log
 
     source.separation_as:
       min_sigma: 1e0
       max_sigma: 1e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     source.position_angle_deg:
       min_sigma: 1e0
       max_sigma: 1e3
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     source.x_position_as:
       min_sigma: 1e0
       max_sigma: 1e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     source.y_position_as:
       min_sigma: 1e0
       max_sigma: 1e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     source.log_flux_total:
       min_sigma: 1e1
       max_sigma: 1e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     source.contrast:
       min_sigma: 1e0
       max_sigma: 1e3
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     optics.plate_scale_as_per_pix:
       min_sigma: 1e1
       max_sigma: 1e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     optics.primary.zernike_coeffs_nm:
       min_sigma: 1e1
       max_sigma: 5e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
     optics.secondary.zernike_coeffs_nm:
       min_sigma: 1e1
       max_sigma: 1e4
-      n_sigma: 20
+      n_magnitudes: 20
       spacing: log
