@@ -1,0 +1,62 @@
+# Example full prescription for `canonical_astrometry.py`.
+#
+# Presets and prescriptions are distinct:
+# - experiment presets live under `src/dluxshera/data/experiment_presets/`
+#   and contain only a top-level `experiment` block.
+# - prescriptions are user-facing recipe configs and may contain top-level
+#   `experiment` only, or both `experiment` and an optional `system` block.
+#
+# This prescription is standalone because it selects both presets explicitly
+# and then adds a few recipe-specific overrides.
+
+system:
+  preset: SHERA_FLIGHT_3P
+  source:
+    exposure_time_s: 1800.0
+  detector:
+    layers:
+      - name: downsample
+        kind: Downsample
+        kernel_size: 3
+      - name: pixel_offsets
+        kind: ApplyPixelOffsets
+        dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
+        dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
+      - name: pixel_response
+        kind: ApplyPixelResponse
+        prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
+      - name: jitter
+        kind: ApplyJitter
+        sigma: 1.0e-12
+        kernel_size: 3
+
+experiment:
+  preset: CANONICAL_ASTROMETRY
+  kind: single_inference
+  notes: "Canonical astrometry retrieval from synthetic data."
+
+  optimizer:
+    loss: map
+    n_iter: 40
+    n_iter_fast: 30
+    base_lr: 0.5
+
+  eigenmodes:
+    enable: true
+    whiten: true
+    truncate_k: null
+    truncate_by_eigval: null
+
+  outputs:
+    outdir: null
+    plots: true
+    save_results: true
+
+  init:
+    sampling: prior
+    # explicit values may be provided here when `sampling: explicit`.
+    # source.separation_as: 10.0
+    # source.position_angle_deg: 90.0
+    # source.x_position_as: 0.0
+    # source.y_position_as: 0.0
+    # source.exposure_time_s: 1800.0

@@ -1,57 +1,50 @@
-"""
-Canonical astrometry retrieval recipe.
+"""Canonical astrometry retrieval recipe.
 
-Recent Migration reference
-------------------------------------------------------
-This recipe is the exemplar for the config-schema migration:
-1) Load YAML/JSON config from disk.
-2) Resolve with `resolve_config` (preset + deep-merge + validation).
-3) Build the binder from resolved `system` config.
-4) Drive inference settings from resolved `experiment` config.
+Configuration model
+-------------------
+This recipe uses the canonical nested config schema and resolves configuration
+in two layers:
 
-Use this script as the pattern when migrating other recipes.
+1. Preset seeds:
+   - system presets contain only top-level ``system``.
+   - experiment presets contain only top-level ``experiment``.
+2. Optional prescription file:
+   - passed via ``--prescription`` (``--config`` remains an alias).
+   - may contain ``experiment`` only, or ``experiment`` plus an optional
+     top-level ``system`` block.
+   - values in the prescription deep-merge over the preset seeds before
+     ``resolve_config()`` validates and resolves each block.
 
-This script is the primary, end-to-end onboarding example for the dLuxShera workflow.
-It is designed to be read like a Matlab script from top to bottom.
-You can open this in your editor and run it.
+The built-in ``CANONICAL_ASTROMETRY`` preset is intentionally experiment-only.
+An example full prescription lives next to this recipe at
+``examples/recipes/canonical_astrometry_prescription.yaml``.
+
+Execution flow
+--------------
+1. Load preset seeds plus optional prescription YAML/JSON.
+2. Resolve with ``resolve_config`` (preset merge + validation).
+3. Build the binder from the resolved ``system`` block.
+4. Drive inference settings from the resolved ``experiment`` block.
 
 What this recipe demonstrates
-- Building/choosing a three-plane Shera configuration and applying overrides.
-- Constructing ParameterSpecs:
-    - a forward spec describing the simulation parameters ("forward_spec")
-    - a subspec selected from the forward spec via infer_keys
-- Initializing a ParameterStore (values) and populating derived parameters
-  (e.g., plate scale computed from focal lengths + pixel pitch via registered
-  transforms).
+-----------------------------
+- Choosing a three-plane Shera configuration and applying overrides.
+- Constructing a forward ParameterSpec and an inference subspec from
+  ``experiment.infer_keys``.
+- Initializing a ParameterStore from the resolved system truth values and
+  refreshing derived parameters.
 - Building a SheraBinder that dispatches source/optics/detector by kind.
-- Generating synthetic data (optionally with noise).
-- Defining inference keys + priors, sampling an initial state from priors.
-- Defining the loss (typically NLL; MAP variants also available).
-- Running a single optimization loop and saving/plotting results using the
-  repository’s built-in artifacts + plotting utilities.
+- Generating synthetic data with optional observation noise.
+- Defining inference priors and initialization from the resolved experiment
+  config.
+- Running a single optimization loop and saving plots/artifacts.
 
-Eigenmode re-parameterization (recommended default)
+Eigenmode re-parameterization
+-----------------------------
 This recipe supports an optional eigenmode parameterization of the inference
-variables. When enabled, the optimization runs in an eigen-basis derived from
-curvature information (e.g., Fisher Information Matrix), which can improve
-conditioning and convergence. You can disable eigenmodes to run in the “raw”
-parameter basis for clarity or debugging.
-
-How to use
-1) Scan the configuration + “options” block near the top (runtime, noise, eigen).
-2) Run the script top-to-bottom.
-3) Inspect the printed summary and saved artifacts/plots in the run directory.
-
-Outputs
-- A run directory containing saved artifacts (e.g., parameters, metrics, traces,
-  and optionally checkpoints), plus summary figures produced by the built-in
-  plotting utilities.
-
-Notes
-- This recipe is intentionally explicit to avoid any hidden helper layers.
-  If you want to adapt the workflow, copy this file and edit the explicit steps.
-- For deeper background, see docs on Params/Stores, inference/losses, eigenmodes,
-  and optimization artifacts in the repository documentation.
+variables. When enabled, optimization runs in an eigen-basis derived from the
+Fisher information matrix. ``experiment.eigenmodes`` provides the config
+defaults; CLI flags can still disable eigenmode optimization explicitly.
 """
 from __future__ import annotations
 
@@ -106,9 +99,11 @@ from dluxshera.systems.base import compose_forward_spec
 # MAIN SIMULATION PARAMETERS #
 ##############################
 
+PRESCRIPTION = "examples/recipes/canonical_astrometry_prescription.yaml"
+
 JAX_ENABLE_X64 = True
 FAST_MODE = False
-ADD_NOISE = True
+ADD_NOISE = False
 SAVE_PLOTS = True
 PLOT_EIGEN_SPECTRUM = True
 
@@ -138,7 +133,7 @@ DEFAULT_INFER_KEYS = (
 )
 
 # Presets
-DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P" # System presets describe the source, optics, + detector
+DEFAULT_SYSTEM_PRESET = "SHERA_FLIGHT_3P" # System presets describe the source, optics, + detector
 DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY" # Experiment presets describe what to do + default settings
 
 # Directories
@@ -155,21 +150,21 @@ plt.rcParams["image.cmap"] = "inferno_nan"
 
 def main(
     *,
-    config_path: Path | None = None,
+    prescription_path: Path | None = PRESCRIPTION,
     system_preset: str = DEFAULT_SYSTEM_PRESET,
     experiment_preset: str = DEFAULT_EXPERIMENT_PRESET,
     fast: bool = FAST_MODE,
     results_dir: Path | None = None,
-    use_eigen: bool = USE_EIGEN,
-    whiten_basis: bool = WHITEN_BASIS,
-    truncate_k: int | None = TRUNCATE_K,
-    truncate_by_eigval: float | None = TRUNCATE_BY_EIGVAL,
+    use_eigen: bool | None = None,
+    whiten_basis: bool | None = None,
+    truncate_k: int | None = None,
+    truncate_by_eigval: float | None = None,
 ) -> None:
     """Run the canonical astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
     user_cfg = load_user_config(
-        config_path=config_path,
+        config_path=prescription_path,
         system_preset=system_preset,
         experiment_preset=experiment_preset,
     )
@@ -181,6 +176,15 @@ def main(
         raise ValueError("canonical_astrometry requires a 'system' block ...")
     if experiment_cfg is None:
         raise ValueError("canonical_astrometry requires an 'experiment' block ...")
+
+    resolved_prescription = _repo_relative_path(prescription_path)
+    print(
+        f"Resolved prescription path: {resolved_prescription or prescription_path}"
+        if prescription_path is not None
+        else "Resolved prescription path: None (using preset seeds only)"
+    )
+    print(f"System preset: {_selected_preset(user_cfg, 'system') or 'custom'}")
+    print(f"Experiment preset: {_selected_preset(user_cfg, 'experiment') or 'custom'}")
 
     # --- Optional explicit override: replace detector.layers within config ---
     # Demonstrates how we might manually change the detector layers
@@ -205,20 +209,37 @@ def main(
     # system_cfg["detector"] = detector_cfg # Insert into the system config
     # -------------------------------------------------------------
 
-    forward_spec = compose_forward_spec(system_cfg)
-    truth_store = ParameterStore.from_spec_defaults(forward_spec)
-
     experiment = _validate_experiment(experiment_cfg)
+    eigen_cfg = experiment["eigenmodes"]
     infer_keys = tuple(experiment["infer_keys"])
     rng_key = jr.PRNGKey(int(experiment["seed"]))
     save_plots = bool(experiment["outputs"]["plots"])
     noise_cfg = experiment["noise"]
+    optimizer_cfg = experiment["optimizer"]
 
-    results_dir = results_dir or DEFAULT_RESULTS_DIR
+    use_eigen = eigen_cfg["enable"] if use_eigen is None else bool(use_eigen)
+    whiten_basis = eigen_cfg["whiten"] if whiten_basis is None else bool(whiten_basis)
+    truncate_k = eigen_cfg["truncate_k"] if truncate_k is None else truncate_k
+    truncate_by_eigval = (
+        eigen_cfg["truncate_by_eigval"]
+        if truncate_by_eigval is None
+        else truncate_by_eigval
+    )
+
+    results_dir, results_dir_source = _resolve_results_dir(
+        cli_results_dir=results_dir,
+        experiment_cfg=experiment,
+        prescription_path=prescription_path,
+    )
     results_dir.mkdir(parents=True, exist_ok=True)
+
+    forward_spec = compose_forward_spec(system_cfg)
+    truth_store = ParameterStore.from_spec_defaults(forward_spec)
+    truth_store = truth_store.refresh_derived(forward_spec)
 
     print("Starting Simulation...")
     print("Creating Config, Spec, Store, and Binder...")
+    print(f"Resolved results_dir: {results_dir} ({results_dir_source})")
     print("Eigenmode configuration:")
     print(f"  use_eigen={use_eigen}")
     print(f"  whiten_basis={whiten_basis}")
@@ -229,18 +250,6 @@ def main(
 
     if fast:
         print("FAST_MODE enabled: using reduced iteration count.")
-
-    truth_store = ParameterStore.from_spec_defaults(forward_spec)
-    truth_store = truth_store.replace(
-        {
-            "source.separation_as": 10.0,
-            "source.position_angle_deg": 90.0,
-            "source.x_position_as": 0.0,
-            "source.y_position_as": 0.0,
-            "source.exposure_time_s": 1800.,
-        }
-    )
-    truth_store = truth_store.refresh_derived(forward_spec)
 
     binder = SheraBinder(system_cfg, forward_spec, truth_store)
 
@@ -267,26 +276,7 @@ def main(
     # inferable directly (store-wins, no forced runtime recomputation).
     inference_subspec = forward_spec.subset(infer_keys)
 
-    # TODO: Parse priors from experiment preset if present, fall back to defaults
-    # prior_info defines our initial knowledge of each parameter,
-    # and determines the amplitude of the random perturbation applied to the model
-    prior_info = {
-        "source.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "source.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"}, # 1.67e-2 deg = 1 arcmin
-        "source.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
-        "source.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
-        "source.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"}, # 4.3e-3 log-flux -> 1% flux cal
-        "source.contrast":               {"sigma": 6e-3, "dist": "LogNormal"}, # 6e-3 log-contrast -> indep. 1% star cal
-        "optics.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"}, # 4.3e-3 log-platescale -> 1% cal
-        "optics.primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("optics.primary.zernike_coeffs_nm"),2),
-            "dist": "Normal",
-        },
-        "optics.secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("optics.secondary.zernike_coeffs_nm"),2),
-            "dist": "Normal",
-        },
-    }
+    prior_info = experiment["priors"] or _default_prior_info(truth_store)
     prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
     init_mode = experiment["init"]["sampling"]
@@ -334,7 +324,8 @@ def main(
         )
         return nll_loss + prior_gaussian_loss
 
-    loss_fn = nll_loss_fn
+    loss_kind = optimizer_cfg["loss"]
+    loss_fn = map_loss_fn if loss_kind == "map" else nll_loss_fn
 
     theta_true = pack_params(inference_subspec, truth_store)
     loss_true = loss_fn(theta_true)
@@ -513,7 +504,6 @@ def main(
     )
 
     print("Running preconditioned gradient descent...")
-    optimizer_cfg = experiment["optimizer"]
     if optimizer_cfg["kind"] not in {"sgd", "adam"}:
         raise ValueError(
             f"Unsupported experiment.optimizer.kind={optimizer_cfg['kind']!r}. "
@@ -722,6 +712,15 @@ def _require_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
+def _optional_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"experiment.{key} must be a mapping when provided")
+    return dict(value)
+
+
 def _require_bool(parent: dict[str, Any], key: str) -> bool:
     value = parent.get(key)
     if not isinstance(value, bool):
@@ -729,8 +728,43 @@ def _require_bool(parent: dict[str, Any], key: str) -> bool:
     return value
 
 
+def _optional_bool(parent: dict[str, Any], key: str, default: bool) -> bool:
+    value = parent.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Expected boolean for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_bool_alias(
+    parent: dict[str, Any],
+    primary_key: str,
+    alias_keys: tuple[str, ...],
+    default: bool,
+) -> bool:
+    if primary_key in parent:
+        value = parent[primary_key]
+    else:
+        value = default
+        for alias in alias_keys:
+            if alias in parent:
+                value = parent[alias]
+                break
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"Expected boolean for {primary_key!r}, got {type(value).__name__}"
+        )
+    return value
+
+
 def _require_int(parent: dict[str, Any], key: str) -> int:
     value = parent.get(key)
+    if not isinstance(value, int):
+        raise ValueError(f"Expected integer for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_int(parent: dict[str, Any], key: str, default: int) -> int:
+    value = parent.get(key, default)
     if not isinstance(value, int):
         raise ValueError(f"Expected integer for {key!r}, got {type(value).__name__}")
     return value
@@ -743,8 +777,22 @@ def _require_number(parent: dict[str, Any], key: str) -> float:
     return float(value)
 
 
+def _optional_number(parent: dict[str, Any], key: str, default: float) -> float:
+    value = parent.get(key, default)
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"Expected number for {key!r}, got {type(value).__name__}")
+    return float(value)
+
+
 def _require_str(parent: dict[str, Any], key: str) -> str:
     value = parent.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"Expected string for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_str(parent: dict[str, Any], key: str, default: str) -> str:
+    value = parent.get(key, default)
     if not isinstance(value, str):
         raise ValueError(f"Expected string for {key!r}, got {type(value).__name__}")
     return value
@@ -755,6 +803,86 @@ def _require_str_list(parent: dict[str, Any], key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
         raise ValueError(f"{key!r} must be a list of strings")
     return tuple(value)
+
+
+def _normalize_init_sampling(raw_value: str) -> str:
+    if raw_value in {"prior", "prior_sample"}:
+        return "prior"
+    if raw_value in {"explicit", "truth"}:
+        return "explicit"
+    raise ValueError(
+        f"Unsupported experiment.init sampling mode {raw_value!r}; "
+        "expected 'prior', 'prior_sample', 'explicit', or 'truth'."
+    )
+
+
+def _default_prior_info(truth_store: ParameterStore) -> dict[str, Any]:
+    return {
+        "source.separation_as": {"sigma": 1e-3, "dist": "Normal"},
+        "source.position_angle_deg": {
+            "sigma": 1.67e-2,
+            "dist": "Uniform",
+        },
+        "source.x_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "source.y_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "source.log_flux_total": {"sigma": 4.3e-3, "dist": "Normal"},
+        "source.contrast": {"sigma": 6e-3, "dist": "LogNormal"},
+        "optics.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"},
+        "optics.primary.zernike_coeffs_nm": {
+            "sigma": np.full_like(
+                truth_store.get("optics.primary.zernike_coeffs_nm"),
+                2,
+            ),
+            "dist": "Normal",
+        },
+        "optics.secondary.zernike_coeffs_nm": {
+            "sigma": np.full_like(
+                truth_store.get("optics.secondary.zernike_coeffs_nm"),
+                2,
+            ),
+            "dist": "Normal",
+        },
+    }
+
+
+def _selected_preset(user_cfg: dict[str, Any], block_name: str) -> str | None:
+    block = user_cfg.get(block_name)
+    if not isinstance(block, dict):
+        return None
+    preset = block.get("preset")
+    if isinstance(preset, str) and preset:
+        return preset
+    return None
+
+
+def _repo_relative_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _resolve_results_dir(
+    *,
+    cli_results_dir: Path | None,
+    experiment_cfg: dict[str, Any],
+    prescription_path: Path | None,
+) -> tuple[Path, str]:
+    if cli_results_dir is not None:
+        return Path(cli_results_dir), "--results-dir"
+
+    outputs_cfg = experiment_cfg.get("outputs", {})
+    outdir_value = outputs_cfg.get("outdir")
+    if outdir_value is None:
+        return DEFAULT_RESULTS_DIR, "default timestamped directory"
+
+    outdir_path = Path(outdir_value).expanduser()
+    if not outdir_path.is_absolute() and prescription_path is not None:
+        outdir_path = (prescription_path.parent / outdir_path).resolve()
+        return outdir_path, "experiment.outputs.outdir (relative to prescription)"
+    return outdir_path, "experiment.outputs.outdir"
 
 
 def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -768,65 +896,149 @@ def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
     else:
         experiment_cfg = cfg
 
-    _require_int(experiment_cfg, "seed")
-    _require_str_list(experiment_cfg, "infer_keys")
+    seed = _require_int(experiment_cfg, "seed")
+    infer_keys = _require_str_list(experiment_cfg, "infer_keys")
 
-    noise_cfg = _require_dict(experiment_cfg, "noise")
-    _require_bool(noise_cfg, "enabled")
-    _require_bool(noise_cfg, "photon_noise")
-    # TODO: Make read_noise and dark_current fields optional, default to False
-    _require_bool(noise_cfg, "read_noise")
-    _require_bool(noise_cfg, "dark_current")
+    noise_cfg = _optional_dict(experiment_cfg, "noise")
+    init_cfg = _optional_dict(experiment_cfg, "init")
+    optimizer_cfg = _optional_dict(experiment_cfg, "optimizer")
+    outputs_cfg = _optional_dict(experiment_cfg, "outputs")
+    priors_cfg = _optional_dict(experiment_cfg, "priors")
 
-    init_cfg = _require_dict(experiment_cfg, "init")
-    init_mode = _require_str(init_cfg, "sampling")
-    if init_mode not in {"prior", "explicit"}:
-        raise ValueError(
-            f"Unsupported experiment.init.mode {init_mode!r}; "
-            "expected 'prior' or 'explicit'."
-        )
+    eigen_cfg_raw = experiment_cfg.get("eigenmodes", experiment_cfg.get("eigen"))
+    if eigen_cfg_raw is None:
+        eigen_cfg = {}
+    elif isinstance(eigen_cfg_raw, dict):
+        eigen_cfg = dict(eigen_cfg_raw)
+    else:
+        raise ValueError("experiment.eigenmodes must be a mapping when provided")
 
-    optimizer_cfg = _require_dict(experiment_cfg, "optimizer")
-    optimizer_kind = _require_str(optimizer_cfg, "kind")
+    init_sampling_raw = init_cfg.get("sampling", init_cfg.get("mode", "prior"))
+    if not isinstance(init_sampling_raw, str):
+        raise ValueError("experiment.init.sampling must be a string")
+    init_sampling = _normalize_init_sampling(init_sampling_raw)
+
+    optimizer_kind = _optional_str(optimizer_cfg, "kind", "sgd")
     if optimizer_kind not in {"sgd", "adam"}:
         raise ValueError(
             f"Unsupported experiment.optimizer.kind {optimizer_kind!r}; "
             "expected 'sgd' or 'adam'."
         )
-    _require_int(optimizer_cfg, "n_iter")
-    # TODO: make n_iter_fast optional, default to 20
-    _require_int(optimizer_cfg, "n_iter_fast")
-    _require_number(optimizer_cfg, "base_lr")
+    loss_kind = _optional_str(optimizer_cfg, "loss", "nll")
+    if loss_kind not in {"nll", "map"}:
+        raise ValueError(
+            f"Unsupported experiment.optimizer.loss {loss_kind!r}; "
+            "expected 'nll' or 'map'."
+        )
 
-    outputs_cfg = _require_dict(experiment_cfg, "outputs")
-    _require_bool(outputs_cfg, "save_plots")
+    plots_enabled = outputs_cfg.get("plots", outputs_cfg.get("save_plots", SAVE_PLOTS))
+    if not isinstance(plots_enabled, bool):
+        raise ValueError("experiment.outputs.plots must be a boolean")
+    outdir_value = outputs_cfg.get("outdir")
+    if outdir_value is not None and not isinstance(outdir_value, str):
+        raise ValueError("experiment.outputs.outdir must be a string or null")
 
-    return experiment_cfg
+    truncate_k_value = eigen_cfg.get("truncate_k", TRUNCATE_K)
+    if truncate_k_value is not None and not isinstance(truncate_k_value, int):
+        raise ValueError("experiment.eigenmodes.truncate_k must be an integer or null")
+    truncate_by_eigval_value = eigen_cfg.get(
+        "truncate_by_eigval",
+        TRUNCATE_BY_EIGVAL,
+    )
+    if truncate_by_eigval_value is not None and not isinstance(
+        truncate_by_eigval_value,
+        (int, float),
+    ):
+        raise ValueError(
+            "experiment.eigenmodes.truncate_by_eigval must be a number or null"
+        )
+
+    return {
+        "seed": seed,
+        "infer_keys": infer_keys,
+        "noise": {
+            "enabled": _optional_bool(noise_cfg, "enabled", ADD_NOISE),
+            "photon_noise": _optional_bool(noise_cfg, "photon_noise", True),
+            "read_noise": _optional_bool(noise_cfg, "read_noise", False),
+            "dark_current": _optional_bool(noise_cfg, "dark_current", False),
+        },
+        "init": {"sampling": init_sampling},
+        "optimizer": {
+            "kind": optimizer_kind,
+            "loss": loss_kind,
+            "n_iter": _optional_int(optimizer_cfg, "n_iter", DEFAULT_N_ITER),
+            "n_iter_fast": _optional_int(
+                optimizer_cfg,
+                "n_iter_fast",
+                DEFAULT_FAST_ITER,
+            ),
+            "base_lr": _optional_number(optimizer_cfg, "base_lr", DEFAULT_BASE_LR),
+        },
+        "outputs": {
+            "plots": plots_enabled,
+            "outdir": outdir_value,
+        },
+        "priors": priors_cfg,
+        "eigenmodes": {
+            "enable": _optional_bool_alias(
+                eigen_cfg,
+                "enable",
+                ("use_eigen",),
+                USE_EIGEN,
+            ),
+            "whiten": _optional_bool_alias(
+                eigen_cfg,
+                "whiten",
+                ("whiten_basis",),
+                WHITEN_BASIS,
+            ),
+            "truncate_k": truncate_k_value,
+            "truncate_by_eigval": (
+                float(truncate_by_eigval_value)
+                if truncate_by_eigval_value is not None
+                else None
+            ),
+        },
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Canonical astrometry strict-schema recipe")
+    parser = argparse.ArgumentParser(
+        description="Canonical astrometry recipe with preset seeds plus optional prescription overrides"
+    )
     parser.add_argument(
         "--config",
+        "--prescription",
+        dest="prescription",
         type=Path,
         default=None,
-        help="Path to YAML/JSON config file (must include strict top-level system/experiment blocks).",
+        help=(
+            "Path to YAML/JSON prescription. A prescription may contain "
+            "top-level experiment only, or experiment plus an optional system "
+            "block. Values deep-merge over --system-preset/--experiment-preset."
+        ),
     )
     parser.add_argument("--system-preset", type=str, default=DEFAULT_SYSTEM_PRESET)
     parser.add_argument("--experiment-preset", type=str, default=DEFAULT_EXPERIMENT_PRESET)
     parser.add_argument("--results-dir", type=Path, default=None)
     parser.add_argument("--fast", action="store_true", help="Use reduced optimization iterations.")
-    parser.add_argument("--no-eigen", action="store_true", help="Disable eigenmode optimization.")
+    parser.add_argument(
+        "--no-eigen",
+        dest="use_eigen",
+        action="store_false",
+        default=None,
+        help="Disable eigenmode optimization (overrides experiment.eigenmodes.enable).",
+    )
     return parser
 
 
 if __name__ == "__main__":
     args = _build_parser().parse_args()
     main(
-        config_path=args.config,
+        prescription_path=args.prescription,
         system_preset=args.system_preset,
         experiment_preset=args.experiment_preset,
         fast=bool(args.fast),
         results_dir=args.results_dir,
-        use_eigen=not bool(args.no_eigen),
+        use_eigen=args.use_eigen,
     )
