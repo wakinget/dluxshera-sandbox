@@ -8,9 +8,6 @@ system:
     exposure_time_s: 1800.0
     x_position_as: 0.0
     y_position_as: 0.0
-    separation_as: 10.0
-    position_angle_deg: 90.0
-    contrast: 3.0
   optics:
     kind: three_plane
     psf_npix: 256

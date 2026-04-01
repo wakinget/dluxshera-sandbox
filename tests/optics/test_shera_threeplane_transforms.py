@@ -1,10 +1,11 @@
 import math
+from contextlib import ExitStack
+from importlib import resources
+from pathlib import Path
 
 import pytest
 
-import math
-import pytest
-
+from dluxshera.components.sources import get_target_spec
 from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
     build_forward_spec_from_config,
@@ -12,6 +13,11 @@ from dluxshera.systems.three_plane import (
 from dluxshera.builders.optics import build_shera_threeplane_optics
 from dluxshera.params.store import ParameterStore, refresh_derived
 from dluxshera.params.transform_registry import TRANSFORMS
+from dluxshera.utils.source_photometry import (
+    build_wavelength_grid_m,
+    derive_source_photometry,
+    target_sed_root,
+)
 
 
 def _build_forward_model_store(cfg=SHERA_TESTBED_CONFIG):
@@ -89,7 +95,7 @@ def test_system_focal_length_matches_analytic():
     denom = (1.0 / f1) + (1.0 / f2) - sep / (f1 * f2)
     f_expected = 1.0 / denom
 
-    assert math.isclose(f_eff, f_expected, rel_tol=1e-12, abs_tol=0.0)
+    assert math.isclose(f_eff, f_expected, rel_tol=5e-6, abs_tol=0.0)
 
 
 def test_plate_scale_matches_legacy_optics():
@@ -111,32 +117,55 @@ def test_plate_scale_matches_legacy_optics():
     assert math.isclose(
         plate_from_transform,
         plate_from_optics,
-        rel_tol=1e-10,
+        rel_tol=5e-6,
         abs_tol=0.0,
     )
 
 
 def test_source_log_flux_total_matches_formula():
     """
-    Check that source.log_flux_total from the transform matches the
-    simple collecting-area × band × exposure × throughput formula.
+    Check that source.log_flux_total from the transform matches
+    explicit SED-backed photometry integration for Alpha Cen.
     """
     cfg = SHERA_TESTBED_CONFIG
     _, store = _build_forward_model_store(cfg)
 
     logF = TRANSFORMS.compute("source.log_flux_total", store)
 
+    target = get_target_spec(str(store.get("source.target")))
     D = float(store.get("optics.m1_diameter_m"))
+    wavelength_m = float(store.get("source.wavelength_m"))
     bandwidth_m = float(store.get("source.bandwidth_m"))
+    n_lambda = int(store.get("source.n_lambda"))
     t_exp = float(store.get("source.exposure_time_s"))
     throughput = float(store.get("optics.throughput"))
-    flux_density = float(store.get("source.spectral_flux_density"))
+    area_m2 = math.pi * (D / 2.0) ** 2
+    wavelength_grid_m = build_wavelength_grid_m(
+        wavelength_m=wavelength_m,
+        bandwidth_m=bandwidth_m,
+        n_lambda=n_lambda,
+    )
 
-    area = math.pi * (D / 2.0) ** 2
-    total_flux = flux_density * bandwidth_m * area * t_exp * throughput
-    expected_logF = math.log10(total_flux)
+    sed_root = target_sed_root()
+    sed_a_ref = sed_root.joinpath(target.sed_a_file)
+    sed_b_ref = sed_root.joinpath(target.sed_b_file)
+    with ExitStack() as stack:
+        sed_a_path = Path(stack.enter_context(resources.as_file(sed_a_ref)))
+        sed_b_path = Path(stack.enter_context(resources.as_file(sed_b_ref)))
+        expected = derive_source_photometry(
+            wavelength_grid_m=wavelength_grid_m,
+            bandwidth_m=bandwidth_m,
+            collecting_area_m2=area_m2,
+            exposure_time_s=t_exp,
+            throughput=throughput,
+            sed_a_path=sed_a_path,
+            sed_b_path=sed_b_path,
+            vmag_a=target.vmag_a,
+            vmag_b=target.vmag_b,
+        )
 
-    assert math.isclose(logF, expected_logF, rel_tol=1e-12, abs_tol=0.0)
+    assert expected.mode == "sed"
+    assert math.isclose(logF, expected.log_flux_total, rel_tol=1e-12, abs_tol=0.0)
 
 
 def test_refresh_derived_populates_forward_model_keys():

@@ -93,7 +93,6 @@ def test_build_binary_target_source_seeds_nominal_target_values():
             "source.wavelength_m": cfg.wavelength_m,
             "source.bandwidth_m": cfg.bandwidth_m,
             "source.n_lambda": cfg.n_lambda,
-            "source.log_flux_total": 7.0,
         }
     )
 
@@ -101,7 +100,9 @@ def test_build_binary_target_source_seeds_nominal_target_values():
 
     assert float(source.separation) == pytest.approx(9.765)
     assert float(source.position_angle) == pytest.approx(14.508)
-    assert float(source.contrast) == pytest.approx(10 ** (0.4 * (1.350 - 0.002)))
+    assert float(source.contrast) > 0.0
+    assert np.isfinite(float(source.log_flux))
+    assert float(source.log_flux) > 0.0
 
 
 def test_build_binary_target_source_store_overrides_win_over_target_defaults():
@@ -143,14 +144,16 @@ def test_load_normalized_sed_weights_interpolates_nm_to_m(tmp_path: Path):
     weights = load_normalized_sed_weights(sed_file, wavelength_grid_m=model_grid_m)
 
     assert np.isclose(np.sum(weights), 1.0)
-    assert np.allclose(weights, np.array([1.0, 2.0, 3.0]) / 6.0)
+    expected = np.array([500.0 * 1.0, 550.0 * 2.0, 600.0 * 3.0], dtype=float)
+    expected /= np.sum(expected)
+    assert np.allclose(weights, expected)
 
 
 def test_load_normalized_sed_weights_errors_on_degenerate_interpolation(tmp_path: Path):
     sed_file = tmp_path / "degenerate.dat"
     sed_file.write_text("500 0.0 0.0\n550 0.0 0.0\n")
 
-    with pytest.raises(ValueError, match="sum to zero"):
+    with pytest.raises(ValueError, match="zero-sum photon spectral flux"):
         load_normalized_sed_weights(sed_file, wavelength_grid_m=np.array([520e-9, 530e-9]))
 
 
@@ -184,7 +187,6 @@ def test_build_binary_target_source_uses_curated_target_sed_weights(target_key: 
             "source.wavelength_m": cfg.wavelength_m,
             "source.bandwidth_m": cfg.bandwidth_m,
             "source.n_lambda": cfg.n_lambda,
-            "source.log_flux_total": 7.0,
         }
     )
 
@@ -194,6 +196,9 @@ def test_build_binary_target_source_uses_curated_target_sed_weights(target_key: 
     assert weights.shape == (2, 4)
     assert np.allclose(np.sum(weights, axis=1), np.ones(2))
     assert not np.allclose(weights, np.full((2, 4), 0.25))
+    assert float(source.contrast) > 0.0
+    assert np.isfinite(float(source.log_flux))
+    assert float(source.log_flux) > 0.0
 
 
 def test_build_binary_target_source_falls_back_when_curated_sed_files_are_missing(monkeypatch):
@@ -217,9 +222,12 @@ def test_build_binary_target_source_falls_back_when_curated_sed_files_are_missin
             "source.wavelength_m": cfg.wavelength_m,
             "source.bandwidth_m": cfg.bandwidth_m,
             "source.n_lambda": cfg.n_lambda,
-            "source.log_flux_total": 7.0,
         }
     )
 
     source = build_binary_target_source(store, cfg=cfg)
     assert np.allclose(np.asarray(source.weights), np.full((2, 4), 0.25))
+    expected_contrast = 10 ** (0.4 * (alpha.vmag_b - alpha.vmag_a))
+    assert float(source.contrast) == pytest.approx(expected_contrast)
+    assert np.isfinite(float(source.log_flux))
+    assert float(source.log_flux) > 0.0

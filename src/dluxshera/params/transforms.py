@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+from importlib import resources
 import math
+from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
+from ..components.sources import get_target_spec
+from ..utils.source_photometry import (
+    build_wavelength_grid_m,
+    derive_source_photometry,
+    target_sed_root,
+)
 from .spec import ParamKey
 from .transform_registry import DEFAULT_SYSTEM_ID, register_transform
 
@@ -104,51 +113,83 @@ def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
 @register_for_systems(
     "source.log_flux_total",
     depends_on=(
+        "source.target",
+        "source.vmag_a",
+        "source.vmag_b",
+        "source.wavelength_m",
         "optics.m1_diameter_m",
         "source.bandwidth_m",
+        "source.n_lambda",
         "source.exposure_time_s",
         "optics.throughput",
-        "source.spectral_flux_density",
     ),
 )
 def transform_source_log_flux_total(ctx: Ctx) -> float:
     """
-    Compute the truth-level log10 total photon count over the exposure.
+    Compute total detected ``log10(photons)`` from authoritative source photometry.
 
-    Model:
-
-        area         = π (D / 2)^2
-        total_flux   = spectral_flux_density * bandwidth_m
-                       * area * exposure_time_s * throughput
-        log_flux_tot = log10(total_flux)
-
-    where:
-        D                      = primary mirror diameter [m]
-        spectral_flux_density  = mean photon flux density at the pupil in
-                                 ph/s/m^2 per *meter* of band
-        bandwidth_m            = bandpass width [m]
-        exposure_time_s        = integration time [s]
-        throughput             = end-to-end efficiency (0–1)
+    This transform uses curated target component SEDs when available. If SEDs
+    are missing, it falls back to a documented Johnson-V/Vega-style
+    approximation using component V magnitudes.
     """
+    target_key_raw = ctx.get("source.target", None)
+    target_key = str(target_key_raw).strip() if target_key_raw not in (None, "") else None
+    target_spec = get_target_spec(target_key) if target_key else None
+
+    vmag_a_raw = ctx.get("source.vmag_a", None)
+    vmag_b_raw = ctx.get("source.vmag_b", None)
+    vmag_a = float(vmag_a_raw) if vmag_a_raw is not None else (target_spec.vmag_a if target_spec else None)
+    vmag_b = float(vmag_b_raw) if vmag_b_raw is not None else (target_spec.vmag_b if target_spec else None)
+
     D = float(ctx["optics.m1_diameter_m"])
+    wavelength_m = float(ctx["source.wavelength_m"])
     bandwidth_m = float(ctx["source.bandwidth_m"])
+    n_lambda = int(ctx["source.n_lambda"])
     t_exp = float(ctx["source.exposure_time_s"])
     throughput = float(ctx["optics.throughput"])
-    flux_density = float(ctx["source.spectral_flux_density"])
+    area_m2 = math.pi * (D / 2.0) ** 2
+    wavelength_grid_m = build_wavelength_grid_m(
+        wavelength_m=wavelength_m,
+        bandwidth_m=bandwidth_m,
+        n_lambda=n_lambda,
+    )
 
-    area = math.pi * (D / 2.0) ** 2
-    total_flux = flux_density * bandwidth_m * area * t_exp * throughput
+    sed_a_ref = None
+    sed_b_ref = None
+    if target_spec and target_spec.sed_a_file and target_spec.sed_b_file:
+        sed_root = target_sed_root()
+        sed_a_ref = sed_root.joinpath(target_spec.sed_a_file)
+        sed_b_ref = sed_root.joinpath(target_spec.sed_b_file)
 
-    # total_flux should be > 0 for physical configurations
-    if not (total_flux > 0.0):
-        # Optional guard; you could also just let log10 blow up.
-        raise ValueError(
-            f"Non-positive total_flux={total_flux} in source_log_flux_total "
-            "(check flux_density, bandwidth, area, exposure_time, throughput)."
+    if sed_a_ref is not None and sed_b_ref is not None and sed_a_ref.is_file() and sed_b_ref.is_file():
+        with ExitStack() as stack:
+            sed_a_path = Path(stack.enter_context(resources.as_file(sed_a_ref)))
+            sed_b_path = Path(stack.enter_context(resources.as_file(sed_b_ref)))
+            photometry = derive_source_photometry(
+                wavelength_grid_m=wavelength_grid_m,
+                bandwidth_m=bandwidth_m,
+                collecting_area_m2=area_m2,
+                exposure_time_s=t_exp,
+                throughput=throughput,
+                sed_a_path=sed_a_path,
+                sed_b_path=sed_b_path,
+                vmag_a=vmag_a,
+                vmag_b=vmag_b,
+            )
+    else:
+        photometry = derive_source_photometry(
+            wavelength_grid_m=wavelength_grid_m,
+            bandwidth_m=bandwidth_m,
+            collecting_area_m2=area_m2,
+            exposure_time_s=t_exp,
+            throughput=throughput,
+            sed_a_path=None,
+            sed_b_path=None,
+            vmag_a=vmag_a,
+            vmag_b=vmag_b,
         )
 
-    log_flux = math.log10(total_flux)
-    return log_flux
+    return float(photometry.log_flux_total)
 
 
 # ---------------------------------------------------------------------------

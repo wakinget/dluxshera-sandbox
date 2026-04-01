@@ -14,6 +14,13 @@ import numpy as np
 from dLuxToliman import AlphaCen
 
 from ..components.sources import TargetSpec, get_target_spec
+from ..utils.source_photometry import (
+    build_wavelength_grid_m,
+    derive_source_photometry,
+    load_sed_photon_flux_density_per_nm,
+    normalize_component_weights,
+    target_sed_root,
+)
 
 if TYPE_CHECKING:
     from ..systems.three_plane import SheraThreePlaneConfig
@@ -40,7 +47,7 @@ def _target_sed_root() -> resources.abc.Traversable:
     directory under ``src/dluxshera/data/target_seds``.
     """
 
-    return resources.files("dluxshera").joinpath("data", "target_seds")
+    return target_sed_root()
 
 
 def _cfg_get(root: Any, path: str, default=None):
@@ -100,9 +107,8 @@ def _store_or_cfg(
     return default
 
 
-def _resolve_target_spec(source_cfg: Mapping[str, Any]) -> TargetSpec | None:
-    """Resolve optional ``system.source.target`` into a curated ``TargetSpec``."""
-    target_key = source_cfg.get("target")
+def _resolve_target_spec(target_key: Any) -> TargetSpec | None:
+    """Resolve optional target key into a curated ``TargetSpec``."""
     if not target_key:
         return None
     return get_target_spec(str(target_key))
@@ -112,7 +118,7 @@ def load_normalized_sed_weights(
     sed_path: Path,
     wavelength_grid_m: np.ndarray,
 ) -> np.ndarray:
-    """Load a tabulated component SED and return normalized model-grid weights.
+    """Load an SED and return normalized photon-count weights on the model grid.
 
     Assumptions
     -----------
@@ -121,71 +127,61 @@ def load_normalized_sed_weights(
     - Additional columns (for example uncertainty) are ignored.
     - The model wavelength grid is provided in **meters**.
 
-    The returned weights are non-negative and normalized to sum to 1.0 so they
-    encode only chromatic shape; total source normalization remains controlled
-    by ``source.log_flux_total`` and ``source.contrast``.
+    The returned weights are normalized photon-count weights (shape-only):
+    they do not set total flux normalization or broadband contrast.
     """
-
-    table = np.loadtxt(sed_path, ndmin=2)
-    if table.shape[1] < 2:
-        raise ValueError(
-            f"SED file {sed_path} must contain at least two columns: wavelength_nm and flux."
-        )
-
-    wavelength_nm = np.asarray(table[:, 0], dtype=float)
-    flux_density = np.asarray(table[:, 1], dtype=float)
-
-    if wavelength_nm.size < 2:
-        raise ValueError(f"SED file {sed_path} must contain at least two wavelength samples.")
-
-    order = np.argsort(wavelength_nm)
-    wavelength_nm = wavelength_nm[order]
-    flux_density = flux_density[order]
-
-    model_wavelengths_nm = np.asarray(wavelength_grid_m, dtype=float) * 1e9
-    interpolated = np.interp(model_wavelengths_nm, wavelength_nm, flux_density, left=0.0, right=0.0)
-    interpolated = np.clip(interpolated, a_min=0.0, a_max=None)
-
-    if not np.all(np.isfinite(interpolated)):
-        raise ValueError(f"Interpolated SED weights from {sed_path} contain non-finite values.")
-
-    total = float(np.sum(interpolated))
-    if not (total > 0.0):
-        raise ValueError(
-            "Interpolated SED weights sum to zero. Ensure the file wavelength range overlaps "
-            "the model bandpass and flux values are positive."
-        )
-
-    return interpolated / total
+    photon_flux = load_sed_photon_flux_density_per_nm(
+        sed_path,
+        wavelength_grid_m=wavelength_grid_m,
+    )
+    return normalize_component_weights(photon_flux)
 
 
-def _resolve_component_weights(
+def _derive_nominal_target_photometry(
     target_spec: TargetSpec | None,
     wavelength_grid_m: np.ndarray,
-) -> jnp.ndarray | None:
-    """Return component spectral weights for a target, or ``None`` for uniform fallback."""
-    if target_spec is None:
-        return None
+    bandwidth_m: float,
+    collecting_area_m2: float,
+    exposure_time_s: float,
+    throughput: float,
+    vmag_a: float | None,
+    vmag_b: float | None,
+):
+    """Derive nominal source photometry from curated SEDs or V-mag fallback."""
+    sed_a_ref = None
+    sed_b_ref = None
+    if target_spec and target_spec.sed_a_file and target_spec.sed_b_file:
+        sed_root = _target_sed_root()
+        sed_a_ref = sed_root.joinpath(target_spec.sed_a_file)
+        sed_b_ref = sed_root.joinpath(target_spec.sed_b_file)
 
-    if not target_spec.sed_a_file or not target_spec.sed_b_file:
-        return None
+    if sed_a_ref is not None and sed_b_ref is not None and sed_a_ref.is_file() and sed_b_ref.is_file():
+        with ExitStack() as stack:
+            sed_a_path = Path(stack.enter_context(resources.as_file(sed_a_ref)))
+            sed_b_path = Path(stack.enter_context(resources.as_file(sed_b_ref)))
+            return derive_source_photometry(
+                wavelength_grid_m=wavelength_grid_m,
+                bandwidth_m=bandwidth_m,
+                collecting_area_m2=collecting_area_m2,
+                exposure_time_s=exposure_time_s,
+                throughput=throughput,
+                sed_a_path=sed_a_path,
+                sed_b_path=sed_b_path,
+                vmag_a=vmag_a,
+                vmag_b=vmag_b,
+            )
 
-    sed_root = _target_sed_root()
-    sed_a_ref = sed_root.joinpath(target_spec.sed_a_file)
-    sed_b_ref = sed_root.joinpath(target_spec.sed_b_file)
-
-    # Lean fallback behaviour: if either curated file is unavailable, use the
-    # source model's default uniform weighting instead of failing construction.
-    if not sed_a_ref.is_file() or not sed_b_ref.is_file():
-        return None
-
-    with ExitStack() as stack:
-        sed_a_path = stack.enter_context(resources.as_file(sed_a_ref))
-        sed_b_path = stack.enter_context(resources.as_file(sed_b_ref))
-        weights_a = load_normalized_sed_weights(sed_a_path, wavelength_grid_m=wavelength_grid_m)
-        weights_b = load_normalized_sed_weights(sed_b_path, wavelength_grid_m=wavelength_grid_m)
-
-    return jnp.asarray(np.stack([weights_a, weights_b], axis=0))
+    return derive_source_photometry(
+        wavelength_grid_m=wavelength_grid_m,
+        bandwidth_m=bandwidth_m,
+        collecting_area_m2=collecting_area_m2,
+        exposure_time_s=exposure_time_s,
+        throughput=throughput,
+        sed_a_path=None,
+        sed_b_path=None,
+        vmag_a=vmag_a,
+        vmag_b=vmag_b,
+    )
 
 
 def build_binary_target_source(
@@ -194,9 +190,10 @@ def build_binary_target_source(
 ) -> AlphaCen:
     """Construct a binary-target source from runtime store values.
 
-    The builder resolves optional ``system.source.target`` metadata to seed
-    nominal defaults, but the authoritative runtime parameter semantics remain
-    unchanged under ``source.*`` keys.
+    Runtime source parameterization is unchanged:
+    astrometry + ``log_flux_total`` + ``contrast`` + component weights.
+    When runtime brightness terms are missing, nominal photometry is seeded
+    from curated target SEDs (authoritative path) with Johnson-V fallback.
     """
     source_cfg = _extract_source_cfg(cfg)
     source_kind = str(source_cfg.get("kind", "")).lower()
@@ -204,14 +201,6 @@ def build_binary_target_source(
     if "target" not in source_cfg and source_kind == "alpha_cen":
         source_cfg = dict(source_cfg)
         source_cfg["target"] = "ALPHA_CEN"
-
-    target_spec = _resolve_target_spec(source_cfg)
-
-    default_sep = target_spec.nominal_separation_as if target_spec else 10.0
-    default_pa = target_spec.nominal_position_angle_deg if target_spec else 90.0
-    default_contrast = (
-        target_spec.nominal_contrast if target_spec and target_spec.nominal_contrast else 3.0
-    )
 
     wavelength_m = _store_or_cfg(
         store,
@@ -234,40 +223,70 @@ def build_binary_target_source(
         source_cfg=source_cfg,
         default=None,
     )
+    target_key = _store_or_cfg(
+        store,
+        "source.target",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=source_cfg.get("target"),
+    )
+    target_spec = _resolve_target_spec(target_key)
+    vmag_a = _store_or_cfg(
+        store,
+        "source.vmag_a",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=target_spec.vmag_a if target_spec else None,
+    )
+    vmag_b = _store_or_cfg(
+        store,
+        "source.vmag_b",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=target_spec.vmag_b if target_spec else None,
+    )
+    exposure_time_s = _store_or_cfg(
+        store,
+        "source.exposure_time_s",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=1.0,
+    )
+    throughput = _store_or_cfg(
+        store,
+        "optics.throughput",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=1.0,
+    )
+    m1_diameter_m = _store_or_cfg(
+        store,
+        "optics.m1_diameter_m",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
     separation_as = _store_or_cfg(
         store,
         "source.separation_as",
         cfg=cfg,
         source_cfg=source_cfg,
-        default=default_sep,
+        default=target_spec.nominal_separation_as if target_spec else 10.0,
     )
     position_angle_deg = _store_or_cfg(
         store,
         "source.position_angle_deg",
         cfg=cfg,
         source_cfg=source_cfg,
-        default=default_pa,
+        default=target_spec.nominal_position_angle_deg if target_spec else 90.0,
     )
-    log_flux_total = _store_or_cfg(
-        store,
-        "source.log_flux_total",
-        cfg=cfg,
-        source_cfg=source_cfg,
-        default=None,
-    )
-    contrast = _store_or_cfg(
-        store,
-        "source.contrast",
-        cfg=cfg,
-        source_cfg=source_cfg,
-        default=default_contrast,
-    )
-
-    if wavelength_m is None or bandwidth_m is None or n_lambda is None or log_flux_total is None:
+    if wavelength_m is None or bandwidth_m is None or n_lambda is None:
         raise ValueError(
             "Missing required source values. Expected source.wavelength_m, source.bandwidth_m, "
-            "source.n_lambda, and source.log_flux_total (in store or config)."
+            "and source.n_lambda (in store or config)."
         )
+    if m1_diameter_m is None:
+        raise ValueError("Missing required optics.m1_diameter_m for source photometry seeding.")
 
     # Optional centre; default to (0, 0) if not present anywhere.
     x_position = _store_or_cfg(
@@ -292,12 +311,66 @@ def build_binary_target_source(
         center_nm + bandwidth_nm / 2,
     )
 
-    model_wavelengths_m = np.linspace(
-        bandpass[0] * 1e-9,
-        bandpass[1] * 1e-9,
-        int(n_lambda),
+    model_wavelengths_m = build_wavelength_grid_m(
+        wavelength_m=float(wavelength_m),
+        bandwidth_m=float(bandwidth_m),
+        n_lambda=int(n_lambda),
     )
-    weights = _resolve_component_weights(target_spec, wavelength_grid_m=model_wavelengths_m)
+    collecting_area_m2 = float(np.pi * (float(m1_diameter_m) / 2.0) ** 2)
+
+    nominal_photometry = None
+    nominal_error = None
+    try:
+        nominal_photometry = _derive_nominal_target_photometry(
+            target_spec=target_spec,
+            wavelength_grid_m=model_wavelengths_m,
+            bandwidth_m=float(bandwidth_m),
+            collecting_area_m2=collecting_area_m2,
+            exposure_time_s=float(exposure_time_s),
+            throughput=float(throughput),
+            vmag_a=float(vmag_a) if vmag_a is not None else None,
+            vmag_b=float(vmag_b) if vmag_b is not None else None,
+        )
+    except ValueError as exc:
+        nominal_error = exc
+
+    default_contrast = (
+        float(nominal_photometry.contrast)
+        if nominal_photometry is not None
+        else (target_spec.nominal_contrast if target_spec and target_spec.nominal_contrast else 3.0)
+    )
+    contrast_sentinel = object()
+    contrast = store.get("source.contrast", default=contrast_sentinel)
+    if contrast is contrast_sentinel:
+        if target_spec is None and "contrast" in source_cfg:
+            contrast = source_cfg.get("contrast")
+        else:
+            contrast = default_contrast
+
+    default_log_flux = float(nominal_photometry.log_flux_total) if nominal_photometry is not None else None
+    log_flux_total = _store_or_cfg(
+        store,
+        "source.log_flux_total",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=default_log_flux,
+    )
+    if log_flux_total is None:
+        if nominal_error is None:
+            raise ValueError(
+                "Missing source.log_flux_total and no nominal photometry could be derived."
+            )
+        raise ValueError(
+            "Missing source.log_flux_total and nominal photometry seeding failed: "
+            f"{nominal_error}"
+        ) from nominal_error
+
+    if nominal_photometry is not None:
+        weights = jnp.asarray(nominal_photometry.weights)
+    else:
+        # If nominal photometry is unavailable but explicit flux parameters
+        # are provided, keep source construction permissive with uniform shape.
+        weights = jnp.asarray(np.full((2, int(n_lambda)), 1.0 / float(n_lambda)))
 
     return AlphaCen(
         n_wavels=int(n_lambda),
@@ -345,7 +418,6 @@ def apply_runtime_bindings(
 
 __all__ = [
     "SOURCE_RUNTIME_BINDINGS",
-    "TARGET_SED_DIR",
     "apply_runtime_bindings",
     "build_alpha_cen_source",
     "build_binary_target_source",

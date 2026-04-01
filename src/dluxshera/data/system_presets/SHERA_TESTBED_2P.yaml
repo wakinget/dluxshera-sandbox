@@ -7,9 +7,6 @@ system:
     n_lambda: 3
     x_position_as: 0.0
     y_position_as: 0.0
-    separation_as: 10.0
-    position_angle_deg: 90.0
-    contrast: 3.0
   optics:
     kind: two_plane
     psf_npix: 256

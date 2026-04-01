@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, is_dataclass
+from importlib import resources
+from pathlib import Path
 from typing import Any
 
 from ..params.spec import ParamField, ParamSpec
+from ..utils.source_photometry import (
+    build_wavelength_grid_m,
+    derive_source_photometry,
+    target_sed_root,
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,8 @@ class TargetSpec:
         return 10.0 ** (0.4 * (self.vmag_b - self.vmag_a))
 
 
+# Target values are taken from a google spreadsheet "MO Targets and sensitivity (TOLIMAN/SHERA)"
+# shared by Eric Mamajek 03/26/2026
 TARGET_SPECS: dict[str, TargetSpec] = {
     "ALPHA_CEN": TargetSpec(
         key="ALPHA_CEN",
@@ -183,13 +193,78 @@ def _extract_source_mapping(source_cfg: Mapping[str, Any] | Any) -> Mapping[str,
     return source_cfg
 
 
+def _derive_nominal_contrast(
+    *,
+    target_spec: TargetSpec | None,
+    wavelength_m: float | None,
+    bandwidth_m: float | None,
+    n_lambda: int | None,
+    vmag_a: float | None,
+    vmag_b: float | None,
+) -> float:
+    """Return nominal ``A/B`` contrast from SEDs with V-mag fallback."""
+    if wavelength_m is None or bandwidth_m is None or n_lambda is None:
+        if target_spec and target_spec.nominal_contrast:
+            return float(target_spec.nominal_contrast)
+        return 3.0
+
+    wavelength_grid_m = build_wavelength_grid_m(
+        wavelength_m=float(wavelength_m),
+        bandwidth_m=float(bandwidth_m),
+        n_lambda=int(n_lambda),
+    )
+
+    sed_a_ref = None
+    sed_b_ref = None
+    if target_spec and target_spec.sed_a_file and target_spec.sed_b_file:
+        sed_root = target_sed_root()
+        sed_a_ref = sed_root.joinpath(target_spec.sed_a_file)
+        sed_b_ref = sed_root.joinpath(target_spec.sed_b_file)
+
+    try:
+        if sed_a_ref is not None and sed_b_ref is not None and sed_a_ref.is_file() and sed_b_ref.is_file():
+            with ExitStack() as stack:
+                sed_a_path = Path(stack.enter_context(resources.as_file(sed_a_ref)))
+                sed_b_path = Path(stack.enter_context(resources.as_file(sed_b_ref)))
+                photometry = derive_source_photometry(
+                    wavelength_grid_m=wavelength_grid_m,
+                    bandwidth_m=float(bandwidth_m),
+                    collecting_area_m2=1.0,
+                    exposure_time_s=1.0,
+                    throughput=1.0,
+                    sed_a_path=sed_a_path,
+                    sed_b_path=sed_b_path,
+                    vmag_a=vmag_a,
+                    vmag_b=vmag_b,
+                )
+        else:
+            photometry = derive_source_photometry(
+                wavelength_grid_m=wavelength_grid_m,
+                bandwidth_m=float(bandwidth_m),
+                collecting_area_m2=1.0,
+                exposure_time_s=1.0,
+                throughput=1.0,
+                sed_a_path=None,
+                sed_b_path=None,
+                vmag_a=vmag_a,
+                vmag_b=vmag_b,
+            )
+    except ValueError:
+        if target_spec and target_spec.nominal_contrast:
+            return float(target_spec.nominal_contrast)
+        return 3.0
+
+    return float(photometry.contrast)
+
+
 def build_binary_target_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
     """Return the generic binary-target parameter contract under ``source.*`` keys.
 
-    The optional ``system.source.target`` key points to static ``TargetSpec``
-    metadata that may seed nominal defaults for ``source.separation_as``,
-    ``source.position_angle_deg``, and ``source.contrast``. Runtime values in
-    the store remain authoritative.
+    Curated target photometry defaults are SED-authoritative where available.
+    If SEDs are missing or omitted, defaults fall back to Johnson-V magnitudes
+    and uniform component weights.
+
+    Runtime values in the store remain authoritative for source primitives.
     """
 
     source_cfg = _extract_source_mapping(source_cfg)
@@ -201,7 +276,9 @@ def build_binary_target_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
     bandwidth_m = source_cfg.get("bandwidth_m")
     n_lambda = source_cfg.get("n_lambda")
     exposure_time_s = source_cfg.get("exposure_time_s", 1.0)
-    spectral_flux_density = source_cfg.get("spectral_flux_density", 1.7227e17)
+    default_target = str(target_key).strip().upper() if target_key else None
+    default_vmag_a = source_cfg.get("vmag_a", target_spec.vmag_a if target_spec else None)
+    default_vmag_b = source_cfg.get("vmag_b", target_spec.vmag_b if target_spec else None)
 
     default_separation = source_cfg.get(
         "separation_as",
@@ -211,17 +288,28 @@ def build_binary_target_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
         "position_angle_deg",
         target_spec.nominal_position_angle_deg if target_spec else 90.0,
     )
-    default_contrast = source_cfg.get(
-        "contrast",
-        target_spec.nominal_contrast if target_spec and target_spec.nominal_contrast else 3.0,
-    )
+    if target_spec is None and source_cfg.get("contrast") is not None:
+        default_contrast = source_cfg.get("contrast")
+    else:
+        default_contrast = _derive_nominal_contrast(
+            target_spec=target_spec,
+            wavelength_m=wavelength_m,
+            bandwidth_m=bandwidth_m,
+            n_lambda=n_lambda,
+            vmag_a=default_vmag_a,
+            vmag_b=default_vmag_b,
+        )
 
     log_flux_dependencies = (
+        "source.target",
+        "source.vmag_a",
+        "source.vmag_b",
+        "source.wavelength_m",
         "optics.m1_diameter_m",
         "source.bandwidth_m",
+        "source.n_lambda",
         "source.exposure_time_s",
         "optics.throughput",
-        "source.spectral_flux_density",
     )
 
     raw_flux_dependencies = (
@@ -267,12 +355,30 @@ def build_binary_target_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
             structural=False,
         ),
         ParamField(
-            "source.spectral_flux_density",
+            "source.target",
+            group="source",
+            kind="primitive",
+            dtype=str,
+            shape=(),
+            default=default_target,
+            structural=False,
+        ),
+        ParamField(
+            "source.vmag_a",
             group="source",
             kind="primitive",
             dtype=float,
             shape=(),
-            default=spectral_flux_density,
+            default=default_vmag_a,
+            structural=False,
+        ),
+        ParamField(
+            "source.vmag_b",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=default_vmag_b,
             structural=False,
         ),
         ParamField(

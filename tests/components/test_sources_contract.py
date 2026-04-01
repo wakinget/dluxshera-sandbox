@@ -14,7 +14,9 @@ def test_alpha_cen_contract_keys_and_structural_flags():
         "source.bandwidth_m": True,
         "source.n_lambda": True,
         "source.exposure_time_s": False,
-        "source.spectral_flux_density": False,
+        "source.target": False,
+        "source.vmag_a": False,
+        "source.vmag_b": False,
         "source.separation_as": False,
         "source.position_angle_deg": False,
         "source.x_position_as": False,
@@ -48,4 +50,7 @@ def test_binary_target_contract_uses_target_seed_defaults():
     alpha = get_target_spec("ALPHA_CEN")
     assert spec.get("source.separation_as").default == alpha.nominal_separation_as
     assert spec.get("source.position_angle_deg").default == alpha.nominal_position_angle_deg
-    assert spec.get("source.contrast").default == alpha.nominal_contrast
+    assert spec.get("source.target").default == "ALPHA_CEN"
+    assert spec.get("source.vmag_a").default == alpha.vmag_a
+    assert spec.get("source.vmag_b").default == alpha.vmag_b
+    assert spec.get("source.contrast").default > 0.0

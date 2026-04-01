@@ -17,7 +17,7 @@ def _system_cfg(optics_kind: str) -> dict:
         "bandwidth_m": 100e-9,
         "n_lambda": 1,
         "exposure_time_s": 1.0,
-        "spectral_flux_density": 1.0,
+        "target": "ALPHA_CEN",
         "separation_as": 10.0,
         "position_angle_deg": 0.0,
         "contrast": 3.0,
@@ -131,18 +131,21 @@ def test_compose_forward_spec_raises_on_key_collisions(monkeypatch):
     def fake_build_detector_contract(_):
         return colliding_detector_contract
 
-    import dluxshera.systems.base as base_mod
+    import dluxshera.builders.detector as detector_mod
 
-    monkeypatch.setattr(base_mod, "build_detector_contract", fake_build_detector_contract)
+    monkeypatch.setattr(detector_mod, "build_detector_contract", fake_build_detector_contract)
 
     with pytest.raises(ValueError, match="key collision"):
         compose_forward_spec(system_cfg)
 
 
 def test_legacy_wrapper_delegates_to_composed_forward_spec_three_plane():
+    cfg = SheraThreePlaneConfig()
     system_cfg = _system_cfg("three_plane")["system"]
+    system_cfg["detector"]["layers"] = cfg.detector_layers
+    system_cfg["detector"]["model"] = cfg.detector_model
 
-    legacy_spec = build_forward_spec_from_config(SheraThreePlaneConfig())
+    legacy_spec = build_forward_spec_from_config(cfg)
 
     delegated_spec = compose_forward_spec({"system": system_cfg})
 

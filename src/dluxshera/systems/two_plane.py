@@ -136,13 +136,22 @@ def build_forward_spec_from_config(cfg: SheraTwoPlaneConfig) -> ParamSpec:
     """
 
     cfg_dict = asdict(cfg)
+    cfg_flat = {k: v for k, v in cfg_dict.items() if k != "system"}
+    system_overrides = cfg_dict.get("system") if isinstance(cfg_dict.get("system"), dict) else {}
+    source_overrides = system_overrides.get("source", {}) if isinstance(system_overrides, dict) else {}
+    optics_overrides = system_overrides.get("optics", {}) if isinstance(system_overrides, dict) else {}
+    detector_overrides = system_overrides.get("detector", {}) if isinstance(system_overrides, dict) else {}
+
+    source_kind = str(source_overrides.get("kind", "alpha_cen")) if isinstance(source_overrides, dict) else "alpha_cen"
+    optics_kind = str(optics_overrides.get("kind", "two_plane")) if isinstance(optics_overrides, dict) else "two_plane"
     system_cfg = {
-        "source": {"kind": "alpha_cen", **cfg_dict},
-        "optics": {"kind": "two_plane", **cfg_dict},
+        "source": {"kind": source_kind, **cfg_flat, **source_overrides},
+        "optics": {"kind": optics_kind, **cfg_flat, **optics_overrides},
         "detector": {
-            "model": cfg_dict.get("detector_model"),
-            "layers": cfg_dict.get("detector_layers", None),
-            **{k: v for k, v in cfg_dict.items() if k.startswith("detector_")},
+            "model": cfg_flat.get("detector_model"),
+            "layers": cfg_flat.get("detector_layers", None),
+            **{k: v for k, v in cfg_flat.items() if k.startswith("detector_")},
+            **detector_overrides,
         },
     }
     return compose_forward_spec({"system": system_cfg})
