@@ -43,7 +43,9 @@ from dluxshera.systems.base import SheraBinder, compose_forward_spec
 SYSTEM_PRESET = "SHERA_FLIGHT_3P"
 DEFAULT_STRETCH = "log"
 DEFAULT_VMIN = 1e3
-DEFAULT_VMAX = 1e11
+DEFAULT_VMAX = 1e9
+DEFAULT_NORMALIZED_VMIN = 1e-7
+DEFAULT_NORMALIZED_VMAX = 1e-3
 DEFAULT_PSF_NPIX: int | None = None
 TIMESTAMP = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 OUTPUT_PATH = Path(f"work/scratch/Results/source_target_montage_{TIMESTAMP}.png")
@@ -55,6 +57,23 @@ TARGET_AUTHORITY_OVERRIDE_KEYS = (
     "vmag_a",
     "vmag_b",
 )
+
+
+def _resolve_display_limits(
+    *,
+    normalize_total_flux: bool,
+    vmin: float | None,
+    vmax: float | None,
+) -> tuple[float, float]:
+    """Return shared display limits for the requested montage mode."""
+
+    if normalize_total_flux:
+        resolved_vmin = DEFAULT_NORMALIZED_VMIN if vmin is None else float(vmin)
+        resolved_vmax = DEFAULT_NORMALIZED_VMAX if vmax is None else float(vmax)
+    else:
+        resolved_vmin = DEFAULT_VMIN if vmin is None else float(vmin)
+        resolved_vmax = DEFAULT_VMAX if vmax is None else float(vmax)
+    return resolved_vmin, resolved_vmax
 
 
 def _parse_args() -> argparse.Namespace:
@@ -88,19 +107,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vmin",
         type=float,
-        default=DEFAULT_VMIN,
+        default=None,
         help=(
             "Shared lower display bound used across all panels. "
-            "In log mode this is passed directly to LogNorm."
+            "When omitted, the script uses mode-specific defaults."
         ),
     )
     parser.add_argument(
         "--vmax",
         type=float,
-        default=DEFAULT_VMAX,
+        default=None,
         help=(
             "Shared upper display bound used across all panels. "
-            "In log mode this is passed directly to LogNorm."
+            "When omitted, the script uses mode-specific defaults."
         ),
     )
     parser.add_argument(
@@ -113,6 +132,11 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    args.vmin, args.vmax = _resolve_display_limits(
+        normalize_total_flux=args.normalize_total_flux,
+        vmin=args.vmin,
+        vmax=args.vmax,
+    )
     if not np.isfinite(args.vmin) or not np.isfinite(args.vmax):
         parser.error("--vmin and --vmax must be finite.")
     if args.vmax <= args.vmin:
