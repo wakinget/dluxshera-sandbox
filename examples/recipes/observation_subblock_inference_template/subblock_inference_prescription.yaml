@@ -22,8 +22,10 @@ experiment:
       # Required: path to an observation sub-block cube FITS artifact.
       cube: CHANGE_ME/obs_subblock_YYYYMMDD-HHMMSS_cube.fits
       # Optional: explicit frame-truth CSV for comparison diagnostics.
+      # If omitted, inferred from the resolved render manifest when possible.
       trace: CHANGE_ME/obs_subblock_YYYYMMDD-HHMMSS_frame_truth.csv
       # Optional: manifest can also be used to infer trace path.
+      # If omitted, the recipe looks for manifest.json beside cube.
       # manifest: CHANGE_ME/manifest.json
 
     validate:
@@ -53,5 +55,6 @@ experiment:
       plots: true
 
   outputs:
+    # Relative paths are resolved from this prescription file's directory.
     outdir: Results/observation_subblock_inference
     file_prefix: obs_subblock_inference

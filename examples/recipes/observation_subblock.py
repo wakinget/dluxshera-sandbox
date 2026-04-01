@@ -1,8 +1,15 @@
-"""Observation sub-block renderer.
+"""Render an observation sub-block cube from a canonical explicit trace.
 
-This recipe renders a short explicit-trace image stack from one resolved
-system configuration. The renderer consumes canonical CSV traces and applies
-frame overrides for configured, supported non-structural varying keys.
+This recipe is the middle stage of the observation sub-block workflow:
+
+1. a trace-builder produces a canonical per-frame CSV trace
+2. this renderer applies those frame updates to one shared resolved system
+3. downstream quick-look or inference consumes the rendered cube plus manifest
+
+The saved manifest is intended to make a render run reviewable on its own. In
+addition to artifact paths and trace metadata, it records the resolved system
+config snapshot, shared truth overrides, noise settings, and the source config
+path used for the render.
 """
 
 from __future__ import annotations
@@ -38,8 +45,10 @@ from dluxshera.utils.obs_subblock_keys import (
 from dluxshera.utils.obs_subblock_io import (
     build_obs_subblock_artifact_paths,
     build_obs_subblock_manifest,
+    find_obs_subblock_sidecar_manifest,
     now_iso_local_ms,
     timestamp_tag,
+    to_jsonable_obs_subblock_payload,
     write_obs_subblock_cube_fits,
     write_obs_subblock_manifest,
     write_obs_subblock_truth_csv,
@@ -50,9 +59,9 @@ from dluxshera.utils.obs_subblock_trace import (
 
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "examples/recipes/observation_subblock_template/prescription.yaml"
+    "examples/recipes/observation_subblock_template/subblock_generation_prescription.yaml"
 )
-DEFAULT_OUTDIR_ROOT = Path("Results/observation_subblock")
+DEFAULT_OUTDIR_ROOT = Path("Results/obs_subblocks")
 MANIFEST_SCHEMA_VERSION = "obs_subblock_manifest.v1"
 GENERATOR_ID = "examples/recipes/observation_subblock.py"
 
@@ -124,9 +133,9 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize the experiment block for observation sub-blocks."""
 
     kind = _required_str(experiment_cfg, "kind", path="experiment")
-    if kind != "observation_subblock":
+    if kind != "subblock_generation":
         raise ValueError(
-            "experiment.kind must be 'observation_subblock' for this recipe."
+            "experiment.kind must be 'subblock_generation' for this recipe."
         )
 
     seed = _required_int(experiment_cfg, "seed", path="experiment")
@@ -136,7 +145,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("experiment.truth must be a mapping/dict.")
 
     subblock_cfg = _required_dict(
-        experiment_cfg, "observation_subblock", path="experiment"
+        experiment_cfg, "subblock", path="experiment"
     )
     varying_keys_value = subblock_cfg.get("varying_keys")
     requested_varying_keys: tuple[str, ...] | None = None
@@ -464,9 +473,19 @@ def generate_obs_subblock(
         fieldnames=truth_columns,
     )
 
+    trace_manifest_path = find_obs_subblock_sidecar_manifest(trace.source_path)
+    manifest_inputs = {
+        "config_path": str(cfg_path.resolve()),
+    }
+    if system_preset is not None:
+        manifest_inputs["system_preset_override"] = str(system_preset)
+    if trace_manifest_path is not None:
+        manifest_inputs["trace_manifest_json"] = str(trace_manifest_path)
+
     system_info = {
-        "preset": (user_cfg.get("system") or {}).get("preset"),
+        "preset": system_cfg.get("preset"),
         "config_hash": _stable_hash_payload(system_cfg),
+        "resolved_config": to_jsonable_obs_subblock_payload(system_cfg),
     }
     manifest = build_obs_subblock_manifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
@@ -483,7 +502,11 @@ def generate_obs_subblock(
         outdir=outdir,
         time_start_s=trace.time_start_s,
         time_stop_s=trace.time_stop_s,
+        inputs=manifest_inputs,
         system_info=system_info,
+        shared_truth=experiment["truth"],
+        seed=int(experiment["seed"]),
+        noise=noise_cfg,
         notes=experiment.get("notes"),
     )
     write_obs_subblock_manifest(output_path=artifacts["manifest_json"], manifest=manifest)

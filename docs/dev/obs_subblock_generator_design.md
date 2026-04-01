@@ -1,7 +1,5 @@
 # Observation Sub-Block Simulation Contract
 
-Status: Phase 4 simulation contract (renderer + separate trace-builder).
-
 ## 1. Purpose and scope
 
 Observation sub-block simulation provides a stable explicit-trace boundary for
@@ -32,7 +30,7 @@ Out of scope:
 
 The architecture remains intentionally split:
 
-- trace construction: `examples/recipes/observation_subblock_trace.py` +
+- trace construction: `examples/recipes/subblock_trace_generation.py` +
   `src/dluxshera/utils/obs_subblock_trace_builders.py`
 - rendering: `examples/recipes/observation_subblock.py`
 
@@ -52,6 +50,9 @@ Renderer input stays explicit: canonical CSV trace rows.
 - validation toggles:
   - `validate.require_contiguous_frame_index` (default `true`)
   - `validate.require_monotonic_time` (default `true`)
+
+Relative `trace.path` and `outputs.outdir` values are resolved relative to the
+prescription file, not the shell working directory.
 
 ### 3.2 Outputs
 
@@ -101,7 +102,7 @@ Observation-subblock simulation supports a defined non-structural key family.
 
 ## 5. Key-address syntax
 
-One syntax is used across config, trace-plan keys, CSV columns, manifests, and
+One syntax is used across config, `plan` keys, CSV columns, manifests, and
 validation:
 
 - scalar: `a.b.c`
@@ -142,12 +143,12 @@ drive rendering unless listed in `varying_keys`.
 
 ## 7. Trace-builder contract
 
-Set `experiment.kind: observation_subblock_trace` and configure:
+Set `experiment.kind: subblock_trace_generation` and configure:
 
-- `n_frames`
-- `dt_s`
-- `varying_keys`
-- `trace_plan` mapping per varying key
+- `trace.n_frames`
+- `trace.dt_s`
+- `trace.varying_keys`
+- `trace.plan` mapping per varying key
 - optional seed (`experiment.seed` or trace block seed)
 
 Trace-builder output remains canonical explicit CSV for renderer consumption.
@@ -184,17 +185,28 @@ derived from global seed + key + effect index + effect kind.
 
 Renderer manifests include:
 
+- `inputs.config_path`
+- optional `inputs.trace_manifest_json` when the trace came from a trace-builder
+  run with a sibling manifest
 - `varying_keys`
 - `applied_varying_keys`
 - optional `requested_varying_keys`
-- trace metadata and artifact relative paths
+- trace metadata with a relative trace path
+- resolved `system` config snapshot and config hash
+- `shared_truth`
+- renderer `seed`
+- renderer `noise`
+- artifact relative paths
 
 Trace-builder manifests include:
 
+- `inputs.config_path`
 - `varying_keys`
 - `applied_varying_keys`
 - resolved per-key anchors
 - normalized trace spec/effects
+- optional resolved `system` config snapshot and config hash
+- `shared_truth`
 
 ## 11. Output artifact layout
 
@@ -213,14 +225,33 @@ Trace-builder outputs:
 - `<file_prefix>_<timestamp>_frame_truth.csv`
 - `manifest.json` (optional via config)
 
+### 11.1 Recommended stage layout
+
+For a series of subblocks, prefer a stable per-subblock directory and use the
+CLI `run_name` for stage labels:
+
+`Results/<campaign>/<subblock_id>/`
+
+- `trace/`
+- `render/`
+- `render/quicklook/`
+- `inference/`
+
+One concrete convention with current scripts:
+
+- trace-builder: `--results-dir Results/<campaign>/<subblock_id> --run-name trace`
+- renderer: `--results-dir Results/<campaign>/<subblock_id> --run-name render`
+- inference: `--results-dir Results/<campaign>/<subblock_id> --run-name inference`
+
+This avoids nested timestamp directories unless you explicitly want them.
+
 ## 12. Backward compatibility
 
 v1-style `x/y/PA` workflows still run:
 
 - renderer defaults to v1 keys when `varying_keys` is omitted
 - trace loader defaults to v1 required varying keys when none are supplied
-- legacy trace-builder `keys: {<key>: {mode: ...}}` schema is still accepted
-  (preferred schema is `trace_plan`)
+- trace-generation schema uses only `experiment.trace.plan` (no legacy aliases)
 
 ## 13. Open follow-ons (Phase 5+)
 

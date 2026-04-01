@@ -21,7 +21,7 @@ Working practices, priorities, and lessons learned.
 - [Observation sub-block simulation contract (Phase 4)](dev/obs_subblock_generator_design.md)
 - [Observation sub-block inference design](dev/obs_subblock_inference_design.md)
 - Observation sub-block recipes:
-  - `examples/recipes/observation_subblock_trace.py` (trace builder)
+  - `examples/recipes/subblock_trace_generation.py` (trace builder)
   - `examples/recipes/observation_subblock.py` (renderer)
   - `examples/recipes/observation_subblock_inference.py` (registration-only block inference)
 

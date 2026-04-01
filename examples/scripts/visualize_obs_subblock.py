@@ -16,7 +16,9 @@ By default, outputs are written under ``<cube-parent>/quicklook/``:
 Trace and manifest handling
 ---------------------------
 - ``--trace`` explicitly provides the frame-truth CSV.
-- If ``--trace`` is omitted and ``--manifest`` is provided, trace discovery is:
+- If ``--manifest`` is omitted, the script looks for ``manifest.json`` beside
+  the cube.
+- If ``--trace`` is omitted and a manifest is available, trace discovery is:
   1. ``manifest["artifacts"]["frame_truth_csv"]``
   2. ``manifest["trace"]["path"]``
 - Manifest metadata is also used to enrich figure titles (for example,
@@ -182,6 +184,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "  python examples/scripts/visualize_obs_subblock.py --cube Results/run/cube.fits\n"
             "  python examples/scripts/visualize_obs_subblock.py --cube Results/run/cube.fits --manifest Results/run/manifest.json\n"
             "  python examples/scripts/visualize_obs_subblock.py --cube Results/run/cube.fits --trace Results/run/frame_truth.csv --mp4\n\n"
+            "Manifest resolution order:\n"
+            "  1) --manifest\n"
+            "  2) sibling manifest.json beside --cube\n\n"
             "Trace resolution order:\n"
             "  1) --trace\n"
             "  2) manifest artifacts.frame_truth_csv\n"
@@ -204,13 +209,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--trace",
         type=Path,
         default=None,
-        help="Optional frame-truth CSV path. If omitted, inferred from --manifest when possible.",
+        help="Optional frame-truth CSV path. If omitted, inferred from the resolved manifest when possible.",
     )
     parser.add_argument(
         "--manifest",
         type=Path,
         default=None,
-        help="Optional manifest JSON used for trace discovery and title metadata.",
+        help="Optional manifest JSON used for trace discovery and title metadata. Defaults to sibling manifest.json beside --cube when present.",
     )
     parser.add_argument(
         "--outdir",
@@ -281,6 +286,10 @@ def main() -> None:
         raise FileNotFoundError(f"Cube FITS not found: {cube_path}")
 
     manifest_path = args.manifest.resolve() if args.manifest is not None else None
+    if manifest_path is None:
+        sibling_manifest = cube_path.parent / "manifest.json"
+        if sibling_manifest.exists():
+            manifest_path = sibling_manifest.resolve()
     manifest = _load_manifest(manifest_path)
 
     trace_path = _infer_trace_path(

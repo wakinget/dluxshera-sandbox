@@ -1,8 +1,8 @@
-"""Observation sub-block registration-only inference recipe.
+"""Run registration-only inference on an observation sub-block cube.
 
-This recipe performs the first, intentionally narrow sub-block inference task:
-jointly infer per-frame registration parameters for a rendered observation cube
-while keeping the shared system/source/optics/detector state fixed.
+This recipe performs the first intentionally narrow block-inference task:
+jointly infer per-frame registration parameters while keeping the shared
+system/source/optics/detector state fixed.
 
 Inferred per frame
 ------------------
@@ -15,13 +15,14 @@ Inputs
 - required: observation sub-block FITS cube
 - optional: frame-truth CSV (for comparison diagnostics)
 - optional: manifest JSON (for metadata / truth-path discovery)
+- if manifest is omitted, the recipe looks for ``manifest.json`` beside the cube
 
 Outputs
 -------
 - recovered per-frame registration table
 - optional truth-vs-recovered comparison table
 - diagnostics plots (loss history, traces, residuals, image-fit panel)
-- manifest JSON summarizing inputs, settings, and artifacts
+- manifest JSON summarizing inputs, settings, fixed shared state, and artifacts
 """
 
 from __future__ import annotations
@@ -47,7 +48,16 @@ from dluxshera.inference.optimization import run_shera_gd
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
-from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
+from dluxshera.utils.obs_subblock_io import (
+    find_obs_subblock_sidecar_manifest,
+    now_iso_local_ms,
+    timestamp_tag,
+    to_jsonable_obs_subblock_payload,
+)
+from dluxshera.utils.obs_subblock_keys import (
+    apply_obs_subblock_overrides_preserving_derived,
+    partition_obs_subblock_overrides_by_kind,
+)
 from dluxshera.utils.obs_subblock_trace import ObsSubblockTrace, load_obs_subblock_trace_csv
 
 matplotlib.use("Agg", force=True)
@@ -704,8 +714,11 @@ def generate_obs_subblock_inference(
             field_name="experiment.observation_subblock_inference.inputs.manifest",
         )
         if manifest_path_value is not None
-        else None
+        else find_obs_subblock_sidecar_manifest(cube_path)
     )
+    manifest_auto_discovered = manifest_path_value is None and manifest_path is not None
+    if manifest_auto_discovered:
+        print(f"Using sibling render manifest: {manifest_path}")
     manifest_input = _load_manifest(manifest_path)
 
     explicit_trace_path = inputs_cfg.get("trace")
@@ -795,15 +808,23 @@ def generate_obs_subblock_inference(
     forward_spec = compose_forward_spec(system_cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_overrides = _flatten_truth_overrides(experiment["truth"])
-    unknown_truth_keys = sorted(key for key in truth_overrides if key not in forward_spec)
+    primitive_truth_overrides, derived_truth_overrides, unknown_truth_keys = (
+        partition_obs_subblock_overrides_by_kind(
+            truth_overrides,
+            forward_spec=forward_spec,
+        )
+    )
     if unknown_truth_keys:
         raise ValueError(
-            "experiment.truth contains keys not present in forward_spec: "
-            + ", ".join(unknown_truth_keys)
+            "experiment.truth contains keys not present or unsupported in "
+            "forward_spec: " + ", ".join(sorted(unknown_truth_keys.keys()))
         )
-    if truth_overrides:
-        base_store = base_store.replace(truth_overrides)
-    base_store = base_store.refresh_derived(forward_spec)
+    base_store = apply_obs_subblock_overrides_preserving_derived(
+        base_store,
+        forward_spec=forward_spec,
+        primitive_overrides=primitive_truth_overrides,
+        derived_overrides=derived_truth_overrides,
+    )
 
     binder = SheraBinder(system_cfg, forward_spec, base_store)
 
@@ -985,8 +1006,9 @@ def generate_obs_subblock_inference(
         )
 
     system_info = {
-        "preset": (user_cfg.get("system") or {}).get("preset"),
+        "preset": system_cfg.get("preset"),
         "config_hash": _stable_hash_payload(system_cfg),
+        "resolved_config": to_jsonable_obs_subblock_payload(system_cfg),
     }
     manifest_payload: dict[str, Any] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -995,9 +1017,16 @@ def generate_obs_subblock_inference(
         "frame_count": n_frame,
         "infer_keys": list(FRAME_PARAM_KEYS),
         "inputs": {
+            "config_path": str(cfg_path.resolve()),
             "cube_fits": str(cube_path),
             "trace_csv": None if trace_path is None else str(trace_path),
             "manifest_json": None if manifest_path is None else str(manifest_path),
+            "manifest_auto_discovered": bool(manifest_auto_discovered),
+        },
+        "init": {
+            "x_position_as": float(theta0_matrix[0, 0]),
+            "y_position_as": float(theta0_matrix[0, 1]),
+            "position_angle_deg": float(theta0_matrix[0, 2]),
         },
         "loss": {
             "noise_model": "gaussian",
@@ -1018,6 +1047,7 @@ def generate_obs_subblock_inference(
         },
         "truth_comparison_available": comparison_trace is not None,
         "system": system_info,
+        "shared_truth": to_jsonable_obs_subblock_payload(experiment["truth"]),
         "artifacts": {
             name: _relative_path(path, outdir=outdir)
             for name, path in artifacts.items()
@@ -1026,7 +1056,7 @@ def generate_obs_subblock_inference(
     if experiment.get("notes") is not None:
         manifest_payload["notes"] = str(experiment["notes"])
     with artifacts["manifest_json"].open("w", encoding="utf-8") as handle:
-        json.dump(manifest_payload, handle, indent=2)
+        json.dump(manifest_payload, handle, indent=2, default=str)
 
     print(f"Finished observation sub-block inference on {n_frame} frames.")
     print(f"initial_loss={initial_loss:.6g} final_loss={final_loss:.6g}")

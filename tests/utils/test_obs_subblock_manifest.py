@@ -12,6 +12,7 @@ from dluxshera.utils.obs_subblock_io import (
 def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(tmp_path):
     outdir = tmp_path / "run_001"
     outdir.mkdir(parents=True, exist_ok=True)
+    trace_path = tmp_path / "trace.csv"
 
     artifacts = build_obs_subblock_artifact_paths(
         outdir=outdir,
@@ -35,13 +36,17 @@ def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(t
             "source.position_angle_deg",
         ),
         trace_format="csv",
-        trace_path=Path("/tmp/trace.csv"),
+        trace_path=trace_path,
         trace_extra_columns=("note",),
         artifacts=artifacts,
         outdir=outdir,
         time_start_s=0.0,
         time_stop_s=0.1,
+        inputs={"config_path": "/tmp/prescription.yaml"},
         system_info={"preset": "SHERA_TESTBED_3P"},
+        shared_truth={"source": {"exposure_time_s": 0.05}},
+        seed=42,
+        noise={"enabled": False},
     )
 
     manifest_path = outdir / "manifest.json"
@@ -57,9 +62,14 @@ def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(t
     assert manifest["applied_varying_keys"] == manifest["varying_keys"]
     assert manifest["requested_varying_keys"] == ["source.x_position_as"]
     assert manifest["trace"]["format"] == "csv"
+    assert manifest["trace"]["path"] == "../trace.csv"
     assert manifest["trace"]["extra_columns"] == ["note"]
     assert manifest["artifacts"]["manifest_json"] == "manifest.json"
     assert manifest["artifacts"]["cube_fits"].endswith("_cube.fits")
     assert not manifest["artifacts"]["cube_fits"].startswith("/")
     assert manifest["artifacts"]["frame_truth_csv"].endswith("_frame_truth.csv")
+    assert manifest["inputs"]["config_path"] == "/tmp/prescription.yaml"
+    assert manifest["shared_truth"]["source"]["exposure_time_s"] == 0.05
+    assert manifest["seed"] == 42
+    assert manifest["noise"]["enabled"] is False
     assert manifest_path.exists()

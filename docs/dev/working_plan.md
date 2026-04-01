@@ -723,7 +723,7 @@ Status: docs housekeeping (dev-facing)
 - Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md`, `examples/recipes/canonical_astrometry.py`, `examples/recipes/twoplane_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, and `examples/runners/run_twoplane_astrometry.py` for runnable flows).
 - Dev-facing planning: this file (`docs/dev/working_plan.md`) and any future dev notes under `docs/dev/`. Keep cross-links back to the architecture docs for specifics.
 - Time-domain design contract (Phase 1): `docs/dev/obs_subblock_generator_design.md` captures the observation sub-block generator interface and artifact layout before implementation.
-- Observation sub-block helper separation (Phase 3): explicit trace generation now has a separate recipe (`examples/recipes/observation_subblock_trace.py`) and builder utility (`src/dluxshera/utils/obs_subblock_trace_builders.py`), while rendering remains in `examples/recipes/observation_subblock.py`.
+- Observation sub-block helper separation (Phase 3): explicit trace generation now has a separate recipe (`examples/recipes/subblock_trace_generation.py`) and builder utility (`src/dluxshera/utils/obs_subblock_trace_builders.py`), while rendering remains in `examples/recipes/observation_subblock.py`.
 - Navigation helpers: `devtools/generate_context_snapshot.py` and `devtools/print_tree.py` remain the authoritative way to browse the live tree and ParamSpec/transform snapshots.
 
 Near-term doc housekeeping:

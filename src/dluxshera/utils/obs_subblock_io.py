@@ -1,4 +1,4 @@
-"""Artifact writers for observation sub-block rendering."""
+"""Artifact and manifest helpers for observation sub-block workflows."""
 
 from __future__ import annotations
 
@@ -79,6 +79,21 @@ def write_obs_subblock_truth_csv(
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def to_jsonable_obs_subblock_payload(payload: Any) -> Any:
+    """Return a JSON-compatible snapshot of a manifest payload fragment."""
+
+    return json.loads(json.dumps(payload, default=str))
+
+
+def find_obs_subblock_sidecar_manifest(artifact_path: Path) -> Path | None:
+    """Return ``artifact_path.parent / manifest.json`` when it exists."""
+
+    candidate = artifact_path.resolve().parent / "manifest.json"
+    if not candidate.exists():
+        return None
+    return candidate
+
+
 def _relative_path(path: Path, *, outdir: Path) -> str:
     """Return a POSIX path relative to ``outdir`` when possible."""
 
@@ -105,7 +120,11 @@ def build_obs_subblock_manifest(
     outdir: Path,
     time_start_s: float | None,
     time_stop_s: float | None,
+    inputs: Mapping[str, Any] | None = None,
     system_info: Mapping[str, Any] | None = None,
+    shared_truth: Mapping[str, Any] | None = None,
+    seed: int | None = None,
+    noise: Mapping[str, Any] | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
     """Build a manifest payload for an observation sub-block run."""
@@ -123,7 +142,7 @@ def build_obs_subblock_manifest(
         ),
         "trace": {
             "format": trace_format,
-            "path": str(trace_path),
+            "path": _relative_path(trace_path, outdir=outdir),
             "extra_columns": list(trace_extra_columns),
         },
         "time_start_s": None if time_start_s is None else float(time_start_s),
@@ -133,8 +152,16 @@ def build_obs_subblock_manifest(
             for name, path in artifacts.items()
         },
     }
+    if inputs is not None:
+        manifest["inputs"] = to_jsonable_obs_subblock_payload(dict(inputs))
     if system_info is not None:
-        manifest["system"] = dict(system_info)
+        manifest["system"] = to_jsonable_obs_subblock_payload(dict(system_info))
+    if shared_truth is not None:
+        manifest["shared_truth"] = to_jsonable_obs_subblock_payload(dict(shared_truth))
+    if seed is not None:
+        manifest["seed"] = int(seed)
+    if noise is not None:
+        manifest["noise"] = to_jsonable_obs_subblock_payload(dict(noise))
     if notes is not None:
         manifest["notes"] = str(notes)
     if requested_varying_keys is not None:
@@ -146,13 +173,15 @@ def write_obs_subblock_manifest(*, output_path: Path, manifest: Mapping[str, Any
     """Write an observation sub-block manifest JSON file."""
 
     with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(dict(manifest), handle, indent=2)
+        json.dump(dict(manifest), handle, indent=2, default=str)
 
 
 __all__ = [
     "build_obs_subblock_artifact_paths",
     "build_obs_subblock_manifest",
+    "find_obs_subblock_sidecar_manifest",
     "now_iso_local_ms",
+    "to_jsonable_obs_subblock_payload",
     "timestamp_tag",
     "write_obs_subblock_cube_fits",
     "write_obs_subblock_manifest",

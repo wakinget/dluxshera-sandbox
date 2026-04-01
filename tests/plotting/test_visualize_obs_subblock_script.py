@@ -69,8 +69,6 @@ def test_visualize_obs_subblock_script_smoke(tmp_path: Path):
             "examples/scripts/visualize_obs_subblock.py",
             "--cube",
             str(cube_path),
-            "--manifest",
-            str(manifest_path),
             "--outdir",
             str(outdir),
             "--stride",

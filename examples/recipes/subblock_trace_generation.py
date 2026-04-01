@@ -1,8 +1,9 @@
-"""Observation sub-block trace-builder recipe.
+"""Generate canonical explicit traces for observation sub-block rendering.
 
-This recipe generates canonical explicit per-frame CSV traces for
-``examples/recipes/observation_subblock.py``. It intentionally does not render
-images.
+This recipe defines the first stage of the observation sub-block workflow. It
+produces a per-frame CSV trace plus a manifest that captures the normalized
+trace `plan`, anchors, source config path, and optional shared system snapshot
+used to anchor any omitted bases.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import (
     now_iso_local_ms,
     timestamp_tag,
+    to_jsonable_obs_subblock_payload,
     write_obs_subblock_manifest,
     write_obs_subblock_truth_csv,
 )
@@ -42,11 +44,11 @@ from dluxshera.utils.obs_subblock_trace_builders import (
 
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "examples/recipes/observation_subblock_trace_template/prescription.yaml"
+    "examples/recipes/observation_subblock_trace_template/subblock_trace_prescription.yaml"
 )
 DEFAULT_OUTDIR_ROOT = Path("Results/observation_subblock_trace")
 MANIFEST_SCHEMA_VERSION = "obs_subblock_trace_manifest.v1"
-GENERATOR_ID = "examples/recipes/observation_subblock_trace.py"
+GENERATOR_ID = "examples/recipes/subblock_trace_generation.py"
 
 
 def _required_dict(parent: dict[str, Any], key: str, *, path: str) -> dict[str, Any]:
@@ -104,19 +106,17 @@ def _relative_path(path: Path, *, outdir: Path) -> str:
 
 def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     kind = _required_str(experiment_cfg, "kind", path="experiment")
-    if kind != "observation_subblock_trace":
+    if kind != "subblock_trace_generation":
         raise ValueError(
-            "experiment.kind must be 'observation_subblock_trace' for this recipe."
+            "experiment.kind must be 'subblock_trace_generation' for this recipe."
         )
 
     seed_value = experiment_cfg.get("seed")
     if seed_value is not None and not isinstance(seed_value, int):
         raise ValueError("experiment.seed must be an integer when provided.")
 
-    trace_cfg = _required_dict(
-        experiment_cfg, "observation_subblock_trace", path="experiment"
-    )
-    trace_plan = build_obs_subblock_trace_plan(trace_cfg, seed=seed_value)
+    trace_cfg = _required_dict(experiment_cfg, "trace", path="experiment")
+    trace_build_plan = build_obs_subblock_trace_plan(trace_cfg, seed=seed_value)
     truth = experiment_cfg.get("truth", {})
     if not isinstance(truth, dict):
         raise ValueError("experiment.truth must be a mapping/dict.")
@@ -142,7 +142,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "kind": kind,
-        "trace_plan": trace_plan,
+        "trace": trace_build_plan,
         "truth": truth,
         "outputs": {
             "outdir": outdir_value,
@@ -172,14 +172,14 @@ def _stable_hash_payload(payload: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def generate_obs_subblock_trace(
+def generate_subblock_trace_generation(
     *,
     config_path: Path | None = None,
     results_dir: Path | None = None,
     run_name: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Generate a canonical explicit observation-subblock trace CSV."""
+    """Generate a canonical explicit trace CSV for one observation sub-block."""
 
     cfg_path = Path(config_path) if config_path is not None else DEFAULT_PRESCRIPTION_PATH
     user_cfg = load_user_config(
@@ -192,14 +192,14 @@ def generate_obs_subblock_trace(
     experiment_cfg = resolved_cfg.get("experiment")
     if experiment_cfg is None:
         raise ValueError(
-            "Observation sub-block trace recipe requires a top-level 'experiment' block."
+            "Subblock trace-generation recipe requires a top-level 'experiment' block."
         )
 
     experiment = _validate_experiment_cfg(experiment_cfg)
-    trace_plan = experiment["trace_plan"]
-    varying_addresses = parse_obs_subblock_varying_keys(list(trace_plan.varying_keys))
+    trace = experiment["trace"]
+    varying_addresses = parse_obs_subblock_varying_keys(list(trace.varying_keys))
     varying_keys = canonical_obs_subblock_varying_keys(varying_addresses)
-    if varying_keys != tuple(trace_plan.varying_keys):
+    if varying_keys != tuple(trace.varying_keys):
         raise ValueError("Internal varying-key canonicalization mismatch in trace plan.")
 
     nominal_anchors: dict[str, float] | None = None
@@ -237,19 +237,20 @@ def generate_obs_subblock_trace(
             addresses=varying_addresses,
         )
         system_info = {
-            "preset": (user_cfg.get("system") or {}).get("preset"),
+            "preset": system_cfg.get("preset"),
             "config_hash": _stable_hash_payload(system_cfg),
+            "resolved_config": to_jsonable_obs_subblock_payload(system_cfg),
         }
     else:
         if experiment["truth"]:
             raise ValueError(
                 "experiment.truth requires a top-level system block in "
-                "observation_subblock_trace recipe."
+                "subblock_trace_generation recipe."
             )
         validate_supported_obs_subblock_key_addresses(varying_addresses)
 
     anchors = resolve_obs_subblock_trace_anchors(
-        trace_plan,
+        trace,
         nominal_anchors=nominal_anchors,
     )
 
@@ -276,59 +277,62 @@ def generate_obs_subblock_trace(
 
     if dry_run:
         print("Dry run: validated trace-generation configuration.")
-        print(f"  frames: {trace_plan.n_frames}")
-        print(f"  dt_s: {trace_plan.dt_s}")
+        print(f"  frames: {trace.n_frames}")
+        print(f"  dt_s: {trace.dt_s}")
         print(f"  output_dir: {outdir}")
         print(f"  expected_trace_csv: {artifacts['trace_csv']}")
         if experiment["outputs"]["write_manifest"]:
             print(f"  expected_manifest: {artifacts['manifest_json']}")
         return {
             "dry_run": True,
-            "frame_count": trace_plan.n_frames,
+            "frame_count": trace.n_frames,
             "output_dir": str(outdir),
             "artifacts": {name: str(path) for name, path in artifacts.items()},
         }
 
     outdir.mkdir(parents=True, exist_ok=True)
 
-    rows = generate_obs_subblock_trace_rows(trace_plan, anchors=anchors)
+    rows = generate_obs_subblock_trace_rows(trace, anchors=anchors)
     write_obs_subblock_truth_csv(
         output_path=artifacts["trace_csv"],
         rows=rows,
-        fieldnames=("frame_index", "time_s", *trace_plan.varying_keys),
+        fieldnames=("frame_index", "time_s", *trace.varying_keys),
     )
 
     if experiment["outputs"]["write_manifest"]:
-        trace_plan_manifest = {
+        plan_manifest = {
             key: {
                 "base": key_plan.base,
                 "effects": [dict(effect) for effect in key_plan.effects],
             }
-            for key, key_plan in trace_plan.key_plans.items()
+            for key, key_plan in trace.key_plans.items()
         }
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "created_at": now_iso_local_ms(),
             "generator": GENERATOR_ID,
-            "frame_count": trace_plan.n_frames,
-            "dt_s": trace_plan.dt_s,
+            "inputs": {
+                "config_path": str(cfg_path.resolve()),
+            },
+            "frame_count": trace.n_frames,
+            "dt_s": trace.dt_s,
             "time_start_s": float(rows[0]["time_s"]),
             "time_stop_s": float(rows[-1]["time_s"]),
             "supported_effect_kinds": list(SUPPORTED_TRACE_EFFECT_KINDS),
-            "varying_keys": list(trace_plan.varying_keys),
-            "applied_varying_keys": list(trace_plan.varying_keys),
+            "varying_keys": list(trace.varying_keys),
+            "applied_varying_keys": list(trace.varying_keys),
             "anchors": {key: float(value) for key, value in anchors.items()},
             "trace_spec": {
-                "n_frames": trace_plan.n_frames,
-                "dt_s": trace_plan.dt_s,
-                "seed": trace_plan.seed,
-                "varying_keys": list(trace_plan.varying_keys),
-                "trace_plan": trace_plan_manifest,
+                "n_frames": trace.n_frames,
+                "dt_s": trace.dt_s,
+                "seed": trace.seed,
+                "varying_keys": list(trace.varying_keys),
+                "plan": plan_manifest,
             },
             "trace": {
                 "format": "csv",
                 "path": _relative_path(artifacts["trace_csv"], outdir=outdir),
-                "required_columns": ["frame_index", "time_s", *trace_plan.varying_keys],
+                "required_columns": ["frame_index", "time_s", *trace.varying_keys],
             },
             "artifacts": {
                 name: _relative_path(path, outdir=outdir)
@@ -337,6 +341,7 @@ def generate_obs_subblock_trace(
         }
         if system_info is not None:
             manifest["system"] = system_info
+        manifest["shared_truth"] = to_jsonable_obs_subblock_payload(experiment["truth"])
         if experiment["notes"] is not None:
             manifest["notes"] = experiment["notes"]
         write_obs_subblock_manifest(
@@ -344,12 +349,12 @@ def generate_obs_subblock_trace(
             manifest=manifest,
         )
 
-    print(f"Generated observation sub-block trace with {trace_plan.n_frames} frames.")
+    print(f"Generated observation sub-block trace with {trace.n_frames} frames.")
     print(f"Wrote artifacts under: {outdir}")
 
     return {
         "dry_run": False,
-        "frame_count": trace_plan.n_frames,
+        "frame_count": trace.n_frames,
         "output_dir": str(outdir),
         "artifacts": {name: str(path) for name, path in artifacts.items()},
     }
@@ -363,7 +368,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=DEFAULT_PRESCRIPTION_PATH,
-        help="Path to observation sub-block trace prescription YAML/JSON.",
+        help="Path to subblock trace-generation prescription YAML/JSON.",
     )
     parser.add_argument(
         "--results-dir",
@@ -388,7 +393,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_parser().parse_args()
-    generate_obs_subblock_trace(
+    generate_subblock_trace_generation(
         config_path=args.config,
         results_dir=args.results_dir,
         run_name=args.run_name,

@@ -57,9 +57,14 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
         "created_at",
         "generator",
         "frame_count",
+        "inputs",
         "varying_keys",
         "applied_varying_keys",
         "trace",
+        "shared_truth",
+        "seed",
+        "noise",
+        "system",
         "artifacts",
     ):
         assert key in manifest
@@ -68,6 +73,12 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
         "source.y_position_as",
         "source.position_angle_deg",
     ]
+    assert manifest["inputs"]["config_path"].endswith("observation_subblock_template/prescription.yaml")
+    assert manifest["system"]["resolved_config"]["preset"] == "SHERA_TESTBED_3P"
+    assert manifest["shared_truth"]["source"]["exposure_time_s"] == 0.05
+    assert manifest["seed"] == 42
+    assert manifest["noise"]["enabled"] is False
+    assert not manifest["trace"]["path"].startswith("/")
 
 
 def test_observation_subblock_varying_keys_are_applied_and_validated(tmp_path):

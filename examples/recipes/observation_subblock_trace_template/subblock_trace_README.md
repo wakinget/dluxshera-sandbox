@@ -7,27 +7,33 @@ This template generates canonical explicit trace CSV files for
 
 Recommended workflow:
 
-1. generate trace CSV with `observation_subblock_trace.py`
+1. generate trace CSV with `subblock_trace_generation.py`
 2. render cube with `observation_subblock.py`
 
 ## Files
 
-- `prescription.yaml`: generalized trace-generation example
+- `subblock_trace_prescription.yaml`: generalized trace-generation example
+
+## Path resolution
+
+Relative `experiment.outputs.outdir` values are resolved relative to the
+prescription file. That makes it easy to keep a trace prescription inside a
+subblock work folder and emit outputs into a sibling `trace/` directory.
 
 ## Config shape
 
 Set:
 
-- `experiment.kind: observation_subblock_trace`
-- `experiment.observation_subblock_trace`:
+- `experiment.kind: subblock_trace_generation`
+- `experiment.trace`:
   - `n_frames` (required)
   - `dt_s` (required)
   - `varying_keys` (required list of key strings)
-  - `trace_plan` (required mapping keyed by each varying key)
+  - `plan` (required mapping keyed by each varying key)
 
 Optional:
 
-- `experiment.seed` or `experiment.observation_subblock_trace.seed`
+- `experiment.seed` or `experiment.trace.seed`
 - `system` + `experiment.truth` (required when any varying key omits `base`)
 - `experiment.outputs.{outdir,file_prefix,write_manifest}`
 
@@ -58,7 +64,7 @@ For each varying key:
 - otherwise anchor = resolved/refreshed nominal store value
 - trace value per frame = `anchor + sum(effects)`
 
-Effects supported in `trace_plan.<key>.effects`:
+Effects supported in `plan.<key>.effects`:
 
 - `constant_offset`: `offset`
 - `linear_drift`: `start`, `rate_per_s`
@@ -73,15 +79,15 @@ Effect outputs are additive and order-independent in meaning.
 Generate trace:
 
 ```bash
-PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
-  --config examples/recipes/observation_subblock_trace_template/prescription.yaml
+PYTHONPATH=src python examples/recipes/subblock_trace_generation.py \
+  --config examples/recipes/observation_subblock_trace_template/subblock_trace_prescription.yaml
 ```
 
 Validate only:
 
 ```bash
-PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
-  --config examples/recipes/observation_subblock_trace_template/prescription.yaml \
+PYTHONPATH=src python examples/recipes/subblock_trace_generation.py \
+  --config examples/recipes/observation_subblock_trace_template/subblock_trace_prescription.yaml \
   --dry-run
 ```
 
@@ -91,6 +97,14 @@ Artifacts:
 
 - `<file_prefix>_<timestamp>_frame_truth.csv`
 - `manifest.json` (unless `write_manifest: false`)
+
+The trace manifest includes:
+
+- source `config_path`
+- normalized `trace_spec`
+- resolved anchor values
+- optional resolved `system` config snapshot
+- `shared_truth` overrides used when anchors come from the system
 
 CSV columns:
 
@@ -106,3 +120,18 @@ Set the renderer trace path:
 PYTHONPATH=src python examples/recipes/observation_subblock.py \
   --config <renderer_prescription.yaml>
 ```
+
+Recommended stage layout for repeated subblocks:
+
+```text
+Results/<campaign>/<subblock_id>/
+  trace/
+  render/
+  inference/
+```
+
+With the current CLI, one simple convention is:
+
+- trace run: `--results-dir Results/<campaign>/<subblock_id> --run-name trace`
+- render run: `--results-dir Results/<campaign>/<subblock_id> --run-name render`
+- inference run: `--results-dir Results/<campaign>/<subblock_id> --run-name inference`

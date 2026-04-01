@@ -19,7 +19,7 @@ def _three_key_cfg() -> dict:
             "source.y_position_as",
             "source.position_angle_deg",
         ],
-        "trace_plan": {
+        "plan": {
             "source.x_position_as": {
                 "base": 0.0,
                 "effects": [{"kind": "constant_offset", "offset": 0.0}],
@@ -38,7 +38,7 @@ def _three_key_cfg() -> dict:
 
 def test_missing_nominal_anchor_fails_when_base_omitted():
     cfg = _three_key_cfg()
-    cfg["trace_plan"]["source.x_position_as"]["base"] = None
+    cfg["plan"]["source.x_position_as"]["base"] = None
     plan = build_obs_subblock_trace_plan(cfg)
 
     with pytest.raises(ValueError, match="base is required"):
@@ -47,7 +47,7 @@ def test_missing_nominal_anchor_fails_when_base_omitted():
 
 def test_explicit_base_takes_precedence_over_nominal_anchor():
     cfg = _three_key_cfg()
-    cfg["trace_plan"]["source.x_position_as"] = {
+    cfg["plan"]["source.x_position_as"] = {
         "base": 2.0,
         "effects": [{"kind": "constant_offset", "offset": 0.0}],
     }
@@ -66,7 +66,7 @@ def test_explicit_base_takes_precedence_over_nominal_anchor():
 
 def test_omitted_base_uses_nominal_anchor():
     cfg = _three_key_cfg()
-    cfg["trace_plan"]["source.x_position_as"] = {
+    cfg["plan"]["source.x_position_as"] = {
         "effects": [{"kind": "constant_offset", "offset": 0.25}],
     }
     plan = build_obs_subblock_trace_plan(cfg)
@@ -84,7 +84,7 @@ def test_omitted_base_uses_nominal_anchor():
 
 def test_additive_effects_sum_for_single_key():
     cfg = _three_key_cfg()
-    cfg["trace_plan"]["source.x_position_as"] = {
+    cfg["plan"]["source.x_position_as"] = {
         "base": 1.0,
         "effects": [
             {"kind": "constant_offset", "offset": 0.5},
@@ -101,7 +101,7 @@ def test_additive_effects_sum_for_single_key():
 def test_linear_plus_iid_jitter_is_reproducible():
     cfg = _three_key_cfg()
     cfg["seed"] = 17
-    cfg["trace_plan"]["source.position_angle_deg"] = {
+    cfg["plan"]["source.position_angle_deg"] = {
         "base": 90.0,
         "effects": [
             {"kind": "linear_drift", "start": 0.0, "rate_per_s": 0.4},
@@ -128,7 +128,7 @@ def test_linear_plus_iid_jitter_is_reproducible():
 def test_random_walk_reproducible_under_fixed_seed():
     cfg = _three_key_cfg()
     cfg["seed"] = 23
-    cfg["trace_plan"]["source.y_position_as"] = {
+    cfg["plan"]["source.y_position_as"] = {
         "base": 0.0,
         "effects": [{"kind": "random_walk", "start": 1.0, "sigma_step": 0.2}],
     }
@@ -159,7 +159,7 @@ def test_mixed_mode_generation_supports_generalized_keys():
             "optics.plate_scale_as_per_pix",
             "optics.primary.zernike_coeffs_nm[2]",
         ],
-        "trace_plan": {
+        "plan": {
             "source.x_position_as": {
                 "base": 0.0,
                 "effects": [{"kind": "linear_drift", "start": 0.0, "rate_per_s": 0.5}],
@@ -195,28 +195,16 @@ def test_mixed_mode_generation_supports_generalized_keys():
     assert np.allclose([row["time_s"] for row in rows], [0.0, 0.1, 0.2, 0.3])
 
 
-def test_legacy_keys_schema_still_supported():
+def test_old_trace_plan_schema_is_rejected():
     cfg = {
         "n_frames": 3,
         "dt_s": 0.5,
-        "keys": {
+        "trace_plan": {
             "source.x_position_as": {
-                "mode": "linear_drift",
-                "start": 1.0,
-                "rate_per_s": 2.0,
+                "base": 1.0,
+                "effects": [{"kind": "constant_offset", "offset": 0.0}],
             },
-            "source.y_position_as": {"mode": "explicit", "values": [0.0, 0.1, 0.2]},
-            "source.position_angle_deg": {
-                "mode": "iid_jitter",
-                "center": 90.0,
-                "sigma": 0.0,
-            },
-        },
+        }
     }
-    plan = build_obs_subblock_trace_plan(cfg)
-    rows = generate_obs_subblock_trace_rows(
-        plan,
-        anchors=resolve_obs_subblock_trace_anchors(plan),
-    )
-    assert np.allclose([row["source.x_position_as"] for row in rows], [1.0, 2.0, 3.0])
-    assert np.allclose([row["source.y_position_as"] for row in rows], [0.0, 0.1, 0.2])
+    with pytest.raises(ValueError, match="experiment.trace must define 'plan'"):
+        build_obs_subblock_trace_plan(cfg)

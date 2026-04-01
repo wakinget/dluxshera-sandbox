@@ -18,7 +18,7 @@ Use this folder as a starting point for explicit-trace rendering runs.
 ## Recommended workflow
 
 1. build a canonical trace CSV with
-   `examples/recipes/observation_subblock_trace.py`
+   `examples/recipes/subblock_trace_generation.py`
 2. render the sub-block cube with
    `examples/recipes/observation_subblock.py`
 
@@ -31,8 +31,19 @@ Optional follow-ons:
 
 ## Files in this template
 
-- `prescription.yaml`: canonical nested config (`system` + `experiment`)
+- `subblock_generation_prescription.yaml`: canonical nested config (`system` + `experiment`)
 - `frame_truth.csv`: minimal explicit trace example
+
+## Path resolution
+
+Relative paths in this recipe are resolved relative to the prescription file,
+not the shell working directory. In practice this affects:
+
+- `experiment.observation_subblock.trace.path`
+- `experiment.outputs.outdir`
+
+That makes it practical to keep a self-contained subblock folder with one
+prescription plus sibling `trace/`, `render/`, and `inference/` directories.
 
 ## Config contract (current behavior)
 
@@ -103,7 +114,7 @@ python examples/recipes/observation_subblock.py [options]
 Supported options:
 
 - `--config <path>`: prescription YAML/JSON path  
-  default: `examples/recipes/observation_subblock_template/prescription.yaml`
+  default: `examples/recipes/observation_subblock_template/subblock_generation_prescription.yaml`
 - `--system-preset <name>`: optional preset override merged before config
 - `--results-dir <path>`: output root override
 - `--run-name <name>`: run directory label under output root
@@ -116,7 +127,7 @@ Supported options:
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock.py \
-  --config examples/recipes/observation_subblock_template/prescription.yaml \
+  --config examples/recipes/observation_subblock_template/subblock_generation_prescription.yaml \
   --dry-run
 ```
 
@@ -124,14 +135,14 @@ PYTHONPATH=src python examples/recipes/observation_subblock.py \
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock.py \
-  --config examples/recipes/observation_subblock_template/prescription.yaml
+  --config examples/recipes/observation_subblock_template/subblock_generation_prescription.yaml
 ```
 
 ### 3) Render to a custom output root + run name
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock.py \
-  --config examples/recipes/observation_subblock_template/prescription.yaml \
+  --config examples/recipes/observation_subblock_template/subblock_generation_prescription.yaml \
   --results-dir Results/observation_subblock \
   --run-name demo_run
 ```
@@ -139,15 +150,51 @@ PYTHONPATH=src python examples/recipes/observation_subblock.py \
 ### 4) Generate a trace first, then render
 
 ```bash
-PYTHONPATH=src python examples/recipes/observation_subblock_trace.py \
-  --config examples/recipes/observation_subblock_trace_template/prescription.yaml \
+PYTHONPATH=src python examples/recipes/subblock_trace_generation.py \
+  --config examples/recipes/observation_subblock_trace_template/subblock_trace_prescription.yaml \
   --run-name trace_run
 ```
 
 Then set `experiment.observation_subblock.trace.path` in your renderer config to
 the generated `*_frame_truth.csv`, and run the renderer recipe.
 
-### 5) Generate quick-look diagnostics
+### 5) Recommended multi-stage folder layout
+
+For one subblock that may later need quick-look and inference outputs, a clear
+layout is:
+
+```text
+Results/<campaign>/<subblock_id>/
+  trace/
+  render/
+  render/quicklook/
+  inference/
+```
+
+One concrete way to create that with the existing CLIs is:
+
+```bash
+PYTHONPATH=src python examples/recipes/subblock_trace_generation.py \
+  --config <trace_prescription.yaml> \
+  --results-dir Results/obs_subblock_test1/subblock_01 \
+  --run-name trace
+
+PYTHONPATH=src python examples/recipes/observation_subblock.py \
+  --config <render_prescription.yaml> \
+  --results-dir Results/obs_subblock_test1/subblock_01 \
+  --run-name render
+
+PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
+  --config <inference_prescription.yaml> \
+  --results-dir Results/obs_subblock_test1/subblock_01 \
+  --run-name inference
+```
+
+That avoids nested timestamps like
+`Results/.../<trace_timestamp>/<render_timestamp>/` unless you explicitly want
+that shape.
+
+### 6) Generate quick-look diagnostics
 
 ```bash
 PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
@@ -156,13 +203,15 @@ PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
 ```
 
 Default quick-look outputs are written to a `quicklook/` folder alongside the
-cube and include `preview.gif`, `summary.png`, and `trace_summary.png`.
+cube and include `preview.gif`, `summary.png`, and `trace_summary.png`. If
+`manifest.json` is beside the cube, `visualize_obs_subblock.py` will discover it
+automatically.
 
-### 6) Run registration-only inference on the rendered cube
+### 7) Run registration-only inference on the rendered cube
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
-  --config examples/recipes/observation_subblock_inference_template/prescription.yaml
+  --config examples/recipes/observation_subblock_inference_template/subblock_inference_prescription.yaml
 ```
 
 ## Output layout
@@ -173,8 +222,14 @@ Artifacts under `<output_root>/<run_name_or_timestamp>/`:
 - `<file_prefix>_<timestamp>_cube.fits`
 - `<file_prefix>_<timestamp>_frame_truth.csv`
 
-`manifest.json` includes schema version, generator info, frame count,
-varying-key metadata, trace metadata, time bounds, and artifact relative paths.
+`manifest.json` includes:
+
+- source `config_path`
+- trace metadata and relative trace path
+- resolved `system` config snapshot plus config hash
+- `shared_truth`, `seed`, and `noise` settings
+- sibling trace-manifest path when the trace came from a trace-builder run
+- artifact relative paths
 
 ## Current limits
 

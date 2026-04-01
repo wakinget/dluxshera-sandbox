@@ -28,17 +28,17 @@ def _load_recipe(path: Path, module_name: str):
 
 def test_observation_subblock_trace_recipe_generates_loader_compatible_csv(tmp_path):
     repo_root = Path(__file__).resolve().parents[2]
-    trace_recipe_path = repo_root / "examples" / "recipes" / "observation_subblock_trace.py"
-    trace_recipe = _load_recipe(trace_recipe_path, "observation_subblock_trace_recipe")
+    trace_recipe_path = repo_root / "examples" / "recipes" / "subblock_trace_generation.py"
+    trace_recipe = _load_recipe(trace_recipe_path, "subblock_trace_generation_recipe")
     trace_template_cfg = (
         repo_root
         / "examples"
         / "recipes"
         / "observation_subblock_trace_template"
-        / "prescription.yaml"
+        / "subblock_trace_prescription.yaml"
     )
 
-    result = trace_recipe.generate_obs_subblock_trace(
+    result = trace_recipe.generate_subblock_trace_generation(
         config_path=trace_template_cfg,
         results_dir=tmp_path,
         run_name="trace_smoke",
@@ -55,27 +55,35 @@ def test_observation_subblock_trace_recipe_generates_loader_compatible_csv(tmp_p
         trace_csv,
         required_varying_keys=manifest["varying_keys"],
     )
-    assert trace.frame_count == 3
+    assert trace.frame_count == int(manifest["frame_count"])
     assert trace.required_columns == ("frame_index", "time_s", *tuple(manifest["varying_keys"]))
     for key in (
         "schema_version",
         "created_at",
         "generator",
+        "inputs",
         "frame_count",
         "applied_varying_keys",
         "trace",
+        "shared_truth",
         "artifacts",
     ):
         assert key in manifest
     assert manifest["applied_varying_keys"] == manifest["varying_keys"]
     assert manifest["trace"]["path"].endswith("_frame_truth.csv")
+    assert manifest["inputs"]["config_path"].endswith(
+        "observation_subblock_trace_template/subblock_trace_prescription.yaml"
+    )
+    assert manifest["trace_spec"]["plan"]["source.x_position_as"]["base"] == 2.0
+    assert manifest["system"]["resolved_config"]["preset"] == "SHERA_FLIGHT_3P"
+    assert manifest["shared_truth"] == {}
 
 
 def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tmp_path):
     repo_root = Path(__file__).resolve().parents[2]
     trace_recipe = _load_recipe(
-        repo_root / "examples" / "recipes" / "observation_subblock_trace.py",
-        "observation_subblock_trace_recipe_render",
+        repo_root / "examples" / "recipes" / "subblock_trace_generation.py",
+        "subblock_trace_generation_recipe_render",
     )
     render_recipe = _load_recipe(
         repo_root / "examples" / "recipes" / "observation_subblock.py",
@@ -84,9 +92,9 @@ def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tm
 
     trace_cfg = {
         "experiment": {
-            "kind": "observation_subblock_trace",
+            "kind": "subblock_trace_generation",
             "seed": 101,
-            "observation_subblock_trace": {
+            "trace": {
                 "n_frames": 2,
                 "dt_s": 0.05,
                 "varying_keys": [
@@ -94,7 +102,7 @@ def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tm
                     "optics.plate_scale_as_per_pix",
                     "optics.primary.zernike_coeffs_nm[1]",
                 ],
-                "trace_plan": {
+                "plan": {
                     "source.x_position_as": {
                         "base": 0.0,
                         "effects": [
@@ -117,7 +125,7 @@ def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tm
     trace_cfg_path = tmp_path / "trace_recipe.json"
     trace_cfg_path.write_text(json.dumps(trace_cfg, indent=2), encoding="utf-8")
 
-    trace_result = trace_recipe.generate_obs_subblock_trace(
+    trace_result = trace_recipe.generate_subblock_trace_generation(
         config_path=trace_cfg_path,
         run_name="generated_trace",
     )
@@ -179,6 +187,8 @@ def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tm
         "optics.plate_scale_as_per_pix",
         "optics.primary.zernike_coeffs_nm[1]",
     ]
+    assert manifest["inputs"]["trace_manifest_json"].endswith("generated_trace/manifest.json")
+    assert manifest["system"]["resolved_config"]["preset"] == "SHERA_TESTBED_3P"
 
     truth_csv = Path(render_result["artifacts"]["frame_truth_csv"])
     with truth_csv.open("r", encoding="utf-8", newline="") as handle:
@@ -193,18 +203,18 @@ def test_generated_trace_can_be_rendered_and_tracks_requested_vs_applied_keys(tm
 def test_trace_recipe_requires_system_when_base_is_omitted(tmp_path):
     repo_root = Path(__file__).resolve().parents[2]
     trace_recipe = _load_recipe(
-        repo_root / "examples" / "recipes" / "observation_subblock_trace.py",
-        "observation_subblock_trace_recipe_missing_anchor",
+        repo_root / "examples" / "recipes" / "subblock_trace_generation.py",
+        "subblock_trace_generation_recipe_missing_anchor",
     )
 
     trace_cfg = {
         "experiment": {
-            "kind": "observation_subblock_trace",
-            "observation_subblock_trace": {
+            "kind": "subblock_trace_generation",
+            "trace": {
                 "n_frames": 2,
                 "dt_s": 0.05,
                 "varying_keys": ["source.x_position_as"],
-                "trace_plan": {
+                "plan": {
                     "source.x_position_as": {
                         "effects": [{"kind": "linear_drift", "start": 0.0, "rate_per_s": 0.1}]
                     }
@@ -216,7 +226,7 @@ def test_trace_recipe_requires_system_when_base_is_omitted(tmp_path):
     cfg_path.write_text(json.dumps(trace_cfg, indent=2), encoding="utf-8")
 
     try:
-        trace_recipe.generate_obs_subblock_trace(config_path=cfg_path, dry_run=True)
+        trace_recipe.generate_subblock_trace_generation(config_path=cfg_path, dry_run=True)
     except ValueError as exc:
         assert "base is required" in str(exc)
     else:
@@ -226,8 +236,8 @@ def test_trace_recipe_requires_system_when_base_is_omitted(tmp_path):
 def test_trace_recipe_omitted_base_uses_refreshed_system_anchor(tmp_path):
     repo_root = Path(__file__).resolve().parents[2]
     trace_recipe = _load_recipe(
-        repo_root / "examples" / "recipes" / "observation_subblock_trace.py",
-        "observation_subblock_trace_recipe_anchor_from_system",
+        repo_root / "examples" / "recipes" / "subblock_trace_generation.py",
+        "subblock_trace_generation_recipe_anchor_from_system",
     )
 
     trace_cfg = {
@@ -237,13 +247,13 @@ def test_trace_recipe_omitted_base_uses_refreshed_system_anchor(tmp_path):
             "detector": {"layers": [{"name": "downsample", "kind": "Downsample", "kernel_size": 3}]},
         },
         "experiment": {
-            "kind": "observation_subblock_trace",
+            "kind": "subblock_trace_generation",
             "seed": 7,
-            "observation_subblock_trace": {
+            "trace": {
                 "n_frames": 2,
                 "dt_s": 0.05,
                 "varying_keys": ["optics.plate_scale_as_per_pix"],
-                "trace_plan": {
+                "plan": {
                     "optics.plate_scale_as_per_pix": {
                         "effects": [{"kind": "constant_offset", "offset": 0.0}]
                     }
@@ -255,7 +265,7 @@ def test_trace_recipe_omitted_base_uses_refreshed_system_anchor(tmp_path):
     cfg_path = tmp_path / "trace_anchor_from_system.json"
     cfg_path.write_text(json.dumps(trace_cfg, indent=2), encoding="utf-8")
 
-    result = trace_recipe.generate_obs_subblock_trace(
+    result = trace_recipe.generate_subblock_trace_generation(
         config_path=cfg_path,
         run_name="anchor_from_system",
     )
@@ -275,3 +285,33 @@ def test_trace_recipe_omitted_base_uses_refreshed_system_anchor(tmp_path):
     expected_anchor = float(np.asarray(expected_store.get("optics.plate_scale_as_per_pix")))
 
     assert observed_anchor == pytest.approx(expected_anchor)
+
+
+def test_trace_recipe_rejects_old_schema(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    trace_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "subblock_trace_generation.py",
+        "subblock_trace_generation_recipe_reject_old",
+    )
+
+    old_schema_cfg = {
+        "experiment": {
+            "kind": "observation_subblock_trace",
+            "observation_subblock_trace": {
+                "n_frames": 2,
+                "dt_s": 0.05,
+                "varying_keys": ["source.x_position_as"],
+                "trace_plan": {
+                    "source.x_position_as": {
+                        "base": 0.0,
+                        "effects": [{"kind": "constant_offset", "offset": 0.0}],
+                    }
+                },
+            },
+        }
+    }
+    cfg_path = tmp_path / "old_schema_trace.json"
+    cfg_path.write_text(json.dumps(old_schema_cfg, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="subblock_trace_generation"):
+        trace_recipe.generate_subblock_trace_generation(config_path=cfg_path, dry_run=True)

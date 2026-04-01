@@ -104,6 +104,15 @@ Expected inputs:
 
 The key operational input is the image cube itself. Truth and manifest artifacts are primarily useful for diagnostics, comparison, and experiment bookkeeping.
 
+Operationally, the common case should be:
+
+- point inference at the rendered cube
+- auto-discover `manifest.json` beside that cube
+- infer the truth-trace path from the render manifest when available
+
+This keeps the common trace -> render -> inference workflow short while still
+allowing explicit overrides for non-standard layouts.
+
 ## Parameter partition
 
 ### Inferred
@@ -173,6 +182,16 @@ At minimum, the outputs should make it easy to answer:
 - did the inference recover the injected registration motion?
 - where does recovery succeed or struggle?
 - how do the residuals behave across the block?
+
+The run manifest should capture enough shared-state context to review the fit
+without reopening the original prescription:
+
+- source `config_path`
+- resolved input cube/trace/manifest paths
+- whether the render manifest was auto-discovered
+- resolved fixed `system` config snapshot
+- `shared_truth`
+- initialization, optimizer, loss, and summary metrics
 
 ## Recommended diagnostics
 
@@ -253,6 +272,7 @@ In practice, that means:
 This will be successful if we have a recipe that:
 
 - loads a sub-block cube and fixed model state
+- works cleanly when only the cube path is provided in the standard artifact layout
 - jointly infers per-frame `x/y/PA` across the full block
 - produces readable outputs comparing recovered traces to truth
 - fits naturally into the current recipe-oriented workflow

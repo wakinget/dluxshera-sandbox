@@ -101,12 +101,10 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     )
 
     cube_path = Path(render_result["artifacts"]["cube_fits"])
-    trace_path = Path(render_result["artifacts"]["frame_truth_csv"])
-    manifest_path = Path(render_result["artifacts"]["manifest_json"])
     cfg = _build_inference_config(
         cube_path=cube_path,
-        trace_path=trace_path,
-        manifest_path=manifest_path,
+        trace_path=None,
+        manifest_path=None,
         outputs_outdir=tmp_path / "inference_results",
         n_iter=10,
         write_plots=True,
@@ -146,13 +144,24 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
         "generator",
         "frame_count",
         "infer_keys",
+        "inputs",
+        "init",
         "optimizer",
         "loss",
         "metrics",
+        "shared_truth",
+        "system",
         "artifacts",
     ):
         assert key in manifest
     assert manifest["truth_comparison_available"] is True
+    assert manifest["inputs"]["manifest_auto_discovered"] is True
+    assert manifest["inputs"]["config_path"].endswith("inference_config.json")
+    assert manifest["system"]["resolved_config"]["preset"] == "SHERA_TESTBED_3P"
+    assert manifest["shared_truth"]["source"]["exposure_time_s"] == 0.05
+    assert manifest["init"]["x_position_as"] == 0.0
+    assert manifest["init"]["y_position_as"] == 0.0
+    assert manifest["init"]["position_angle_deg"] == 90.0
 
     assert np.isfinite(float(result["initial_loss"]))
     assert np.isfinite(float(result["final_loss"]))
@@ -184,9 +193,11 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
         show_progress=False,
     )
     cube_path = Path(render_result["artifacts"]["cube_fits"])
+    standalone_cube_path = tmp_path / "standalone_cube.fits"
+    standalone_cube_path.write_bytes(cube_path.read_bytes())
 
     cfg = _build_inference_config(
-        cube_path=cube_path,
+        cube_path=standalone_cube_path,
         trace_path=None,
         manifest_path=None,
         outputs_outdir=tmp_path / "inference_results_no_truth",
@@ -213,3 +224,4 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
     manifest = json.loads(artifacts["manifest_json"].read_text(encoding="utf-8"))
     assert manifest["truth_comparison_available"] is False
     assert manifest["frame_count"] == int(result["frame_count"])
+    assert manifest["inputs"]["manifest_auto_discovered"] is False

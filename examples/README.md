@@ -36,11 +36,11 @@ under `examples/runners/`.
     ```
 - **Observation sub-block trace + renderer + inference recipes** — Three-step
   time-domain workflow for short frame stacks:
-  1) generate explicit per-frame trace CSV (`observation_subblock_trace.py`),
+  1) generate explicit per-frame trace CSV (`subblock_trace_generation.py`),
   2) render a central-field sub-block cube (`observation_subblock.py`),
   3) infer per-frame registration traces from the cube
      (`observation_subblock_inference.py`).
-  - Trace recipe: `examples/recipes/observation_subblock_trace.py`
+  - Trace recipe: `examples/recipes/subblock_trace_generation.py`
   - Renderer recipe: `examples/recipes/observation_subblock.py`
   - Inference recipe: `examples/recipes/observation_subblock_inference.py`
   - Template directories:
