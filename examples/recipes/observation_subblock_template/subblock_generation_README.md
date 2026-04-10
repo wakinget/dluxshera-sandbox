@@ -207,12 +207,16 @@ cube and include `preview.gif`, `summary.png`, and `trace_summary.png`. If
 `manifest.json` is beside the cube, `visualize_obs_subblock.py` will discover it
 automatically.
 
-### 7) Run registration-only inference on the rendered cube
+### 7) Run sub-block inference on the rendered cube
 
 ```bash
 PYTHONPATH=src python examples/recipes/observation_subblock_inference.py \
   --config examples/recipes/observation_subblock_inference_template/subblock_inference_prescription.yaml
 ```
+
+The current bundled inference template is still the registration-only validated
+case, but the recipe itself now derives its active state and objective structure
+from the prescription.
 
 ## Output layout
 

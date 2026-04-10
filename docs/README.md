@@ -23,7 +23,7 @@ Working practices, priorities, and lessons learned.
 - Observation sub-block recipes:
   - `examples/recipes/subblock_trace_generation.py` (trace builder)
   - `examples/recipes/observation_subblock.py` (renderer)
-  - `examples/recipes/observation_subblock_inference.py` (registration-only block inference)
+  - `examples/recipes/observation_subblock_inference.py` (config-driven block inference; current tested template is registration-only)
 
 ## Tutorials
 Hands-on guides for common workflows.

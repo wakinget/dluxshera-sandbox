@@ -41,29 +41,52 @@ def _build_inference_config(
     n_iter: int,
     write_plots: bool,
 ) -> dict[str, object]:
-    inputs: dict[str, object] = {"cube": str(cube_path)}
+    data: dict[str, object] = {"cube": str(cube_path)}
     if trace_path is not None:
-        inputs["trace"] = str(trace_path)
+        data["truth_trace"] = str(trace_path)
     if manifest_path is not None:
-        inputs["manifest"] = str(manifest_path)
+        data["manifest"] = str(manifest_path)
 
     return {
         "system": _base_system_block(),
         "experiment": {
-            "kind": "observation_subblock_inference",
-            "truth": {"source": {"exposure_time_s": 0.05}},
-            "observation_subblock_inference": {
-                "inputs": inputs,
+            "kind": "subblock_inference",
+            "inference": {
+                "data": data,
                 "validate": {
                     "require_contiguous_frame_index": True,
                     "require_monotonic_time": True,
                 },
                 "init": {
-                    "x_position_as": 0.0,
-                    "y_position_as": 0.0,
-                    "position_angle_deg": 90.0,
+                    "frame": {
+                        "mode": "shared_guess",
+                        "values": {
+                            "source.x_position_as": 0.0,
+                            "source.y_position_as": 0.0,
+                            "source.position_angle_deg": 90.0,
+                        },
+                    },
+                    "shared": {},
                 },
-                "loss": {"reduce": "sum", "variance": 1.0},
+                "active": {
+                    "frame_keys": [
+                        "source.x_position_as",
+                        "source.y_position_as",
+                        "source.position_angle_deg",
+                    ],
+                    "shared_keys": [],
+                },
+                "priors": {"frame": {}, "shared": {}},
+                "temporal": {"frame_model": {"kind": "independent"}},
+                "objective": {
+                    "kind": "nll",
+                    "reduce": "sum",
+                    "noise_model": {
+                        "kind": "gaussian",
+                        "variance_model": "scalar",
+                        "scalar": 1.0,
+                    },
+                },
                 "optimizer": {"kind": "adam", "base_lr": 0.01, "n_iter": n_iter},
                 "diagnostics": {"plots": write_plots},
             },
@@ -91,7 +114,7 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
         / "examples"
         / "recipes"
         / "observation_subblock_template"
-        / "prescription.yaml"
+        / "subblock_generation_prescription.yaml"
     )
     render_result = trace_recipe.generate_obs_subblock(
         config_path=render_cfg_path,
@@ -112,10 +135,14 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     cfg_path = tmp_path / "inference_config.json"
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
-    result = inference_recipe.generate_obs_subblock_inference(
-        config_path=cfg_path,
-        run_name="inference_smoke",
-        show_progress=False,
+    result = inference_recipe.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--run-name",
+            "inference_smoke",
+            "--no-progress",
+        ]
     )
 
     artifacts = {name: Path(path) for name, path in result["artifacts"].items()}
@@ -145,11 +172,13 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
         "frame_count",
         "infer_keys",
         "inputs",
+        "active",
         "init",
+        "priors",
+        "temporal",
+        "objective",
         "optimizer",
-        "loss",
         "metrics",
-        "shared_truth",
         "system",
         "artifacts",
     ):
@@ -158,10 +187,10 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert manifest["inputs"]["manifest_auto_discovered"] is True
     assert manifest["inputs"]["config_path"].endswith("inference_config.json")
     assert manifest["system"]["resolved_config"]["preset"] == "SHERA_TESTBED_3P"
-    assert manifest["shared_truth"]["source"]["exposure_time_s"] == 0.05
-    assert manifest["init"]["x_position_as"] == 0.0
-    assert manifest["init"]["y_position_as"] == 0.0
-    assert manifest["init"]["position_angle_deg"] == 90.0
+    assert manifest["init"]["frame"]["mode"] == "shared_guess"
+    assert manifest["init"]["frame"]["values"]["source.x_position_as"] == 0.0
+    assert manifest["init"]["frame"]["values"]["source.y_position_as"] == 0.0
+    assert manifest["init"]["frame"]["values"]["source.position_angle_deg"] == 90.0
 
     assert np.isfinite(float(result["initial_loss"]))
     assert np.isfinite(float(result["final_loss"]))
@@ -184,7 +213,7 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
         / "examples"
         / "recipes"
         / "observation_subblock_template"
-        / "prescription.yaml"
+        / "subblock_generation_prescription.yaml"
     )
     render_result = render_recipe.generate_obs_subblock(
         config_path=render_cfg_path,
@@ -207,10 +236,14 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
     cfg_path = tmp_path / "inference_no_truth_config.json"
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
-    result = inference_recipe.generate_obs_subblock_inference(
-        config_path=cfg_path,
-        run_name="inference_no_truth",
-        show_progress=False,
+    result = inference_recipe.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--run-name",
+            "inference_no_truth",
+            "--no-progress",
+        ]
     )
 
     artifacts = {name: Path(path) for name, path in result["artifacts"].items()}

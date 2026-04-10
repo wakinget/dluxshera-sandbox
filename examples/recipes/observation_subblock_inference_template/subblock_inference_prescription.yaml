@@ -1,60 +1,229 @@
 system:
-  preset: SHERA_TESTBED_3P
+  # The top-level system block defines the assumed shared model state for this solve.
+  # In synthetic studies, this may be the resolved truth-like state used to generate the cube.
+  # In later mission-like workflows, this may come from the current propagated belief state.
+  preset: SHERA_FLIGHT_3P
   source:
-    n_lambda: 1
-  detector:
-    layers:
-      - name: downsample
-        kind: Downsample
-        kernel_size: 3
+    target: ALPHA_CEN
+    exposure_time_s: 0.05
+#    separation_as: 10.0
+#    position_angle_deg: 90.0
+#    contrast: 3.0
 
 experiment:
-  kind: observation_subblock_inference
-  notes: "Registration-only observation sub-block inference template."
+  kind: subblock_inference
+  notes: "Sub-block inference prescription template."
 
-  # Shared fixed model overrides (optional)
-  truth:
-    source:
-      exposure_time_s: 0.05
+  inference:
+    data:
+      # Required: rendered observation sub-block cube.
+      # Relative paths are resolved from this prescription file's directory.
+      cube: ../../../Results/obs_subblocks/obs_subblock_YYYYMMDD-HHMMSS_cube.fits
 
-  observation_subblock_inference:
-    inputs:
-      # Required: path to an observation sub-block cube FITS artifact.
-      cube: CHANGE_ME/obs_subblock_YYYYMMDD-HHMMSS_cube.fits
-      # Optional: explicit frame-truth CSV for comparison diagnostics.
-      # If omitted, inferred from the resolved render manifest when possible.
-      trace: CHANGE_ME/obs_subblock_YYYYMMDD-HHMMSS_frame_truth.csv
-      # Optional: manifest can also be used to infer trace path.
-      # If omitted, the recipe looks for manifest.json beside cube.
-      # manifest: CHANGE_ME/manifest.json
+      # Optional synthetic-data reference products.
+      # These are useful while validating inference against known truth, but should
+      # not be assumed to exist in later mission-like operations.
+      truth_trace: ../../../Results/obs_subblocks/obs_subblock_YYYYMMDD-HHMMSS_frame_truth.csv
+      manifest: ../../../Results/obs_subblocks/manifest.json
+
+      # Future options we may want to support:
+      # - cube_extension: 0
+      # - variance_cube: CHANGE_ME/render/obs_subblock_..._variance.fits
+      # - roi_metadata: CHANGE_ME/render/roi_metadata.json
+      # - block_id: subblock_0001
 
     validate:
       require_contiguous_frame_index: true
       require_monotonic_time: true
 
-    # Initialize all frames from one shared registration guess.
-    init:
-      x_position_as: 0.0
-      y_position_as: 0.0
-      position_angle_deg: 90.0
+      # Future options we may want to support:
+      # - require_uniform_dt: false
+      # - max_time_gap_s: null
+      # - require_matching_truth_frame_count: true
 
-    loss:
+    active:
+      # Explicitly partition the active inference state.
+      # First milestone: registration-only frame inference with no shared active terms.
+      frame_keys:
+        - source.x_position_as
+        - source.y_position_as
+        - source.position_angle_deg
+      shared_keys: []
+
+      # Near-term options we are considering:
+      # shared_keys:
+      #   - optics.plate_scale_as_per_pix
+      #
+      # Later possibilities:
+      # shared_keys:
+      #   - optics.primary.zernike_coeffs_nm[0]
+      #   - optics.primary.zernike_coeffs_nm[3]
+      #   - source.log_flux_total
+      #
+      # Longer-term possibilities:
+      # frame_keys:
+      #   - source.x_position_as
+      #   - source.y_position_as
+      #   - source.position_angle_deg
+      #   - source.log_flux_total
+
+    init:
+      frame:
+        # One shared initial guess repeated across all frames in the block.
+        mode: shared_guess
+        values:
+          source.x_position_as: 0.0
+          source.y_position_as: 0.0
+          source.position_angle_deg: 14.5
+
+        # Other frame-init modes we are considering:
+        # mode: from_system
+        #   Use the resolved values already present in the base system/store.
+        #
+        # mode: explicit_table
+        #   path: CHANGE_ME/init_frame_guess.csv
+        #
+        # mode: from_truth_trace
+        #   Synthetic/debug only. Not intended as a mission-mode default.
+        #
+        # mode: previous_block
+        #   Use a propagated estimate from the previous sub-block.
+
+      shared: {}
+
+      # Shared-init options we are considering for later:
+      # shared:
+      #   optics.plate_scale_as_per_pix: null
+      #   optics.primary.zernike_coeffs_nm[0]: 0.0
+
+    priors:
+      # Priors are separated from initialization.
+      # For the first registration-only milestone, these may remain unused or empty,
+      # but we want the schema to leave room for the broader estimator architecture.
+      frame: {}
+      shared: {}
+
+      # Candidate future frame priors:
+      # frame:
+      #   source.x_position_as:
+      #     dist: Normal
+      #     sigma: 1.0e-3
+      #   source.y_position_as:
+      #     dist: Normal
+      #     sigma: 1.0e-3
+      #   source.position_angle_deg:
+      #     dist: Normal
+      #     sigma: 1.0e-2
+      #
+      # Candidate future shared priors:
+      # shared:
+      #   optics.plate_scale_as_per_pix:
+      #     dist: LogNormal
+      #     sigma: 1.0e-3
+      #   optics.primary.zernike_coeffs_nm:
+      #     dist: Normal
+      #     sigma: 1.0
+
+    temporal:
+      # The within-block evolution model for the frame-varying state.
+      # First milestone: independent per-frame registration terms.
+      frame_model:
+        kind: independent
+
+        # Future temporal models we are considering:
+        # kind: shared_anchor_plus_residual
+        # kind: drift_plus_jitter
+        # kind: random_walk
+        #
+        # Possible future parameters:
+        # anchor_keys:
+        #   - source.x_position_as
+        #   - source.y_position_as
+        # drift_keys:
+        #   - source.x_position_as
+        #   - source.y_position_as
+        # residual_sigma:
+        #   source.x_position_as: 0.002
+        #   source.y_position_as: 0.002
+        #   source.position_angle_deg: 0.01
+        #
+        # random-walk example:
+        # step_sigma:
+        #   source.x_position_as: 0.001
+        #   source.y_position_as: 0.001
+        #   source.position_angle_deg: 0.005
+
+    objective:
+      # First milestone: NLL-style image-domain block objective.
+      kind: nll
       reduce: sum
-      variance: 1.0
+
+      noise_model:
+        # This should describe how the variance used by the Gaussian image NLL is built.
+        # For shot-noise-dominated synthetic runs, "data" is the natural default:
+        # variance array = observed data cube.
+        kind: gaussian
+        variance_model: data
+
+        # Simpler/debug option we are considering:
+        # variance_model: scalar
+        # scalar: 1.0
+
+        # Other options we may want later:
+        # variance_model: provided_cube
+        # path: CHANGE_ME/render/obs_subblock_..._variance.fits
+        #
+        # variance_model: detector_noise_model
+        # read_noise: true
+        # dark_current: true
+        #
+        # Eventually we may also want:
+        # kind: poisson
+
+      # Future objective options we are considering:
+      # kind: map
+      # prior_weight: 1.0
+      # temporal_weight: 1.0
 
     optimizer:
-      kind: adam
-      base_lr: 0.01
-      n_iter: 80
+      kind: sgd
+      base_lr: 0.5
+      n_iter: 40
       kwargs:
-        b1: 0.9
-        b2: 0.999
-        eps: 1.0e-8
+#        momentum: 0.0
+#        nesterov: false
+
+      # Other optimizer options we are considering:
+      # kind: adam
+      # schedule:
+      #   kind: constant
+      #
+      # Later possibilities:
+      # - per-parameter learning rates
+      # - shared/frame learning-rate split
+      # - optimizer in transformed/eigen basis
 
     diagnostics:
       plots: true
+      compare_to_truth_when_available: true
+
+      # Other diagnostics we are considering:
+      # save_model_cube: false
+      # save_residual_cube: false
+      # save_per_frame_metrics: true
+      # plot_image_fit: true
+      # plot_recovered_traces: true
+      # plot_truth_comparison: true
+      # plot_trace_residuals: true
+      # compute_reduced_chi2: true
 
   outputs:
     # Relative paths are resolved from this prescription file's directory.
-    outdir: Results/observation_subblock_inference
-    file_prefix: obs_subblock_inference
+    outdir: Results/subblock_inference
+    file_prefix: subblock_inference
+
+    # Future options we are considering:
+    # save_manifest: true
+    # save_recovered_trace: true
+    # save_truth_comparison: true
+    # save_state_summary: true
