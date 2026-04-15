@@ -4,34 +4,35 @@
 
 This note defines the intended direction for observation sub-block inference.
 
-The immediate implementation goal remains a readable first block-inference recipe
-that jointly solves for frame-varying registration parameters over a short stack
-of frames. However, this document is intentionally broader than that first
-milestone. It is meant to describe the longer-term mission-aligned inference
-story so that the initial recipe, schema, and artifacts grow in the right
-direction.
-
 The central design goal is to treat sub-block inference as a structured
 time-domain estimation problem rather than as a one-off optimization over a
-small synthetic dataset.
+small synthetic dataset. This will help explain how we intend to support
+mission-level inference.
+
+The immediate implementation goal remains a readable block-inference recipe
+that jointly solves for frame-varying registration parameters over a short stack
+of frames. However, this document is intentionally broader than this first
+milestone. It describes the longer-term mission-aligned inference story so that
+the initial script, schema, and artifacts grow in the right direction.
 
 ## Context
 
-We now have a working sub-block workflow with three main pieces:
+We currently have a working sub-block workflow with three main pieces:
 
-- a trace-generation stage that produces canonical explicit frame traces
-- a rendering stage that produces an observation sub-block FITS cube from a
-  shared base state plus per-frame updates
+- a trace-generation stage that produces truth tables for a specified sub-block
+- a rendering stage that produces a sub-block FITS cube from a specified 
+  trace/truth table
 - an inference stage that begins by fitting per-frame registration terms from
-  the rendered cube
+  the rendered cube. This stage is expected to change and grow over time as needed 
+  to include shared terms, and/or assumptions about how parameters evolve over time.
 
-The current prototype is intentionally narrow: it holds the shared system state
-fixed and fits only per-frame registration. That is a useful first milestone,
-but it is not the full intended mission inference story.
+The first prototype is intentionally narrow: it will fit only per-frame registration 
+terms, holding all other system parameters fixed. This is a useful first milestone,
+but it is not the full mission inference story.
 
 A more realistic mission-level view is:
 
-- the instrument carries a time-evolving belief about many parameters
+- the instrument carries a time-evolving belief about many/all parameters
 - some parameters are effectively static over long spans
 - some parameters vary slowly from block to block
 - some parameters vary frame to frame
@@ -47,7 +48,7 @@ primary downlinked product. Instead, an on-board centroiding process identifies
 a region of interest (ROI) around the PSF, and that ROI remains fixed for a
 short interval before being re-centered.
 
-A useful working assumption is:
+The working assumption is:
 
 - frame cadence is approximately 20 Hz
 - the ROI remains fixed for roughly 1 second
@@ -55,16 +56,14 @@ A useful working assumption is:
 - each fixed-ROI interval therefore contains about 20 frames
 
 This naturally defines an observation sub-block as the interval over which one
-ROI crop remains fixed.
+ROI crop remains fixed. The 1-second interval is assumed for now, but may be
+changed in the future.
 
-That structure strongly motivates a hybrid estimation strategy:
+That structure motivates a hybrid estimation strategy:
 
-- **within one sub-block:** use a joint block fit / smoothing-style inference
-  over all frames in the block
+- **within one sub-block:** use a joint block fit over all frames in the block
 - **across successive sub-blocks:** propagate a running belief state forward in
   time, updating it as each new block arrives
-
-This note adopts that hybrid view as the long-term design direction.
 
 ## Design goal
 
@@ -77,7 +76,7 @@ sub-blocks using:
 - temporal structure for the frame-varying state
 - a mechanism for carrying information from one sub-block to the next
 
-The first recipe does not need to implement all of that, but it should be
+The first recipe script will not implement all of this, but it should be
 understood as the first restricted case of that broader problem.
 
 ## Terminology
@@ -86,14 +85,14 @@ To avoid conflating several different ideas, this note uses the following terms.
 
 ### Belief state
 
-The mission’s current estimate of parameter values and uncertainty.
+The mission’s current estimate of (all) parameter values and uncertainty.
 
 This may include nearly every important modeled quantity, even when a given
 parameter is not actively varied in the current solve. Examples include:
 
 - binary separation
-- contrast or total flux terms
-- plate scale
+- photometry terms
+- system plate scale
 - selected optical aberration terms
 - detector calibration state
 - registration anchors or slowly drifting pointing state
@@ -132,7 +131,7 @@ Examples may include:
 
 A probabilistic constraint on an actively inferred parameter or process.
 
-In this note, “prior” is not treated as a synonym for “belief state.” A prior
+In this note, we distinguish between "prior" and "belief state." A prior
 is the part of the belief that is actively used in the current inference
 problem.
 
@@ -153,66 +152,12 @@ Examples include:
 - more structured stochastic processes in future work
 
 The temporal model is expected to become increasingly important as the inference
-problem becomes more realistic.
-
-## Why this distinction matters
-
-A common conceptual trap is to treat every modeled quantity as if it either:
-
-- has a prior and is therefore being inferred, or
-- is fixed and therefore irrelevant to uncertainty propagation
-
-Neither of those is quite right.
-
-A better way to think about the problem is:
-
-- nearly every important parameter may belong to the mission belief state
-- only some parameters are active in a given solve
-- priors apply to the active subset
-- frozen uncertain parameters may still need to be handled through joint
-  inference, marginalization, or approximate uncertainty propagation
-
-This gives us a more realistic long-term path than treating the first
-registration-only recipe as the final architecture.
-
-## Inference architecture
-
-The intended architecture is hierarchical.
-
-### Within a sub-block
-
-For frames that share one fixed ROI crop, inference should be formulated as a
-joint block problem.
-
-That is, given a sub-block cube
-
-- `D_0, D_1, ..., D_{N-1}`
-
-we define a likelihood for the full block and optimize or evaluate it jointly
-over the active parameters for that block.
-
-This is more naturally described as a block fit or smoothing-style inference
-than as independent per-frame fits.
-
-### Across sub-blocks
-
-After one sub-block is processed, the resulting parameter estimates and
-uncertainty should inform the next sub-block.
-
-Conceptually, this is the recursive or filtering layer of the mission
-estimation story:
-
-- propagate the belief state forward to the next sub-block
-- use the next sub-block’s image data to update that belief
-- continue over time
-
-This document does not require that the first implementation be a full Bayesian
-filter. The important design point is that sub-block inference should be
-compatible with that future interpretation.
+problem becomes more realistic. We will want to take advantage of the knowledge
+that certain parameters may be correlated across frames.
 
 ## Problem formulation
 
-Let the observed sub-block be a stack of frames
+Let the observed sub-block be a stack of frames:
 
 - `D_0, D_1, ..., D_{N-1}`
 
@@ -221,10 +166,10 @@ Let the active latent state be partitioned into:
 - shared block parameters `theta_shared`
 - frame-varying parameters `phi_i`
 
-For the first phase, we take:
+For our first phase, we take:
 
 - `theta_shared = {}` as an empty inferred shared set
-- `phi_i = [x_i, y_i, pa_i]`
+- `phi_i = [x_i, y_i, pa_i]` as the per-frame registration terms
 
 where:
 
@@ -232,27 +177,18 @@ where:
 - `y_i = source.y_position_as`
 - `pa_i = source.position_angle_deg`
 
-The model prediction for frame `i` is produced by:
-
-1. starting from the shared base store
-2. applying any fixed shared assumptions
-3. applying the frame-specific active overrides
-4. refreshing derived values
-5. evaluating the forward model for that frame
-
-The full block objective should be understood conceptually as:
+The full block objective (Loss function) can be understood conceptually as:
 
 - `L_block = data_term + prior_term + temporal_term`
 
 where:
 
-- `data_term` is the image-domain likelihood contribution over the full cube
+- `data_term` is the image-domain likelihood contribution over the full cube (NLL summed over cube)
 - `prior_term` contains active priors on shared and/or frame parameters
 - `temporal_term` contains any explicit temporal regularization or motion model
 
 For the first implementation, this simplifies to a block image loss with only
-frame-varying registration parameters active. The broader form is recorded here
-so the early schema does not point us in the wrong direction.
+frame-varying registration parameters active.
 
 ## State taxonomy
 
@@ -272,7 +208,7 @@ Examples:
 ### Slowly varying calibration state
 
 Parameters that may change over long spans but are not expected to vary within a
-single 1-second sub-block.
+single sub-block.
 
 Examples:
 
@@ -301,13 +237,206 @@ recovery.
 
 Parameters that vary within the sub-block.
 
-Examples:
+Mainly:
 
 - `source.x_position_as`
 - `source.y_position_as`
 - `source.position_angle_deg`
 
 This is the first active inference set.
+
+## Hierarchical estimation levels
+
+The intended architecture is hierarchical.
+
+### Level 1: frame level
+
+This is the raw image domain.
+
+Data product:
+
+- individual short-exposure frames within one sub-block
+
+Typical varying quantities:
+
+- frame-to-frame registration
+
+Role:
+
+- provides the image-domain likelihood
+- is not, by itself, the main carried-forward product
+
+### Level 2: sub-block level
+
+This is the first routine inference unit.
+
+Data product:
+
+- one fixed-ROI frame cube
+- associated metadata and any optional truth products in simulation mode
+
+Typical active quantities:
+
+- per-frame `x/y/PA`
+- a small set of shared parameters such as plate scale
+
+Role:
+
+- performs one joint block fit
+- outputs recovered active state, diagnostics, and a machine-readable state
+  summary for later propagation
+- The state summary is what we carry forward to the next level, but we don't
+  discard the data cubes.
+
+### Level 3: observation-period level
+
+This is the layer that links many sub-blocks from one observing window.
+
+Data product:
+
+- a sequence of recovered sub-block state summaries
+- optional access to retained image cubes when re-analysis is needed
+
+Typical quantities of interest:
+
+- slowly drifting shared parameters
+- calibration terms that are stable over many blocks
+- observation-level astrometric summaries
+
+Role:
+
+- propagates belief state from one sub-block to the next
+- accumulates information across many local solves
+- may occasionally revisit the image-domain products when a richer model is
+  needed
+
+### Level 4: mission level
+
+This is the longest-timescale layer.
+
+Data product:
+
+- a sequence of observation-level summaries across many visits or epochs
+
+Typical quantities of interest:
+
+- long-term calibration state
+- long-term drift terms
+- final science parameters and their uncertainty
+
+Role:
+
+- fuses information over mission timescales
+- updates long-lived priors and calibration beliefs
+- supports mission-scale performance assessment and science analysis
+
+## How sub-block inference fits into the hierarchy
+
+A sub-block solve should be thought of as producing a local state update.
+
+In routine operation, the carried-forward product should usually be a recovered
+state summary rather than a composite image. Coadded or aligned images may still
+be useful as diagnostics, but they are not the primary abstraction for the
+higher-level estimator.
+
+A useful way to phrase the transition is:
+
+- images are the evidence
+- sub-block inference is the local estimator
+- the recovered state summary is the propagated product
+
+## What one sub-block solve should output
+
+Outputs should support both immediate algorithm assessment and future recursive
+use.
+
+Recommended outputs include:
+
+- a run manifest / results summary
+- a recovered per-frame parameter table
+- a comparison table with truth and recovered values when truth is available
+- residual or fit-quality diagnostics
+- simple plots that compare truth vs recovered traces
+- a machine-readable summary of the recovered active state suitable for later
+  propagation into a running belief state
+
+At minimum, the outputs should make it easy to answer:
+
+- did the inference recover the intended motion pattern?
+- where does recovery succeed or struggle?
+- how do the residuals behave across the block?
+- what state estimate should be carried forward?
+
+The run manifest should capture enough shared-state context to review the fit
+without reopening the original prescription, including:
+
+- source `config_path`
+- resolved input cube/trace/manifest paths
+- resolved fixed or assumed `system` config snapshot
+- active initialization and optimizer settings
+- objective settings
+- summary metrics
+- recovered-state artifact paths
+
+## Example mechanics for hierarchical estimation
+
+The exact machinery is not finalized, but the intended mechanics are roughly as
+follows.
+
+### Example A: first milestone
+
+For one sub-block:
+
+1. start from an assumed shared state
+2. fit per-frame `x/y/PA` jointly across the full block
+3. write recovered per-frame traces and fit diagnostics
+4. summarize the recovered block state
+5. pass a simple summary forward for use as the next block’s initialization
+
+In this first milestone, the shared state is fixed. The value of this phase is
+that it validates the block likelihood, the artifact layout, and the basic
+frame-varying estimation path.
+
+### Example B: shared-plus-frame block inference
+
+For one sub-block:
+
+1. start from an assumed shared state plus uncertainty
+2. fit per-frame `x/y/PA`
+3. also fit one or a few shared terms, for example:
+   - `optics.plate_scale_as_per_pix`
+4. write recovered frame traces and recovered shared terms
+5. carry the recovered shared estimate and uncertainty into the next block
+
+This is the natural next phase after registration-only recovery.
+
+### Example C: block-to-block propagation over one observing period
+
+For a sequence of sub-blocks:
+
+1. initialize block `k` from the propagated state summary from block `k-1`
+2. solve block `k` in the image domain
+3. update the belief state using the recovered block summary
+4. continue to the next block
+
+In this picture, the routine estimator advances primarily on sub-block summaries,
+not by re-fitting all previous frames from scratch after every update.
+
+### Example D: higher-level refinement
+
+At some later stage, a higher-level solve may revisit a set of retained sub-block
+cubes together when a richer parameter set becomes important.
+
+For example:
+
+- a first pass may recover only registration
+- a second pass over selected blocks may promote plate scale or selected
+  low-order Zernikes into the active state
+- a still later pass may update long-timescale calibration parameters using many
+  blocks together
+
+This means sub-block summaries are the main propagated product, but not a
+lossless replacement for the underlying images.
 
 ## First implementation milestone
 
@@ -342,9 +471,6 @@ This first phase is still the right place to start because it:
 - makes the frame-varying state explicit
 - provides interpretable truth-vs-recovered diagnostics
 - gives a clean foundation for later joint shared-plus-frame inference
-
-The important change in this note is not the milestone itself, but the way that
-milestone is framed relative to the longer-term design.
 
 ## Initialization
 
@@ -383,97 +509,20 @@ Priors should be supported eventually for:
 - frame-varying inferred parameters
 - temporal-model hyperparameters when present
 
-These priors may be weak or strong depending on operational knowledge.
-
 ### For frozen parameters
 
-Frozen parameters may still carry uncertainty in the mission belief state, but
-that uncertainty does not automatically enter the local sub-block solve.
+Frozen parameters may still be uncertain in the broader belief state.
 
-To make frozen uncertainty matter in the local solve, we would need one of:
+In many early solves, that uncertainty will be ignored locally for simplicity.
+Later, it may need to be handled by one or more of:
 
-- joint inference
-- marginalization
-- approximate uncertainty propagation / nuisance-state treatment
+- promoting the parameter into the active state
+- marginalizing approximately over its uncertainty
+- carrying uncertainty inflation into higher-level summaries
+- re-solving selected blocks with a richer active model
 
-That distinction should be kept clear in both code and docs.
-
-## Loss and objective structure
-
-The first recipe should remain readable and recipe-like, but the design target
-should be broader than a hard-coded registration-only NLL script.
-
-The intended conceptual structure is:
-
-1. load and resolve config
-2. load the sub-block cube and associated metadata
-3. build the forward spec and shared base store
-4. construct the active state for the current inference phase
-5. define the block objective:
-   - image-domain likelihood
-   - optional active priors
-   - optional temporal regularization or motion model
-6. initialize the active parameters
-7. run the optimizer or estimator
-8. write outputs and diagnostics
-9. summarize the updated state estimate for downstream use
-
-The first implementation may only instantiate a subset of this structure, but
-the design note should describe the full intended pattern.
-
-## Inputs
-
-Expected operational inputs remain:
-
-- an observation sub-block FITS cube
-- a canonical config / prescription describing the shared fixed or partially
-  inferred model state and experiment settings
-- optional frame-truth CSV for evaluation and comparison
-- optional manifest JSON for metadata and artifact discovery
-
-The common synthetic-data workflow should still be:
-
-- point inference at the rendered cube
-- auto-discover `manifest.json` beside that cube
-- infer the truth-trace path from the render manifest when available
-
-But the design should not assume that truth artifacts will exist in real
-mission operations. Truth is a simulation and validation convenience, not a
-mission-mode requirement.
-
-## Output products
-
-Outputs should support both immediate algorithm assessment and future recursive
-use.
-
-Recommended outputs include:
-
-- a run manifest / results summary
-- a recovered per-frame parameter table
-- a comparison table with truth and recovered values when truth is available
-- residual or fit-quality diagnostics
-- simple plots that compare truth vs recovered traces
-- a machine-readable summary of the recovered active state suitable for later
-  propagation into a running belief state
-
-At minimum, the outputs should make it easy to answer:
-
-- did the inference recover the intended motion pattern?
-- where does recovery succeed or struggle?
-- how do the residuals behave across the block?
-- what state estimate should be carried forward?
-
-The run manifest should capture enough shared-state context to review the fit
-without reopening the original prescription, including:
-
-- source `config_path`
-- resolved input cube/trace/manifest paths
-- whether the render manifest was auto-discovered
-- resolved fixed or assumed `system` config snapshot
-- active initialization and optimizer settings
-- objective settings
-- summary metrics
-- recovered-state artifact paths
+The first implementation does not need to solve this fully. It only needs to
+avoid language that falsely implies frozen state is certain.
 
 ## Recommended diagnostics
 
@@ -493,23 +542,6 @@ Later diagnostics may also include:
 - shared-parameter posterior summaries
 - temporal-model residual checks
 - block-to-block state continuity summaries
-
-## What is intentionally out of scope in the first implementation
-
-The first implementation should not attempt to solve the entire mission problem.
-
-Out of scope for the first implementation:
-
-- inference of arbitrary shared parameter sets
-- full recursive filtering across blocks
-- generalized temporal-model inference
-- calibration-map inference inside the routine science solve
-- multi-ROI joint inference
-- full uncertainty propagation from all frozen nuisance parameters
-- elaborate abstraction layers that obscure the recipe logic
-
-These are deferred not because they are unimportant, but because the first goal
-is to establish a clear and trustworthy block-inference pattern.
 
 ## Planned next phases
 
@@ -531,7 +563,7 @@ registration recovery.
 A later phase should introduce an explicit temporal model for frame-varying
 registration, for example:
 
-- independent frame parameters
+- independent frame parameters (first assumption)
 - shared anchor plus residuals
 - linear drift plus jitter
 - random walk
@@ -549,7 +581,7 @@ story becomes appropriate.
 ## Design guidance for implementation
 
 When implementing the first recipe and its early extensions, the main priorities
-should be:
+are:
 
 - readability
 - alignment with canonical recipe structure
@@ -563,8 +595,8 @@ In practice, that means:
 - keep the main recipe logic visible
 - use helper functions sparingly and only where they genuinely clarify the
   script
-- avoid naming that hard-codes synthetic “truth” semantics into the long-term
-  inference story
+- avoid naming that hard-codes synthetic truth semantics into the long-term
+  inference story (we won't always know what truth is).
 - keep initialization, priors, and fixed assumptions conceptually separate
 - make it easy to inspect recovered values, residuals, and carried-forward state
 
@@ -573,14 +605,13 @@ In practice, that means:
 This design direction will be successful if we build a workflow that:
 
 - loads a sub-block cube and fixed or partially inferred model state
-- works cleanly when only the cube path is provided in the standard artifact
-  layout
 - supports a clear first milestone of jointly inferring per-frame `x/y/PA`
   across the full block
 - produces readable outputs comparing recovered traces to truth in synthetic
   studies
 - naturally extends to shared-plus-frame inference
 - naturally extends to block-to-block state propagation
+- makes the carried-forward state explicit and inspectable
 - provides a clear foundation for a future mission-aligned estimation story
 
 ## Summary
@@ -588,16 +619,13 @@ This design direction will be successful if we build a workflow that:
 The first observation sub-block inference recipe is still intentionally modest:
 a registration-only block fit over a short image cube.
 
-But that recipe should be understood as the first restricted case of a broader
-hierarchical time-domain estimation problem.
-
 The intended long-term direction is:
 
-- batch or smoothing-style inference within each short fixed-ROI sub-block
-- recursive propagation of a broader belief state across successive sub-blocks
+- joint inference within each short fixed-ROI sub-block
+- propagation of a broader belief state across successive sub-blocks
 - eventual support for both shared and frame-varying inferred parameters
 - clear separation between belief state, active parameters, frozen parameters,
-  priors, initialization, and temporal structure
+  priors, initialization, temporal structure, and carried-forward state
 
 That framing should help keep the implementation, schema, and future extensions
 pointed in the right direction.
