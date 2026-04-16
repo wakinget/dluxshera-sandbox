@@ -64,6 +64,18 @@ The current recipe accepts:
 - `experiment.inference.optimizer`
 - `experiment.inference.diagnostics`
 
+Optimizer diagnostics can be enabled with:
+
+- `first_step_report`
+- `save_first_step_json`
+- `save_fim_debug`
+- `finite_difference_check`
+- `plot_parameter_history_heatmap`
+- `plot_parameter_residual_history_heatmap`
+- `plot_parameter_history_lines`
+- `plot_parameter_residual_history_lines`
+- `top_k`
+
 The current tested workflow is:
 
 - `active.frame_keys` must be exactly `source.x_position_as`, `source.y_position_as`, `source.position_angle_deg`

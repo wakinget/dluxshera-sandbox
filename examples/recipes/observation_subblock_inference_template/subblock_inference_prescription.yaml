@@ -189,9 +189,9 @@ experiment:
       kind: sgd
       base_lr: 0.5
       n_iter: 40
-      kwargs:
-#        momentum: 0.0
-#        nesterov: false
+      # kwargs:
+      #   momentum: 0.0
+      #   nesterov: false
       preconditioning:
         # Optional theta-space curvature-aware scaling built from
         # F(theta_ref) = Hessian(loss_fn, theta_ref) over the full packed
@@ -200,8 +200,8 @@ experiment:
         damping: 1.0e-6
         eig_floor_rel: 1.0e-6
         eig_floor_abs: 1.0e-8
-        # Optional clip for per-parameter effective learning rates after
-        # applying the damped preconditioner diagonal.
+        # Optional clip for per-parameter preconditioning scales. base_lr is
+        # applied separately by the optimizer.
         # lr_clip: [1.0e-4, 1.0]
 
       # Other optimizer options we are considering:
@@ -217,6 +217,15 @@ experiment:
     diagnostics:
       plots: true
       compare_to_truth_when_available: true
+      first_step_report: false
+      save_first_step_json: false
+      save_fim_debug: false
+      finite_difference_check: false
+      plot_parameter_history_heatmap: false
+      plot_parameter_residual_history_heatmap: false
+      plot_parameter_history_lines: false
+      plot_parameter_residual_history_lines: false
+      top_k: 10
 
       # Other diagnostics we are considering:
       # save_model_cube: false

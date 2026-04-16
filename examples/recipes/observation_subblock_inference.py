@@ -61,6 +61,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib
 import numpy as np
+import optax
 from astropy.io import fits
 
 from dluxshera.config.io import load_user_config
@@ -177,6 +178,8 @@ class ThetaPreconditioningBundle:
     fim: np.ndarray
     eigvals: np.ndarray
     eigvals_stable: np.ndarray
+    preconditioner_diag: np.ndarray
+    lr_vec_unclipped: np.ndarray
     lr_vec: np.ndarray
     config: dict[str, Any]
 
@@ -354,6 +357,10 @@ def _build_artifact_paths(
     include_comparison: bool,
     write_plots: bool,
     include_trace_plots: bool,
+    include_parameter_history_heatmap: bool = False,
+    include_parameter_residual_history_heatmap: bool = False,
+    include_parameter_history_lines: bool = False,
+    include_parameter_residual_history_lines: bool = False,
 ) -> dict[str, Path]:
     """Return artifact paths for one inference run."""
 
@@ -380,7 +387,37 @@ def _build_artifact_paths(
                 artifacts["recovered_traces_png"] = (
                     outdir / f"{file_prefix}_{timestamp}_recovered_traces.png"
                 )
+        if include_parameter_history_heatmap:
+            artifacts["parameter_history_heatmap_png"] = (
+                outdir / f"{file_prefix}_{timestamp}_parameter_history_heatmap.png"
+            )
+        if include_parameter_residual_history_heatmap:
+            artifacts["parameter_residual_history_heatmap_png"] = (
+                outdir / f"{file_prefix}_{timestamp}_parameter_residual_history_heatmap.png"
+            )
+        if include_parameter_history_lines:
+            artifacts["parameter_history_lines_png"] = (
+                outdir / f"{file_prefix}_{timestamp}_parameter_history_lines.png"
+            )
+        if include_parameter_residual_history_lines:
+            artifacts["parameter_residual_history_lines_png"] = (
+                outdir / f"{file_prefix}_{timestamp}_parameter_residual_history_lines.png"
+            )
     return artifacts
+
+
+def _theta_labels_for_layout(layout: ActiveStateLayout) -> list[str]:
+    """Return readable labels in the exact packed-theta order."""
+
+    labels: list[str] = []
+    for frame_index in range(layout.n_frame):
+        labels.extend(
+            f"frame[{frame_index}].{spec.canonical}" for spec in layout.frame_specs
+        )
+    labels.extend(f"shared.{spec.canonical}" for spec in layout.shared_specs)
+    if len(labels) != layout.theta_size:
+        raise ValueError("Theta label count does not match active-state layout.")
+    return labels
 
 
 def _pack_active_state(layout: ActiveStateLayout, state: ActiveState) -> jnp.ndarray:
@@ -962,8 +999,17 @@ def _build_theta_preconditioning_bundle(
 
     inv_sqrt_eigs = np.reciprocal(np.sqrt(eigvals_stable))
     precond_full = eigvecs @ (inv_sqrt_eigs[:, None] * eigvecs.T)
-    lr_vec = base_lr * np.diag(precond_full)
+    preconditioner_diag = np.diag(precond_full)
+    # Convention: lr_vec is a pure preconditioning scale. run_shera_gd applies
+    # base_lr via its learning_rate argument, matching canonical theta workflows.
+    _ = base_lr
+    lr_vec_unclipped = np.array(preconditioner_diag, copy=True)
+    lr_vec = np.array(lr_vec_unclipped, copy=True)
+    lr_clip_applied_count = 0
     if lr_clip is not None:
+        lr_clip_applied_count = int(
+            np.count_nonzero((lr_vec < lr_clip[0]) | (lr_vec > lr_clip[1]))
+        )
         lr_vec = np.clip(lr_vec, lr_clip[0], lr_clip[1])
 
     if lr_vec.shape != (int(theta_ref_vec.size),):
@@ -977,6 +1023,8 @@ def _build_theta_preconditioning_bundle(
         fim=fim_sym,
         eigvals=eigvals,
         eigvals_stable=eigvals_stable,
+        preconditioner_diag=preconditioner_diag,
+        lr_vec_unclipped=lr_vec_unclipped,
         lr_vec=lr_vec,
         config={
             "enabled": True,
@@ -985,7 +1033,121 @@ def _build_theta_preconditioning_bundle(
             "eig_floor_abs": eig_floor_abs,
             "eig_floor_effective": eig_floor,
             "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
+            "lr_clip_applied_count": lr_clip_applied_count,
         },
+    )
+
+
+def _format_scalar(value: float) -> str:
+    """Format console diagnostics with compact scientific notation."""
+
+    return f"{float(value):.6g}"
+
+
+def _format_array_stats(values: np.ndarray) -> str:
+    """Return a compact min/median/max summary for finite numeric values."""
+
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size == 0:
+        return "empty"
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return "no finite values"
+    return (
+        f"min={_format_scalar(np.min(finite))} "
+        f"median={_format_scalar(np.median(finite))} "
+        f"max={_format_scalar(np.max(finite))}"
+    )
+
+
+def _condition_number_from_bounds(min_value: float, max_value: float) -> float:
+    """Return max/min when the lower bound is positive, otherwise inf."""
+
+    if min_value <= 0.0:
+        return float("inf")
+    return float(max_value / min_value)
+
+
+def _print_active_layout_summary(*, layout: ActiveStateLayout, theta0: jnp.ndarray) -> None:
+    """Print active-state packing details before optimization."""
+
+    theta0_np = np.asarray(theta0, dtype=float)
+    print("Active inference layout:")
+    print(
+        f"  frames={layout.n_frame} frame_width={layout.frame_width} "
+        f"shared_width={layout.shared_width} theta_size={layout.theta_size}"
+    )
+    print(f"  frame_keys={list(layout.frame_keys)}")
+    print(f"  shared_keys={list(layout.shared_keys)}")
+    print(f"  theta0: {_format_array_stats(theta0_np)}")
+
+
+def _print_preconditioning_summary(
+    *,
+    bundle: ThetaPreconditioningBundle,
+    base_lr: float,
+) -> None:
+    """Print the numerical details of the theta-space FIM preconditioner."""
+
+    fim_diag = np.diag(bundle.fim)
+    fim_abs = np.abs(bundle.fim)
+    stable_min = float(np.min(bundle.eigvals_stable))
+    stable_max = float(np.max(bundle.eigvals_stable))
+    eig_nonpositive = int(np.count_nonzero(bundle.eigvals <= 0.0))
+    eig_floor = float(bundle.config["eig_floor_effective"])
+    eig_floored = int(np.count_nonzero(bundle.eigvals < eig_floor))
+    stable_condition = _condition_number_from_bounds(stable_min, stable_max)
+    effective_lr = float(base_lr) * bundle.lr_vec
+    effective_lr_unclipped = float(base_lr) * bundle.lr_vec_unclipped
+
+    print("Theta-space Fisher preconditioning summary:")
+    print(
+        f"  theta_dim={bundle.lr_vec.size} fim_shape={bundle.fim.shape} "
+        f"base_lr={_format_scalar(base_lr)}"
+    )
+    print(
+        "  config: "
+        f"damping={_format_scalar(bundle.config['damping'])} "
+        f"eig_floor_rel={_format_scalar(bundle.config['eig_floor_rel'])} "
+        f"eig_floor_abs={_format_scalar(bundle.config['eig_floor_abs'])} "
+        f"eig_floor_effective={_format_scalar(eig_floor)} "
+        f"lr_clip={bundle.config['lr_clip']}"
+    )
+    print(
+        "  fim: "
+        f"diag({_format_array_stats(fim_diag)}) "
+        f"trace={_format_scalar(np.trace(bundle.fim))} "
+        f"max_abs_entry={_format_scalar(np.max(fim_abs))}"
+    )
+    print(
+        "  raw eigenvalues: "
+        f"{_format_array_stats(bundle.eigvals)} "
+        f"nonpositive={eig_nonpositive} floor_lifted={eig_floored}"
+    )
+    print(
+        "  stabilized eigenvalues: "
+        f"{_format_array_stats(bundle.eigvals_stable)} "
+        f"condition_est={_format_scalar(stable_condition)}"
+    )
+    print(
+        "  preconditioner-like diagonal used to build lr_vec: "
+        f"{_format_array_stats(bundle.preconditioner_diag)}"
+    )
+    print(
+        "  lr_vec before clipping: "
+        f"{_format_array_stats(bundle.lr_vec_unclipped)} "
+        "(preconditioning scale only)"
+    )
+    print(
+        "  lr_vec after clipping: "
+        f"{_format_array_stats(bundle.lr_vec)} "
+        "(preconditioning scale only) "
+        f"clipped={bundle.config['lr_clip_applied_count']}"
+    )
+    print(
+        "  implied effective SGD scale: "
+        f"before_clip({_format_array_stats(effective_lr_unclipped)}) "
+        f"after_clip({_format_array_stats(effective_lr)})"
     )
 
 
@@ -993,6 +1155,506 @@ def _label_for_key(key: str) -> str:
     """Return a readable axis label for one canonical active key."""
 
     return key
+
+
+def _to_jsonable_float_list(values: np.ndarray) -> list[float]:
+    """Convert a numeric array to a JSON-friendly flat float list."""
+
+    return [float(value) for value in np.asarray(values, dtype=float).ravel()]
+
+
+def _optimizer_first_step(
+    *,
+    loss_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    theta0: jnp.ndarray,
+    learning_rate: float,
+    lr_vec: np.ndarray | None,
+    optimizer_kind: str,
+    optimizer_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate loss/grad at theta0 and simulate the optimizer's first update."""
+
+    theta0_arr = jnp.asarray(theta0)
+    loss0, grad0 = jax.value_and_grad(loss_fn)(theta0_arr)
+    opt_kwargs = dict(optimizer_kwargs)
+
+    def _scale_by_vector(vec: jnp.ndarray) -> optax.GradientTransformation:
+        def init_fn(_params):
+            return None
+
+        def update_fn(updates, state, params=None):
+            del params
+            return jax.tree_util.tree_map(lambda g: g * vec, updates), state
+
+        return optax.GradientTransformation(init_fn, update_fn)
+
+    if optimizer_kind == "sgd":
+        if lr_vec is None:
+            optimizer = optax.sgd(learning_rate=learning_rate, **opt_kwargs)
+        else:
+            optimizer = optax.sgd(
+                learning_rate=learning_rate * jnp.asarray(lr_vec),
+                **opt_kwargs,
+            )
+    elif optimizer_kind == "adam":
+        txs: list[optax.GradientTransformation] = [optax.scale_by_adam(**opt_kwargs)]
+        if lr_vec is not None:
+            txs.append(_scale_by_vector(jnp.asarray(lr_vec)))
+        txs.append(optax.scale(-learning_rate))
+        optimizer = optax.chain(*txs)
+    else:
+        raise ValueError(f"Unsupported optimizer kind for diagnostics: {optimizer_kind!r}.")
+
+    opt_state = optimizer.init(theta0_arr)
+    updates, _ = optimizer.update(grad0, opt_state, params=theta0_arr)
+    theta1 = optax.apply_updates(theta0_arr, updates)
+    loss1 = loss_fn(theta1)
+    return {
+        "theta0": np.asarray(theta0_arr, dtype=float),
+        "theta1": np.asarray(theta1, dtype=float),
+        "loss0": float(np.asarray(loss0)),
+        "loss1": float(np.asarray(loss1)),
+        "grad0": np.asarray(grad0, dtype=float),
+        "delta0": np.asarray(theta1 - theta0_arr, dtype=float),
+        "lr_vec": None if lr_vec is None else np.asarray(lr_vec, dtype=float),
+    }
+
+
+def _top_labeled_entries(
+    values: np.ndarray,
+    *,
+    labels: list[str],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Return the largest entries by absolute value with theta labels."""
+
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size != len(labels):
+        raise ValueError("Diagnostic vector length does not match theta label count.")
+    k = min(max(int(top_k), 0), arr.size)
+    if k == 0:
+        return []
+    idx = np.argsort(np.abs(arr))[::-1][:k]
+    return [
+        {
+            "index": int(i),
+            "label": labels[int(i)],
+            "value": float(arr[int(i)]),
+            "abs_value": float(abs(arr[int(i)])),
+        }
+        for i in idx
+    ]
+
+
+def _summarize_first_step(
+    *,
+    label: str,
+    step: dict[str, Any],
+    theta_labels: list[str],
+    top_k: int,
+) -> dict[str, Any]:
+    """Build and print a readable first-step diagnostic summary."""
+
+    theta0 = np.asarray(step["theta0"], dtype=float)
+    theta1 = np.asarray(step["theta1"], dtype=float)
+    grad0 = np.asarray(step["grad0"], dtype=float)
+    delta0 = np.asarray(step["delta0"], dtype=float)
+    lr_vec = step["lr_vec"]
+    payload: dict[str, Any] = {
+        "label": label,
+        "loss0": float(step["loss0"]),
+        "loss1": float(step["loss1"]),
+        "loss0_finite": bool(np.isfinite(step["loss0"])),
+        "loss1_finite": bool(np.isfinite(step["loss1"])),
+        "grad0_finite": bool(np.all(np.isfinite(grad0))),
+        "theta0_finite": bool(np.all(np.isfinite(theta0))),
+        "theta1_finite": bool(np.all(np.isfinite(theta1))),
+        "grad0_min": float(np.min(grad0)),
+        "grad0_max": float(np.max(grad0)),
+        "delta0_min": float(np.min(delta0)),
+        "delta0_max": float(np.max(delta0)),
+        "lr_vec_min": None if lr_vec is None else float(np.min(lr_vec)),
+        "lr_vec_max": None if lr_vec is None else float(np.max(lr_vec)),
+        "top_grad_abs": _top_labeled_entries(grad0, labels=theta_labels, top_k=top_k),
+        "top_delta_abs": _top_labeled_entries(delta0, labels=theta_labels, top_k=top_k),
+    }
+
+    print(f"First-step diagnostic [{label}]:")
+    print(
+        f"  loss0={_format_scalar(payload['loss0'])} "
+        f"finite={payload['loss0_finite']} | "
+        f"loss1={_format_scalar(payload['loss1'])} "
+        f"finite={payload['loss1_finite']}"
+    )
+    print(
+        f"  grad_finite={payload['grad0_finite']} "
+        f"theta0_finite={payload['theta0_finite']} "
+        f"theta1_finite={payload['theta1_finite']}"
+    )
+    print(
+        f"  grad0 min/max={payload['grad0_min']:.3e}/{payload['grad0_max']:.3e} | "
+        f"delta0 min/max={payload['delta0_min']:.3e}/{payload['delta0_max']:.3e}"
+    )
+    if lr_vec is not None:
+        print(
+            f"  lr_vec scale min/max={payload['lr_vec_min']:.3e}/"
+            f"{payload['lr_vec_max']:.3e}"
+        )
+    top_grad = ", ".join(
+        f"{item['label']}={item['value']:.3e}" for item in payload["top_grad_abs"]
+    )
+    top_delta = ", ".join(
+        f"{item['label']}={item['value']:.3e}" for item in payload["top_delta_abs"]
+    )
+    print(f"  top |grad0|: {top_grad}")
+    print(f"  top |delta0|: {top_delta}")
+    return payload
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write an indented JSON diagnostic artifact."""
+
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, default=str)
+
+
+def _save_fim_debug_artifact(
+    *,
+    bundle: ThetaPreconditioningBundle,
+    theta_labels: list[str],
+    base_lr: float,
+    output_path: Path,
+) -> None:
+    """Persist full theta-space preconditioning introspection data."""
+
+    _write_json(
+        output_path,
+        {
+            "schema_version": "subblock_theta_preconditioning_debug.v1",
+            "description": {
+                "fim": "curvature-like full theta-space Fisher information matrix",
+                "fim_diagonal": "curvature-like diagonal of fim",
+                "eigenvalues": "raw curvature-like eigenvalues of symmetrized fim",
+                "stabilized_eigenvalues": "floored and damped curvature-like eigenvalues",
+                "preconditioner_diagonal": (
+                    "preconditioner-like diagonal used to build lr_vec"
+                ),
+                "lr_vec_before_clipping": (
+                    "preconditioning scale vector before clipping; excludes base_lr"
+                ),
+                "lr_vec_after_clipping": (
+                    "preconditioning scale vector passed to run_shera_gd; excludes base_lr"
+                ),
+            },
+            "theta_labels": list(theta_labels),
+            "config": to_jsonable_obs_subblock_payload(bundle.config),
+            "fim": np.asarray(bundle.fim, dtype=float).tolist(),
+            "fim_diagonal": _to_jsonable_float_list(np.diag(bundle.fim)),
+            "eigenvalues": _to_jsonable_float_list(bundle.eigvals),
+            "stabilized_eigenvalues": _to_jsonable_float_list(bundle.eigvals_stable),
+            "preconditioner_diagonal": _to_jsonable_float_list(
+                bundle.preconditioner_diag
+            ),
+            "base_lr": float(base_lr),
+            "lr_scale_before_clipping": _to_jsonable_float_list(bundle.lr_vec_unclipped),
+            "lr_scale_after_clipping": _to_jsonable_float_list(bundle.lr_vec),
+            "effective_lr_before_clipping": _to_jsonable_float_list(
+                float(base_lr) * bundle.lr_vec_unclipped
+            ),
+            "effective_lr_after_clipping": _to_jsonable_float_list(
+                float(base_lr) * bundle.lr_vec
+            ),
+            "lr_vec_before_clipping": _to_jsonable_float_list(bundle.lr_vec_unclipped),
+            "lr_vec_after_clipping": _to_jsonable_float_list(bundle.lr_vec),
+        },
+    )
+
+
+def _per_frame_diagnostic_rows(
+    *,
+    per_frame_terms: np.ndarray,
+    label: str,
+) -> list[dict[str, Any]]:
+    """Return JSON rows for per-frame data-term diagnostics."""
+
+    terms = np.asarray(per_frame_terms, dtype=float).ravel()
+    total = float(np.sum(terms))
+    return [
+        {
+            "step": label,
+            "frame_index": int(idx),
+            "data_term": float(value),
+            "fraction_of_step_total": None if total == 0.0 else float(value / total),
+        }
+        for idx, value in enumerate(terms)
+    ]
+
+
+def _print_per_frame_data_terms(
+    *,
+    label: str,
+    terms: np.ndarray,
+) -> None:
+    """Print a compact per-frame data-term summary."""
+
+    arr = np.asarray(terms, dtype=float).ravel()
+    if arr.size == 0:
+        print(f"Per-frame data terms [{label}]: empty")
+        return
+    dominant_idx = int(np.argmax(arr))
+    total = float(np.sum(arr))
+    print(
+        f"Per-frame data terms [{label}]: total={_format_scalar(total)} "
+        f"min={_format_scalar(np.min(arr))} median={_format_scalar(np.median(arr))} "
+        f"max={_format_scalar(np.max(arr))} dominant_frame={dominant_idx}"
+    )
+
+
+def _finite_difference_gradient_check(
+    *,
+    loss_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    theta0: jnp.ndarray,
+    grad0: np.ndarray,
+    theta_labels: list[str],
+) -> list[dict[str, Any]]:
+    """Compare autodiff gradient signs with central finite differences."""
+
+    theta0_np = np.asarray(theta0, dtype=float).ravel()
+    grad0_np = np.asarray(grad0, dtype=float).ravel()
+    rows: list[dict[str, Any]] = []
+    for idx, value in enumerate(theta0_np):
+        eps = max(1e-6, abs(float(value)) * 1e-4)
+        direction = np.zeros_like(theta0_np)
+        direction[idx] = eps
+        loss_plus = float(np.asarray(loss_fn(jnp.asarray(theta0_np + direction))))
+        loss_minus = float(np.asarray(loss_fn(jnp.asarray(theta0_np - direction))))
+        fd_grad = (loss_plus - loss_minus) / (2.0 * eps)
+        autodiff_grad = float(grad0_np[idx])
+        sign_consistent = (
+            abs(autodiff_grad) < 1e-12
+            or abs(fd_grad) < 1e-12
+            or np.sign(autodiff_grad) == np.sign(fd_grad)
+        )
+        rows.append(
+            {
+                "index": int(idx),
+                "label": theta_labels[idx],
+                "theta0": float(value),
+                "eps": float(eps),
+                "autodiff_grad": autodiff_grad,
+                "finite_difference_grad": float(fd_grad),
+                "sign_consistent": bool(sign_consistent),
+                "loss_plus": loss_plus,
+                "loss_minus": loss_minus,
+            }
+        )
+    consistent = sum(1 for row in rows if row["sign_consistent"])
+    print(
+        "Finite-difference gradient sign check: "
+        f"{consistent}/{len(rows)} dimensions locally consistent"
+    )
+    return rows
+
+
+def _plot_theta_bar(
+    *,
+    values: np.ndarray,
+    labels: list[str],
+    ylabel: str,
+    title: str,
+    output_path: Path,
+) -> None:
+    """Plot a labeled bar chart for one theta diagnostic vector."""
+
+    arr = np.asarray(values, dtype=float).ravel()
+    fig_width = max(7.0, 0.45 * len(labels))
+    fig, ax = plt.subplots(figsize=(fig_width, 4.5))
+    ax.bar(np.arange(arr.size), np.abs(arr))
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(np.arange(arr.size))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_per_frame_comparison(
+    *,
+    theta0_terms: np.ndarray,
+    theta1_terms: np.ndarray,
+    output_path: Path,
+) -> None:
+    """Plot per-frame data-term contributions before and after step 1."""
+
+    terms0 = np.asarray(theta0_terms, dtype=float).ravel()
+    terms1 = np.asarray(theta1_terms, dtype=float).ravel()
+    x = np.arange(terms0.size)
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(x - width / 2, terms0, width=width, label="theta0")
+    ax.bar(x + width / 2, terms1, width=width, label="theta1")
+    ax.set_xlabel("Frame index")
+    ax.set_ylabel("Data-term contribution")
+    ax.set_title("Per-frame objective contribution")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _build_frame_history_from_theta_trace(
+    *,
+    layout: ActiveStateLayout,
+    theta0: jnp.ndarray,
+    theta_trace: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Decode optimizer theta history into iteration-by-frame-by-key values."""
+
+    theta0_np = np.asarray(theta0, dtype=float).ravel()
+    trace_np = np.asarray(theta_trace, dtype=float)
+    if trace_np.ndim == 1:
+        trace_np = trace_np.reshape((1, trace_np.size))
+    if trace_np.ndim != 2:
+        raise ValueError("Optimizer theta trace must be a 2D array.")
+    if trace_np.shape[1] != theta0_np.size:
+        raise ValueError("Optimizer theta trace width does not match theta0 size.")
+
+    if trace_np.shape[0] == 0:
+        theta_history = theta0_np[None, :]
+    elif np.allclose(trace_np[0], theta0_np, rtol=0.0, atol=1e-12):
+        theta_history = trace_np
+    else:
+        theta_history = np.vstack((theta0_np[None, :], trace_np))
+
+    frame_history = np.asarray(
+        [
+            np.asarray(
+                _unpack_active_state(layout, jnp.asarray(theta_values)).frame,
+                dtype=float,
+            )
+            for theta_values in theta_history
+        ],
+        dtype=float,
+    )
+    iterations = np.arange(theta_history.shape[0], dtype=int)
+    return iterations, frame_history
+
+
+def _plot_parameter_history_heatmaps(
+    *,
+    frame_history: np.ndarray,
+    labels: tuple[str, ...],
+    output_path: Path,
+    title: str,
+    colorbar_label: str,
+    center_zero: bool = False,
+) -> None:
+    """Plot frame-varying parameter history as one heatmap per active key."""
+
+    history = np.asarray(frame_history, dtype=float)
+    if history.ndim != 3 or history.shape[2] == 0:
+        return
+
+    n_step, n_frame, n_key = history.shape
+    fig, axes = plt.subplots(
+        n_key,
+        1,
+        figsize=(8, max(3.2, 2.4 * n_key)),
+        sharex=True,
+        squeeze=False,
+    )
+    x_extent = (-0.5, max(n_step - 0.5, 0.5))
+    extent = (x_extent[0], x_extent[1], -0.5, max(n_frame - 0.5, 0.5))
+
+    for key_index, ax in enumerate(axes[:, 0]):
+        values = history[:, :, key_index].T
+        cmap = "viridis"
+        vmin = vmax = None
+        if center_zero:
+            finite_abs = np.abs(values[np.isfinite(values)])
+            limit = float(np.max(finite_abs)) if finite_abs.size else 0.0
+            if not np.isfinite(limit) or limit <= 0.0:
+                limit = 1.0
+            vmin = -limit
+            vmax = limit
+            cmap = "RdBu_r"
+        image = ax.imshow(
+            values,
+            aspect="auto",
+            origin="lower",
+            extent=extent,
+            interpolation="nearest",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        ax.set_ylabel("Frame index")
+        ax.set_title(_label_for_key(labels[key_index]))
+        fig.colorbar(image, ax=ax, label=colorbar_label, fraction=0.025, pad=0.02)
+
+    axes[-1, 0].set_xlabel("Optimizer iteration")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_parameter_history_lines(
+    *,
+    iterations: np.ndarray,
+    frame_history: np.ndarray,
+    labels: tuple[str, ...],
+    output_path: Path,
+    title: str = "Frame-varying active-state optimizer history",
+    ylabel_suffix: str = "",
+    zero_line: bool = False,
+) -> None:
+    """Plot frame-wise parameter trajectories as compact line panels."""
+
+    history = np.asarray(frame_history, dtype=float)
+    if history.ndim != 3 or history.shape[2] == 0:
+        return
+
+    n_step, n_frame, n_key = history.shape
+    fig, axes = plt.subplots(
+        n_key,
+        1,
+        figsize=(8, max(3.5, 2.5 * n_key)),
+        sharex=True,
+        squeeze=False,
+    )
+    for key_index, ax in enumerate(axes[:, 0]):
+        for frame_index in range(n_frame):
+            ax.plot(
+                iterations,
+                history[:, frame_index, key_index],
+                linewidth=1.0,
+                marker="o" if n_step <= 20 else None,
+                markersize=2.5,
+                label=f"frame {frame_index}",
+            )
+        if zero_line:
+            ax.axhline(0.0, color="k", linestyle=":", linewidth=0.8, alpha=0.6)
+        ax.axvline(
+            int(iterations[-1]),
+            color="k",
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.5,
+        )
+        ax.set_ylabel(f"{_label_for_key(labels[key_index])}{ylabel_suffix}")
+        ax.grid(alpha=0.3)
+        if n_frame <= 10:
+            ax.legend(loc="best", fontsize="small", ncol=min(n_frame, 4))
+
+    axes[-1, 0].set_xlabel("Optimizer iteration")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
 
 
 def _plot_loss_history(*, losses: np.ndarray, output_path: Path) -> None:
@@ -1442,6 +2104,66 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "experiment.inference.diagnostics.compare_to_truth_when_available must be a bool."
         )
+    first_step_report = diagnostics_cfg.get("first_step_report", False)
+    if not isinstance(first_step_report, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.first_step_report must be a bool."
+        )
+    save_first_step_json = diagnostics_cfg.get("save_first_step_json", False)
+    if not isinstance(save_first_step_json, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.save_first_step_json must be a bool."
+        )
+    save_fim_debug = diagnostics_cfg.get("save_fim_debug", False)
+    if not isinstance(save_fim_debug, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.save_fim_debug must be a bool."
+        )
+    finite_difference_check = diagnostics_cfg.get("finite_difference_check", False)
+    if not isinstance(finite_difference_check, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.finite_difference_check must be a bool."
+        )
+    plot_parameter_history_heatmap = diagnostics_cfg.get(
+        "plot_parameter_history_heatmap",
+        False,
+    )
+    if not isinstance(plot_parameter_history_heatmap, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.plot_parameter_history_heatmap "
+            "must be a bool."
+        )
+    plot_parameter_residual_history_heatmap = diagnostics_cfg.get(
+        "plot_parameter_residual_history_heatmap",
+        False,
+    )
+    if not isinstance(plot_parameter_residual_history_heatmap, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.plot_parameter_residual_history_heatmap "
+            "must be a bool."
+        )
+    plot_parameter_history_lines = diagnostics_cfg.get(
+        "plot_parameter_history_lines",
+        False,
+    )
+    if not isinstance(plot_parameter_history_lines, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.plot_parameter_history_lines must be a bool."
+        )
+    plot_parameter_residual_history_lines = diagnostics_cfg.get(
+        "plot_parameter_residual_history_lines",
+        False,
+    )
+    if not isinstance(plot_parameter_residual_history_lines, bool):
+        raise ValueError(
+            "experiment.inference.diagnostics.plot_parameter_residual_history_lines "
+            "must be a bool."
+        )
+    top_k = diagnostics_cfg.get("top_k", 10)
+    if isinstance(top_k, bool) or not isinstance(top_k, int):
+        raise ValueError("experiment.inference.diagnostics.top_k must be an int.")
+    if top_k <= 0:
+        raise ValueError("experiment.inference.diagnostics.top_k must be > 0.")
 
     outputs_cfg = _optional_dict(experiment_cfg, "outputs", path="experiment")
     file_prefix = outputs_cfg.get("file_prefix", "obs_subblock_inference")
@@ -1513,6 +2235,19 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
             "diagnostics": {
                 "plots": write_plots,
                 "compare_to_truth_when_available": compare_to_truth,
+                "first_step_report": first_step_report,
+                "save_first_step_json": save_first_step_json,
+                "save_fim_debug": save_fim_debug,
+                "finite_difference_check": finite_difference_check,
+                "plot_parameter_history_heatmap": plot_parameter_history_heatmap,
+                "plot_parameter_residual_history_heatmap": (
+                    plot_parameter_residual_history_heatmap
+                ),
+                "plot_parameter_history_lines": plot_parameter_history_lines,
+                "plot_parameter_residual_history_lines": (
+                    plot_parameter_residual_history_lines
+                ),
+                "top_k": top_k,
             },
         },
         "outputs": {
@@ -1643,6 +2378,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     n_frame = int(cube.shape[0])
     if n_frame <= 0:
         raise ValueError("Observation sub-block cube must contain at least one frame.")
+    print(
+        "Loaded observation cube: "
+        f"path={cube_path} shape={cube.shape} "
+        f"data({_format_array_stats(cube)})"
+    )
 
     print("Building fixed shared forward state...")
     forward_spec = compose_forward_spec(system_cfg)
@@ -1708,7 +2448,60 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         include_comparison=comparison_trace is not None and active_layout.frame_width > 0,
         write_plots=bool(inference_cfg["diagnostics"]["plots"]),
         include_trace_plots=active_layout.frame_width > 0,
+        include_parameter_history_heatmap=(
+            active_layout.frame_width > 0
+            and bool(inference_cfg["diagnostics"]["plot_parameter_history_heatmap"])
+        ),
+        include_parameter_residual_history_heatmap=(
+            active_layout.frame_width > 0
+            and comparison_trace is not None
+            and bool(
+                inference_cfg["diagnostics"][
+                    "plot_parameter_residual_history_heatmap"
+                ]
+            )
+        ),
+        include_parameter_history_lines=(
+            active_layout.frame_width > 0
+            and bool(inference_cfg["diagnostics"]["plot_parameter_history_lines"])
+        ),
+        include_parameter_residual_history_lines=(
+            active_layout.frame_width > 0
+            and comparison_trace is not None
+            and bool(
+                inference_cfg["diagnostics"]["plot_parameter_residual_history_lines"]
+            )
+        ),
     )
+    diag_cfg = inference_cfg["diagnostics"]
+    if bool(diag_cfg["save_first_step_json"]):
+        artifacts["first_step_json"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_first_step.json"
+        )
+        artifacts["per_frame_step_json"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_per_frame_step.json"
+        )
+    if bool(diag_cfg["finite_difference_check"]):
+        artifacts["finite_difference_json"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_finite_difference.json"
+        )
+    if bool(diag_cfg["save_fim_debug"]):
+        artifacts["fim_debug_json"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_fim_debug.json"
+        )
+    if bool(diag_cfg["plots"]) and (
+        bool(diag_cfg["first_step_report"]) or bool(diag_cfg["save_first_step_json"])
+        or bool(diag_cfg["finite_difference_check"])
+    ):
+        artifacts["first_step_grad_png"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_first_step_grad.png"
+        )
+        artifacts["first_step_delta_png"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_first_step_delta.png"
+        )
+        artifacts["per_frame_step_png"] = (
+            outdir / f"{experiment['outputs']['file_prefix']}_{stamp}_per_frame_step.png"
+        )
 
     initial_state = _resolve_initial_active_state(
         layout=active_layout,
@@ -1716,10 +2509,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         init_cfg=inference_cfg["init"],
     )
     theta0 = _pack_active_state(active_layout, initial_state)
+    theta_labels = _theta_labels_for_layout(active_layout)
+    _print_active_layout_summary(layout=active_layout, theta0=theta0)
 
     variance_cube = _build_variance_cube(
         data_cube=cube,
         noise_model_cfg=inference_cfg["objective"]["noise_model"],
+    )
+    print(
+        "Objective setup: "
+        f"kind={inference_cfg['objective']['kind']} "
+        f"reduce={inference_cfg['objective']['reduce']} "
+        f"noise_model={inference_cfg['objective']['noise_model']['kind']} "
+        f"variance_model={inference_cfg['objective']['noise_model']['variance_model']} "
+        f"variance({_format_array_stats(variance_cube)})"
     )
     objective_bundle = _build_objective_bundle(
         layout=active_layout,
@@ -1760,7 +2563,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     preconditioning_bundle: ThetaPreconditioningBundle | None = None
     lr_vec: np.ndarray | None = None
     if bool(preconditioning_cfg["enabled"]):
-        print("Computing theta-space Fisher preconditioner at initialization...")
+        print(
+            "Computing theta-space Fisher preconditioner at initialization "
+            f"(theta_dim={active_layout.theta_size})..."
+        )
         preconditioning_bundle = _build_theta_preconditioning_bundle(
             loss_fn=objective_bundle.total_loss_fn,
             theta_ref=jnp.asarray(theta0),
@@ -1768,13 +2574,217 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             cfg=preconditioning_cfg,
         )
         lr_vec = np.asarray(preconditioning_bundle.lr_vec, dtype=float)
+        _print_preconditioning_summary(
+            bundle=preconditioning_bundle,
+            base_lr=float(optimizer_cfg["base_lr"]),
+        )
+        if bool(inference_cfg["diagnostics"]["save_fim_debug"]):
+            _save_fim_debug_artifact(
+                bundle=preconditioning_bundle,
+                theta_labels=theta_labels,
+                base_lr=float(optimizer_cfg["base_lr"]),
+                output_path=artifacts["fim_debug_json"],
+            )
+    else:
+        print("Preconditioning disabled; using scalar optimizer learning rate.")
+        if bool(inference_cfg["diagnostics"]["save_fim_debug"]):
+            _write_json(
+                artifacts["fim_debug_json"],
+                {
+                    "schema_version": "subblock_theta_preconditioning_debug.v1",
+                    "enabled": False,
+                    "message": "Theta preconditioning was disabled for this run.",
+                },
+            )
+
+    configured_first_step: dict[str, Any] | None = None
+    if (
+        bool(inference_cfg["diagnostics"]["first_step_report"])
+        or bool(inference_cfg["diagnostics"]["save_first_step_json"])
+        or bool(inference_cfg["diagnostics"]["finite_difference_check"])
+    ):
+        print("Running first-step optimizer diagnostics before main optimization...")
+        base_lr = float(optimizer_cfg["base_lr"])
+        optimizer_kind = str(optimizer_cfg["kind"])
+        optimizer_kwargs = dict(optimizer_cfg["kwargs"])
+        top_k = int(inference_cfg["diagnostics"]["top_k"])
+        configured_first_step = _optimizer_first_step(
+            loss_fn=objective_bundle.total_loss_fn,
+            theta0=jnp.asarray(theta0),
+            learning_rate=base_lr,
+            lr_vec=lr_vec,
+            optimizer_kind=optimizer_kind,
+            optimizer_kwargs=optimizer_kwargs,
+        )
+        configured_summary = _summarize_first_step(
+            label="configured optimizer settings",
+            step=configured_first_step,
+            theta_labels=theta_labels,
+            top_k=top_k,
+        )
+        no_lr_vec_step = _optimizer_first_step(
+            loss_fn=objective_bundle.total_loss_fn,
+            theta0=jnp.asarray(theta0),
+            learning_rate=base_lr,
+            lr_vec=None,
+            optimizer_kind=optimizer_kind,
+            optimizer_kwargs=optimizer_kwargs,
+        )
+        no_lr_vec_summary = _summarize_first_step(
+            label="base_lr with lr_vec=None",
+            step=no_lr_vec_step,
+            theta_labels=theta_labels,
+            top_k=top_k,
+        )
+        tiny_step = _optimizer_first_step(
+            loss_fn=objective_bundle.total_loss_fn,
+            theta0=jnp.asarray(theta0),
+            learning_rate=base_lr * 1.0e-3,
+            lr_vec=None,
+            optimizer_kind=optimizer_kind,
+            optimizer_kwargs=optimizer_kwargs,
+        )
+        tiny_summary = _summarize_first_step(
+            label="tiny scalar lr with lr_vec=None",
+            step=tiny_step,
+            theta_labels=theta_labels,
+            top_k=top_k,
+        )
+
+        per_frame_theta0 = np.asarray(
+            objective_bundle.per_frame_data_terms_fn(jnp.asarray(theta0)),
+            dtype=float,
+        )
+        per_frame_theta1 = np.asarray(
+            objective_bundle.per_frame_data_terms_fn(
+                jnp.asarray(configured_first_step["theta1"])
+            ),
+            dtype=float,
+        )
+        _print_per_frame_data_terms(label="theta0", terms=per_frame_theta0)
+        _print_per_frame_data_terms(
+            label="theta1 configured first step",
+            terms=per_frame_theta1,
+        )
+
+        finite_difference_rows: list[dict[str, Any]] | None = None
+        if bool(inference_cfg["diagnostics"]["finite_difference_check"]):
+            finite_difference_rows = _finite_difference_gradient_check(
+                loss_fn=objective_bundle.total_loss_fn,
+                theta0=jnp.asarray(theta0),
+                grad0=np.asarray(configured_first_step["grad0"], dtype=float),
+                theta_labels=theta_labels,
+            )
+            _write_json(
+                artifacts["finite_difference_json"],
+                {
+                    "schema_version": "subblock_finite_difference_check.v1",
+                    "rows": finite_difference_rows,
+                },
+            )
+
+        if bool(inference_cfg["diagnostics"]["save_first_step_json"]):
+            _write_json(
+                artifacts["first_step_json"],
+                {
+                    "schema_version": "subblock_first_step_diagnostics.v1",
+                    "optimizer": {
+                        "kind": optimizer_kind,
+                        "base_lr": base_lr,
+                        "kwargs": optimizer_kwargs,
+                        "run_shera_gd_lr_vec_semantics": (
+                            "lr_vec is a preconditioning scale only; run_shera_gd "
+                            "applies base_lr through learning_rate"
+                        ),
+                    },
+                    "theta_labels": list(theta_labels),
+                    "theta0": _to_jsonable_float_list(configured_first_step["theta0"]),
+                    "theta1_configured": _to_jsonable_float_list(
+                        configured_first_step["theta1"]
+                    ),
+                    "grad0": _to_jsonable_float_list(configured_first_step["grad0"]),
+                    "delta0_configured": _to_jsonable_float_list(
+                        configured_first_step["delta0"]
+                    ),
+                    "loss0": float(configured_first_step["loss0"]),
+                    "loss1_configured": float(configured_first_step["loss1"]),
+                    "preconditioning": (
+                        {"enabled": False, "lr_vec": None}
+                        if preconditioning_bundle is None
+                        else {
+                            **to_jsonable_obs_subblock_payload(
+                                preconditioning_bundle.config
+                            ),
+                            "preconditioner_diagonal": _to_jsonable_float_list(
+                                preconditioning_bundle.preconditioner_diag
+                            ),
+                            "lr_scale_before_clipping": _to_jsonable_float_list(
+                                preconditioning_bundle.lr_vec_unclipped
+                            ),
+                            "lr_scale_after_clipping": _to_jsonable_float_list(
+                                preconditioning_bundle.lr_vec
+                            ),
+                            "effective_lr_before_clipping": _to_jsonable_float_list(
+                                base_lr * preconditioning_bundle.lr_vec_unclipped
+                            ),
+                            "effective_lr_after_clipping": _to_jsonable_float_list(
+                                base_lr * preconditioning_bundle.lr_vec
+                            ),
+                        }
+                    ),
+                    "summaries": {
+                        "configured": configured_summary,
+                        "base_lr_lr_vec_none": no_lr_vec_summary,
+                        "tiny_scalar_lr_lr_vec_none": tiny_summary,
+                    },
+                },
+            )
+            _write_json(
+                artifacts["per_frame_step_json"],
+                {
+                    "schema_version": "subblock_per_frame_first_step.v1",
+                    "rows": (
+                        _per_frame_diagnostic_rows(
+                            per_frame_terms=per_frame_theta0,
+                            label="theta0",
+                        )
+                        + _per_frame_diagnostic_rows(
+                            per_frame_terms=per_frame_theta1,
+                            label="theta1_configured",
+                        )
+                    ),
+                },
+            )
+
+        if bool(inference_cfg["diagnostics"]["plots"]):
+            _plot_theta_bar(
+                values=np.asarray(configured_first_step["grad0"], dtype=float),
+                labels=theta_labels,
+                ylabel="|grad0|",
+                title="Initial Gradient Magnitudes",
+                output_path=artifacts["first_step_grad_png"],
+            )
+            _plot_theta_bar(
+                values=np.asarray(configured_first_step["delta0"], dtype=float),
+                labels=theta_labels,
+                ylabel="|delta0|",
+                title="Configured First-Step Update Magnitudes",
+                output_path=artifacts["first_step_delta_png"],
+            )
+            _plot_per_frame_comparison(
+                theta0_terms=per_frame_theta0,
+                theta1_terms=per_frame_theta1,
+                output_path=artifacts["per_frame_step_png"],
+            )
 
     print("Initializing active inference state...")
     print(
         "Running optimization: "
         f"kind={optimizer_cfg['kind']} n_iter={optimizer_cfg['n_iter']} "
-        f"base_lr={optimizer_cfg['base_lr']}"
+        f"base_lr={optimizer_cfg['base_lr']} "
+        f"preconditioned={lr_vec is not None}"
     )
+    # lr_vec is scale-only; run_shera_gd applies base_lr through learning_rate.
     theta_final, trace_history = run_shera_gd(
         loss_fn=objective_bundle.total_loss_fn,
         theta0=jnp.asarray(theta0),
@@ -1851,6 +2861,66 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     if inference_cfg["diagnostics"]["plots"]:
         _plot_loss_history(losses=loss_history, output_path=artifacts["loss_history_png"])
         if active_layout.frame_width > 0:
+            history_plot_requested = (
+                bool(inference_cfg["diagnostics"]["plot_parameter_history_heatmap"])
+                or bool(
+                    inference_cfg["diagnostics"][
+                        "plot_parameter_residual_history_heatmap"
+                    ]
+                )
+                or bool(inference_cfg["diagnostics"]["plot_parameter_history_lines"])
+                or bool(
+                    inference_cfg["diagnostics"][
+                        "plot_parameter_residual_history_lines"
+                    ]
+                )
+            )
+            if history_plot_requested:
+                iterations, frame_history = _build_frame_history_from_theta_trace(
+                    layout=active_layout,
+                    theta0=jnp.asarray(theta0),
+                    theta_trace=np.asarray(trace_history["theta"], dtype=float),
+                )
+                if "parameter_history_heatmap_png" in artifacts:
+                    _plot_parameter_history_heatmaps(
+                        frame_history=frame_history,
+                        labels=active_layout.frame_keys,
+                        output_path=artifacts["parameter_history_heatmap_png"],
+                        title="Frame-varying active-state optimizer history",
+                        colorbar_label="Parameter value",
+                    )
+                if (
+                    truth_matrix is not None
+                    and "parameter_residual_history_heatmap_png" in artifacts
+                ):
+                    _plot_parameter_history_heatmaps(
+                        frame_history=frame_history - truth_matrix[None, :, :],
+                        labels=active_layout.frame_keys,
+                        output_path=artifacts["parameter_residual_history_heatmap_png"],
+                        title="Frame-varying residual optimizer history",
+                        colorbar_label="Recovered minus truth",
+                        center_zero=True,
+                    )
+                if "parameter_history_lines_png" in artifacts:
+                    _plot_parameter_history_lines(
+                        iterations=iterations,
+                        frame_history=frame_history,
+                        labels=active_layout.frame_keys,
+                        output_path=artifacts["parameter_history_lines_png"],
+                    )
+                if (
+                    truth_matrix is not None
+                    and "parameter_residual_history_lines_png" in artifacts
+                ):
+                    _plot_parameter_history_lines(
+                        iterations=iterations,
+                        frame_history=frame_history - truth_matrix[None, :, :],
+                        labels=active_layout.frame_keys,
+                        output_path=artifacts["parameter_residual_history_lines_png"],
+                        title="Frame-varying residual optimizer history",
+                        ylabel_suffix=" residual",
+                        zero_line=True,
+                    )
             if truth_matrix is not None:
                 _plot_trace_comparison(
                     times=times,
@@ -1892,6 +2962,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         spec.canonical: float(final_shared_vector[idx])
         for idx, spec in enumerate(active_layout.shared_specs)
     }
+    optimizer_base_lr = float(optimizer_cfg["base_lr"])
 
     system_info = {
         "preset": system_cfg.get("preset"),
@@ -1941,11 +3012,40 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     "eigval_max": float(np.max(preconditioning_bundle.eigvals)),
                     "eigval_stable_min": float(np.min(preconditioning_bundle.eigvals_stable)),
                     "eigval_stable_max": float(np.max(preconditioning_bundle.eigvals_stable)),
-                    "lr_vec_min": float(np.min(preconditioning_bundle.lr_vec)),
-                    "lr_vec_max": float(np.max(preconditioning_bundle.lr_vec)),
+                    "lr_scale_unclipped_min": float(
+                        np.min(preconditioning_bundle.lr_vec_unclipped)
+                    ),
+                    "lr_scale_unclipped_max": float(
+                        np.max(preconditioning_bundle.lr_vec_unclipped)
+                    ),
+                    "preconditioner_diag_min": float(
+                        np.min(preconditioning_bundle.preconditioner_diag)
+                    ),
+                    "preconditioner_diag_max": float(
+                        np.max(preconditioning_bundle.preconditioner_diag)
+                    ),
+                    "lr_scale_min": float(np.min(preconditioning_bundle.lr_vec)),
+                    "lr_scale_max": float(np.max(preconditioning_bundle.lr_vec)),
+                    "effective_lr_unclipped_min": float(
+                        np.min(
+                            optimizer_base_lr * preconditioning_bundle.lr_vec_unclipped
+                        )
+                    ),
+                    "effective_lr_unclipped_max": float(
+                        np.max(
+                            optimizer_base_lr * preconditioning_bundle.lr_vec_unclipped
+                        )
+                    ),
+                    "effective_lr_min": float(
+                        np.min(optimizer_base_lr * preconditioning_bundle.lr_vec)
+                    ),
+                    "effective_lr_max": float(
+                        np.max(optimizer_base_lr * preconditioning_bundle.lr_vec)
+                    ),
                 }
             ),
         },
+        "diagnostics": to_jsonable_obs_subblock_payload(inference_cfg["diagnostics"]),
         "metrics": {
             "initial_loss": initial_loss,
             "final_loss": final_loss,
