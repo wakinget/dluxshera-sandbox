@@ -192,6 +192,17 @@ experiment:
       kwargs:
 #        momentum: 0.0
 #        nesterov: false
+      preconditioning:
+        # Optional theta-space curvature-aware scaling built from
+        # F(theta_ref) = Hessian(loss_fn, theta_ref) over the full packed
+        # active theta vector (frame and/or shared terms).
+        enabled: false
+        damping: 1.0e-6
+        eig_floor_rel: 1.0e-6
+        eig_floor_abs: 1.0e-8
+        # Optional clip for per-parameter effective learning rates after
+        # applying the damped preconditioner diagonal.
+        # lr_clip: [1.0e-4, 1.0]
 
       # Other optimizer options we are considering:
       # kind: adam

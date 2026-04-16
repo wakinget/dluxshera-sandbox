@@ -40,6 +40,7 @@ def _build_inference_config(
     outputs_outdir: Path,
     n_iter: int,
     write_plots: bool,
+    enable_preconditioning: bool = False,
 ) -> dict[str, object]:
     data: dict[str, object] = {"cube": str(cube_path)}
     if trace_path is not None:
@@ -87,7 +88,17 @@ def _build_inference_config(
                         "scalar": 1.0,
                     },
                 },
-                "optimizer": {"kind": "adam", "base_lr": 0.01, "n_iter": n_iter},
+                "optimizer": {
+                    "kind": "adam",
+                    "base_lr": 0.01,
+                    "n_iter": n_iter,
+                    "preconditioning": {
+                        "enabled": enable_preconditioning,
+                        "damping": 1e-6,
+                        "eig_floor_rel": 1e-6,
+                        "eig_floor_abs": 1e-8,
+                    },
+                },
                 "diagnostics": {"plots": write_plots},
             },
             "outputs": {
@@ -131,6 +142,7 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
         outputs_outdir=tmp_path / "inference_results",
         n_iter=10,
         write_plots=True,
+        enable_preconditioning=True,
     )
     cfg_path = tmp_path / "inference_config.json"
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
@@ -191,6 +203,10 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert manifest["init"]["frame"]["values"]["source.x_position_as"] == 0.0
     assert manifest["init"]["frame"]["values"]["source.y_position_as"] == 0.0
     assert manifest["init"]["frame"]["values"]["source.position_angle_deg"] == 90.0
+    precond_meta = manifest["optimizer"]["preconditioning"]
+    assert precond_meta["enabled"] is True
+    assert precond_meta["theta_dim"] > 0
+    assert precond_meta["lr_vec_max"] >= precond_meta["lr_vec_min"] > 0.0
 
     assert np.isfinite(float(result["initial_loss"]))
     assert np.isfinite(float(result["final_loss"]))
@@ -232,6 +248,7 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
         outputs_outdir=tmp_path / "inference_results_no_truth",
         n_iter=4,
         write_plots=False,
+        enable_preconditioning=False,
     )
     cfg_path = tmp_path / "inference_no_truth_config.json"
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")

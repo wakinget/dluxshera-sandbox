@@ -66,7 +66,7 @@ from astropy.io import fits
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.losses import gaussian_image_nll
-from dluxshera.inference.optimization import run_shera_gd
+from dluxshera.inference.optimization import fim_theta, run_shera_gd
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
@@ -168,6 +168,17 @@ class ObjectiveBundle:
     objective_terms_fn: Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]
     predict_cube_fn: Callable[[jnp.ndarray], jnp.ndarray]
     per_frame_data_terms_fn: Callable[[jnp.ndarray], jnp.ndarray]
+
+
+@dataclass(frozen=True)
+class ThetaPreconditioningBundle:
+    """Curvature and learning-rate-vector outputs for theta preconditioning."""
+
+    fim: np.ndarray
+    eigvals: np.ndarray
+    eigvals_stable: np.ndarray
+    lr_vec: np.ndarray
+    config: dict[str, Any]
 
 
 def _required_dict(parent: dict[str, Any], key: str, *, path: str) -> dict[str, Any]:
@@ -878,6 +889,106 @@ def _build_objective_bundle(
     )
 
 
+def _coerce_lr_clip(
+    value: Any,
+    *,
+    path: str,
+) -> tuple[float, float] | None:
+    """Validate an optional [min, max] learning-rate clip tuple."""
+
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{path} must be [min, max] when provided.")
+    lr_min, lr_max = value
+    if (
+        isinstance(lr_min, bool)
+        or isinstance(lr_max, bool)
+        or not isinstance(lr_min, (int, float))
+        or not isinstance(lr_max, (int, float))
+    ):
+        raise ValueError(f"{path} values must be numeric.")
+    lr_min_f = float(lr_min)
+    lr_max_f = float(lr_max)
+    if lr_min_f <= 0.0:
+        raise ValueError(f"{path}[0] must be > 0.")
+    if lr_max_f < lr_min_f:
+        raise ValueError(f"{path}[1] must be >= {path}[0].")
+    return (lr_min_f, lr_max_f)
+
+
+def _build_theta_preconditioning_bundle(
+    *,
+    loss_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    theta_ref: jnp.ndarray,
+    base_lr: float,
+    cfg: dict[str, Any],
+) -> ThetaPreconditioningBundle:
+    """Build a damped theta-space preconditioner from the full packed FIM."""
+
+    damping = float(cfg.get("damping", 1e-6))
+    eig_floor_rel = float(cfg.get("eig_floor_rel", 1e-6))
+    eig_floor_abs = float(cfg.get("eig_floor_abs", 1e-8))
+    lr_clip = _coerce_lr_clip(
+        cfg.get("lr_clip"),
+        path="experiment.inference.optimizer.preconditioning.lr_clip",
+    )
+
+    if damping < 0.0:
+        raise ValueError("experiment.inference.optimizer.preconditioning.damping must be >= 0.")
+    if eig_floor_rel < 0.0:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.eig_floor_rel must be >= 0."
+        )
+    if eig_floor_abs < 0.0:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.eig_floor_abs must be >= 0."
+        )
+
+    theta_ref_vec = jnp.asarray(theta_ref)
+    fim = np.asarray(fim_theta(loss_fn, theta_ref_vec), dtype=float)
+    if fim.ndim != 2 or fim.shape[0] != fim.shape[1]:
+        raise ValueError("Theta-space curvature must be a square matrix.")
+    if fim.shape[0] != int(theta_ref_vec.size):
+        raise ValueError("Theta-space curvature dimension must match packed theta dimension.")
+    if not np.all(np.isfinite(fim)):
+        raise ValueError("Theta-space curvature contains non-finite values.")
+
+    fim_sym = 0.5 * (fim + fim.T)
+    eigvals, eigvecs = np.linalg.eigh(fim_sym)
+    eig_scale = max(float(np.max(np.abs(eigvals))), 1.0)
+    eig_floor = max(eig_floor_abs, eig_floor_rel * eig_scale)
+    eigvals_stable = np.maximum(eigvals, eig_floor) + damping
+
+    inv_sqrt_eigs = np.reciprocal(np.sqrt(eigvals_stable))
+    precond_full = eigvecs @ (inv_sqrt_eigs[:, None] * eigvecs.T)
+    lr_vec = base_lr * np.diag(precond_full)
+    if lr_clip is not None:
+        lr_vec = np.clip(lr_vec, lr_clip[0], lr_clip[1])
+
+    if lr_vec.shape != (int(theta_ref_vec.size),):
+        raise ValueError("Preconditioning vector shape does not match packed theta dimension.")
+    if not np.all(np.isfinite(lr_vec)):
+        raise ValueError("Preconditioning vector contains non-finite values.")
+    if np.any(lr_vec <= 0.0):
+        raise ValueError("Preconditioning vector must be strictly positive.")
+
+    return ThetaPreconditioningBundle(
+        fim=fim_sym,
+        eigvals=eigvals,
+        eigvals_stable=eigvals_stable,
+        lr_vec=lr_vec,
+        config={
+            "enabled": True,
+            "damping": damping,
+            "eig_floor_rel": eig_floor_rel,
+            "eig_floor_abs": eig_floor_abs,
+            "eig_floor_effective": eig_floor,
+            "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
+        },
+    )
+
+
 def _label_for_key(key: str) -> str:
     """Return a readable axis label for one canonical active key."""
 
@@ -1271,6 +1382,52 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     optimizer_kwargs = optimizer_cfg.get("kwargs", {})
     if not isinstance(optimizer_kwargs, dict):
         raise ValueError("experiment.inference.optimizer.kwargs must be a mapping/dict.")
+    preconditioning_cfg = _optional_dict(
+        optimizer_cfg,
+        "preconditioning",
+        path="experiment.inference.optimizer",
+    )
+    preconditioning_enabled = bool(preconditioning_cfg.get("enabled", False))
+    preconditioning_damping = preconditioning_cfg.get("damping", 1e-6)
+    if isinstance(preconditioning_damping, bool) or not isinstance(
+        preconditioning_damping, (int, float)
+    ):
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.damping must be numeric."
+        )
+    preconditioning_damping = float(preconditioning_damping)
+    if preconditioning_damping < 0.0:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.damping must be >= 0."
+        )
+    preconditioning_eig_floor_rel = preconditioning_cfg.get("eig_floor_rel", 1e-6)
+    if isinstance(preconditioning_eig_floor_rel, bool) or not isinstance(
+        preconditioning_eig_floor_rel, (int, float)
+    ):
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.eig_floor_rel must be numeric."
+        )
+    preconditioning_eig_floor_rel = float(preconditioning_eig_floor_rel)
+    if preconditioning_eig_floor_rel < 0.0:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.eig_floor_rel must be >= 0."
+        )
+    preconditioning_eig_floor_abs = preconditioning_cfg.get("eig_floor_abs", 1e-8)
+    if isinstance(preconditioning_eig_floor_abs, bool) or not isinstance(
+        preconditioning_eig_floor_abs, (int, float)
+    ):
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.eig_floor_abs must be numeric."
+        )
+    preconditioning_eig_floor_abs = float(preconditioning_eig_floor_abs)
+    if preconditioning_eig_floor_abs < 0.0:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.eig_floor_abs must be >= 0."
+        )
+    preconditioning_lr_clip = _coerce_lr_clip(
+        preconditioning_cfg.get("lr_clip"),
+        path="experiment.inference.optimizer.preconditioning.lr_clip",
+    )
 
     diagnostics_cfg = _optional_dict(
         inference_cfg,
@@ -1341,6 +1498,17 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                 "base_lr": base_lr,
                 "n_iter": n_iter,
                 "kwargs": dict(optimizer_kwargs),
+                "preconditioning": {
+                    "enabled": preconditioning_enabled,
+                    "damping": preconditioning_damping,
+                    "eig_floor_rel": preconditioning_eig_floor_rel,
+                    "eig_floor_abs": preconditioning_eig_floor_abs,
+                    "lr_clip": (
+                        None
+                        if preconditioning_lr_clip is None
+                        else list(preconditioning_lr_clip)
+                    ),
+                },
             },
             "diagnostics": {
                 "plots": write_plots,
@@ -1588,6 +1756,19 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     optimizer_cfg = inference_cfg["optimizer"]
+    preconditioning_cfg = optimizer_cfg["preconditioning"]
+    preconditioning_bundle: ThetaPreconditioningBundle | None = None
+    lr_vec: np.ndarray | None = None
+    if bool(preconditioning_cfg["enabled"]):
+        print("Computing theta-space Fisher preconditioner at initialization...")
+        preconditioning_bundle = _build_theta_preconditioning_bundle(
+            loss_fn=objective_bundle.total_loss_fn,
+            theta_ref=jnp.asarray(theta0),
+            base_lr=float(optimizer_cfg["base_lr"]),
+            cfg=preconditioning_cfg,
+        )
+        lr_vec = np.asarray(preconditioning_bundle.lr_vec, dtype=float)
+
     print("Initializing active inference state...")
     print(
         "Running optimization: "
@@ -1598,6 +1779,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         loss_fn=objective_bundle.total_loss_fn,
         theta0=jnp.asarray(theta0),
         learning_rate=float(optimizer_cfg["base_lr"]),
+        lr_vec=None if lr_vec is None else jnp.asarray(lr_vec),
         num_steps=int(optimizer_cfg["n_iter"]),
         optimizer_kind=str(optimizer_cfg["kind"]),
         optimizer_kwargs=dict(optimizer_cfg["kwargs"]),
@@ -1749,6 +1931,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "base_lr": float(optimizer_cfg["base_lr"]),
             "n_iter": int(optimizer_cfg["n_iter"]),
             "kwargs": dict(optimizer_cfg["kwargs"]),
+            "preconditioning": (
+                {"enabled": False}
+                if preconditioning_bundle is None
+                else {
+                    **preconditioning_bundle.config,
+                    "theta_dim": int(preconditioning_bundle.lr_vec.size),
+                    "eigval_min": float(np.min(preconditioning_bundle.eigvals)),
+                    "eigval_max": float(np.max(preconditioning_bundle.eigvals)),
+                    "eigval_stable_min": float(np.min(preconditioning_bundle.eigvals_stable)),
+                    "eigval_stable_max": float(np.max(preconditioning_bundle.eigvals_stable)),
+                    "lr_vec_min": float(np.min(preconditioning_bundle.lr_vec)),
+                    "lr_vec_max": float(np.max(preconditioning_bundle.lr_vec)),
+                }
+            ),
         },
         "metrics": {
             "initial_loss": initial_loss,
@@ -1758,6 +1954,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "final_prior_term": float(np.asarray(final_prior_term)),
             "final_temporal_term": float(np.asarray(final_temporal_term)),
             "mean_frame_nll": float(np.mean(frame_data_terms)),
+            "preconditioner_trace_fim": (
+                None
+                if preconditioning_bundle is None
+                else float(np.trace(preconditioning_bundle.fim))
+            ),
         },
         "truth_comparison_available": truth_matrix is not None,
         "system": system_info,
