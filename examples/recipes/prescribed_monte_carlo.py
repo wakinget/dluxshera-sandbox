@@ -67,6 +67,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from dluxshera.config.io import load_user_config, load_config_file
+from dluxshera.config.numeric import coerce_numeric_value, normalize_optimizer_kwargs
 from dluxshera.config.resolver import resolve_config, resolve_system_config
 from dluxshera.inference.optimization import (
     EigenThetaMap,
@@ -1093,6 +1094,11 @@ def _resolve_run_spec_with_id(
     if prior_overrides:
         resolved["prior_overrides"] = prior_overrides
 
+    resolved["optimizer"] = _normalize_optimizer_cfg(
+        resolved["optimizer"],
+        path=f"run_spec[{index}].optimizer",
+    )
+
     return resolved
 
 
@@ -1146,6 +1152,50 @@ def _resolve_loss_kind(run_spec: dict[str, Any], mc_defaults: dict[str, Any]) ->
             f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
         )
     return loss_kind
+
+
+def _normalize_optimizer_cfg(
+    optimizer_cfg: dict[str, Any],
+    *,
+    path: str,
+) -> dict[str, Any]:
+    """Normalize known optimizer fields without touching unrelated config text."""
+
+    if not isinstance(optimizer_cfg, dict):
+        raise ValueError(f"{path} must be a mapping/dict.")
+    normalized = copy.deepcopy(optimizer_cfg)
+
+    optimizer_kind = str(normalized.get("kind", "sgd")).strip().lower()
+    if optimizer_kind not in {"sgd", "adam"}:
+        raise ValueError(f"{path}.kind must be 'sgd' or 'adam'.")
+    normalized["kind"] = optimizer_kind
+
+    if "base_lr" in normalized:
+        normalized["base_lr"] = float(
+            coerce_numeric_value(
+                normalized["base_lr"],
+                path=f"{path}.base_lr",
+                must_be_positive=True,
+            )
+        )
+    if "n_iter" in normalized:
+        n_iter_value = normalized["n_iter"]
+        if isinstance(n_iter_value, bool):
+            raise ValueError(f"{path}.n_iter must be an integer.")
+        try:
+            n_iter = int(n_iter_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path}.n_iter must be an integer.") from exc
+        if n_iter <= 0:
+            raise ValueError(f"{path}.n_iter must be > 0.")
+        normalized["n_iter"] = n_iter
+
+    normalized["kwargs"] = normalize_optimizer_kwargs(
+        optimizer_kind,
+        normalized.get("kwargs", {}),
+        path=f"{path}.kwargs",
+    )
+    return normalized
 
 
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:

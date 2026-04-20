@@ -98,6 +98,27 @@ recipes/runners.
       --cube Results/observation_subblock/<run>/obs_subblock_*_cube.fits \
       --manifest Results/observation_subblock/<run>/manifest.json
     ```
+- **sweep_obs_subblock_adam.py** — Run the focused Adam hyperparameter sweep
+  for the current three-frame registration-only observation sub-block inference
+  toy problem.
+  - Starts from one inference prescription, patches only the Adam/objective
+    fields needed for the staged grid, runs one inference job per grid point,
+    and writes `results.csv`, `ranked_summary.csv`, `manifest.json`, and
+    recommendation files.
+  - Ranking centers on final truth accuracy, quickness to 90 percent
+    improvement, tolerance settling time, residual ringing, tail stability, and
+    overshoot.
+  - How to run:
+
+    ```bash
+    PYTHONPATH=src python examples/scripts/sweep_obs_subblock_adam.py \
+      --config examples/recipes/observation_subblock_inference_template/subblock_inference_prescription.yaml \
+      --results-dir Results/obs_subblock_adam_sweeps \
+      --no-progress
+    ```
+
+  - See `examples/recipes/observation_subblock_inference_template/subblock_inference_README.md`
+    for the metric definitions and output layout.
 - **generate_binary_rois.py** — Generate a static two-circle binary-star ROI
   mask as a detector `pixel_response` FITS map, plus a PNG quick-look preview.
   - Uses geometry from a resolved `--system-preset` and supports optional

@@ -73,6 +73,7 @@ from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
 from dluxshera.config.io import load_user_config
+from dluxshera.config.numeric import coerce_numeric_value, normalize_optimizer_kwargs
 from dluxshera.config.resolver import resolve_config
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -577,12 +578,19 @@ def main(
         learning_rate=float(optimizer_cfg["base_lr"]),
         lr_vec=lr_vec,
         num_steps=n_iter,
+        optimizer_kind=str(optimizer_cfg["kind"]),
+        optimizer_kwargs=dict(optimizer_cfg["kwargs"]),
         run_dir=results_dir,
         return_artifacts=False,
         theta_space=theta_space,
         metric=metric_payload,
         extra_meta={
-            "optimizer": {"preconditioning": precond_meta},
+            "optimizer": {
+                "preconditioning": precond_meta,
+                "kind": optimizer_cfg["kind"],
+                "kwargs": dict(optimizer_cfg["kwargs"]),
+                "loss": optimizer_cfg["loss"],
+            },
             "theta": {"labels_by_key": labels_by_key},
         },
     )
@@ -772,16 +780,12 @@ def _optional_int(parent: dict[str, Any], key: str, default: int) -> int:
 
 def _require_number(parent: dict[str, Any], key: str) -> float:
     value = parent.get(key)
-    if not isinstance(value, (int, float)):
-        raise ValueError(f"Expected number for {key!r}, got {type(value).__name__}")
-    return float(value)
+    return float(coerce_numeric_value(value, path=f"experiment.{key}"))
 
 
 def _optional_number(parent: dict[str, Any], key: str, default: float) -> float:
     value = parent.get(key, default)
-    if not isinstance(value, (int, float)):
-        raise ValueError(f"Expected number for {key!r}, got {type(value).__name__}")
-    return float(value)
+    return float(coerce_numeric_value(value, path=f"experiment.{key}"))
 
 
 def _require_str(parent: dict[str, Any], key: str) -> str:
@@ -973,6 +977,11 @@ def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
                 DEFAULT_FAST_ITER,
             ),
             "base_lr": _optional_number(optimizer_cfg, "base_lr", DEFAULT_BASE_LR),
+            "kwargs": normalize_optimizer_kwargs(
+                optimizer_kind,
+                optimizer_cfg.get("kwargs", {}),
+                path="experiment.optimizer.kwargs",
+            ),
         },
         "outputs": {
             "plots": plots_enabled,

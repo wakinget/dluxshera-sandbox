@@ -65,6 +65,11 @@ import optax
 from astropy.io import fits
 
 from dluxshera.config.io import load_user_config
+from dluxshera.config.numeric import (
+    coerce_numeric_mapping as _shared_coerce_numeric_mapping,
+    coerce_numeric_value,
+    normalize_optimizer_kwargs,
+)
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.losses import gaussian_image_nll
 from dluxshera.inference.optimization import fim_theta, run_shera_gd
@@ -231,21 +236,15 @@ def _coerce_numeric_mapping(
     *,
     path: str,
 ) -> dict[str, float]:
-    """Validate a string-keyed numeric mapping and normalize values to float."""
+    """Validate a string-keyed numeric mapping and normalize values to float.
 
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict):
-        raise ValueError(f"{path} must be a mapping/dict when provided.")
+    Numeric coercion used to be local to init mappings only. Keep this wrapper
+    for recipe readability, but delegate to the shared field-aware helper so
+    quoted YAML/JSON values like ``"1e-3"`` work only where numeric values are
+    explicitly expected.
+    """
 
-    coerced: dict[str, float] = {}
-    for raw_key, raw_value in payload.items():
-        if not isinstance(raw_key, str) or not raw_key.strip():
-            raise ValueError(f"{path} keys must be non-empty strings.")
-        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-            raise ValueError(f"{path}.{raw_key} must be numeric.")
-        coerced[raw_key.strip()] = float(raw_value)
-    return coerced
+    return _shared_coerce_numeric_mapping(payload, path=path)
 
 
 def _resolve_relative_path(
@@ -587,9 +586,12 @@ def _extract_frame_init_values(
                 "Unsupported init.frame override key "
                 f"{raw_key!r}. Use canonical active keys under init.frame.values."
             )
-        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-            raise ValueError(f"experiment.inference.init.frame.{raw_key} must be numeric.")
-        configured[canonical] = float(raw_value)
+        configured[canonical] = float(
+            coerce_numeric_value(
+                raw_value,
+                path=f"experiment.inference.init.frame.{raw_key}",
+            )
+        )
 
     return configured
 
@@ -757,9 +759,13 @@ def _build_variance_cube(
             raise ValueError(
                 "objective.noise_model.scalar is required when variance_model='scalar'."
             )
-        scalar_value = float(scalar)
-        if scalar_value <= 0.0:
-            raise ValueError("objective.noise_model.scalar must be > 0.")
+        scalar_value = float(
+            coerce_numeric_value(
+                scalar,
+                path="objective.noise_model.scalar",
+                must_be_positive=True,
+            )
+        )
         return np.full_like(data_cube, scalar_value, dtype=float)
 
     raise ValueError(f"Unsupported objective.noise_model.variance_model: {variance_model!r}")
@@ -938,17 +944,10 @@ def _coerce_lr_clip(
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         raise ValueError(f"{path} must be [min, max] when provided.")
     lr_min, lr_max = value
-    if (
-        isinstance(lr_min, bool)
-        or isinstance(lr_max, bool)
-        or not isinstance(lr_min, (int, float))
-        or not isinstance(lr_max, (int, float))
-    ):
-        raise ValueError(f"{path} values must be numeric.")
-    lr_min_f = float(lr_min)
-    lr_max_f = float(lr_max)
-    if lr_min_f <= 0.0:
-        raise ValueError(f"{path}[0] must be > 0.")
+    lr_min_f = float(
+        coerce_numeric_value(lr_min, path=f"{path}[0]", must_be_positive=True)
+    )
+    lr_max_f = float(coerce_numeric_value(lr_max, path=f"{path}[1]"))
     if lr_max_f < lr_min_f:
         raise ValueError(f"{path}[1] must be >= {path}[0].")
     return (lr_min_f, lr_max_f)
@@ -963,24 +962,31 @@ def _build_theta_preconditioning_bundle(
 ) -> ThetaPreconditioningBundle:
     """Build a damped theta-space preconditioner from the full packed FIM."""
 
-    damping = float(cfg.get("damping", 1e-6))
-    eig_floor_rel = float(cfg.get("eig_floor_rel", 1e-6))
-    eig_floor_abs = float(cfg.get("eig_floor_abs", 1e-8))
+    damping = float(
+        coerce_numeric_value(
+            cfg.get("damping", 1e-6),
+            path="experiment.inference.optimizer.preconditioning.damping",
+            must_be_nonnegative=True,
+        )
+    )
+    eig_floor_rel = float(
+        coerce_numeric_value(
+            cfg.get("eig_floor_rel", 1e-6),
+            path="experiment.inference.optimizer.preconditioning.eig_floor_rel",
+            must_be_nonnegative=True,
+        )
+    )
+    eig_floor_abs = float(
+        coerce_numeric_value(
+            cfg.get("eig_floor_abs", 1e-8),
+            path="experiment.inference.optimizer.preconditioning.eig_floor_abs",
+            must_be_nonnegative=True,
+        )
+    )
     lr_clip = _coerce_lr_clip(
         cfg.get("lr_clip"),
         path="experiment.inference.optimizer.preconditioning.lr_clip",
     )
-
-    if damping < 0.0:
-        raise ValueError("experiment.inference.optimizer.preconditioning.damping must be >= 0.")
-    if eig_floor_rel < 0.0:
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.eig_floor_rel must be >= 0."
-        )
-    if eig_floor_abs < 0.0:
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.eig_floor_abs must be >= 0."
-        )
 
     theta_ref_vec = jnp.asarray(theta_ref)
     fim = np.asarray(fim_theta(loss_fn, theta_ref_vec), dtype=float)
@@ -2016,15 +2022,11 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     )
     scalar_variance = noise_model_cfg.get("scalar")
     if scalar_variance is not None:
-        if isinstance(scalar_variance, bool) or not isinstance(scalar_variance, (int, float)):
-            raise ValueError(
-                "experiment.inference.objective.noise_model.scalar must be numeric when provided."
-            )
-        scalar_variance = float(scalar_variance)
-        if scalar_variance <= 0.0:
-            raise ValueError(
-                "experiment.inference.objective.noise_model.scalar must be > 0."
-            )
+        scalar_variance = coerce_numeric_value(
+            scalar_variance,
+            path="experiment.inference.objective.noise_model.scalar",
+            must_be_positive=True,
+        )
 
     optimizer_cfg = _optional_dict(inference_cfg, "optimizer", path="experiment.inference")
     optimizer_kind = str(optimizer_cfg.get("kind", "adam"))
@@ -2032,60 +2034,49 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "experiment.inference.optimizer.kind must be 'adam' or 'sgd'."
         )
-    base_lr = optimizer_cfg.get("base_lr", 1e-2)
-    if isinstance(base_lr, bool) or not isinstance(base_lr, (int, float)):
-        raise ValueError("experiment.inference.optimizer.base_lr must be numeric.")
-    base_lr = float(base_lr)
-    if base_lr <= 0.0:
-        raise ValueError("experiment.inference.optimizer.base_lr must be > 0.")
+    base_lr = float(
+        coerce_numeric_value(
+            optimizer_cfg.get("base_lr", 1e-2),
+            path="experiment.inference.optimizer.base_lr",
+            must_be_positive=True,
+        )
+    )
     n_iter = int(optimizer_cfg.get("n_iter", 100))
     if n_iter <= 0:
         raise ValueError("experiment.inference.optimizer.n_iter must be > 0.")
     optimizer_kwargs = optimizer_cfg.get("kwargs", {})
-    if not isinstance(optimizer_kwargs, dict):
-        raise ValueError("experiment.inference.optimizer.kwargs must be a mapping/dict.")
+    optimizer_kwargs = normalize_optimizer_kwargs(
+        optimizer_kind,
+        optimizer_kwargs,
+        path="experiment.inference.optimizer.kwargs",
+    )
     preconditioning_cfg = _optional_dict(
         optimizer_cfg,
         "preconditioning",
         path="experiment.inference.optimizer",
     )
     preconditioning_enabled = bool(preconditioning_cfg.get("enabled", False))
-    preconditioning_damping = preconditioning_cfg.get("damping", 1e-6)
-    if isinstance(preconditioning_damping, bool) or not isinstance(
-        preconditioning_damping, (int, float)
-    ):
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.damping must be numeric."
+    preconditioning_damping = float(
+        coerce_numeric_value(
+            preconditioning_cfg.get("damping", 1e-6),
+            path="experiment.inference.optimizer.preconditioning.damping",
+            must_be_nonnegative=True,
         )
-    preconditioning_damping = float(preconditioning_damping)
-    if preconditioning_damping < 0.0:
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.damping must be >= 0."
+    )
+    preconditioning_eig_floor_rel = float(
+        coerce_numeric_value(
+            preconditioning_cfg.get("eig_floor_rel", 1e-6),
+            path="experiment.inference.optimizer.preconditioning.eig_floor_rel",
+            must_be_nonnegative=True,
         )
-    preconditioning_eig_floor_rel = preconditioning_cfg.get("eig_floor_rel", 1e-6)
-    if isinstance(preconditioning_eig_floor_rel, bool) or not isinstance(
-        preconditioning_eig_floor_rel, (int, float)
-    ):
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.eig_floor_rel must be numeric."
+    )
+    preconditioning_eig_floor_abs = float(
+        coerce_numeric_value(
+            preconditioning_cfg.get("eig_floor_abs", 1e-8),
+            path="experiment.inference.optimizer.preconditioning.eig_floor_abs",
+            must_be_nonnegative=True,
         )
-    preconditioning_eig_floor_rel = float(preconditioning_eig_floor_rel)
-    if preconditioning_eig_floor_rel < 0.0:
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.eig_floor_rel must be >= 0."
-        )
-    preconditioning_eig_floor_abs = preconditioning_cfg.get("eig_floor_abs", 1e-8)
-    if isinstance(preconditioning_eig_floor_abs, bool) or not isinstance(
-        preconditioning_eig_floor_abs, (int, float)
-    ):
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.eig_floor_abs must be numeric."
-        )
-    preconditioning_eig_floor_abs = float(preconditioning_eig_floor_abs)
-    if preconditioning_eig_floor_abs < 0.0:
-        raise ValueError(
-            "experiment.inference.optimizer.preconditioning.eig_floor_abs must be >= 0."
-        )
+    )
     preconditioning_lr_clip = _coerce_lr_clip(
         preconditioning_cfg.get("lr_clip"),
         path="experiment.inference.optimizer.preconditioning.lr_clip",
@@ -3026,6 +3017,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     ),
                     "lr_scale_min": float(np.min(preconditioning_bundle.lr_vec)),
                     "lr_scale_max": float(np.max(preconditioning_bundle.lr_vec)),
+                    "lr_vec_min": float(np.min(preconditioning_bundle.lr_vec)),
+                    "lr_vec_max": float(np.max(preconditioning_bundle.lr_vec)),
                     "effective_lr_unclipped_min": float(
                         np.min(
                             optimizer_base_lr * preconditioning_bundle.lr_vec_unclipped
@@ -3085,7 +3078,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "shared_keys": list(active_layout.shared_keys),
         "initial_loss": initial_loss,
         "final_loss": final_loss,
+        "theta0": np.asarray(theta0, dtype=float),
         "theta_final": theta_final_np,
+        # Keep the optimizer trace available to in-process orchestration scripts
+        # such as the Adam sweep without expanding the on-disk inference schema.
+        "trace_history": {
+            name: np.asarray(values, dtype=float)
+            for name, values in trace_history.items()
+        },
     }
 
 
