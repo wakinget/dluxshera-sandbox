@@ -101,11 +101,11 @@ from dluxshera.systems.base import compose_forward_spec
 # MAIN SIMULATION PARAMETERS #
 ##############################
 
-PRESCRIPTION = "examples/recipes/canonical_astrometry_prescription.yaml"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PRESCRIPTION = REPO_ROOT / "examples/recipes/canonical_astrometry_prescription.yaml"
 
 JAX_ENABLE_X64 = True
 FAST_MODE = False
-ADD_NOISE = False
 SAVE_PLOTS = True
 PLOT_EIGEN_SPECTRUM = True
 
@@ -123,15 +123,15 @@ DEFAULT_BASE_LR = 0.5
 
 # User may comment out any keys they wish not to include in the optimization
 DEFAULT_INFER_KEYS = (
-    "source.separation_as",
+    # "source.separation_as",
     "source.position_angle_deg",
     "source.x_position_as",
     "source.y_position_as",
-    "source.log_flux_total",
-    "source.contrast",
-    "optics.plate_scale_as_per_pix",
-    "optics.primary.zernike_coeffs_nm",
-    "optics.secondary.zernike_coeffs_nm",
+    # "source.log_flux_total",
+    # "source.contrast",
+    # "optics.plate_scale_as_per_pix",
+    # "optics.primary.zernike_coeffs_nm",
+    # "optics.secondary.zernike_coeffs_nm",
 )
 
 # Presets
@@ -140,7 +140,6 @@ DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY" # Experiment presets describe
 
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
 
 
@@ -247,6 +246,11 @@ def main(
     print(f"  whiten_basis={whiten_basis}")
     print(f"  truncate_k={truncate_k}")
     print(f"  truncate_by_eigval={truncate_by_eigval}")
+    print("Observation noise configuration:")
+    print(f"  enabled={noise_cfg['enabled']}")
+    print(f"  photon_noise={noise_cfg['photon_noise']}")
+    print(f"  read_noise={noise_cfg['read_noise']}")
+    print(f"  dark_current={noise_cfg['dark_current']}")
 
     t0_script = time.time()
 
@@ -256,19 +260,14 @@ def main(
     binder = SheraBinder(system_cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
-    data_psf = binder.model()
-
-    if noise_cfg["enabled"]:
-        rng_key, noise_key = jr.split(rng_key)
-    else:
-        noise_key = rng_key
-    data, data_var = apply_observation_noise(
-        data_psf,
+    data_psf, data, data_var, rng_key = _render_synthetic_observation(
+        binder=binder,
+        truth_store=truth_store,
         noise_cfg=noise_cfg,
-        rng_key=noise_key,
-        detector_spec=getattr(binder.detector, "spec", None),
-        exposure_time_s=truth_store.get("source.exposure_time_s", default=None),
+        rng_key=rng_key,
     )
+    if not noise_cfg["enabled"]:
+        print("Observation noise disabled: data is the deterministic model image.")
 
     print("Configuring Inference...")
     # Phase 5 migration note: inference layout is now defined directly from
@@ -914,6 +913,32 @@ def _resolve_results_dir(
     return outdir_path, "experiment.outputs.outdir"
 
 
+def _render_synthetic_observation(
+    *,
+    binder: SheraBinder,
+    truth_store: ParameterStore,
+    noise_cfg: dict[str, Any],
+    rng_key: jr.KeyArray,
+) -> tuple[jax.Array, jax.Array, jax.Array, jr.KeyArray]:
+    """Render the synthetic observation and honor the resolved noise config."""
+    data_psf = binder.model()
+    if not noise_cfg["enabled"]:
+        # No observational image noise is sampled in this branch; data is the
+        # deterministic detector-rendered model image. data_var remains the
+        # Gaussian weighting image used by the downstream NLL/Z-score plots.
+        return data_psf, data_psf, jnp.maximum(data_psf, 1.0), rng_key
+
+    rng_key, noise_key = jr.split(rng_key)
+    data, data_var = apply_observation_noise(
+        data_psf,
+        noise_cfg=noise_cfg,
+        rng_key=noise_key,
+        detector_spec=getattr(binder.detector, "spec", None),
+        exposure_time_s=truth_store.get("source.exposure_time_s", default=None),
+    )
+    return data_psf, data, data_var, rng_key
+
+
 def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ValueError("experiment config must be a mapping")
@@ -986,7 +1011,12 @@ def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
         "seed": seed,
         "infer_keys": infer_keys,
         "noise": {
-            "enabled": _optional_bool(noise_cfg, "enabled", ADD_NOISE),
+            "enabled": _optional_bool_alias(
+                noise_cfg,
+                "enabled",
+                ("add_noise",),
+                False,
+            ),
             "photon_noise": _optional_bool(noise_cfg, "photon_noise", True),
             "read_noise": _optional_bool(noise_cfg, "read_noise", False),
             "dark_current": _optional_bool(noise_cfg, "dark_current", False),
@@ -1045,12 +1075,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--prescription",
         dest="prescription",
         type=Path,
-        default=None,
+        default=PRESCRIPTION,
         help=(
             "Path to YAML/JSON prescription. A prescription may contain "
             "top-level experiment only, or experiment plus an optional system "
-            "block. Values deep-merge over --system-preset/--experiment-preset."
+            "block. Values deep-merge over --system-preset/--experiment-preset. "
+            f"Defaults to {_repo_relative_path(PRESCRIPTION)}."
         ),
+    )
+    parser.add_argument(
+        "--no-prescription",
+        dest="prescription",
+        action="store_const",
+        const=None,
+        help="Use preset seeds only and do not load the bundled prescription.",
     )
     parser.add_argument("--system-preset", type=str, default=DEFAULT_SYSTEM_PRESET)
     parser.add_argument("--experiment-preset", type=str, default=DEFAULT_EXPERIMENT_PRESET)

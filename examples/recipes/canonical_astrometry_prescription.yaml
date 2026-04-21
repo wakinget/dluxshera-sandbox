@@ -48,19 +48,19 @@ experiment:
     truncate_by_eigval: null
 
   infer_keys:
-    - source.separation_as
+#    - source.separation_as
     - source.position_angle_deg
     - source.x_position_as
     - source.y_position_as
-    - source.log_flux_total
-    - source.contrast
-    - optics.plate_scale_as_per_pix
-    - optics.primary.zernike_coeffs_nm
-    - optics.secondary.zernike_coeffs_nm
+#    - source.log_flux_total
+#    - source.contrast
+#    - optics.plate_scale_as_per_pix
+#    - optics.primary.zernike_coeffs_nm
+#    - optics.secondary.zernike_coeffs_nm
 
   noise:
     enabled: false
-    photon_noise: true
+    photon_noise: false
     read_noise: false
     dark_current: false
 
