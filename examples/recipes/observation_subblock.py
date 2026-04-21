@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import jax
 import jax.random as jr
 import numpy as np
 from tqdm import tqdm
@@ -64,6 +65,7 @@ DEFAULT_PRESCRIPTION_PATH = Path(
 DEFAULT_OUTDIR_ROOT = Path("Results/obs_subblocks")
 MANIFEST_SCHEMA_VERSION = "obs_subblock_manifest.v1"
 GENERATOR_ID = "examples/recipes/observation_subblock.py"
+JAX_ENABLE_X64 = True
 
 
 def _required_dict(parent: dict[str, Any], key: str, *, path: str) -> dict[str, Any]:
@@ -279,6 +281,8 @@ def generate_obs_subblock(
         Summary including output directory and artifact paths.
     """
 
+    jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
+
     cfg_path = Path(config_path) if config_path is not None else DEFAULT_PRESCRIPTION_PATH
     progress_enabled = bool(sys.stderr.isatty()) if show_progress is None else bool(show_progress)
 
@@ -457,6 +461,13 @@ def generate_obs_subblock(
 
     print("Writing FITS cube, truth CSV, and manifest...")
     cube = np.stack(frame_images, axis=0)
+    runtime_info = {
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+    }
+    render_info = {
+        "cube_dtype": str(cube.dtype),
+        "cube_dtype_source": "in_memory_before_fits_write",
+    }
     write_obs_subblock_cube_fits(
         output_path=artifacts["cube_fits"],
         cube=cube,
@@ -507,6 +518,8 @@ def generate_obs_subblock(
         shared_truth=experiment["truth"],
         seed=int(experiment["seed"]),
         noise=noise_cfg,
+        runtime_info=runtime_info,
+        render_info=render_info,
         notes=experiment.get("notes"),
     )
     write_obs_subblock_manifest(output_path=artifacts["manifest_json"], manifest=manifest)

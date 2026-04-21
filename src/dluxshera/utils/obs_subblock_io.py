@@ -125,6 +125,8 @@ def build_obs_subblock_manifest(
     shared_truth: Mapping[str, Any] | None = None,
     seed: int | None = None,
     noise: Mapping[str, Any] | None = None,
+    runtime_info: Mapping[str, Any] | None = None,
+    render_info: Mapping[str, Any] | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
     """Build a manifest payload for an observation sub-block run."""
@@ -162,6 +164,10 @@ def build_obs_subblock_manifest(
         manifest["seed"] = int(seed)
     if noise is not None:
         manifest["noise"] = to_jsonable_obs_subblock_payload(dict(noise))
+    if runtime_info is not None:
+        manifest["runtime"] = to_jsonable_obs_subblock_payload(dict(runtime_info))
+    if render_info is not None:
+        manifest["render"] = to_jsonable_obs_subblock_payload(dict(render_info))
     if notes is not None:
         manifest["notes"] = str(notes)
     if requested_varying_keys is not None:

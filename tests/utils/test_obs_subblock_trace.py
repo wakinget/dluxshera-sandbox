@@ -25,6 +25,22 @@ def test_trace_missing_required_column_raises(tmp_path):
         load_obs_subblock_trace_csv(trace_path)
 
 
+def test_trace_explicit_required_varying_column_missing_remains_strict(tmp_path):
+    trace_path = _write_trace(
+        tmp_path / "trace_missing_generalized.csv",
+        """
+        frame_index,time_s,source.x_position_as
+        0,0.0,0.0
+        """,
+    )
+
+    with pytest.raises(ValueError, match="source.log_flux_total"):
+        load_obs_subblock_trace_csv(
+            trace_path,
+            required_varying_keys=("source.x_position_as", "source.log_flux_total"),
+        )
+
+
 def test_trace_non_contiguous_frame_index_raises(tmp_path):
     trace_path = _write_trace(
         tmp_path / "trace_non_contiguous.csv",

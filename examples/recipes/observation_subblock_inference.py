@@ -72,7 +72,11 @@ from dluxshera.config.numeric import (
 )
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.losses import gaussian_image_nll
-from dluxshera.inference.optimization import fim_theta, run_shera_gd
+from dluxshera.inference.optimization import (
+    build_fim_diagonal_preconditioner,
+    fim_theta,
+    run_shera_gd,
+)
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
@@ -186,10 +190,46 @@ class ThetaPreconditioningBundle:
     fim: np.ndarray
     eigvals: np.ndarray
     eigvals_stable: np.ndarray
+    fim_diag: np.ndarray
+    curvature_vec: np.ndarray
     preconditioner_diag: np.ndarray
     lr_vec_unclipped: np.ndarray
     lr_vec: np.ndarray
     config: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TruthFrameMatrix:
+    """Completed truth values and provenance for active frame keys."""
+
+    matrix: np.ndarray
+    sources: dict[str, str]
+    available_mask: np.ndarray
+    trace_path: str | None
+
+    @property
+    def has_available(self) -> bool:
+        return bool(np.any(self.available_mask))
+
+    @property
+    def complete(self) -> bool:
+        return bool(np.all(self.available_mask))
+
+    @property
+    def available_keys(self) -> tuple[str, ...]:
+        return tuple(
+            key
+            for key, available in zip(self.sources.keys(), self.available_mask)
+            if bool(available)
+        )
+
+    @property
+    def unavailable_keys(self) -> tuple[str, ...]:
+        return tuple(
+            key
+            for key, available in zip(self.sources.keys(), self.available_mask)
+            if not bool(available)
+        )
 
 
 def _required_dict(parent: dict[str, Any], key: str, *, path: str) -> dict[str, Any]:
@@ -1014,8 +1054,17 @@ def _build_theta_preconditioning_bundle(
     theta_ref: jnp.ndarray,
     base_lr: float,
     cfg: dict[str, Any],
+    reference_source: str | None = None,
 ) -> ThetaPreconditioningBundle:
-    """Build a damped theta-space preconditioner from the full packed FIM."""
+    """Build the canonical diagonal theta-space FIM preconditioner.
+
+    This intentionally matches the primitive-theta path in
+    ``canonical_astrometry.py``: compute the packed-theta FIM, use its diagonal
+    as curvature, and pass ``lr_vec = 1 / max(diag(FIM), floor)`` to
+    ``run_shera_gd`` as a scale-only vector. The legacy full-FIM damping/eigen
+    options remain accepted for config compatibility but are diagnostic-only for
+    this diagonal method.
+    """
 
     damping = float(
         coerce_numeric_value(
@@ -1042,6 +1091,7 @@ def _build_theta_preconditioning_bundle(
         cfg.get("lr_clip"),
         path="experiment.inference.optimizer.preconditioning.lr_clip",
     )
+    reference = str(cfg.get("reference", "truth_when_available"))
 
     theta_ref_vec = jnp.asarray(theta_ref)
     fim = np.asarray(fim_theta(loss_fn, theta_ref_vec), dtype=float)
@@ -1054,24 +1104,23 @@ def _build_theta_preconditioning_bundle(
 
     fim_sym = 0.5 * (fim + fim.T)
     eigvals, eigvecs = np.linalg.eigh(fim_sym)
-    eig_scale = max(float(np.max(np.abs(eigvals))), 1.0)
-    eig_floor = max(eig_floor_abs, eig_floor_rel * eig_scale)
-    eigvals_stable = np.maximum(eigvals, eig_floor) + damping
+    eigvals_stable = np.array(eigvals, copy=True)
+    del eigvecs
 
-    inv_sqrt_eigs = np.reciprocal(np.sqrt(eigvals_stable))
-    precond_full = eigvecs @ (inv_sqrt_eigs[:, None] * eigvecs.T)
-    preconditioner_diag = np.diag(precond_full)
+    precond = build_fim_diagonal_preconditioner(
+        fim_sym,
+        curvature_floor=1e-8,
+        eps=1e-12,
+        lr_clip=lr_clip,
+    )
+    fim_diag = np.asarray(precond["fim_diag"], dtype=float)
+    curvature_vec = np.asarray(precond["curvature_vec"], dtype=float)
+    lr_vec_unclipped = np.asarray(precond["lr_vec_unclipped"], dtype=float)
+    lr_vec = np.asarray(precond["lr_vec"], dtype=float)
+    precond_config = dict(precond["config"])
     # Convention: lr_vec is a pure preconditioning scale. run_shera_gd applies
     # base_lr via its learning_rate argument, matching canonical theta workflows.
     _ = base_lr
-    lr_vec_unclipped = np.array(preconditioner_diag, copy=True)
-    lr_vec = np.array(lr_vec_unclipped, copy=True)
-    lr_clip_applied_count = 0
-    if lr_clip is not None:
-        lr_clip_applied_count = int(
-            np.count_nonzero((lr_vec < lr_clip[0]) | (lr_vec > lr_clip[1]))
-        )
-        lr_vec = np.clip(lr_vec, lr_clip[0], lr_clip[1])
 
     if lr_vec.shape != (int(theta_ref_vec.size),):
         raise ValueError("Preconditioning vector shape does not match packed theta dimension.")
@@ -1084,17 +1133,28 @@ def _build_theta_preconditioning_bundle(
         fim=fim_sym,
         eigvals=eigvals,
         eigvals_stable=eigvals_stable,
-        preconditioner_diag=preconditioner_diag,
+        fim_diag=fim_diag,
+        curvature_vec=curvature_vec,
+        # Backward-compatible field name for existing diagnostics. In the
+        # canonical diagonal method this stores the curvature diagonal, not
+        # diag(F^-1/2).
+        preconditioner_diag=curvature_vec,
         lr_vec_unclipped=lr_vec_unclipped,
         lr_vec=lr_vec,
         config={
             "enabled": True,
+            "method": "fim_diag",
+            "curvature_floor": precond_config["curvature_floor"],
+            "curvature_floored_count": precond_config["curvature_floored_count"],
+            "eps": precond_config["eps"],
             "damping": damping,
             "eig_floor_rel": eig_floor_rel,
             "eig_floor_abs": eig_floor_abs,
-            "eig_floor_effective": eig_floor,
+            "legacy_full_fim_options_inactive": True,
             "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
-            "lr_clip_applied_count": lr_clip_applied_count,
+            "lr_clip_applied_count": precond_config["lr_clip_applied_count"],
+            "reference": reference,
+            "reference_source": reference_source,
         },
     )
 
@@ -1150,14 +1210,9 @@ def _print_preconditioning_summary(
 ) -> None:
     """Print the numerical details of the theta-space FIM preconditioner."""
 
-    fim_diag = np.diag(bundle.fim)
+    fim_diag = bundle.fim_diag
     fim_abs = np.abs(bundle.fim)
-    stable_min = float(np.min(bundle.eigvals_stable))
-    stable_max = float(np.max(bundle.eigvals_stable))
     eig_nonpositive = int(np.count_nonzero(bundle.eigvals <= 0.0))
-    eig_floor = float(bundle.config["eig_floor_effective"])
-    eig_floored = int(np.count_nonzero(bundle.eigvals < eig_floor))
-    stable_condition = _condition_number_from_bounds(stable_min, stable_max)
     effective_lr = float(base_lr) * bundle.lr_vec
     effective_lr_unclipped = float(base_lr) * bundle.lr_vec_unclipped
 
@@ -1168,12 +1223,20 @@ def _print_preconditioning_summary(
     )
     print(
         "  config: "
-        f"damping={_format_scalar(bundle.config['damping'])} "
-        f"eig_floor_rel={_format_scalar(bundle.config['eig_floor_rel'])} "
-        f"eig_floor_abs={_format_scalar(bundle.config['eig_floor_abs'])} "
-        f"eig_floor_effective={_format_scalar(eig_floor)} "
+        f"method={bundle.config['method']} "
+        f"reference={bundle.config.get('reference_source')} "
+        f"curvature_floor={_format_scalar(bundle.config['curvature_floor'])} "
+        f"floored={bundle.config['curvature_floored_count']} "
+        f"eps={_format_scalar(bundle.config['eps'])} "
         f"lr_clip={bundle.config['lr_clip']}"
     )
+    if bundle.config.get("legacy_full_fim_options_inactive"):
+        print(
+            "  legacy full-FIM options inactive for method=fim_diag: "
+            f"damping={_format_scalar(bundle.config['damping'])} "
+            f"eig_floor_rel={_format_scalar(bundle.config['eig_floor_rel'])} "
+            f"eig_floor_abs={_format_scalar(bundle.config['eig_floor_abs'])}"
+        )
     print(
         "  fim: "
         f"diag({_format_array_stats(fim_diag)}) "
@@ -1183,16 +1246,11 @@ def _print_preconditioning_summary(
     print(
         "  raw eigenvalues: "
         f"{_format_array_stats(bundle.eigvals)} "
-        f"nonpositive={eig_nonpositive} floor_lifted={eig_floored}"
+        f"nonpositive={eig_nonpositive} (diagnostic only)"
     )
     print(
-        "  stabilized eigenvalues: "
-        f"{_format_array_stats(bundle.eigvals_stable)} "
-        f"condition_est={_format_scalar(stable_condition)}"
-    )
-    print(
-        "  preconditioner-like diagonal used to build lr_vec: "
-        f"{_format_array_stats(bundle.preconditioner_diag)}"
+        "  curvature diagonal used to build lr_vec: "
+        f"{_format_array_stats(bundle.curvature_vec)}"
     )
     print(
         "  lr_vec before clipping: "
@@ -1396,9 +1454,14 @@ def _save_fim_debug_artifact(
                 "fim": "curvature-like full theta-space Fisher information matrix",
                 "fim_diagonal": "curvature-like diagonal of fim",
                 "eigenvalues": "raw curvature-like eigenvalues of symmetrized fim",
-                "stabilized_eigenvalues": "floored and damped curvature-like eigenvalues",
+                "stabilized_eigenvalues": (
+                    "legacy field; equal to raw eigenvalues for method=fim_diag"
+                ),
+                "curvature_diagonal": (
+                    "canonical diagonal curvature used to build lr_vec"
+                ),
                 "preconditioner_diagonal": (
-                    "preconditioner-like diagonal used to build lr_vec"
+                    "legacy field name; same values as curvature_diagonal for method=fim_diag"
                 ),
                 "lr_vec_before_clipping": (
                     "preconditioning scale vector before clipping; excludes base_lr"
@@ -1410,9 +1473,10 @@ def _save_fim_debug_artifact(
             "theta_labels": list(theta_labels),
             "config": to_jsonable_obs_subblock_payload(bundle.config),
             "fim": np.asarray(bundle.fim, dtype=float).tolist(),
-            "fim_diagonal": _to_jsonable_float_list(np.diag(bundle.fim)),
+            "fim_diagonal": _to_jsonable_float_list(bundle.fim_diag),
             "eigenvalues": _to_jsonable_float_list(bundle.eigvals),
             "stabilized_eigenvalues": _to_jsonable_float_list(bundle.eigvals_stable),
+            "curvature_diagonal": _to_jsonable_float_list(bundle.curvature_vec),
             "preconditioner_diagonal": _to_jsonable_float_list(
                 bundle.preconditioner_diag
             ),
@@ -1889,20 +1953,185 @@ def _plot_image_fit(
     plt.close(fig)
 
 
-def _build_truth_matrix(
+def _trace_column_float_values(
     trace: ObsSubblockTrace,
     *,
-    frame_keys: tuple[str, ...],
-) -> np.ndarray:
-    """Return a frame-by-key truth matrix aligned to ``frame_keys``."""
+    key: str,
+) -> np.ndarray | None:
+    """Return finite numeric values for an optional trace column, if present."""
 
-    return np.asarray(
-        [
-            [float(row[key]) for key in frame_keys]
-            for row in trace.rows
-        ],
-        dtype=float,
+    if key not in trace.required_columns and key not in trace.extra_columns:
+        return None
+
+    values: list[float] = []
+    for row_index, row in enumerate(trace.rows):
+        raw_value = row.get(key)
+        text = "" if raw_value is None else str(raw_value).strip()
+        if text == "":
+            raise ValueError(
+                f"truth trace column {key!r} has a blank value at sorted row {row_index}."
+            )
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"truth trace column {key!r} has non-numeric value {text!r} "
+                f"at sorted row {row_index}."
+            ) from exc
+        if not np.isfinite(value):
+            raise ValueError(
+                f"truth trace column {key!r} has non-finite value {text!r} "
+                f"at sorted row {row_index}."
+            )
+        values.append(value)
+
+    return np.asarray(values, dtype=float)
+
+
+def _resolve_scalar_truth_from_store(
+    store: ParameterStore,
+    *,
+    spec: ActiveKeySpec,
+) -> float | None:
+    """Resolve one active key from the base store as an unambiguous scalar."""
+
+    try:
+        value = get_obs_subblock_store_value(store, address=spec.address)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    return float(value)
+
+
+def _build_truth_frame_matrix(
+    trace: ObsSubblockTrace | None,
+    *,
+    layout: ActiveStateLayout,
+    base_store: ParameterStore,
+    n_frame: int,
+) -> TruthFrameMatrix:
+    """Complete optional truth-trace coverage for active frame keys.
+
+    Inference truth traces are diagnostic inputs, not render contracts. A trace
+    column wins when present; otherwise, if a truth trace exists and the key can
+    be resolved from the fixed base store, the scalar store value is broadcast
+    across frames. Keys that cannot be completed are marked unavailable.
+    """
+
+    matrix = np.full((int(n_frame), layout.frame_width), np.nan, dtype=float)
+    sources: dict[str, str] = {}
+    parse_warnings: list[str] = []
+    resolved_store_keys: list[str] = []
+    unavailable_keys: list[str] = []
+
+    for key_index, spec in enumerate(layout.frame_specs):
+        key = spec.canonical
+        trace_values: np.ndarray | None = None
+        if trace is not None:
+            try:
+                trace_values = _trace_column_float_values(trace, key=key)
+            except ValueError as exc:
+                parse_warnings.append(str(exc))
+
+        if trace_values is not None:
+            if trace_values.shape != (int(n_frame),):
+                raise ValueError(
+                    f"Truth trace column {key!r} has shape {trace_values.shape}; "
+                    f"expected ({int(n_frame)},)."
+                )
+            matrix[:, key_index] = trace_values
+            sources[key] = "trace_csv"
+            continue
+
+        store_value = (
+            _resolve_scalar_truth_from_store(base_store, spec=spec)
+            if trace is not None
+            else None
+        )
+        if store_value is not None:
+            matrix[:, key_index] = store_value
+            sources[key] = "resolved_store"
+            resolved_store_keys.append(key)
+            continue
+
+        sources[key] = "unavailable"
+        unavailable_keys.append(key)
+
+    if parse_warnings:
+        print(
+            "Warning: some active truth-trace columns could not be parsed; "
+            "falling back to resolved-store truth where possible: "
+            + "; ".join(parse_warnings)
+        )
+    if resolved_store_keys:
+        print(
+            "Active frame truth filled from resolved store for trace-missing "
+            "or unusable keys: "
+            + ", ".join(resolved_store_keys)
+        )
+    if trace is not None and unavailable_keys:
+        print(
+            "Warning: truth unavailable for active frame keys; diagnostics will "
+            "skip these keys and truth-based preconditioning will fall back if "
+            "needed: "
+            + ", ".join(unavailable_keys)
+        )
+
+    available_mask = np.asarray(
+        [source != "unavailable" for source in sources.values()],
+        dtype=bool,
     )
+    return TruthFrameMatrix(
+        matrix=matrix,
+        sources=sources,
+        available_mask=available_mask,
+        trace_path=None if trace is None else str(trace.source_path),
+    )
+
+
+def _resolve_theta_preconditioning_reference(
+    *,
+    layout: ActiveStateLayout,
+    theta0: jnp.ndarray,
+    initial_state: ActiveState,
+    truth: TruthFrameMatrix | None,
+    reference_mode: str,
+) -> tuple[jnp.ndarray, str]:
+    """Choose the theta reference for FIM preconditioning.
+
+    Canonical astrometry computes its primitive-theta FIM at truth. For
+    synthetic subblock runs with an aligned truth trace, use the equivalent
+    packed truth frame state. Without truth, fall back to the initial state so
+    operational workflows can still run.
+    """
+
+    if reference_mode == "initial":
+        return jnp.asarray(theta0), "initial"
+    if reference_mode != "truth_when_available":
+        raise ValueError(
+            "preconditioning.reference must be 'truth_when_available' or 'initial'."
+        )
+    if truth is None or not truth.has_available:
+        return jnp.asarray(theta0), "initial_fallback_no_truth_trace"
+    if not truth.complete:
+        print(
+            "Warning: truth-based preconditioning reference is incomplete for "
+            "active frame keys; falling back to initial reference. Missing: "
+            + ", ".join(truth.unavailable_keys)
+        )
+        return jnp.asarray(theta0), "initial_fallback_incomplete_truth"
+
+    truth_ref_state = ActiveState(
+        frame=jnp.asarray(truth.matrix),
+        shared=initial_state.shared,
+    )
+    source = (
+        "truth_trace"
+        if all(value == "trace_csv" for value in truth.sources.values())
+        else "truth_mixed"
+    )
+    return _pack_active_state(layout, truth_ref_state), source
 
 
 def _build_recovered_rows(
@@ -1929,22 +2158,22 @@ def _build_recovered_rows(
 
 def _build_truth_comparison_rows(
     *,
-    layout: ActiveStateLayout,
+    frame_keys: tuple[str, ...],
     times: np.ndarray,
     recovered_frame_matrix: np.ndarray,
     truth_matrix: np.ndarray,
     frame_data_terms: np.ndarray,
 ) -> list[dict[str, Any]]:
-    """Build truth/recovered/residual rows aligned to the active frame keys."""
+    """Build truth/recovered/residual rows aligned to available truth keys."""
 
     rows: list[dict[str, Any]] = []
-    for frame_index in range(layout.n_frame):
+    for frame_index in range(int(recovered_frame_matrix.shape[0])):
         row: dict[str, Any] = {
             "frame_index": int(frame_index),
             "time_s": float(times[frame_index]),
             "frame_nll": float(frame_data_terms[frame_index]),
         }
-        for key_index, key in enumerate(layout.frame_keys):
+        for key_index, key in enumerate(frame_keys):
             truth_value = float(truth_matrix[frame_index, key_index])
             recovered_value = float(recovered_frame_matrix[frame_index, key_index])
             row[f"{key}_truth"] = truth_value
@@ -2139,6 +2368,14 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         preconditioning_cfg.get("lr_clip"),
         path="experiment.inference.optimizer.preconditioning.lr_clip",
     )
+    preconditioning_reference = str(
+        preconditioning_cfg.get("reference", "truth_when_available")
+    )
+    if preconditioning_reference not in {"truth_when_available", "initial"}:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.reference must be "
+            "'truth_when_available' or 'initial'."
+        )
 
     diagnostics_cfg = _optional_dict(
         inference_cfg,
@@ -2280,6 +2517,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                         if preconditioning_lr_clip is None
                         else list(preconditioning_lr_clip)
                     ),
+                    "reference": preconditioning_reference,
                 },
             },
             "diagnostics": {
@@ -2460,22 +2698,32 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         validate_cfg = inference_cfg["validate"]
         trace = load_obs_subblock_trace_csv(
             trace_path,
-            required_varying_keys=active_layout.frame_keys,
+            required_varying_keys=(),
             require_contiguous_frame_index=validate_cfg["require_contiguous_frame_index"],
             require_monotonic_time=validate_cfg["require_monotonic_time"],
         )
 
     time_trace: ObsSubblockTrace | None = trace
-    comparison_trace: ObsSubblockTrace | None = (
-        trace if inference_cfg["diagnostics"]["compare_to_truth_when_available"] else None
-    )
+    truth_trace_for_values: ObsSubblockTrace | None = trace
     if trace is not None and trace.frame_count != n_frame:
         print(
             "Warning: truth trace frame count does not match cube frame count; "
             "skipping truth-based time/comparison outputs."
         )
         time_trace = None
-        comparison_trace = None
+        truth_trace_for_values = None
+
+    truth_frame_matrix = _build_truth_frame_matrix(
+        truth_trace_for_values,
+        layout=active_layout,
+        base_store=base_store,
+        n_frame=n_frame,
+    )
+    include_truth_comparison = (
+        bool(inference_cfg["diagnostics"]["compare_to_truth_when_available"])
+        and active_layout.frame_width > 0
+        and truth_frame_matrix.has_available
+    )
 
     configured_outdir = experiment["outputs"]["outdir"]
     if args.results_dir is not None:
@@ -2496,7 +2744,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         outdir=outdir,
         file_prefix=experiment["outputs"]["file_prefix"],
         timestamp=stamp,
-        include_comparison=comparison_trace is not None and active_layout.frame_width > 0,
+        include_comparison=include_truth_comparison,
         write_plots=bool(inference_cfg["diagnostics"]["plots"]),
         include_trace_plots=active_layout.frame_width > 0,
         include_parameter_history_heatmap=(
@@ -2505,7 +2753,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ),
         include_parameter_residual_history_heatmap=(
             active_layout.frame_width > 0
-            and comparison_trace is not None
+            and include_truth_comparison
             and bool(
                 inference_cfg["diagnostics"][
                     "plot_parameter_residual_history_heatmap"
@@ -2518,13 +2766,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ),
         include_parameter_residual_history_lines=(
             active_layout.frame_width > 0
-            and comparison_trace is not None
+            and include_truth_comparison
             and bool(
                 inference_cfg["diagnostics"]["plot_parameter_residual_history_lines"]
             )
         ),
         include_parameter_abs_residual_history_lines=(
-            active_layout.frame_width > 0 and comparison_trace is not None
+            active_layout.frame_width > 0 and include_truth_comparison
         ),
     )
     diag_cfg = inference_cfg["diagnostics"]
@@ -2635,15 +2883,26 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     preconditioning_bundle: ThetaPreconditioningBundle | None = None
     lr_vec: np.ndarray | None = None
     if bool(preconditioning_cfg["enabled"]):
+        preconditioning_theta_ref, preconditioning_reference_source = (
+            _resolve_theta_preconditioning_reference(
+                layout=active_layout,
+                theta0=jnp.asarray(theta0),
+                initial_state=initial_state,
+                truth=truth_frame_matrix,
+                reference_mode=str(preconditioning_cfg["reference"]),
+            )
+        )
         print(
-            "Computing theta-space Fisher preconditioner at initialization "
-            f"(theta_dim={active_layout.theta_size})..."
+            "Computing theta-space Fisher preconditioner "
+            f"(theta_dim={active_layout.theta_size}, "
+            f"reference={preconditioning_reference_source})..."
         )
         preconditioning_bundle = _build_theta_preconditioning_bundle(
             loss_fn=objective_bundle.total_loss_fn,
-            theta_ref=jnp.asarray(theta0),
+            theta_ref=preconditioning_theta_ref,
             base_lr=float(optimizer_cfg["base_lr"]),
             cfg=preconditioning_cfg,
+            reference_source=preconditioning_reference_source,
         )
         lr_vec = np.asarray(preconditioning_bundle.lr_vec, dtype=float)
         _print_preconditioning_summary(
@@ -2679,6 +2938,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 None
                 if preconditioning_bundle is None
                 else preconditioning_bundle.preconditioner_diag
+            ),
+            "curvature_vec": (
+                None
+                if preconditioning_bundle is None
+                else preconditioning_bundle.curvature_vec
             ),
             "lr_vec": lr_vec,
         },
@@ -2805,6 +3069,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                             "preconditioner_diagonal": _to_jsonable_float_list(
                                 preconditioning_bundle.preconditioner_diag
                             ),
+                            "curvature_diagonal": _to_jsonable_float_list(
+                                preconditioning_bundle.curvature_vec
+                            ),
                             "lr_scale_before_clipping": _to_jsonable_float_list(
                                 preconditioning_bundle.lr_vec_unclipped
                             ),
@@ -2921,20 +3188,21 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     )
 
     truth_matrix: np.ndarray | None = None
-    if comparison_trace is not None and active_layout.frame_width > 0:
-        truth_matrix = _build_truth_matrix(
-            comparison_trace,
-            frame_keys=active_layout.frame_keys,
-        )
+    truth_frame_keys: tuple[str, ...] = ()
+    truth_available_indices = np.flatnonzero(truth_frame_matrix.available_mask)
+    if include_truth_comparison:
+        truth_frame_keys = truth_frame_matrix.available_keys
+        truth_matrix = truth_frame_matrix.matrix[:, truth_available_indices]
+        recovered_truth_frame_matrix = final_frame_matrix[:, truth_available_indices]
         comparison_rows = _build_truth_comparison_rows(
-            layout=active_layout,
+            frame_keys=truth_frame_keys,
             times=times,
-            recovered_frame_matrix=final_frame_matrix,
+            recovered_frame_matrix=recovered_truth_frame_matrix,
             truth_matrix=truth_matrix,
             frame_data_terms=frame_data_terms,
         )
         comparison_fieldnames = ["frame_index", "time_s"]
-        for key in active_layout.frame_keys:
+        for key in truth_frame_keys:
             comparison_fieldnames.extend(
                 [f"{key}_truth", f"{key}_recovered", f"{key}_residual"]
             )
@@ -2982,8 +3250,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     and "parameter_residual_history_heatmap_png" in artifacts
                 ):
                     _plot_parameter_history_heatmaps(
-                        frame_history=frame_history - truth_matrix[None, :, :],
-                        labels=active_layout.frame_keys,
+                        frame_history=(
+                            frame_history[:, :, truth_available_indices]
+                            - truth_matrix[None, :, :]
+                        ),
+                        labels=truth_frame_keys,
                         output_path=artifacts["parameter_residual_history_heatmap_png"],
                         title="Frame-varying residual optimizer history",
                         colorbar_label="Recovered minus truth",
@@ -3002,8 +3273,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 ):
                     _plot_parameter_history_lines(
                         iterations=iterations,
-                        frame_history=frame_history - truth_matrix[None, :, :],
-                        labels=active_layout.frame_keys,
+                        frame_history=(
+                            frame_history[:, :, truth_available_indices]
+                            - truth_matrix[None, :, :]
+                        ),
+                        labels=truth_frame_keys,
                         output_path=artifacts["parameter_residual_history_lines_png"],
                         title="Frame-varying residual optimizer history",
                         ylabel_suffix=" residual",
@@ -3015,8 +3289,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 ):
                     _plot_parameter_history_lines(
                         iterations=iterations,
-                        frame_history=np.abs(frame_history - truth_matrix[None, :, :]),
-                        labels=active_layout.frame_keys,
+                        frame_history=np.abs(
+                            frame_history[:, :, truth_available_indices]
+                            - truth_matrix[None, :, :]
+                        ),
+                        labels=truth_frame_keys,
                         output_path=artifacts["parameter_abs_residual_history_lines_png"],
                         title="Frame-varying absolute residual optimizer history",
                         ylabel_suffix=" |residual|",
@@ -3026,16 +3303,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             if truth_matrix is not None:
                 _plot_trace_comparison(
                     times=times,
-                    recovered=final_frame_matrix,
+                    recovered=final_frame_matrix[:, truth_available_indices],
                     truth=truth_matrix,
-                    labels=active_layout.frame_keys,
+                    labels=truth_frame_keys,
                     output_path=artifacts["trace_comparison_png"],
                 )
                 _plot_trace_residuals(
                     times=times,
-                    recovered=final_frame_matrix,
+                    recovered=final_frame_matrix[:, truth_available_indices],
                     truth=truth_matrix,
-                    labels=active_layout.frame_keys,
+                    labels=truth_frame_keys,
                     output_path=artifacts["trace_residuals_png"],
                 )
             else:
@@ -3088,6 +3365,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "frame_keys": list(active_layout.frame_keys),
             "shared_keys": list(active_layout.shared_keys),
         },
+        "truth": {
+            "trace_path": truth_frame_matrix.trace_path,
+            "frame_key_sources": dict(truth_frame_matrix.sources),
+            "available_frame_keys": list(truth_frame_matrix.available_keys),
+            "unavailable_frame_keys": list(truth_frame_matrix.unavailable_keys),
+            "complete_for_active_frame_keys": bool(truth_frame_matrix.complete),
+            "comparison_enabled": bool(truth_matrix is not None),
+        },
         "init": {
             "frame": {
                 "mode": str(inference_cfg["init"]["frame"]["mode"]),
@@ -3125,6 +3410,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     ),
                     "preconditioner_diag_max": float(
                         np.max(preconditioning_bundle.preconditioner_diag)
+                    ),
+                    "curvature_diag_min": float(
+                        np.min(preconditioning_bundle.curvature_vec)
+                    ),
+                    "curvature_diag_max": float(
+                        np.max(preconditioning_bundle.curvature_vec)
                     ),
                     "lr_scale_min": float(np.min(preconditioning_bundle.lr_vec)),
                     "lr_scale_max": float(np.max(preconditioning_bundle.lr_vec)),
@@ -3187,6 +3478,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "artifacts": {name: str(path) for name, path in artifacts.items()},
         "frame_keys": list(active_layout.frame_keys),
         "shared_keys": list(active_layout.shared_keys),
+        "truth": {
+            "frame_key_sources": dict(truth_frame_matrix.sources),
+            "available_frame_keys": list(truth_frame_matrix.available_keys),
+            "unavailable_frame_keys": list(truth_frame_matrix.unavailable_keys),
+        },
         "initial_loss": initial_loss,
         "final_loss": final_loss,
         "theta0": np.asarray(theta0, dtype=float),

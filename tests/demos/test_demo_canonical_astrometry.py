@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import jax.numpy as jnp
 import jax.random as jr
+import numpy as np
 
 
 def load_recipe_module():
@@ -54,6 +56,32 @@ def test_canonical_validation_honors_infer_keys_and_noise_block():
         "read_noise": True,
         "dark_current": True,
     }
+    assert validated["diagnostics"]["fits_roundtrip"] == {
+        "enabled": False,
+        "use_readback": False,
+    }
+
+
+def test_canonical_validation_accepts_fits_roundtrip_diagnostic_config():
+    recipe = load_recipe_module()
+
+    validated = recipe._validate_experiment(
+        {
+            "seed": 7,
+            "infer_keys": ["source.x_position_as"],
+            "diagnostics": {
+                "fits_roundtrip": {
+                    "enabled": False,
+                    "use_readback": True,
+                },
+            },
+        }
+    )
+
+    assert validated["diagnostics"]["fits_roundtrip"] == {
+        "enabled": True,
+        "use_readback": True,
+    }
 
 
 def test_canonical_cli_defaults_to_bundled_prescription():
@@ -62,6 +90,38 @@ def test_canonical_cli_defaults_to_bundled_prescription():
     args = recipe._build_parser().parse_args([])
 
     assert args.prescription == recipe.PRESCRIPTION
+
+
+def test_canonical_cli_enables_fits_roundtrip_flags():
+    recipe = load_recipe_module()
+
+    args = recipe._build_parser().parse_args(
+        ["--fits-roundtrip-diagnostic", "--fits-roundtrip-use-readback"]
+    )
+
+    assert args.fits_roundtrip_diagnostic is True
+    assert args.fits_roundtrip_use_readback is True
+
+
+def test_canonical_fits_roundtrip_diagnostic_writes_summary(tmp_path):
+    recipe = load_recipe_module()
+    data = jnp.asarray([[1.0, 2.5], [3.25, 4.0]], dtype=float)
+
+    data_for_optimizer, summary = recipe._run_fits_roundtrip_diagnostic(
+        data=data,
+        output_dir=tmp_path,
+        use_readback=True,
+    )
+
+    assert (tmp_path / "canonical_fits_roundtrip_cube.fits").exists()
+    summary_path = tmp_path / "fits_roundtrip_summary.json"
+    assert summary_path.exists()
+    persisted = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert persisted["optimizer_data_source"] == "fits_readback"
+    assert persisted["exact_equal"] is True
+    assert persisted["max_abs_diff"] == 0.0
+    assert summary["summary_path"] == str(summary_path)
+    np.testing.assert_array_equal(np.asarray(data_for_optimizer), np.asarray(data))
 
 
 def test_canonical_default_prescription_resolves_noiseless_noise_config():

@@ -23,6 +23,10 @@ devtools/context_snapshot_*/**
 !devtools/**/__init__.py
 !devtools/**/*.py
 
+# Ignore dev/notes
+docs/dev/notes
+docs/dev/notes/*
+
 # My own example files to ignore
 Examples/*
 # BUT do not ignore these specific examples folder

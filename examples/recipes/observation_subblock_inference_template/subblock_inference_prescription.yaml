@@ -198,8 +198,15 @@ experiment:
       preconditioning:
         # Optional theta-space curvature-aware scaling built from
         # F(theta_ref) = Hessian(loss_fn, theta_ref) over the full packed
-        # active theta vector (frame and/or shared terms).
+        # active theta vector (frame and/or shared terms). The implemented
+        # primitive-theta method matches canonical_astrometry.py:
+        # lr_vec = 1 / max(diag(FIM), 1e-8). base_lr is applied separately.
         enabled: false
+        # Use packed truth-trace theta for synthetic/debug runs when available,
+        # matching canonical's FIM-at-truth convention. Falls back to initial.
+        reference: truth_when_available
+        # Legacy full-FIM stabilization knobs are accepted for compatibility
+        # but are inactive for the current diagonal FIM method.
         damping: 1.0e-6
         eig_floor_rel: 1.0e-6
         eig_floor_abs: 1.0e-8

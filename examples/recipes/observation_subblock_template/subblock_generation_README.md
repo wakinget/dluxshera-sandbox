@@ -39,11 +39,18 @@ Optional follow-ons:
 Relative paths in this recipe are resolved relative to the prescription file,
 not the shell working directory. In practice this affects:
 
-- `experiment.observation_subblock.trace.path`
+- `experiment.subblock.trace.path`
 - `experiment.outputs.outdir`
 
 That makes it practical to keep a self-contained subblock folder with one
 prescription plus sibling `trace/`, `render/`, and `inference/` directories.
+
+## Precision contract
+
+The renderer enables JAX x64 by default. This matches canonical astrometry and
+subblock inference so synthetic render/infer validation does not compare
+float32-rendered data against a float64 inference model. The render manifest
+records `runtime.jax_enable_x64` and `render.cube_dtype` for auditability.
 
 ## Config contract (current behavior)
 
@@ -56,10 +63,10 @@ The recipe expects top-level `system` and `experiment` blocks.
 
 ### `experiment`
 
-- `kind` must be `observation_subblock`
+- `kind` must be `subblock_generation`
 - `seed` controls optional noise sampling
 - `truth` defines shared sub-block truth overrides
-- `observation_subblock` controls trace input and validation:
+- `subblock` controls trace input and validation:
   - `varying_keys` is the applied per-frame varying-key list
   - if omitted, renderer defaults to:
     - `source.x_position_as`
@@ -155,8 +162,8 @@ PYTHONPATH=src python examples/recipes/subblock_trace_generation.py \
   --run-name trace_run
 ```
 
-Then set `experiment.observation_subblock.trace.path` in your renderer config to
-the generated `*_frame_truth.csv`, and run the renderer recipe.
+Then set `experiment.subblock.trace.path` in your renderer config to the
+generated `*_frame_truth.csv`, and run the renderer recipe.
 
 ### 5) Recommended multi-stage folder layout
 

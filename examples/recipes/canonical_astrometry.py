@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -59,9 +60,11 @@ import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.io import fits
 
 from dluxshera.inference.optimization import (
     EigenThetaMap,
+    build_fim_diagonal_preconditioner,
     fim_theta,
     generate_fim_labels,
     make_binder_nll_fn,
@@ -84,6 +87,7 @@ from dluxshera.params.packing import (
 from dluxshera.params.store import ParameterStore
 from dluxshera.utils.dtype_diagnostics import print_dtype_audit
 from dluxshera.utils.noise import apply_observation_noise
+from dluxshera.utils.obs_subblock_io import write_obs_subblock_cube_fits
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
@@ -160,6 +164,8 @@ def main(
     whiten_basis: bool | None = None,
     truncate_k: int | None = None,
     truncate_by_eigval: float | None = None,
+    fits_roundtrip_diagnostic: bool | None = None,
+    fits_roundtrip_use_readback: bool | None = None,
 ) -> None:
     """Run the canonical astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
@@ -217,6 +223,13 @@ def main(
     save_plots = bool(experiment["outputs"]["plots"])
     noise_cfg = experiment["noise"]
     optimizer_cfg = experiment["optimizer"]
+    fits_roundtrip_cfg = dict(experiment["diagnostics"]["fits_roundtrip"])
+    if fits_roundtrip_diagnostic is not None:
+        fits_roundtrip_cfg["enabled"] = bool(fits_roundtrip_diagnostic)
+    if fits_roundtrip_use_readback is not None:
+        fits_roundtrip_cfg["use_readback"] = bool(fits_roundtrip_use_readback)
+        if fits_roundtrip_cfg["use_readback"]:
+            fits_roundtrip_cfg["enabled"] = True
 
     use_eigen = eigen_cfg["enable"] if use_eigen is None else bool(use_eigen)
     whiten_basis = eigen_cfg["whiten"] if whiten_basis is None else bool(whiten_basis)
@@ -251,6 +264,10 @@ def main(
     print(f"  photon_noise={noise_cfg['photon_noise']}")
     print(f"  read_noise={noise_cfg['read_noise']}")
     print(f"  dark_current={noise_cfg['dark_current']}")
+    if fits_roundtrip_cfg["enabled"]:
+        print("FITS round-trip diagnostic:")
+        print(f"  enabled={fits_roundtrip_cfg['enabled']}")
+        print(f"  use_readback={fits_roundtrip_cfg['use_readback']}")
 
     t0_script = time.time()
 
@@ -268,6 +285,14 @@ def main(
     )
     if not noise_cfg["enabled"]:
         print("Observation noise disabled: data is the deterministic model image.")
+
+    fits_roundtrip_summary: dict[str, Any] | None = None
+    if bool(fits_roundtrip_cfg["enabled"]):
+        data, fits_roundtrip_summary = _run_fits_roundtrip_diagnostic(
+            data=data,
+            output_dir=results_dir,
+            use_readback=bool(fits_roundtrip_cfg["use_readback"]),
+        )
 
     print("Configuring Inference...")
     # Phase 5 migration note: inference layout is now defined directly from
@@ -466,12 +491,16 @@ def main(
         }
     else:
         index_map = build_index_map(inference_subspec, init_store, theta=theta0)
-        curvature_vec = np.maximum(np.asarray(fim_diag), 1e-8)
-        lr_vec = 1.0 / (curvature_vec + 1e-12)
+        primitive_precond = build_fim_diagonal_preconditioner(F)
+        curvature_vec = np.asarray(primitive_precond["curvature_vec"])
+        lr_vec = np.asarray(primitive_precond["lr_vec"])
         loss_opt = loss_fn
         theta0_opt = theta0
         theta_space = "primitive"
-        precond_meta = {"lr_vec": lr_vec}
+        precond_meta = {
+            **primitive_precond["config"],
+            "lr_vec": lr_vec,
+        }
 
     print_dtype_audit(
         "canonical_astrometry optimizer",
@@ -628,6 +657,32 @@ def main(
     final_psf = binder.model(
         binder.strip_structural(final_store)
     )
+    final_loss_value = float(loss_fn(theta_final))
+    if fits_roundtrip_summary is not None:
+        final_model_residual = np.asarray(final_psf, dtype=float) - np.asarray(
+            data,
+            dtype=float,
+        )
+        theta_error = np.asarray(theta_final, dtype=float) - np.asarray(
+            theta_true,
+            dtype=float,
+        )
+        fits_roundtrip_summary["optimization"] = {
+            "loss_true": float(loss_true),
+            "loss_initial": float(loss0),
+            "loss_final": final_loss_value,
+            "theta_final_minus_truth_max_abs": float(np.max(np.abs(theta_error))),
+            "final_model_minus_data_max_abs": float(
+                np.max(np.abs(final_model_residual))
+            ),
+            "final_model_minus_data_rms": float(
+                np.sqrt(np.mean(final_model_residual * final_model_residual))
+            ),
+        }
+        _write_json(
+            Path(str(fits_roundtrip_summary["summary_path"])),
+            fits_roundtrip_summary,
+        )
 
     print("\n==============================")
     if use_eigen:
@@ -638,7 +693,7 @@ def main(
     print(f"n_iter = {n_iter}")
     print(f"loss(true theta) = {loss_true:.8g}")
     print(f"loss(init theta0) = {loss0:.8g}")
-    print(f"loss(final theta)       = {float(loss_fn(theta_final)):.8g}")
+    print(f"loss(final theta)       = {final_loss_value:.8g}")
     print("")
 
     summary_true = {k: truth_store.get(k) for k in infer_keys}
@@ -939,6 +994,110 @@ def _render_synthetic_observation(
     return data_psf, data, data_var, rng_key
 
 
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write a small JSON artifact with stable formatting."""
+
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def _read_subblock_style_cube(path: Path) -> tuple[np.ndarray, str]:
+    """Read a FITS cube using the same style as subblock inference."""
+
+    with fits.open(path) as hdul:
+        raw_data = hdul[0].data
+        raw_dtype = str(np.asarray(raw_data).dtype)
+        cube = np.asarray(raw_data, dtype=float)
+    if cube.ndim != 3:
+        raise ValueError(
+            "FITS round-trip cube must have shape (n_frame, ny, nx), "
+            f"got {cube.shape}."
+        )
+    if int(cube.shape[0]) != 1:
+        raise ValueError(
+            "Canonical FITS round-trip diagnostic expects a 1-frame cube, "
+            f"got n_frame={int(cube.shape[0])}."
+        )
+    return cube, raw_dtype
+
+
+def _run_fits_roundtrip_diagnostic(
+    *,
+    data: jax.Array,
+    output_dir: Path,
+    use_readback: bool,
+) -> tuple[jax.Array, dict[str, Any]]:
+    """Write/read canonical data through the subblock FITS cube path."""
+
+    original = np.asarray(data)
+    cube = original[None, :, :]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cube_path = output_dir / "canonical_fits_roundtrip_cube.fits"
+    summary_path = output_dir / "fits_roundtrip_summary.json"
+
+    write_obs_subblock_cube_fits(
+        output_path=cube_path,
+        cube=cube,
+        header_cards={
+            "SCHEMA": "CANONRT",
+            "NFRAME": 1,
+        },
+    )
+    read_cube, fits_dtype_before_cast = _read_subblock_style_cube(cube_path)
+    readback = read_cube[0]
+    diff = readback - np.asarray(original, dtype=float)
+    abs_diff = np.abs(diff)
+
+    summary: dict[str, Any] = {
+        "schema_version": "canonical_fits_roundtrip.v1",
+        "cube_path": str(cube_path),
+        "summary_path": str(summary_path),
+        "optimizer_data_source": "fits_readback" if use_readback else "in_memory",
+        "use_readback_for_optimization": bool(use_readback),
+        "original_shape": list(original.shape),
+        "cube_shape": list(read_cube.shape),
+        "original_dtype": str(original.dtype),
+        "fits_dtype_before_subblock_cast": fits_dtype_before_cast,
+        "readback_dtype": str(readback.dtype),
+        "max_abs_diff": float(np.max(abs_diff)),
+        "mean_abs_diff": float(np.mean(abs_diff)),
+        "rms_diff": float(np.sqrt(np.mean(diff * diff))),
+        "sum_diff": float(np.sum(diff)),
+        "exact_equal": bool(np.array_equal(original, readback)),
+        "allclose_zero_tolerance": bool(
+            np.allclose(original, readback, rtol=0.0, atol=0.0)
+        ),
+        "allclose_default": bool(np.allclose(original, readback)),
+    }
+
+    print("FITS round-trip diagnostic summary:")
+    print(f"  cube_path={cube_path}")
+    print(f"  original dtype/shape={summary['original_dtype']} {summary['original_shape']}")
+    print(
+        "  readback dtype/shape="
+        f"{summary['readback_dtype']} {summary['cube_shape']}"
+    )
+    print(
+        "  diff: "
+        f"max_abs={summary['max_abs_diff']:.6e} "
+        f"mean_abs={summary['mean_abs_diff']:.6e} "
+        f"rms={summary['rms_diff']:.6e}"
+    )
+    print(
+        "  equality: "
+        f"exact={summary['exact_equal']} "
+        f"allclose_zero_tol={summary['allclose_zero_tolerance']} "
+        f"allclose_default={summary['allclose_default']}"
+    )
+    print(f"  optimizer_data_source={summary['optimizer_data_source']}")
+
+    _write_json(summary_path, summary)
+
+    if use_readback:
+        return jnp.asarray(readback), summary
+    return data, summary
+
+
 def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ValueError("experiment config must be a mapping")
@@ -958,6 +1117,8 @@ def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
     optimizer_cfg = _optional_dict(experiment_cfg, "optimizer")
     outputs_cfg = _optional_dict(experiment_cfg, "outputs")
     priors_cfg = _optional_dict(experiment_cfg, "priors")
+    diagnostics_cfg = _optional_dict(experiment_cfg, "diagnostics")
+    fits_roundtrip_cfg_raw = _optional_dict(diagnostics_cfg, "fits_roundtrip")
 
     eigen_cfg_raw = experiment_cfg.get("eigenmodes", experiment_cfg.get("eigen"))
     if eigen_cfg_raw is None:
@@ -991,6 +1152,15 @@ def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
     outdir_value = outputs_cfg.get("outdir")
     if outdir_value is not None and not isinstance(outdir_value, str):
         raise ValueError("experiment.outputs.outdir must be a string or null")
+    fits_roundtrip_use_readback = _optional_bool(
+        fits_roundtrip_cfg_raw,
+        "use_readback",
+        False,
+    )
+    fits_roundtrip_enabled = (
+        _optional_bool(fits_roundtrip_cfg_raw, "enabled", False)
+        or fits_roundtrip_use_readback
+    )
 
     truncate_k_value = eigen_cfg.get("truncate_k", TRUNCATE_K)
     if truncate_k_value is not None and not isinstance(truncate_k_value, int):
@@ -1041,6 +1211,12 @@ def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
         "outputs": {
             "plots": plots_enabled,
             "outdir": outdir_value,
+        },
+        "diagnostics": {
+            "fits_roundtrip": {
+                "enabled": fits_roundtrip_enabled,
+                "use_readback": fits_roundtrip_use_readback,
+            },
         },
         "priors": priors_cfg,
         "eigenmodes": {
@@ -1101,6 +1277,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Disable eigenmode optimization (overrides experiment.eigenmodes.enable).",
     )
+    parser.add_argument(
+        "--fits-roundtrip-diagnostic",
+        dest="fits_roundtrip_diagnostic",
+        action="store_true",
+        default=None,
+        help=(
+            "Opt in to writing canonical data as a 1-frame subblock-style FITS "
+            "cube, reading it back, and writing fits_roundtrip_summary.json."
+        ),
+    )
+    parser.add_argument(
+        "--fits-roundtrip-use-readback",
+        dest="fits_roundtrip_use_readback",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable the FITS round-trip diagnostic and optimize canonical "
+            "astrometry on the read-back frame instead of the in-memory image."
+        ),
+    )
     return parser
 
 
@@ -1113,4 +1309,6 @@ if __name__ == "__main__":
         fast=bool(args.fast),
         results_dir=args.results_dir,
         use_eigen=args.use_eigen,
+        fits_roundtrip_diagnostic=args.fits_roundtrip_diagnostic,
+        fits_roundtrip_use_readback=args.fits_roundtrip_use_readback,
     )

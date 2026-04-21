@@ -89,6 +89,7 @@ __all__ = [
     # reparameterisation utils
     "generate_fim_labels",
     "map_labels_to_keys",
+    "build_fim_diagonal_preconditioner",
 ]
 
 
@@ -1792,6 +1793,86 @@ def fim_theta(
 
     # We don't need any special tricks here; θ is already flat.
     return jax.hessian(loss_fn)(theta_ref)
+
+
+def build_fim_diagonal_preconditioner(
+    fim: np.ndarray,
+    *,
+    curvature_floor: float = 1e-8,
+    eps: float = 1e-12,
+    lr_clip: Optional[tuple[float, float]] = None,
+) -> dict[str, onp.ndarray | dict[str, object]]:
+    """Build the canonical primitive-theta diagonal FIM preconditioner.
+
+    This implements the convention used by the canonical astrometry recipe:
+
+    ``curvature_vec = max(diag(FIM), curvature_floor)``
+    ``lr_vec = 1 / (curvature_vec + eps)``
+
+    ``lr_vec`` is a scale vector only. ``run_shera_gd`` applies the global
+    ``learning_rate`` separately, yielding SGD updates
+    ``theta <- theta - learning_rate * lr_vec * grad``.
+    """
+
+    fim_arr = onp.asarray(fim, dtype=float)
+    if fim_arr.ndim != 2 or fim_arr.shape[0] != fim_arr.shape[1]:
+        raise ValueError("FIM must be a square matrix.")
+    if not onp.all(onp.isfinite(fim_arr)):
+        raise ValueError("FIM contains non-finite values.")
+
+    curvature_floor = float(curvature_floor)
+    eps = float(eps)
+    if curvature_floor < 0.0:
+        raise ValueError("curvature_floor must be non-negative.")
+    if eps < 0.0:
+        raise ValueError("eps must be non-negative.")
+
+    fim_sym = 0.5 * (fim_arr + fim_arr.T)
+    fim_diag = onp.diag(fim_sym)
+    curvature_floored_count = int(onp.count_nonzero(fim_diag < curvature_floor))
+    curvature_vec = onp.maximum(fim_diag, curvature_floor)
+    lr_vec_unclipped = onp.reciprocal(curvature_vec + eps)
+    lr_vec = onp.array(lr_vec_unclipped, copy=True)
+    lr_clip_applied_count = 0
+    if lr_clip is not None:
+        lr_min, lr_max = lr_clip
+        lr_min = float(lr_min)
+        lr_max = float(lr_max)
+        if lr_min <= 0.0:
+            raise ValueError("lr_clip lower bound must be positive.")
+        if lr_max < lr_min:
+            raise ValueError("lr_clip upper bound must be >= lower bound.")
+        lr_clip_applied_count = int(
+            onp.count_nonzero((lr_vec < lr_min) | (lr_vec > lr_max))
+        )
+        lr_vec = onp.clip(lr_vec, lr_min, lr_max)
+
+    for name, arr in {
+        "fim_diag": fim_diag,
+        "curvature_vec": curvature_vec,
+        "lr_vec_unclipped": lr_vec_unclipped,
+        "lr_vec": lr_vec,
+    }.items():
+        if not onp.all(onp.isfinite(arr)):
+            raise ValueError(f"Non-finite values encountered in {name}.")
+    if onp.any(lr_vec <= 0.0):
+        raise ValueError("Preconditioning vector must be strictly positive.")
+
+    return {
+        "fim": fim_sym,
+        "fim_diag": fim_diag,
+        "curvature_vec": curvature_vec,
+        "lr_vec_unclipped": lr_vec_unclipped,
+        "lr_vec": lr_vec,
+        "config": {
+            "method": "fim_diag",
+            "curvature_floor": curvature_floor,
+            "curvature_floored_count": curvature_floored_count,
+            "eps": eps,
+            "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
+            "lr_clip_applied_count": lr_clip_applied_count,
+        },
+    }
 
 
 def fim_theta_shera(

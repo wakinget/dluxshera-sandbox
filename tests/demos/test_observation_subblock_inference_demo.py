@@ -41,12 +41,18 @@ def _build_inference_config(
     n_iter: int,
     write_plots: bool,
     enable_preconditioning: bool = False,
+    active_frame_keys: list[str] | None = None,
 ) -> dict[str, object]:
     data: dict[str, object] = {"cube": str(cube_path)}
     if trace_path is not None:
         data["truth_trace"] = str(trace_path)
     if manifest_path is not None:
         data["manifest"] = str(manifest_path)
+    frame_keys = active_frame_keys or [
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.position_angle_deg",
+    ]
 
     return {
         "system": _base_system_block(),
@@ -70,11 +76,7 @@ def _build_inference_config(
                     "shared": {},
                 },
                 "active": {
-                    "frame_keys": [
-                        "source.x_position_as",
-                        "source.y_position_as",
-                        "source.position_angle_deg",
-                    ],
+                    "frame_keys": frame_keys,
                     "shared_keys": [],
                 },
                 "priors": {"frame": {}, "shared": {}},
@@ -215,6 +217,79 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert np.isfinite(float(result["initial_loss"]))
     assert np.isfinite(float(result["final_loss"]))
     assert float(result["final_loss"]) <= float(result["initial_loss"])
+
+
+def test_observation_subblock_inference_accepts_partial_truth_trace(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    render_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "observation_subblock.py",
+        "observation_subblock_recipe_for_partial_truth",
+    )
+    inference_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "observation_subblock_inference.py",
+        "observation_subblock_inference_recipe_partial_truth",
+    )
+
+    render_cfg_path = (
+        repo_root
+        / "examples"
+        / "recipes"
+        / "observation_subblock_template"
+        / "subblock_generation_prescription.yaml"
+    )
+    render_result = render_recipe.generate_obs_subblock(
+        config_path=render_cfg_path,
+        results_dir=tmp_path / "render_results_partial_truth",
+        run_name="render_for_partial_truth",
+        show_progress=False,
+    )
+
+    cfg = _build_inference_config(
+        cube_path=Path(render_result["artifacts"]["cube_fits"]),
+        trace_path=Path(render_result["artifacts"]["frame_truth_csv"]),
+        manifest_path=None,
+        outputs_outdir=tmp_path / "inference_results_partial_truth",
+        n_iter=1,
+        write_plots=False,
+        enable_preconditioning=True,
+        active_frame_keys=[
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+            "source.log_flux_total",
+        ],
+    )
+    cfg_path = tmp_path / "inference_partial_truth_config.json"
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+    result = inference_recipe.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--run-name",
+            "inference_partial_truth",
+            "--no-progress",
+        ]
+    )
+
+    artifacts = {name: Path(path) for name, path in result["artifacts"].items()}
+    assert artifacts["truth_comparison_csv"].exists()
+    comparison_rows = _read_csv_rows(artifacts["truth_comparison_csv"])
+    assert "source.log_flux_total_truth" in comparison_rows[0]
+    assert result["truth"]["frame_key_sources"] == {
+        "source.x_position_as": "trace_csv",
+        "source.y_position_as": "trace_csv",
+        "source.position_angle_deg": "trace_csv",
+        "source.log_flux_total": "resolved_store",
+    }
+
+    manifest = json.loads(artifacts["manifest_json"].read_text(encoding="utf-8"))
+    assert manifest["truth"]["frame_key_sources"]["source.log_flux_total"] == (
+        "resolved_store"
+    )
+    assert manifest["truth"]["complete_for_active_frame_keys"] is True
+    assert manifest["truth_comparison_available"] is True
+    assert manifest["optimizer"]["preconditioning"]["reference_source"] == "truth_mixed"
 
 
 def test_observation_subblock_inference_recipe_without_truth_still_writes_core_outputs(tmp_path):

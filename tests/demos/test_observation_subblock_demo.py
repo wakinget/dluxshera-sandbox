@@ -28,7 +28,7 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
         / "examples"
         / "recipes"
         / "observation_subblock_template"
-        / "prescription.yaml"
+        / "subblock_generation_prescription.yaml"
     )
 
     result = recipe.generate_obs_subblock(
@@ -50,6 +50,8 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
     assert cube is not None
     assert cube.ndim == 3
     assert cube.shape[0] == 3
+    assert cube.dtype.kind == "f"
+    assert cube.dtype.itemsize == 8
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for key in (
@@ -66,6 +68,8 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
         "noise",
         "system",
         "artifacts",
+        "runtime",
+        "render",
     ):
         assert key in manifest
     assert manifest["applied_varying_keys"] == [
@@ -73,11 +77,17 @@ def test_observation_subblock_recipe_runs_and_writes_artifacts(tmp_path):
         "source.y_position_as",
         "source.position_angle_deg",
     ]
-    assert manifest["inputs"]["config_path"].endswith("observation_subblock_template/prescription.yaml")
-    assert manifest["system"]["resolved_config"]["preset"] == "SHERA_TESTBED_3P"
-    assert manifest["shared_truth"]["source"]["exposure_time_s"] == 0.05
+    assert manifest["inputs"]["config_path"].endswith(
+        "observation_subblock_template/subblock_generation_prescription.yaml"
+    )
+    assert manifest["system"]["resolved_config"]["preset"] == "SHERA_FLIGHT_3P"
+    assert manifest["system"]["resolved_config"]["source"]["exposure_time_s"] == 0.05
+    assert manifest["shared_truth"] == {}
     assert manifest["seed"] == 42
     assert manifest["noise"]["enabled"] is False
+    assert manifest["runtime"]["jax_enable_x64"] is True
+    assert manifest["render"]["cube_dtype"] == "float64"
+    assert manifest["render"]["cube_dtype_source"] == "in_memory_before_fits_write"
     assert not manifest["trace"]["path"].startswith("/")
 
 
@@ -100,10 +110,10 @@ def test_observation_subblock_varying_keys_are_applied_and_validated(tmp_path):
     base_cfg = {
         "system": {"preset": "SHERA_TESTBED_3P"},
         "experiment": {
-            "kind": "observation_subblock",
+            "kind": "subblock_generation",
             "seed": 42,
             "truth": {"source": {"exposure_time_s": 0.05}},
-            "observation_subblock": {
+            "subblock": {
                 "trace": {"format": "csv", "path": str(trace_path)},
                 "validate": {
                     "require_contiguous_frame_index": True,
@@ -129,10 +139,10 @@ def test_observation_subblock_varying_keys_are_applied_and_validated(tmp_path):
 
     cfg_custom = dict(base_cfg)
     cfg_custom["experiment"] = dict(base_cfg["experiment"])
-    cfg_custom["experiment"]["observation_subblock"] = dict(
-        base_cfg["experiment"]["observation_subblock"]
+    cfg_custom["experiment"]["subblock"] = dict(
+        base_cfg["experiment"]["subblock"]
     )
-    cfg_custom["experiment"]["observation_subblock"]["varying_keys"] = [
+    cfg_custom["experiment"]["subblock"]["varying_keys"] = [
         "source.x_position_as",
         "optics.plate_scale_as_per_pix",
     ]
@@ -146,10 +156,10 @@ def test_observation_subblock_varying_keys_are_applied_and_validated(tmp_path):
 
     cfg_invalid = dict(base_cfg)
     cfg_invalid["experiment"] = dict(base_cfg["experiment"])
-    cfg_invalid["experiment"]["observation_subblock"] = dict(
-        base_cfg["experiment"]["observation_subblock"]
+    cfg_invalid["experiment"]["subblock"] = dict(
+        base_cfg["experiment"]["subblock"]
     )
-    cfg_invalid["experiment"]["observation_subblock"]["varying_keys"] = [
+    cfg_invalid["experiment"]["subblock"]["varying_keys"] = [
         "metadata.only",
     ]
     cfg_invalid_path = tmp_path / "prescription_invalid_varying.json"

@@ -47,6 +47,11 @@ def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(t
         shared_truth={"source": {"exposure_time_s": 0.05}},
         seed=42,
         noise={"enabled": False},
+        runtime_info={"jax_enable_x64": True},
+        render_info={
+            "cube_dtype": "float64",
+            "cube_dtype_source": "in_memory_before_fits_write",
+        },
     )
 
     manifest_path = outdir / "manifest.json"
@@ -72,4 +77,7 @@ def test_obs_subblock_manifest_contains_required_fields_and_relative_artifacts(t
     assert manifest["shared_truth"]["source"]["exposure_time_s"] == 0.05
     assert manifest["seed"] == 42
     assert manifest["noise"]["enabled"] is False
+    assert manifest["runtime"]["jax_enable_x64"] is True
+    assert manifest["render"]["cube_dtype"] == "float64"
+    assert manifest["render"]["cube_dtype_source"] == "in_memory_before_fits_write"
     assert manifest_path.exists()
