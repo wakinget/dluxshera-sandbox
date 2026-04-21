@@ -42,7 +42,11 @@ def _minimal_base_config() -> dict:
                     "frame_keys": list(module.CURRENT_TOY_FRAME_KEYS),
                     "shared_keys": [],
                 },
-                "objective": {"kind": "nll", "reduce": "sum"},
+                "objective": {
+                    "kind": "nll",
+                    "frame_reduce": "sum",
+                    "subblock_reduce": "sum",
+                },
                 "optimizer": {
                     "kind": "sgd",
                     "base_lr": 0.5,
@@ -170,10 +174,12 @@ def test_patch_config_for_adam_point_keeps_base_config_pristine(tmp_path):
     )
 
     assert module.validate_current_toy_config(base_cfg) == module.CURRENT_TOY_FRAME_KEYS
-    assert base_cfg["experiment"]["inference"]["objective"]["reduce"] == "sum"
+    assert base_cfg["experiment"]["inference"]["objective"]["frame_reduce"] == "sum"
+    assert base_cfg["experiment"]["inference"]["objective"]["subblock_reduce"] == "sum"
     assert base_cfg["experiment"]["inference"]["optimizer"]["kind"] == "sgd"
     optimizer = patched["experiment"]["inference"]["optimizer"]
-    assert patched["experiment"]["inference"]["objective"]["reduce"] == "mean"
+    assert patched["experiment"]["inference"]["objective"]["frame_reduce"] == "mean"
+    assert patched["experiment"]["inference"]["objective"]["subblock_reduce"] == "sum"
     assert optimizer["kind"] == "adam"
     assert optimizer["base_lr"] == pytest.approx(3.0e-4)
     assert optimizer["kwargs"] == {"b1": 0.7, "b2": 0.99, "eps": 1.0e-8}
@@ -198,7 +204,8 @@ def test_aggregate_outputs_write_results_manifest_and_ranked_summary(tmp_path):
             "optimizer.kwargs.b1": point_a.b1,
             "optimizer.kwargs.b2": point_a.b2,
             "optimizer.kwargs.eps": point_a.eps,
-            "objective.reduce": "mean",
+            "objective.frame_reduce": "mean",
+            "objective.subblock_reduce": "sum",
             "final_truth_score": 0.5,
             "iter_to_90pct_improvement": 7,
             "settling_iter_tol": 8,
@@ -216,7 +223,8 @@ def test_aggregate_outputs_write_results_manifest_and_ranked_summary(tmp_path):
             "optimizer.kwargs.b1": point_b.b1,
             "optimizer.kwargs.b2": point_b.b2,
             "optimizer.kwargs.eps": point_b.eps,
-            "objective.reduce": "mean",
+            "objective.frame_reduce": "mean",
+            "objective.subblock_reduce": "sum",
             "final_truth_score": 0.25,
             "iter_to_90pct_improvement": 9,
             "settling_iter_tol": 12,
@@ -258,6 +266,8 @@ def test_aggregate_outputs_write_results_manifest_and_ranked_summary(tmp_path):
     assert manifest["schema_version"] == module.MANIFEST_SCHEMA_VERSION
     assert manifest["outputs"]["results_csv"] == module.RESULTS_CSV
     assert manifest["recommendation"]["run_id"] == point_b.run_id
+    assert manifest["recommendation"]["objective"]["frame_reduce"] == "mean"
+    assert manifest["recommendation"]["objective"]["subblock_reduce"] == "sum"
     assert manifest["recommendation"]["optimizer"]["base_lr"] == pytest.approx(3.0e-3)
     assert manifest["recommendation"]["metrics"]["settling_iter_tol"] == pytest.approx(12)
     assert manifest["recommendation"]["metrics"]["ringing_index"] == pytest.approx(0.5)

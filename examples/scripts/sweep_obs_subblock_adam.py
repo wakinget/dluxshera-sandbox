@@ -80,7 +80,8 @@ RESULT_FIELD_ORDER = (
     "optimizer.kwargs.b1",
     "optimizer.kwargs.b2",
     "optimizer.kwargs.eps",
-    "objective.reduce",
+    "objective.frame_reduce",
+    "objective.subblock_reduce",
     "optimizer.n_iter",
     "frame_count",
     "output_dir",
@@ -267,7 +268,9 @@ def patch_config_for_adam_point(
     experiment = cfg.setdefault("experiment", {})
     inference = experiment.setdefault("inference", {})
     objective = inference.setdefault("objective", {})
-    objective["reduce"] = "mean"
+    objective["frame_reduce"] = "mean"
+    objective["subblock_reduce"] = "sum"
+    objective.pop("reduce", None)
 
     optimizer = inference.setdefault("optimizer", {})
     optimizer["kind"] = "adam"
@@ -732,7 +735,10 @@ def recommendation_from_ranked_rows(
         "run_id": best["run_id"],
         "rank": int(best["rank"]),
         "optimizer": optimizer,
-        "objective": {"reduce": best.get("objective.reduce", "mean")},
+        "objective": {
+            "frame_reduce": best.get("objective.frame_reduce", "mean"),
+            "subblock_reduce": best.get("objective.subblock_reduce", "sum"),
+        },
         "metrics": {
             "final_truth_score": _numeric_rank_value(best, "final_truth_score"),
             "iter_to_90pct_improvement": _numeric_rank_value(
@@ -778,7 +784,8 @@ def _write_recommendation_files(
             f"    b2: {kwargs['b2']}\n"
             f"    eps: {kwargs['eps']}\n"
             "objective:\n"
-            f"  reduce: {recommendation['objective']['reduce']}\n"
+            f"  frame_reduce: {recommendation['objective']['frame_reduce']}\n"
+            f"  subblock_reduce: {recommendation['objective']['subblock_reduce']}\n"
             "```\n\n"
             f"Final truth score: {metrics['final_truth_score']:.6g}\n\n"
             f"Iteration to 90 percent improvement: "
@@ -928,7 +935,8 @@ def write_aggregate_outputs(
         },
         "grid": {
             "optimizer.kind": "adam",
-            "objective.reduce": "mean",
+            "objective.frame_reduce": "mean",
+            "objective.subblock_reduce": "sum",
             "base_lrs": sorted({point.base_lr for point in grid}),
             "b1s": sorted({point.b1 for point in grid}),
             "b2s": sorted({point.b2 for point in grid}),
@@ -1023,7 +1031,8 @@ def _base_result_row(
         "optimizer.kwargs.b1": point.b1,
         "optimizer.kwargs.b2": point.b2,
         "optimizer.kwargs.eps": point.eps,
-        "objective.reduce": "mean",
+        "objective.frame_reduce": "mean",
+        "objective.subblock_reduce": "sum",
         "output_dir": str(run_dir),
         "config_path": str(config_path),
     }

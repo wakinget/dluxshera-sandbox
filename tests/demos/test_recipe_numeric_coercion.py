@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 
@@ -38,7 +39,8 @@ def _subblock_experiment_cfg() -> dict:
             "temporal": {"frame_model": {"kind": "independent"}},
             "objective": {
                 "kind": "nll",
-                "reduce": "sum",
+                "frame_reduce": "sum",
+                "subblock_reduce": "sum",
                 "noise_model": {
                     "kind": "gaussian",
                     "variance_model": "scalar",
@@ -74,8 +76,11 @@ def test_subblock_validation_normalizes_scientific_optimizer_values():
 
     validated = recipe._validate_experiment_cfg(_subblock_experiment_cfg())
     optimizer = validated["inference"]["optimizer"]
+    objective = validated["inference"]["objective"]
     preconditioning = optimizer["preconditioning"]
 
+    assert objective["frame_reduce"] == "sum"
+    assert objective["subblock_reduce"] == "sum"
     assert optimizer["base_lr"] == pytest.approx(1e-3)
     assert optimizer["kwargs"]["b1"] == pytest.approx(0.9)
     assert optimizer["kwargs"]["eps"] == pytest.approx(1e-8)
@@ -97,6 +102,56 @@ def test_subblock_validation_rejects_bad_optimizer_eps(bad_value):
 
     with pytest.raises(ValueError, match="experiment.inference.optimizer.kwargs.eps"):
         recipe._validate_experiment_cfg(cfg)
+
+
+def test_subblock_validation_maps_legacy_reduce_to_frame_and_subblock_defaults():
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_legacy_reduce_tests",
+    )
+    cfg = _subblock_experiment_cfg()
+    objective = cfg["inference"]["objective"]
+    objective.pop("frame_reduce")
+    objective.pop("subblock_reduce")
+    objective["reduce"] = "mean"
+
+    validated = recipe._validate_experiment_cfg(cfg)
+
+    assert validated["inference"]["objective"]["frame_reduce"] == "mean"
+    assert validated["inference"]["objective"]["subblock_reduce"] == "sum"
+    assert "reduce" not in validated["inference"]["objective"]
+
+
+def test_subblock_validation_prefers_new_reduction_fields_over_legacy_reduce():
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_reduce_precedence_tests",
+    )
+    cfg = _subblock_experiment_cfg()
+    cfg["inference"]["objective"]["reduce"] = "sum"
+    cfg["inference"]["objective"]["frame_reduce"] = "mean"
+    cfg["inference"]["objective"]["subblock_reduce"] = "mean"
+
+    validated = recipe._validate_experiment_cfg(cfg)
+
+    assert validated["inference"]["objective"]["frame_reduce"] == "mean"
+    assert validated["inference"]["objective"]["subblock_reduce"] == "mean"
+
+
+def test_subblock_term_reduction_helper_respects_sum_and_mean():
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_reduction_helper_tests",
+    )
+
+    per_frame_terms = recipe.jnp.asarray(np.array([2.0, 4.0, 8.0], dtype=float))
+
+    assert float(recipe._reduce_subblock_terms(per_frame_terms, reduce="sum")) == pytest.approx(
+        14.0
+    )
+    assert float(
+        recipe._reduce_subblock_terms(per_frame_terms, reduce="mean")
+    ) == pytest.approx(14.0 / 3.0)
 
 
 def test_canonical_validation_normalizes_optimizer_kwargs():

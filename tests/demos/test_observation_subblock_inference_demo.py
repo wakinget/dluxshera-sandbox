@@ -81,7 +81,8 @@ def _build_inference_config(
                 "temporal": {"frame_model": {"kind": "independent"}},
                 "objective": {
                     "kind": "nll",
-                    "reduce": "sum",
+                    "frame_reduce": "sum",
+                    "subblock_reduce": "sum",
                     "noise_model": {
                         "kind": "gaussian",
                         "variance_model": "scalar",
@@ -203,6 +204,9 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert manifest["init"]["frame"]["values"]["source.x_position_as"] == 0.0
     assert manifest["init"]["frame"]["values"]["source.y_position_as"] == 0.0
     assert manifest["init"]["frame"]["values"]["source.position_angle_deg"] == 90.0
+    assert manifest["objective"]["frame_reduce"] == "sum"
+    assert manifest["objective"]["subblock_reduce"] == "sum"
+    assert "reduce" not in manifest["objective"]
     precond_meta = manifest["optimizer"]["preconditioning"]
     assert precond_meta["enabled"] is True
     assert precond_meta["theta_dim"] > 0
@@ -275,3 +279,5 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
     assert manifest["truth_comparison_available"] is False
     assert manifest["frame_count"] == int(result["frame_count"])
     assert manifest["inputs"]["manifest_auto_discovered"] is False
+    assert manifest["objective"]["frame_reduce"] == "sum"
+    assert manifest["objective"]["subblock_reduce"] == "sum"

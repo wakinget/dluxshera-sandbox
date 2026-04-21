@@ -76,6 +76,7 @@ from dluxshera.inference.optimization import fim_theta, run_shera_gd
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.dtype_diagnostics import print_dtype_audit
 from dluxshera.utils.obs_subblock_io import (
     find_obs_subblock_sidecar_manifest,
     now_iso_local_ms,
@@ -103,6 +104,8 @@ DEFAULT_PRESCRIPTION_PATH = Path(
 DEFAULT_OUTDIR_ROOT = Path("Results/subblock_inference")
 MANIFEST_SCHEMA_VERSION = "subblock_inference_manifest.v1"
 GENERATOR_ID = "examples/recipes/observation_subblock_inference.py"
+JAX_ENABLE_X64 = True
+PARAMETER_RESIDUAL_LOG_FLOOR = 1.0e-18
 TRACE_VALIDATE_DEFAULTS = {
     "require_contiguous_frame_index": True,
     "require_monotonic_time": True,
@@ -360,6 +363,7 @@ def _build_artifact_paths(
     include_parameter_residual_history_heatmap: bool = False,
     include_parameter_history_lines: bool = False,
     include_parameter_residual_history_lines: bool = False,
+    include_parameter_abs_residual_history_lines: bool = False,
 ) -> dict[str, Path]:
     """Return artifact paths for one inference run."""
 
@@ -401,6 +405,11 @@ def _build_artifact_paths(
         if include_parameter_residual_history_lines:
             artifacts["parameter_residual_history_lines_png"] = (
                 outdir / f"{file_prefix}_{timestamp}_parameter_residual_history_lines.png"
+            )
+        if include_parameter_abs_residual_history_lines:
+            artifacts["parameter_abs_residual_history_lines_png"] = (
+                outdir
+                / f"{file_prefix}_{timestamp}_parameter_abs_residual_history_lines.png"
             )
     return artifacts
 
@@ -771,6 +780,47 @@ def _build_variance_cube(
     raise ValueError(f"Unsupported objective.noise_model.variance_model: {variance_model!r}")
 
 
+def _normalize_objective_reductions(
+    objective_cfg: dict[str, Any],
+) -> tuple[str, str]:
+    """Resolve frame/subblock reductions, honoring the legacy ``reduce`` field."""
+
+    legacy_reduce = objective_cfg.get("reduce")
+    frame_reduce_raw = objective_cfg.get("frame_reduce", legacy_reduce if legacy_reduce is not None else "sum")
+    subblock_reduce_raw = objective_cfg.get("subblock_reduce", "sum")
+
+    frame_reduce = str(frame_reduce_raw)
+    if frame_reduce not in {"sum", "mean"}:
+        raise ValueError(
+            "experiment.inference.objective.frame_reduce must be 'sum' or 'mean'."
+        )
+
+    subblock_reduce = str(subblock_reduce_raw)
+    if subblock_reduce not in {"sum", "mean"}:
+        raise ValueError(
+            "experiment.inference.objective.subblock_reduce must be 'sum' or 'mean'."
+        )
+
+    return frame_reduce, subblock_reduce
+
+
+def _reduce_subblock_terms(
+    per_frame_terms: jnp.ndarray,
+    *,
+    reduce: str,
+) -> jnp.ndarray:
+    """Aggregate frame-level terms into one sub-block data term."""
+
+    if reduce == "sum":
+        return jnp.sum(per_frame_terms)
+    if reduce == "mean":
+        return jnp.mean(per_frame_terms)
+    raise ValueError(
+        "Sub-block reduction must be 'sum' or 'mean'. "
+        f"Got {reduce!r}."
+    )
+
+
 def _build_prior_term_fn(
     priors_cfg: dict[str, Any],
 ) -> Callable[[ActiveState], jnp.ndarray]:
@@ -857,11 +907,8 @@ def _build_objective_bundle(
             f"{noise_model_kind!r}."
         )
 
-    reduce = str(objective_cfg["reduce"])
-    if reduce not in {"sum", "mean"}:
-        raise ValueError(
-            "experiment.inference.objective.reduce must be 'sum' or 'mean'."
-        )
+    frame_reduce = str(objective_cfg["frame_reduce"])
+    subblock_reduce = str(objective_cfg["subblock_reduce"])
 
     data_cube = jnp.asarray(cube_data)
     var_cube = jnp.asarray(variance_cube)
@@ -901,13 +948,21 @@ def _build_objective_bundle(
             var_frame: jnp.ndarray,
         ) -> jnp.ndarray:
             model_frame = _frame_model(shared_store, frame_values)
-            return gaussian_image_nll(model_frame, data_frame, var_frame, reduce=reduce)
+            return gaussian_image_nll(
+                model_frame,
+                data_frame,
+                var_frame,
+                reduce=frame_reduce,
+            )
 
         return jax.vmap(_frame_loss)(state.frame, data_cube, var_cube)
 
     def _objective_terms(theta_flat: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         state = _unpack_active_state(layout, theta_flat)
-        data_term = jnp.sum(_per_frame_data_terms_from_state(state))
+        data_term = _reduce_subblock_terms(
+            _per_frame_data_terms_from_state(state),
+            reduce=subblock_reduce,
+        )
         prior_term = prior_term_fn(state)
         temporal_term = temporal_term_fn(state)
         return data_term, prior_term, temporal_term
@@ -1617,6 +1672,8 @@ def _plot_parameter_history_lines(
     title: str = "Frame-varying active-state optimizer history",
     ylabel_suffix: str = "",
     zero_line: bool = False,
+    log_scale: bool = False,
+    positive_floor: float | None = None,
 ) -> None:
     """Plot frame-wise parameter trajectories as compact line panels."""
 
@@ -1634,16 +1691,21 @@ def _plot_parameter_history_lines(
     )
     for key_index, ax in enumerate(axes[:, 0]):
         for frame_index in range(n_frame):
+            values = np.asarray(history[:, frame_index, key_index], dtype=float)
+            if positive_floor is not None:
+                values = np.clip(values, positive_floor, None)
             ax.plot(
                 iterations,
-                history[:, frame_index, key_index],
+                values,
                 linewidth=1.0,
                 marker="o" if n_step <= 20 else None,
                 markersize=2.5,
                 label=f"frame {frame_index}",
             )
-        if zero_line:
+        if zero_line and not log_scale:
             ax.axhline(0.0, color="k", linestyle=":", linewidth=0.8, alpha=0.6)
+        if log_scale:
+            ax.set_yscale("log")
         ax.axvline(
             int(iterations[-1]),
             color="k",
@@ -2000,11 +2062,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         "kind",
         path="experiment.inference.objective",
     )
-    reduce = str(objective_cfg.get("reduce", "sum"))
-    if reduce not in {"sum", "mean"}:
-        raise ValueError(
-            "experiment.inference.objective.reduce must be 'sum' or 'mean'."
-        )
+    frame_reduce, subblock_reduce = _normalize_objective_reductions(objective_cfg)
     noise_model_cfg = _required_dict(
         objective_cfg,
         "noise_model",
@@ -2199,7 +2257,8 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
             },
             "objective": {
                 "kind": objective_kind,
-                "reduce": reduce,
+                "frame_reduce": frame_reduce,
+                "subblock_reduce": subblock_reduce,
                 "noise_model": {
                     "kind": noise_model_kind,
                     "variance_model": variance_model,
@@ -2294,6 +2353,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     """Run the observation sub-block inference recipe and return run metadata."""
+    jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
     args = _build_parser().parse_args(argv)
 
@@ -2463,6 +2523,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 inference_cfg["diagnostics"]["plot_parameter_residual_history_lines"]
             )
         ),
+        include_parameter_abs_residual_history_lines=(
+            active_layout.frame_width > 0 and comparison_trace is not None
+        ),
     )
     diag_cfg = inference_cfg["diagnostics"]
     if bool(diag_cfg["save_first_step_json"]):
@@ -2510,7 +2573,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     print(
         "Objective setup: "
         f"kind={inference_cfg['objective']['kind']} "
-        f"reduce={inference_cfg['objective']['reduce']} "
+        f"frame_reduce={inference_cfg['objective']['frame_reduce']} "
+        f"subblock_reduce={inference_cfg['objective']['subblock_reduce']} "
         f"noise_model={inference_cfg['objective']['noise_model']['kind']} "
         f"variance_model={inference_cfg['objective']['noise_model']['variance_model']} "
         f"variance({_format_array_stats(variance_cube)})"
@@ -2525,6 +2589,23 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         objective_cfg=inference_cfg["objective"],
         priors_cfg=inference_cfg["priors"],
         temporal_cfg=inference_cfg["temporal"],
+    )
+    theta0_model_cube = objective_bundle.predict_cube_fn(theta0)
+    theta0_per_frame_terms = objective_bundle.per_frame_data_terms_fn(theta0)
+    theta0_total_loss = objective_bundle.total_loss_fn(theta0)
+    print_dtype_audit(
+        "observation_subblock_inference data_and_loss",
+        {
+            "cube": cube,
+            "reference_image": reference_image,
+            "variance_cube": variance_cube,
+            "initial_frame_state": initial_state.frame,
+            "initial_shared_state": initial_state.shared,
+            "theta0": theta0,
+            "theta0_model_cube": theta0_model_cube,
+            "theta0_per_frame_data_terms": theta0_per_frame_terms,
+            "theta0_total_loss": theta0_total_loss,
+        },
     )
 
     if args.dry_run:
@@ -2587,6 +2668,21 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     "message": "Theta preconditioning was disabled for this run.",
                 },
             )
+    print_dtype_audit(
+        "observation_subblock_inference optimizer",
+        {
+            "theta0": theta0,
+            "preconditioner_fim": (
+                None if preconditioning_bundle is None else preconditioning_bundle.fim
+            ),
+            "preconditioner_diag": (
+                None
+                if preconditioning_bundle is None
+                else preconditioning_bundle.preconditioner_diag
+            ),
+            "lr_vec": lr_vec,
+        },
+    )
 
     configured_first_step: dict[str, Any] | None = None
     if (
@@ -2865,6 +2961,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                         "plot_parameter_residual_history_lines"
                     ]
                 )
+                or "parameter_abs_residual_history_lines_png" in artifacts
             )
             if history_plot_requested:
                 iterations, frame_history = _build_frame_history_from_theta_trace(
@@ -2911,6 +3008,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                         title="Frame-varying residual optimizer history",
                         ylabel_suffix=" residual",
                         zero_line=True,
+                    )
+                if (
+                    truth_matrix is not None
+                    and "parameter_abs_residual_history_lines_png" in artifacts
+                ):
+                    _plot_parameter_history_lines(
+                        iterations=iterations,
+                        frame_history=np.abs(frame_history - truth_matrix[None, :, :]),
+                        labels=active_layout.frame_keys,
+                        output_path=artifacts["parameter_abs_residual_history_lines_png"],
+                        title="Frame-varying absolute residual optimizer history",
+                        ylabel_suffix=" |residual|",
+                        log_scale=True,
+                        positive_floor=PARAMETER_RESIDUAL_LOG_FLOOR,
                     )
             if truth_matrix is not None:
                 _plot_trace_comparison(

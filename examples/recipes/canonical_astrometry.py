@@ -82,6 +82,7 @@ from dluxshera.params.packing import (
     unpack_params as store_unpack_params,
 )
 from dluxshera.params.store import ParameterStore
+from dluxshera.utils.dtype_diagnostics import print_dtype_audit
 from dluxshera.utils.noise import apply_observation_noise
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
@@ -331,6 +332,19 @@ def main(
     theta_true = pack_params(inference_subspec, truth_store)
     loss_true = loss_fn(theta_true)
     loss0 = loss_fn(theta0)
+    print_dtype_audit(
+        "canonical_astrometry data_and_loss",
+        {
+            "data_psf": data_psf,
+            "data": data,
+            "data_var": data_var,
+            "init_psf": init_psf,
+            "theta_true": theta_true,
+            "theta0": theta0,
+            "loss_true": loss_true,
+            "loss0": loss0,
+        },
+    )
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
@@ -459,6 +473,17 @@ def main(
         theta0_opt = theta0
         theta_space = "primitive"
         precond_meta = {"lr_vec": lr_vec}
+
+    print_dtype_audit(
+        "canonical_astrometry optimizer",
+        {
+            "F": F,
+            "fim_diag": fim_diag,
+            "theta0_opt": theta0_opt,
+            "curvature_vec": curvature_vec,
+            "lr_vec": lr_vec,
+        },
+    )
 
     print(
         "FIM diag: min={:.3e}, max={:.3e}".format(

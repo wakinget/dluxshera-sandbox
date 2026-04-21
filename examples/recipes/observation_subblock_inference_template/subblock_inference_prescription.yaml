@@ -156,7 +156,10 @@ experiment:
     objective:
       # First milestone: NLL-style image-domain block objective.
       kind: nll
-      reduce: sum
+      # frame_reduce applies within each frame's pixel-domain Gaussian image NLL.
+      # subblock_reduce aggregates the resulting per-frame terms across the block.
+      frame_reduce: sum
+      subblock_reduce: sum
 
       noise_model:
         # This should describe how the variance used by the Gaussian image NLL is built.

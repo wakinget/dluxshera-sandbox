@@ -16,6 +16,11 @@ per-frame:
 
 while keeping all shared model parameters fixed.
 
+Within `experiment.inference.objective`, the recipe now separates:
+
+- `frame_reduce`: pixel-domain reduction within each frame's Gaussian image NLL
+- `subblock_reduce`: aggregation across the resulting frame-level terms
+
 ## Recommended workflow
 
 1. Generate a trace CSV:
@@ -85,7 +90,8 @@ PYTHONPATH=src python examples/scripts/sweep_obs_subblock_adam.py \
 The default grid is:
 
 - `optimizer.kind: adam`
-- `objective.reduce: mean`
+- `objective.frame_reduce: mean`
+- `objective.subblock_reduce: sum`
 - `optimizer.base_lr` in `[0.03, 0.04, 0.05, 0.06]`
 - `optimizer.kwargs.b1` in `[0.65, 0.7, 0.75]`
 - `optimizer.kwargs.b2` in `[0.999]`
@@ -189,6 +195,13 @@ The current recipe accepts:
 - `experiment.inference.objective`
 - `experiment.inference.optimizer`
 - `experiment.inference.diagnostics`
+
+For the current objective schema:
+
+- `objective.frame_reduce` controls pixel aggregation inside each frame
+- `objective.subblock_reduce` controls aggregation across frame-level data terms
+- legacy `objective.reduce` is still accepted for compatibility and maps to
+  `frame_reduce = reduce`, `subblock_reduce = sum`
 
 Optimizer diagnostics can be enabled with:
 

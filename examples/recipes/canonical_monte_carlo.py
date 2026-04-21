@@ -50,6 +50,7 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.plot.plotting import apply_plot_defaults, get_default_cmaps, plot_fim
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.dtype_diagnostics import print_dtype_audit
 
 ##############################
 # MAIN SIMULATION PARAMETERS #
@@ -366,6 +367,18 @@ def main(
         )
 
     fim_diag = jnp.diag(F)
+    print_dtype_audit(
+        "canonical_monte_carlo shared_inputs",
+        {
+            "data_psf": data_psf,
+            "data": data,
+            "data_var": data_var,
+            "theta_true": theta_true,
+            "loss_true": loss_true,
+            "F": F,
+            "fim_diag": fim_diag,
+        },
+    )
 
     if use_eigen:
         theta_space = "eigen"
@@ -505,7 +518,20 @@ def main(
             loss_opt = nll_loss_fn
             theta0_opt = theta0
 
+        loss_init = float(nll_loss_fn(theta0))
         lr_vec = np.asarray(lr_vec) if lr_vec is not None else None
+        if run_index == 0:
+            print_dtype_audit(
+                "canonical_monte_carlo first_run_optimizer",
+                {
+                    "init_psf": init_psf,
+                    "theta0": theta0,
+                    "theta0_opt": theta0_opt,
+                    "loss_init": loss_init,
+                    "curvature_vec": curvature_vec,
+                    "lr_vec": lr_vec,
+                },
+            )
         metric_payload = {
             "theta_ref": np.asarray(theta0_opt),
             "metric_diag": np.asarray(curvature_vec),
@@ -555,7 +581,6 @@ def main(
         final_store = store_unpack_params(inference_subspec, theta_final, init_store)
         final_psf = binder.model(binder.strip_structural(final_store))
 
-        loss_init = float(nll_loss_fn(theta0))
         loss_final = float(nll_loss_fn(theta_final))
         improvement_ratio = loss_init / loss_final if loss_final != 0 else float("nan")
 
