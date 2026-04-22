@@ -85,6 +85,7 @@ def test_subblock_validation_normalizes_scientific_optimizer_values():
     assert optimizer["kwargs"]["b1"] == pytest.approx(0.9)
     assert optimizer["kwargs"]["eps"] == pytest.approx(1e-8)
     assert optimizer["kwargs"]["eps_root"] == pytest.approx(1.0e-8)
+    assert preconditioning["method"] == "auto"
     assert preconditioning["damping"] == pytest.approx(5e-4)
     assert preconditioning["eig_floor_rel"] == pytest.approx(1e-6)
     assert preconditioning["eig_floor_abs"] == pytest.approx(1e-8)
@@ -101,6 +102,18 @@ def test_subblock_validation_rejects_bad_optimizer_eps(bad_value):
     cfg["inference"]["optimizer"]["kwargs"]["eps"] = bad_value
 
     with pytest.raises(ValueError, match="experiment.inference.optimizer.kwargs.eps"):
+        recipe._validate_experiment_cfg(cfg)
+
+
+def test_subblock_validation_rejects_unknown_preconditioning_method():
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_bad_precond_method_tests",
+    )
+    cfg = _subblock_experiment_cfg()
+    cfg["inference"]["optimizer"]["preconditioning"]["method"] = "not_a_method"
+
+    with pytest.raises(ValueError, match="preconditioning.method"):
         recipe._validate_experiment_cfg(cfg)
 
 

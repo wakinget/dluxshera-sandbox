@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def _load_recipe_module():
@@ -419,3 +420,134 @@ def test_pack_unpack_active_state_with_frame_and_shared_roundtrips():
     assert theta.shape == (layout.theta_size,)
     np.testing.assert_allclose(np.asarray(restored.frame), state.frame)
     np.testing.assert_allclose(np.asarray(restored.shared), state.shared)
+
+
+def test_preconditioning_auto_selects_frame_block_for_frame_only_independent():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(),
+        n_frame=3,
+    )
+
+    method = recipe._select_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "independent"}},
+    )
+
+    assert method == "frame_block"
+
+
+def test_preconditioning_auto_selects_frame_shared_for_shared_independent():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(_active_spec(recipe, "source.log_flux_total"),),
+        n_frame=3,
+    )
+
+    method = recipe._select_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "independent"}},
+    )
+
+    assert method == "frame_shared_structured"
+
+
+def test_preconditioning_frame_block_rejects_shared_active_terms():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(_active_spec(recipe, "source.log_flux_total"),),
+        n_frame=3,
+    )
+
+    with pytest.raises(ValueError, match="requires no shared active parameters"):
+        recipe._select_preconditioning_method(
+            requested_method="frame_block",
+            layout=layout,
+            temporal_cfg={"frame_model": {"kind": "independent"}},
+        )
+
+
+def test_frame_shared_structured_bundle_builds_arrowhead_without_dense_fim():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(
+            _active_spec(recipe, "source.log_flux_total"),
+            _active_spec(recipe, "source.y_position_as"),
+        ),
+        n_frame=2,
+    )
+    local_curvatures = (
+        recipe.jnp.asarray(
+            [
+                [4.0, 0.5, -0.25],
+                [0.5, 3.0, 0.1],
+                [-0.25, 0.1, 2.0],
+            ]
+        ),
+        recipe.jnp.asarray(
+            [
+                [6.0, -0.75, 0.2],
+                [-0.75, 5.0, 0.3],
+                [0.2, 0.3, 7.0],
+            ]
+        ),
+    )
+
+    def frame_data_term(frame_values, shared_values, frame_index):
+        local = recipe.jnp.concatenate((frame_values, shared_values), axis=0)
+        curvature = local_curvatures[frame_index]
+        return 0.5 * local @ curvature @ local
+
+    def per_frame_terms(theta):
+        state = recipe._unpack_active_state(layout, theta)
+        return recipe.jnp.stack(
+            [
+                frame_data_term(state.frame[index], state.shared, index)
+                for index in range(layout.n_frame)
+            ]
+        )
+
+    def total_loss(theta):
+        return recipe.jnp.sum(per_frame_terms(theta))
+
+    objective_bundle = recipe.ObjectiveBundle(
+        total_loss_fn=total_loss,
+        objective_terms_fn=lambda theta: (
+            total_loss(theta),
+            recipe.jnp.array(0.0),
+            recipe.jnp.array(0.0),
+        ),
+        predict_cube_fn=lambda theta: recipe.jnp.zeros((layout.n_frame, 1, 1)),
+        per_frame_data_terms_fn=per_frame_terms,
+        frame_data_term_fn=frame_data_term,
+    )
+
+    bundle = recipe._build_structured_preconditioning_bundle(
+        layout=layout,
+        objective_bundle=objective_bundle,
+        theta_ref=recipe.jnp.zeros(layout.theta_size),
+        base_lr=0.1,
+        cfg={"method": "frame_shared_structured", "reference": "initial"},
+        method="frame_shared_structured",
+        subblock_reduce="sum",
+        reference_source="initial",
+    )
+
+    assert bundle.fim is None
+    assert bundle.structured_blocks is not None
+    assert bundle.config["method"] == "frame_shared_structured"
+    assert bundle.config["dense_global_fim_materialized"] is False
+    assert bundle.config["arrowhead_structure_built"] is True
+    assert bundle.structured_blocks.shared_dim == 2
+    assert bundle.structured_blocks.blocks[0].coupling_block.shape == (1, 2)
+    np.testing.assert_allclose(bundle.fim_diag, [4.0, 6.0, 8.0, 9.0])
+    np.testing.assert_allclose(
+        bundle.lr_vec,
+        1.0 / (np.asarray([4.0, 6.0, 8.0, 9.0]) + 1e-12),
+    )

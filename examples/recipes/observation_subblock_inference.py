@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -76,6 +77,11 @@ from dluxshera.inference.optimization import (
     build_fim_diagonal_preconditioner,
     fim_theta,
     run_shera_gd,
+)
+from dluxshera.inference.structured_preconditioning import (
+    StructuredCurvatureBlocks,
+    build_diagonal_preconditioner_from_curvature_diag,
+    build_independent_frame_curvature_blocks,
 )
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
@@ -181,21 +187,23 @@ class ObjectiveBundle:
     objective_terms_fn: Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]
     predict_cube_fn: Callable[[jnp.ndarray], jnp.ndarray]
     per_frame_data_terms_fn: Callable[[jnp.ndarray], jnp.ndarray]
+    frame_data_term_fn: Callable[[jnp.ndarray, jnp.ndarray, int], jnp.ndarray]
 
 
 @dataclass(frozen=True)
 class ThetaPreconditioningBundle:
     """Curvature and learning-rate-vector outputs for theta preconditioning."""
 
-    fim: np.ndarray
-    eigvals: np.ndarray
-    eigvals_stable: np.ndarray
+    fim: np.ndarray | None
+    eigvals: np.ndarray | None
+    eigvals_stable: np.ndarray | None
     fim_diag: np.ndarray
     curvature_vec: np.ndarray
     preconditioner_diag: np.ndarray
     lr_vec_unclipped: np.ndarray
     lr_vec: np.ndarray
     config: dict[str, Any]
+    structured_blocks: StructuredCurvatureBlocks | None = None
 
 
 @dataclass(frozen=True)
@@ -997,6 +1005,22 @@ def _build_objective_bundle(
 
         return jax.vmap(_frame_loss)(state.frame, data_cube, var_cube)
 
+    def _single_frame_data_term(
+        frame_values: jnp.ndarray,
+        shared_values: jnp.ndarray,
+        frame_index: int,
+    ) -> jnp.ndarray:
+        """Return one unreduced frame data term for structured curvature."""
+
+        shared_store = _shared_store(shared_values)
+        model_frame = _frame_model(shared_store, frame_values)
+        return gaussian_image_nll(
+            model_frame,
+            data_cube[int(frame_index)],
+            var_cube[int(frame_index)],
+            reduce=frame_reduce,
+        )
+
     def _objective_terms(theta_flat: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         state = _unpack_active_state(layout, theta_flat)
         data_term = _reduce_subblock_terms(
@@ -1024,6 +1048,7 @@ def _build_objective_bundle(
         objective_terms_fn=_objective_terms,
         predict_cube_fn=_predict_cube,
         per_frame_data_terms_fn=_per_frame_terms,
+        frame_data_term_fn=_single_frame_data_term,
     )
 
 
@@ -1046,6 +1071,84 @@ def _coerce_lr_clip(
     if lr_max_f < lr_min_f:
         raise ValueError(f"{path}[1] must be >= {path}[0].")
     return (lr_min_f, lr_max_f)
+
+
+_PRECONDITIONING_METHOD_ALIASES = {
+    "auto": "auto",
+    "fim_diag": "dense_full_theta",
+    "dense": "dense_full_theta",
+    "dense_fim_diag": "dense_full_theta",
+    "dense_full_theta": "dense_full_theta",
+    "frame_block": "frame_block",
+    "frame_shared_structured": "frame_shared_structured",
+}
+
+
+def _normalize_preconditioning_method(method: Any) -> str:
+    """Normalize configured preconditioning method names and legacy aliases."""
+
+    if method is None:
+        return "auto"
+    if not isinstance(method, str) or not method.strip():
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.method must be a "
+            "non-empty string."
+        )
+    raw = method.strip()
+    try:
+        return _PRECONDITIONING_METHOD_ALIASES[raw]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(_PRECONDITIONING_METHOD_ALIASES))
+        raise ValueError(
+            "Unsupported experiment.inference.optimizer.preconditioning.method "
+            f"{raw!r}. Expected one of: {allowed}."
+        ) from exc
+
+
+def _frame_model_kind(temporal_cfg: dict[str, Any]) -> str:
+    frame_model_cfg = _required_dict(
+        temporal_cfg,
+        "frame_model",
+        path="experiment.inference.temporal",
+    )
+    return _required_str(
+        frame_model_cfg,
+        "kind",
+        path="experiment.inference.temporal.frame_model",
+    )
+
+
+def _select_preconditioning_method(
+    *,
+    requested_method: str,
+    layout: ActiveStateLayout,
+    temporal_cfg: dict[str, Any],
+) -> str:
+    """Select the effective preconditioning method for this active layout."""
+
+    requested = _normalize_preconditioning_method(requested_method)
+    frame_kind = _frame_model_kind(temporal_cfg)
+    if requested == "auto":
+        if frame_kind == "independent":
+            return (
+                "frame_block"
+                if layout.shared_width == 0
+                else "frame_shared_structured"
+            )
+        return "dense_full_theta"
+
+    if requested in {"frame_block", "frame_shared_structured"}:
+        if frame_kind != "independent":
+            raise ValueError(
+                "Structured sub-block preconditioning currently requires "
+                "experiment.inference.temporal.frame_model.kind='independent'."
+            )
+        if requested == "frame_block" and layout.shared_width != 0:
+            raise ValueError(
+                "preconditioning.method='frame_block' requires no shared active "
+                "parameters. Use 'frame_shared_structured' or 'auto' instead."
+            )
+    return requested
 
 
 def _build_theta_preconditioning_bundle(
@@ -1092,6 +1195,11 @@ def _build_theta_preconditioning_bundle(
         path="experiment.inference.optimizer.preconditioning.lr_clip",
     )
     reference = str(cfg.get("reference", "truth_when_available"))
+    method_meta = (
+        "fim_diag"
+        if cfg.get("method") is None
+        else _normalize_preconditioning_method(cfg.get("method"))
+    )
 
     theta_ref_vec = jnp.asarray(theta_ref)
     fim = np.asarray(fim_theta(loss_fn, theta_ref_vec), dtype=float)
@@ -1143,7 +1251,9 @@ def _build_theta_preconditioning_bundle(
         lr_vec=lr_vec,
         config={
             "enabled": True,
-            "method": "fim_diag",
+            "method": method_meta,
+            "curvature_source": "dense_full_theta_fim",
+            "dense_global_fim_materialized": True,
             "curvature_floor": precond_config["curvature_floor"],
             "curvature_floored_count": precond_config["curvature_floored_count"],
             "eps": precond_config["eps"],
@@ -1151,6 +1261,114 @@ def _build_theta_preconditioning_bundle(
             "eig_floor_rel": eig_floor_rel,
             "eig_floor_abs": eig_floor_abs,
             "legacy_full_fim_options_inactive": True,
+            "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
+            "lr_clip_applied_count": precond_config["lr_clip_applied_count"],
+            "reference": reference,
+            "reference_source": reference_source,
+        },
+    )
+
+
+def _build_structured_preconditioning_bundle(
+    *,
+    layout: ActiveStateLayout,
+    objective_bundle: ObjectiveBundle,
+    theta_ref: jnp.ndarray,
+    base_lr: float,
+    cfg: dict[str, Any],
+    method: str,
+    subblock_reduce: str,
+    reference_source: str | None = None,
+) -> ThetaPreconditioningBundle:
+    """Build a structured independent-frame diagonal FIM preconditioner.
+
+    The frame-only case computes exact frame-local curvature blocks and uses
+    their diagonals to reproduce the canonical packed diagonal preconditioner
+    without materializing the full global Hessian. The frame+shared case builds
+    the same local blocks plus frame/shared couplings; the current optimizer
+    still consumes the exact global diagonal of that arrowhead structure.
+    """
+
+    lr_clip = _coerce_lr_clip(
+        cfg.get("lr_clip"),
+        path="experiment.inference.optimizer.preconditioning.lr_clip",
+    )
+    reference = str(cfg.get("reference", "truth_when_available"))
+    state_ref = _unpack_active_state(layout, jnp.asarray(theta_ref))
+    if subblock_reduce not in {"sum", "mean"}:
+        raise ValueError(
+            "Structured preconditioning subblock_reduce must be 'sum' or 'mean'."
+        )
+
+    blocks = build_independent_frame_curvature_blocks(
+        frame_loss_fn=objective_bundle.frame_data_term_fn,
+        frame_theta_ref=state_ref.frame,
+        shared_theta_ref=state_ref.shared,
+        subblock_reduce=subblock_reduce,  # type: ignore[arg-type]
+        kind=method,
+    )
+    precond = build_diagonal_preconditioner_from_curvature_diag(
+        blocks.curvature_diag(),
+        curvature_floor=1e-8,
+        eps=1e-12,
+        lr_clip=lr_clip,
+    )
+    fim_diag = np.asarray(precond["fim_diag"], dtype=float)
+    curvature_vec = np.asarray(precond["curvature_vec"], dtype=float)
+    lr_vec_unclipped = np.asarray(precond["lr_vec_unclipped"], dtype=float)
+    lr_vec = np.asarray(precond["lr_vec"], dtype=float)
+    precond_config = dict(precond["config"])
+    _ = base_lr
+
+    if lr_vec.shape != (int(layout.theta_size),):
+        raise ValueError(
+            "Preconditioning vector shape does not match packed theta dimension."
+        )
+    if not np.all(np.isfinite(lr_vec)):
+        raise ValueError("Preconditioning vector contains non-finite values.")
+    if np.any(lr_vec <= 0.0):
+        raise ValueError("Preconditioning vector must be strictly positive.")
+
+    is_frame_only_exact = method == "frame_block" and layout.shared_width == 0
+    shared_note = (
+        "none"
+        if layout.shared_width == 0
+        else (
+            "shared diagonal accumulated globally from local arrowhead blocks; "
+            "frame/shared couplings are retained in diagnostics but not yet used "
+            "for a Schur-complement solve"
+        )
+    )
+
+    return ThetaPreconditioningBundle(
+        fim=None,
+        eigvals=None,
+        eigvals_stable=None,
+        fim_diag=fim_diag,
+        curvature_vec=curvature_vec,
+        preconditioner_diag=curvature_vec,
+        lr_vec_unclipped=lr_vec_unclipped,
+        lr_vec=lr_vec,
+        structured_blocks=blocks,
+        config={
+            "enabled": True,
+            "method": method,
+            "requested_method": str(cfg.get("method", "auto")),
+            "curvature_source": "independent_frame_structured_blocks",
+            "dense_global_fim_materialized": False,
+            "frame_block_curvature_exact": bool(is_frame_only_exact),
+            "arrowhead_structure_built": bool(layout.shared_width > 0),
+            "schur_complement_solve_implemented": False,
+            "shared_treatment": shared_note,
+            "frame_count": int(layout.n_frame),
+            "frame_dim": int(layout.frame_width),
+            "shared_dim": int(layout.shared_width),
+            "local_block_dim": int(layout.frame_width + layout.shared_width),
+            "subblock_reduce": subblock_reduce,
+            "reduce_weight": float(blocks.reduce_weight),
+            "curvature_floor": precond_config["curvature_floor"],
+            "curvature_floored_count": precond_config["curvature_floored_count"],
+            "eps": precond_config["eps"],
             "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
             "lr_clip_applied_count": precond_config["lr_clip_applied_count"],
             "reference": reference,
@@ -1208,19 +1426,32 @@ def _print_preconditioning_summary(
     bundle: ThetaPreconditioningBundle,
     base_lr: float,
 ) -> None:
-    """Print the numerical details of the theta-space FIM preconditioner."""
+    """Print the numerical details of the selected FIM preconditioner."""
 
     fim_diag = bundle.fim_diag
-    fim_abs = np.abs(bundle.fim)
-    eig_nonpositive = int(np.count_nonzero(bundle.eigvals <= 0.0))
     effective_lr = float(base_lr) * bundle.lr_vec
     effective_lr_unclipped = float(base_lr) * bundle.lr_vec_unclipped
 
-    print("Theta-space Fisher preconditioning summary:")
-    print(
-        f"  theta_dim={bundle.lr_vec.size} fim_shape={bundle.fim.shape} "
-        f"base_lr={_format_scalar(base_lr)}"
-    )
+    dense_fim_shape = None if bundle.fim is None else bundle.fim.shape
+    print("Fisher preconditioning summary:")
+    print(f"  theta_dim={bundle.lr_vec.size} base_lr={_format_scalar(base_lr)}")
+    if bundle.structured_blocks is not None:
+        blocks = bundle.structured_blocks
+        print(
+            "  structure: "
+            f"method={bundle.config['method']} "
+            f"frames={blocks.n_frame} frame_dim={blocks.frame_dim} "
+            f"shared_dim={blocks.shared_dim} local_block_dim="
+            f"{blocks.frame_dim + blocks.shared_dim} "
+            f"subblock_reduce={blocks.subblock_reduce} "
+            f"dense_global_fim_materialized={bundle.config['dense_global_fim_materialized']}"
+        )
+    else:
+        print(
+            "  structure: "
+            f"method={bundle.config['method']} fim_shape={dense_fim_shape} "
+            f"dense_global_fim_materialized={bundle.config.get('dense_global_fim_materialized')}"
+        )
     print(
         "  config: "
         f"method={bundle.config['method']} "
@@ -1232,22 +1463,31 @@ def _print_preconditioning_summary(
     )
     if bundle.config.get("legacy_full_fim_options_inactive"):
         print(
-            "  legacy full-FIM options inactive for method=fim_diag: "
+            "  legacy full-FIM options inactive for dense diagonal methods: "
             f"damping={_format_scalar(bundle.config['damping'])} "
             f"eig_floor_rel={_format_scalar(bundle.config['eig_floor_rel'])} "
             f"eig_floor_abs={_format_scalar(bundle.config['eig_floor_abs'])}"
         )
-    print(
-        "  fim: "
-        f"diag({_format_array_stats(fim_diag)}) "
-        f"trace={_format_scalar(np.trace(bundle.fim))} "
-        f"max_abs_entry={_format_scalar(np.max(fim_abs))}"
-    )
-    print(
-        "  raw eigenvalues: "
-        f"{_format_array_stats(bundle.eigvals)} "
-        f"nonpositive={eig_nonpositive} (diagnostic only)"
-    )
+    if bundle.fim is not None and bundle.eigvals is not None:
+        fim_abs = np.abs(bundle.fim)
+        eig_nonpositive = int(np.count_nonzero(bundle.eigvals <= 0.0))
+        print(
+            "  fim: "
+            f"diag({_format_array_stats(fim_diag)}) "
+            f"trace={_format_scalar(np.trace(bundle.fim))} "
+            f"max_abs_entry={_format_scalar(np.max(fim_abs))}"
+        )
+        print(
+            "  raw eigenvalues: "
+            f"{_format_array_stats(bundle.eigvals)} "
+            f"nonpositive={eig_nonpositive} (diagnostic only)"
+        )
+    else:
+        print(
+            "  structured curvature: "
+            f"diag({_format_array_stats(fim_diag)}) "
+            f"trace={_format_scalar(np.sum(fim_diag))}"
+        )
     print(
         "  curvature diagonal used to build lr_vec: "
         f"{_format_array_stats(bundle.curvature_vec)}"
@@ -1455,13 +1695,14 @@ def _save_fim_debug_artifact(
                 "fim_diagonal": "curvature-like diagonal of fim",
                 "eigenvalues": "raw curvature-like eigenvalues of symmetrized fim",
                 "stabilized_eigenvalues": (
-                    "legacy field; equal to raw eigenvalues for method=fim_diag"
+                    "legacy field; equal to raw eigenvalues for dense diagonal methods"
                 ),
                 "curvature_diagonal": (
                     "canonical diagonal curvature used to build lr_vec"
                 ),
                 "preconditioner_diagonal": (
-                    "legacy field name; same values as curvature_diagonal for method=fim_diag"
+                    "legacy field name; same values as curvature_diagonal for "
+                    "diagonal methods"
                 ),
                 "lr_vec_before_clipping": (
                     "preconditioning scale vector before clipping; excludes base_lr"
@@ -1469,13 +1710,34 @@ def _save_fim_debug_artifact(
                 "lr_vec_after_clipping": (
                     "preconditioning scale vector passed to run_shera_gd; excludes base_lr"
                 ),
+                "structured_blocks": (
+                    "present for frame_block/frame_shared_structured methods; "
+                    "contains frame-local blocks and optional frame/shared couplings"
+                ),
             },
             "theta_labels": list(theta_labels),
             "config": to_jsonable_obs_subblock_payload(bundle.config),
-            "fim": np.asarray(bundle.fim, dtype=float).tolist(),
+            "fim": (
+                None
+                if bundle.fim is None
+                else np.asarray(bundle.fim, dtype=float).tolist()
+            ),
             "fim_diagonal": _to_jsonable_float_list(bundle.fim_diag),
-            "eigenvalues": _to_jsonable_float_list(bundle.eigvals),
-            "stabilized_eigenvalues": _to_jsonable_float_list(bundle.eigvals_stable),
+            "eigenvalues": (
+                None
+                if bundle.eigvals is None
+                else _to_jsonable_float_list(bundle.eigvals)
+            ),
+            "stabilized_eigenvalues": (
+                None
+                if bundle.eigvals_stable is None
+                else _to_jsonable_float_list(bundle.eigvals_stable)
+            ),
+            "structured_blocks": (
+                None
+                if bundle.structured_blocks is None
+                else bundle.structured_blocks.to_debug_payload(include_blocks=True)
+            ),
             "curvature_diagonal": _to_jsonable_float_list(bundle.curvature_vec),
             "preconditioner_diagonal": _to_jsonable_float_list(
                 bundle.preconditioner_diag
@@ -2343,6 +2605,9 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         path="experiment.inference.optimizer",
     )
     preconditioning_enabled = bool(preconditioning_cfg.get("enabled", False))
+    preconditioning_method = _normalize_preconditioning_method(
+        preconditioning_cfg.get("method", "auto")
+    )
     preconditioning_damping = float(
         coerce_numeric_value(
             preconditioning_cfg.get("damping", 1e-6),
@@ -2509,6 +2774,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                 "kwargs": dict(optimizer_kwargs),
                 "preconditioning": {
                     "enabled": preconditioning_enabled,
+                    "method": preconditioning_method,
                     "damping": preconditioning_damping,
                     "eig_floor_rel": preconditioning_eig_floor_rel,
                     "eig_floor_abs": preconditioning_eig_floor_abs,
@@ -2592,6 +2858,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     """Run the observation sub-block inference recipe and return run metadata."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
+    t0_script = time.time()
 
     args = _build_parser().parse_args(argv)
 
@@ -2866,6 +3133,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         print(f"  output_dir: {outdir}")
         for key, path in artifacts.items():
             print(f"  expected_{key}: {path}")
+        t1_script = time.time()
+        print("Script finished in %.3f sec" % (t1_script - t0_script))
         return {
             "dry_run": True,
             "frame_count": n_frame,
@@ -2883,6 +3152,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     preconditioning_bundle: ThetaPreconditioningBundle | None = None
     lr_vec: np.ndarray | None = None
     if bool(preconditioning_cfg["enabled"]):
+        effective_preconditioning_method = _select_preconditioning_method(
+            requested_method=str(preconditioning_cfg["method"]),
+            layout=active_layout,
+            temporal_cfg=inference_cfg["temporal"],
+        )
         preconditioning_theta_ref, preconditioning_reference_source = (
             _resolve_theta_preconditioning_reference(
                 layout=active_layout,
@@ -2893,17 +3167,38 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             )
         )
         print(
-            "Computing theta-space Fisher preconditioner "
-            f"(theta_dim={active_layout.theta_size}, "
+            "Computing Fisher preconditioner "
+            f"(method={effective_preconditioning_method}, "
+            f"requested={preconditioning_cfg['method']}, "
+            f"theta_dim={active_layout.theta_size}, "
+            f"frames={active_layout.n_frame}, "
+            f"frame_dim={active_layout.frame_width}, "
+            f"shared_dim={active_layout.shared_width}, "
             f"reference={preconditioning_reference_source})..."
         )
-        preconditioning_bundle = _build_theta_preconditioning_bundle(
-            loss_fn=objective_bundle.total_loss_fn,
-            theta_ref=preconditioning_theta_ref,
-            base_lr=float(optimizer_cfg["base_lr"]),
-            cfg=preconditioning_cfg,
-            reference_source=preconditioning_reference_source,
-        )
+        if effective_preconditioning_method == "dense_full_theta":
+            dense_cfg = {
+                **preconditioning_cfg,
+                "method": effective_preconditioning_method,
+            }
+            preconditioning_bundle = _build_theta_preconditioning_bundle(
+                loss_fn=objective_bundle.total_loss_fn,
+                theta_ref=preconditioning_theta_ref,
+                base_lr=float(optimizer_cfg["base_lr"]),
+                cfg=dense_cfg,
+                reference_source=preconditioning_reference_source,
+            )
+        else:
+            preconditioning_bundle = _build_structured_preconditioning_bundle(
+                layout=active_layout,
+                objective_bundle=objective_bundle,
+                theta_ref=preconditioning_theta_ref,
+                base_lr=float(optimizer_cfg["base_lr"]),
+                cfg=preconditioning_cfg,
+                method=effective_preconditioning_method,
+                subblock_reduce=str(inference_cfg["objective"]["subblock_reduce"]),
+                reference_source=preconditioning_reference_source,
+            )
         lr_vec = np.asarray(preconditioning_bundle.lr_vec, dtype=float)
         _print_preconditioning_summary(
             bundle=preconditioning_bundle,
@@ -3395,10 +3690,26 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 else {
                     **preconditioning_bundle.config,
                     "theta_dim": int(preconditioning_bundle.lr_vec.size),
-                    "eigval_min": float(np.min(preconditioning_bundle.eigvals)),
-                    "eigval_max": float(np.max(preconditioning_bundle.eigvals)),
-                    "eigval_stable_min": float(np.min(preconditioning_bundle.eigvals_stable)),
-                    "eigval_stable_max": float(np.max(preconditioning_bundle.eigvals_stable)),
+                    "eigval_min": (
+                        None
+                        if preconditioning_bundle.eigvals is None
+                        else float(np.min(preconditioning_bundle.eigvals))
+                    ),
+                    "eigval_max": (
+                        None
+                        if preconditioning_bundle.eigvals is None
+                        else float(np.max(preconditioning_bundle.eigvals))
+                    ),
+                    "eigval_stable_min": (
+                        None
+                        if preconditioning_bundle.eigvals_stable is None
+                        else float(np.min(preconditioning_bundle.eigvals_stable))
+                    ),
+                    "eigval_stable_max": (
+                        None
+                        if preconditioning_bundle.eigvals_stable is None
+                        else float(np.max(preconditioning_bundle.eigvals_stable))
+                    ),
                     "lr_scale_unclipped_min": float(
                         np.min(preconditioning_bundle.lr_vec_unclipped)
                     ),
@@ -3452,7 +3763,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "preconditioner_trace_fim": (
                 None
                 if preconditioning_bundle is None
-                else float(np.trace(preconditioning_bundle.fim))
+                else (
+                    float(np.trace(preconditioning_bundle.fim))
+                    if preconditioning_bundle.fim is not None
+                    else float(np.sum(preconditioning_bundle.fim_diag))
+                )
             ),
         },
         "truth_comparison_available": truth_matrix is not None,
@@ -3470,6 +3785,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     print(f"Finished observation sub-block inference on {n_frame} frames.")
     print(f"initial_loss={initial_loss:.6g} final_loss={final_loss:.6g}")
     print(f"Wrote artifacts under: {outdir}")
+    t1_script = time.time()
+    print("Script finished in %.3f sec" % (t1_script - t0_script))
 
     return {
         "dry_run": False,

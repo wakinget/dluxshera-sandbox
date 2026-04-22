@@ -20,6 +20,7 @@ Working practices, priorities, and lessons learned.
 - [ML training dataset V2 workflow](dev/ml_training_dataset_v2.md)
 - [Observation sub-block simulation contract (Phase 4)](dev/obs_subblock_generator_design.md)
 - [Observation sub-block inference design](dev/obs_subblock_inference_design.md)
+- [Structured sub-block preconditioning](dev/subblock_structured_preconditioning.md)
 - Observation sub-block recipes:
   - `examples/recipes/subblock_trace_generation.py` (trace builder)
   - `examples/recipes/observation_subblock.py` (renderer)
