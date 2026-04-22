@@ -80,6 +80,7 @@ def _condition_detector_map(
     *,
     map_name: str,
     target_shape: tuple[int, int],
+    warn_on_map_conditioning: bool = False,
 ) -> jnp.ndarray:
     """Condition detector-resolution maps to the requested PSF shape.
 
@@ -107,14 +108,15 @@ def _condition_detector_map(
         conditioned = _center_pad_reflect(conditioned, target_size)
         policy = "center-pad+reflect"
 
-    warnings.warn(
-        (
-            f"Conditioned {map_name} at detector build time: "
-            f"provided shape {src_shape} -> requested shape {target_shape} "
-            f"using policy {policy}."
-        ),
-        stacklevel=2,
-    )
+    if warn_on_map_conditioning:
+        warnings.warn(
+            (
+                f"Conditioned {map_name} at detector build time: "
+                f"provided shape {src_shape} -> requested shape {target_shape} "
+                f"using policy {policy}."
+            ),
+            stacklevel=2,
+        )
     return conditioned
 
 
@@ -217,6 +219,14 @@ def _downsample_kernel_size(layer_cfg: Mapping, *, context: str) -> int:
     if kernel_size is None:
         raise ValueError(f"{context} requires `kernel_size` (or alias `factor`).")
     return int(kernel_size)
+
+
+def _warn_on_map_conditioning(layer_cfg: Mapping, *, context: str) -> bool:
+    """Return whether detector map conditioning should emit warnings."""
+    warn = layer_cfg.get("warn_on_map_conditioning", False)
+    if not isinstance(warn, bool):
+        raise ValueError(f"{context}.warn_on_map_conditioning must be a bool.")
+    return warn
 
 
 def _detector_to_psf_scale_by_layer_name(
@@ -344,6 +354,10 @@ def build_detector_layer(
         dx_path = _resolve_repo_path(layer_cfg.get("dx_path", None))
         dy_path = _resolve_repo_path(layer_cfg.get("dy_path", None))
         interp_method = layer_cfg.get("interp_method", "cubic")
+        warn_on_map_conditioning = _warn_on_map_conditioning(
+            layer_cfg,
+            context=f"detector layer {name!r}",
+        )
 
         if dx_path is not None:
             dx_map_raw = _load_array(dx_path)
@@ -367,8 +381,18 @@ def build_detector_layer(
                     stacklevel=2,
                 )
 
-        dx_map = _condition_detector_map(dx_map_raw, map_name="dx_map", target_shape=target_shape)
-        dy_map = _condition_detector_map(dy_map_raw, map_name="dy_map", target_shape=target_shape)
+        dx_map = _condition_detector_map(
+            dx_map_raw,
+            map_name="dx_map",
+            target_shape=target_shape,
+            warn_on_map_conditioning=warn_on_map_conditioning,
+        )
+        dy_map = _condition_detector_map(
+            dy_map_raw,
+            map_name="dy_map",
+            target_shape=target_shape,
+            warn_on_map_conditioning=warn_on_map_conditioning,
+        )
 
         knowledge_error = layer_cfg.get("knowledge_error", None)
         if knowledge_error:
@@ -396,13 +420,20 @@ def build_detector_layer(
 
     if kind == "ApplyPixelResponse":
         prf_path = _resolve_repo_path(layer_cfg.get("prf_path", None))
+        warn_on_map_conditioning = _warn_on_map_conditioning(
+            layer_cfg,
+            context=f"detector layer {name!r}",
+        )
         if prf_path is None:
             pixel_response_raw = jnp.ones(target_shape, dtype=float)
         else:
             pixel_response_raw = _load_array(prf_path)
 
         pixel_response = _condition_detector_map(
-            pixel_response_raw, map_name="pixel_response", target_shape=target_shape
+            pixel_response_raw,
+            map_name="pixel_response",
+            target_shape=target_shape,
+            warn_on_map_conditioning=warn_on_map_conditioning,
         )
         knowledge_error = layer_cfg.get("knowledge_error", None)
         if knowledge_error:

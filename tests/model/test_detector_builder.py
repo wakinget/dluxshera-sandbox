@@ -1,3 +1,5 @@
+import warnings
+
 import jax
 import numpy as np
 import pytest
@@ -434,7 +436,7 @@ def test_build_detector_computes_detector_pix_convolution_scale_from_downstream_
     assert float(detector.layers["diffusion_post"].detector_to_psf_scale) == 1.0
 
 
-def test_build_detector_conditions_larger_maps_with_center_crop_and_warns(tmp_path):
+def test_build_detector_conditions_larger_maps_with_center_crop_quiet_by_default(tmp_path):
     dx = jax.numpy.arange(36, dtype=float).reshape(6, 6)
     dy = jax.numpy.zeros((6, 6), dtype=float)
     dx_path = tmp_path / "dx.npy"
@@ -458,14 +460,61 @@ def test_build_detector_conditions_larger_maps_with_center_crop_and_warns(tmp_pa
         }
     }
 
-    with pytest.warns(UserWarning, match="policy center-crop"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         detector, _contract = build_detector(cfg)
 
+    assert not [
+        warning
+        for warning in caught
+        if "Conditioned" in str(warning.message)
+    ]
     assert detector.layers["pixel_offsets"].dx_map.shape == (4, 4)
     assert detector.layers["pixel_offsets"].dy_map.shape == (4, 4)
 
 
-def test_build_detector_conditions_smaller_maps_with_reflect_pad_and_warns(tmp_path):
+def test_build_detector_conditions_larger_maps_with_center_crop_warns_when_enabled(tmp_path):
+    dx = jax.numpy.arange(36, dtype=float).reshape(6, 6)
+    dy = jax.numpy.zeros((6, 6), dtype=float)
+    dx_path = tmp_path / "dx.npy"
+    dy_path = tmp_path / "dy.npy"
+    np.save(dx_path, dx)
+    np.save(dy_path, dy)
+
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 4},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "pixel_offsets",
+                        "ApplyPixelOffsets",
+                        dx_path=str(dx_path),
+                        dy_path=str(dy_path),
+                        warn_on_map_conditioning=True,
+                    ),
+                ]
+            },
+        }
+    }
+
+    with pytest.warns(UserWarning) as caught:
+        detector, _contract = build_detector(cfg)
+
+    messages = [str(warning.message) for warning in caught]
+    assert any(
+        "Conditioned dx_map" in msg and "policy center-crop" in msg
+        for msg in messages
+    )
+    assert any(
+        "Conditioned dy_map" in msg and "policy center-crop" in msg
+        for msg in messages
+    )
+    assert detector.layers["pixel_offsets"].dx_map.shape == (4, 4)
+    assert detector.layers["pixel_offsets"].dy_map.shape == (4, 4)
+
+
+def test_build_detector_conditions_smaller_maps_with_reflect_pad_quiet_by_default(tmp_path):
     dx = jax.numpy.array([[1.0, 2.0], [3.0, 4.0]])
     dy = jax.numpy.zeros((2, 2), dtype=float)
     dx_path = tmp_path / "dx_small.npy"
@@ -489,11 +538,49 @@ def test_build_detector_conditions_smaller_maps_with_reflect_pad_and_warns(tmp_p
         }
     }
 
-    with pytest.warns(UserWarning, match=r"policy center-pad\+reflect"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         detector, _contract = build_detector(cfg)
 
+    assert not [
+        warning
+        for warning in caught
+        if "Conditioned" in str(warning.message)
+    ]
     assert detector.layers["pixel_offsets"].dx_map.shape == (4, 4)
     assert detector.layers["pixel_offsets"].dy_map.shape == (4, 4)
+
+
+def test_build_detector_pixel_response_map_conditioning_warns_when_enabled(tmp_path):
+    prf = np.ones((6, 6), dtype=float)
+    prf_path = tmp_path / "prf.npy"
+    np.save(prf_path, prf)
+
+    cfg = {
+        "system": {
+            "optics": {"psf_npix": 4},
+            "detector": {
+                "layers": [
+                    _layer(
+                        "pixel_response",
+                        "ApplyPixelResponse",
+                        prf_path=str(prf_path),
+                        warn_on_map_conditioning=True,
+                    ),
+                ]
+            },
+        }
+    }
+
+    with pytest.warns(UserWarning) as caught:
+        detector, _contract = build_detector(cfg)
+
+    messages = [str(warning.message) for warning in caught]
+    assert any(
+        "Conditioned pixel_response" in msg and "policy center-crop" in msg
+        for msg in messages
+    )
+    assert detector.layers["pixel_response"].pixel_response.shape == (4, 4)
 
 
 def test_build_detector_uses_zero_offset_maps_when_unset():
