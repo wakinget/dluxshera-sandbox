@@ -178,6 +178,12 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     comparison_rows = _read_csv_rows(artifacts["truth_comparison_csv"])
     assert len(recovered_rows) == result["frame_count"]
     assert len(comparison_rows) == result["frame_count"]
+    assert "frame_chi2" in recovered_rows[0]
+    assert "frame_reduced_chi2" in recovered_rows[0]
+    assert "frame_chi2_dof_pixels" in recovered_rows[0]
+    assert "frame_chi2" in comparison_rows[0]
+    assert "frame_reduced_chi2" in comparison_rows[0]
+    assert "frame_chi2_dof_pixels" in comparison_rows[0]
 
     manifest = json.loads(artifacts["manifest_json"].read_text(encoding="utf-8"))
     for key in (
@@ -209,6 +215,18 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert manifest["objective"]["frame_reduce"] == "sum"
     assert manifest["objective"]["subblock_reduce"] == "sum"
     assert "reduce" not in manifest["objective"]
+    chi2_metrics = manifest["metrics"]["chi2"]
+    assert "positive finite variance" in chi2_metrics["metric_notes"]
+    assert chi2_metrics["per_frame_csv_columns"] == [
+        "frame_chi2",
+        "frame_reduced_chi2",
+        "frame_chi2_dof_pixels",
+    ]
+    assert len(chi2_metrics["final_model"]["per_frame_reduced_chi2"]) == int(
+        result["frame_count"]
+    )
+    assert chi2_metrics["initial_model"]["block_sum_chi2"] is not None
+    assert chi2_metrics["final_model"]["block_reduced_chi2"] is not None
     precond_meta = manifest["optimizer"]["preconditioning"]
     assert precond_meta["enabled"] is True
     assert precond_meta["theta_dim"] > 0
@@ -216,6 +234,7 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
 
     assert np.isfinite(float(result["initial_loss"]))
     assert np.isfinite(float(result["final_loss"]))
+    assert len(result["chi2"]["final_model"]["per_frame_chi2"]) == int(result["frame_count"])
     assert float(result["final_loss"]) <= float(result["initial_loss"])
 
 
@@ -349,6 +368,9 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
 
     recovered_rows = _read_csv_rows(artifacts["recovered_trace_csv"])
     assert len(recovered_rows) == int(result["frame_count"])
+    assert "frame_chi2" in recovered_rows[0]
+    assert "frame_reduced_chi2" in recovered_rows[0]
+    assert "frame_chi2_dof_pixels" in recovered_rows[0]
 
     manifest = json.loads(artifacts["manifest_json"].read_text(encoding="utf-8"))
     assert manifest["truth_comparison_available"] is False
@@ -356,3 +378,6 @@ def test_observation_subblock_inference_recipe_without_truth_still_writes_core_o
     assert manifest["inputs"]["manifest_auto_discovered"] is False
     assert manifest["objective"]["frame_reduce"] == "sum"
     assert manifest["objective"]["subblock_reduce"] == "sum"
+    assert len(manifest["metrics"]["chi2"]["final_model"]["per_frame_chi2"]) == int(
+        result["frame_count"]
+    )

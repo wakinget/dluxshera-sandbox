@@ -109,6 +109,9 @@ from dluxshera.utils.noise import (
     apply_observation_noise,
     make_subseed,
 )
+from dluxshera.utils.chi2_diagnostics import (
+    reduced_chi2_between_images as _reduced_chi2_between_images,
+)
 
 DEFAULT_PRESCRIPTION_PATH = Path(
     "examples/recipes/prescribed_mc_template/prescription.yaml"
@@ -1475,34 +1478,6 @@ def _config_payload(cfg: dict[str, Any], *, repo_root: Path) -> dict[str, Any]:
         payload.setdefault("optics", {})
         payload["optics"]["dp_path"] = _repo_relative_path(dp_path, repo_root=repo_root)
     return payload
-
-
-def _reduced_chi2_between_images(
-    data_image: Any,
-    model_image: Any,
-    *,
-    variance_image: Any,
-) -> float:
-    """Compute reduced chi-squared between data and model PSF images.
-
-    Used in `main` to report image-space fit quality for the seeded initial
-    model and optimized final model in each run summary. The computation mirrors
-    `plot_psf_comparison` by building a z-score image from residuals and
-    variance, then averaging squared z values by image degrees of freedom.
-
-    This helper is a good candidate for migration into a shared utility module
-    if additional experiment scripts need the same image-comparison metric.
-    """
-    data_arr = np.asarray(data_image, dtype=float)
-    model_arr = np.asarray(model_image, dtype=float)
-    var_arr = np.asarray(variance_image, dtype=float)
-
-    safe_var = np.where(var_arr > 0.0, var_arr, np.nan)
-    z_score = (data_arr - model_arr) / np.sqrt(safe_var)
-    dof = data_arr.size
-    if dof <= 0:
-        return float("nan")
-    return float(np.nansum(z_score**2) / dof)
 
 
 def _maybe_warn_missing_artifacts(run_dir: Path) -> None:

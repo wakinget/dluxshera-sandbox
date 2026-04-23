@@ -252,6 +252,10 @@ The inference recipe writes:
 - optional `<file_prefix>_<timestamp>_truth_comparison.csv` (when truth trace is available)
 - diagnostic plots (loss history, trace plots, image-fit panel)
 
+The per-frame CSV artifacts include `frame_nll`, `frame_chi2`,
+`frame_reduced_chi2`, and `frame_chi2_dof_pixels`. The manifest records matching
+block-level chi-squared summaries for the initial and final models.
+
 The image-fit panel samples representative frames and shows data, model, raw
 residual, and variance-scaled Z-score maps. The Z-score uses the same variance
 cube used by the Gaussian image NLL objective.

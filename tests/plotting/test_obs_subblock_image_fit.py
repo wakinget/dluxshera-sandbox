@@ -75,3 +75,29 @@ def test_plot_image_fit_rejects_shape_mismatch(tmp_path):
             variance_cube=variance_cube,
             output_path=tmp_path / "unused.png",
         )
+
+
+def test_variance_flooring_keeps_chi2_summary_finite():
+    recipe = _load_recipe_module()
+    data_cube = np.array(
+        [
+            [[0.0, -1.0], [2.0, 3.0]],
+            [[4.0, 0.0], [1.0, -2.0]],
+        ],
+        dtype=float,
+    )
+    model_cube = np.zeros_like(data_cube)
+    variance_cube = recipe._build_variance_cube(
+        data_cube=data_cube,
+        noise_model_cfg={"variance_model": "data"},
+    )
+
+    summary = recipe.summarize_framewise_chi2(
+        data_cube,
+        model_cube,
+        variance_cube=variance_cube,
+    )
+
+    assert np.all(variance_cube >= 1e-9)
+    assert np.all(np.isfinite(summary.per_frame_chi2))
+    assert np.all(np.isfinite(summary.per_frame_reduced_chi2))

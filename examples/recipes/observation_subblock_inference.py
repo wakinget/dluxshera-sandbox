@@ -86,6 +86,11 @@ from dluxshera.inference.structured_preconditioning import (
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.chi2_diagnostics import (
+    CHI2_METRIC_NOTES,
+    ChiSquaredCubeSummary,
+    summarize_framewise_chi2,
+)
 from dluxshera.utils.dtype_diagnostics import print_dtype_audit
 from dluxshera.utils.obs_subblock_io import (
     find_obs_subblock_sidecar_manifest,
@@ -2199,7 +2204,11 @@ def _plot_image_fit(
     vmin = float(np.nanpercentile(data_arr, 1.0))
     vmax = float(np.nanpercentile(data_arr, 99.0))
     residual_cube = data_arr - model_arr
-    safe_variance = np.where(variance_arr > 0.0, variance_arr, np.nan)
+    safe_variance = np.where(
+        np.isfinite(variance_arr) & (variance_arr > 0.0),
+        variance_arr,
+        np.nan,
+    )
     with np.errstate(divide="ignore", invalid="ignore"):
         z_score_cube = residual_cube / np.sqrt(safe_variance)
 
@@ -2443,6 +2452,7 @@ def _build_recovered_rows(
     times: np.ndarray,
     frame_matrix: np.ndarray,
     frame_data_terms: np.ndarray,
+    chi2_summary: ChiSquaredCubeSummary,
 ) -> list[dict[str, Any]]:
     """Build recovered per-frame rows for CSV output."""
 
@@ -2452,6 +2462,13 @@ def _build_recovered_rows(
             "frame_index": int(frame_index),
             "time_s": float(times[frame_index]),
             "frame_nll": float(frame_data_terms[frame_index]),
+            "frame_chi2": float(chi2_summary.per_frame_chi2[frame_index]),
+            "frame_reduced_chi2": float(
+                chi2_summary.per_frame_reduced_chi2[frame_index]
+            ),
+            "frame_chi2_dof_pixels": int(
+                chi2_summary.per_frame_dof_pixels[frame_index]
+            ),
         }
         for key_index, key in enumerate(layout.frame_keys):
             row[key] = float(frame_matrix[frame_index, key_index])
@@ -2466,6 +2483,7 @@ def _build_truth_comparison_rows(
     recovered_frame_matrix: np.ndarray,
     truth_matrix: np.ndarray,
     frame_data_terms: np.ndarray,
+    chi2_summary: ChiSquaredCubeSummary,
 ) -> list[dict[str, Any]]:
     """Build truth/recovered/residual rows aligned to available truth keys."""
 
@@ -2475,6 +2493,13 @@ def _build_truth_comparison_rows(
             "frame_index": int(frame_index),
             "time_s": float(times[frame_index]),
             "frame_nll": float(frame_data_terms[frame_index]),
+            "frame_chi2": float(chi2_summary.per_frame_chi2[frame_index]),
+            "frame_reduced_chi2": float(
+                chi2_summary.per_frame_reduced_chi2[frame_index]
+            ),
+            "frame_chi2_dof_pixels": int(
+                chi2_summary.per_frame_dof_pixels[frame_index]
+            ),
         }
         for key_index, key in enumerate(frame_keys):
             truth_value = float(truth_matrix[frame_index, key_index])
@@ -3187,6 +3212,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         }
 
     outdir.mkdir(parents=True, exist_ok=True)
+    theta0_model_cube_np = np.asarray(theta0_model_cube, dtype=float)
+    initial_chi2_summary = summarize_framewise_chi2(
+        cube,
+        theta0_model_cube_np,
+        variance_cube=variance_cube,
+    )
 
     optimizer_cfg = inference_cfg["optimizer"]
     preconditioning_cfg = optimizer_cfg["preconditioning"]
@@ -3497,6 +3528,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     final_loss = float(np.asarray(objective_bundle.total_loss_fn(theta_final)))
 
     model_cube = np.asarray(objective_bundle.predict_cube_fn(theta_final), dtype=float)
+    final_chi2_summary = summarize_framewise_chi2(
+        cube,
+        model_cube,
+        variance_cube=variance_cube,
+    )
     frame_data_terms = np.asarray(
         objective_bundle.per_frame_data_terms_fn(theta_final),
         dtype=float,
@@ -3515,8 +3551,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         times=times,
         frame_matrix=final_frame_matrix,
         frame_data_terms=frame_data_terms,
+        chi2_summary=final_chi2_summary,
     )
-    recovered_fieldnames = ("frame_index", "time_s", *active_layout.frame_keys, "frame_nll")
+    recovered_fieldnames = (
+        "frame_index",
+        "time_s",
+        *active_layout.frame_keys,
+        "frame_nll",
+        "frame_chi2",
+        "frame_reduced_chi2",
+        "frame_chi2_dof_pixels",
+    )
     write_obs_subblock_truth_csv(
         output_path=artifacts["recovered_trace_csv"],
         rows=recovered_rows,
@@ -3536,13 +3581,21 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             recovered_frame_matrix=recovered_truth_frame_matrix,
             truth_matrix=truth_matrix,
             frame_data_terms=frame_data_terms,
+            chi2_summary=final_chi2_summary,
         )
         comparison_fieldnames = ["frame_index", "time_s"]
         for key in truth_frame_keys:
             comparison_fieldnames.extend(
                 [f"{key}_truth", f"{key}_recovered", f"{key}_residual"]
             )
-        comparison_fieldnames.append("frame_nll")
+        comparison_fieldnames.extend(
+            [
+                "frame_nll",
+                "frame_chi2",
+                "frame_reduced_chi2",
+                "frame_chi2_dof_pixels",
+            ]
+        )
         write_obs_subblock_truth_csv(
             output_path=artifacts["truth_comparison_csv"],
             rows=comparison_rows,
@@ -3802,6 +3855,19 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "final_prior_term": float(np.asarray(final_prior_term)),
             "final_temporal_term": float(np.asarray(final_temporal_term)),
             "mean_frame_nll": float(np.mean(frame_data_terms)),
+            "chi2": {
+                "metric_notes": CHI2_METRIC_NOTES,
+                "variance_basis": (
+                    "same variance cube used by the Gaussian image NLL objective"
+                ),
+                "per_frame_csv_columns": [
+                    "frame_chi2",
+                    "frame_reduced_chi2",
+                    "frame_chi2_dof_pixels",
+                ],
+                "initial_model": initial_chi2_summary.to_jsonable(),
+                "final_model": final_chi2_summary.to_jsonable(),
+            },
             "preconditioner_trace_fim": (
                 None
                 if preconditioning_bundle is None
@@ -3826,6 +3892,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 
     print(f"Finished observation sub-block inference on {n_frame} frames.")
     print(f"initial_loss={initial_loss:.6g} final_loss={final_loss:.6g}")
+    print(
+        "chi2 diagnostics: "
+        f"init_block_reduced={_format_scalar(initial_chi2_summary.block_reduced_chi2)} "
+        f"final_block_reduced={_format_scalar(final_chi2_summary.block_reduced_chi2)}"
+    )
     print(f"Wrote artifacts under: {outdir}")
     t1_script = time.time()
     print("Script finished in %.3f sec" % (t1_script - t0_script))
@@ -3844,6 +3915,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         },
         "initial_loss": initial_loss,
         "final_loss": final_loss,
+        "chi2": {
+            "metric_notes": CHI2_METRIC_NOTES,
+            "initial_model": initial_chi2_summary.to_jsonable(),
+            "final_model": final_chi2_summary.to_jsonable(),
+        },
         "theta0": np.asarray(theta0, dtype=float),
         "theta_final": theta_final_np,
         # Keep the optimizer trace available to in-process orchestration scripts
