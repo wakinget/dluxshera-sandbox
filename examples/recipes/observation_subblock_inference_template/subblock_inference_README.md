@@ -252,6 +252,10 @@ The inference recipe writes:
 - optional `<file_prefix>_<timestamp>_truth_comparison.csv` (when truth trace is available)
 - diagnostic plots (loss history, trace plots, image-fit panel)
 
+The image-fit panel samples representative frames and shows data, model, raw
+residual, and variance-scaled Z-score maps. The Z-score uses the same variance
+cube used by the Gaussian image NLL objective.
+
 The saved inference manifest includes:
 
 - source `config_path`

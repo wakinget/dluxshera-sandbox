@@ -2167,11 +2167,28 @@ def _plot_image_fit(
     *,
     data_cube: np.ndarray,
     model_cube: np.ndarray,
+    variance_cube: np.ndarray,
     output_path: Path,
 ) -> None:
-    """Plot representative data/model/residual image panels."""
+    """Plot representative data/model/residual/Z-score image panels."""
 
-    n_frame = int(data_cube.shape[0])
+    data_arr = np.asarray(data_cube, dtype=float)
+    model_arr = np.asarray(model_cube, dtype=float)
+    variance_arr = np.asarray(variance_cube, dtype=float)
+    if data_arr.shape != model_arr.shape or data_arr.shape != variance_arr.shape:
+        raise ValueError(
+            "data_cube, model_cube, and variance_cube must have the same shape "
+            "for image-fit diagnostics."
+        )
+    if data_arr.ndim != 3:
+        raise ValueError(
+            "data_cube, model_cube, and variance_cube must be 3D arrays with "
+            "shape (n_frame, y, x)."
+        )
+
+    n_frame = int(data_arr.shape[0])
+    if n_frame <= 0:
+        raise ValueError("Image-fit diagnostics require at least one frame.")
     sample_indices = [0, n_frame // 2, n_frame - 1]
     deduped: list[int] = []
     for idx in sample_indices:
@@ -2179,37 +2196,61 @@ def _plot_image_fit(
             deduped.append(idx)
     sample_indices = deduped
 
-    vmin = float(np.percentile(data_cube, 1.0))
-    vmax = float(np.percentile(data_cube, 99.0))
-    residual_cube = data_cube - model_cube
-    rv = float(np.max(np.abs(residual_cube)))
-    if not np.isfinite(rv) or rv <= 0.0:
-        rv = 1.0
+    vmin = float(np.nanpercentile(data_arr, 1.0))
+    vmax = float(np.nanpercentile(data_arr, 99.0))
+    residual_cube = data_arr - model_arr
+    safe_variance = np.where(variance_arr > 0.0, variance_arr, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z_score_cube = residual_cube / np.sqrt(safe_variance)
 
-    fig, axes = plt.subplots(len(sample_indices), 3, figsize=(10, 3.5 * len(sample_indices)))
+    residual_abs = np.abs(residual_cube[np.isfinite(residual_cube)])
+    rv = float(np.max(residual_abs)) if residual_abs.size else 1.0
+    if rv <= 0.0:
+        rv = 1.0
+    zscore_abs = np.abs(z_score_cube[np.isfinite(z_score_cube)])
+    zv = float(np.max(zscore_abs)) if zscore_abs.size else 1.0
+    if zv <= 0.0:
+        zv = 1.0
+
+    fig, axes = plt.subplots(
+        len(sample_indices),
+        4,
+        figsize=(13.5, 3.5 * len(sample_indices)),
+    )
     if len(sample_indices) == 1:
         axes = np.asarray([axes])
 
     for row, frame_index in enumerate(sample_indices):
-        ax_data, ax_model, ax_resid = axes[row]
-        im_data = ax_data.imshow(data_cube[frame_index], cmap="inferno", vmin=vmin, vmax=vmax)
+        ax_data, ax_model, ax_resid, ax_zscore = axes[row]
+        im_data = ax_data.imshow(data_arr[frame_index], cmap="inferno", vmin=vmin, vmax=vmax)
         im_model = ax_model.imshow(
-            model_cube[frame_index], cmap="inferno", vmin=vmin, vmax=vmax
+            model_arr[frame_index], cmap="inferno", vmin=vmin, vmax=vmax
         )
         im_resid = ax_resid.imshow(
             residual_cube[frame_index], cmap="RdBu_r", vmin=-rv, vmax=rv
         )
+        im_zscore = ax_zscore.imshow(
+            z_score_cube[frame_index], cmap="RdBu_r", vmin=-zv, vmax=zv
+        )
         ax_data.set_title(f"data frame {frame_index}")
         ax_model.set_title(f"model frame {frame_index}")
-        ax_resid.set_title(f"residual frame {frame_index}")
-        for ax in (ax_data, ax_model, ax_resid):
+        ax_resid.set_title(f"raw residual frame {frame_index}")
+        ax_zscore.set_title(f"Z-score frame {frame_index}")
+        for ax in (ax_data, ax_model, ax_resid, ax_zscore):
             ax.set_xlabel("x (pix)")
             ax.set_ylabel("y (pix)")
-        fig.colorbar(im_data, ax=ax_data, fraction=0.046, pad=0.04)
-        fig.colorbar(im_model, ax=ax_model, fraction=0.046, pad=0.04)
-        fig.colorbar(im_resid, ax=ax_resid, fraction=0.046, pad=0.04)
+        fig.colorbar(im_data, ax=ax_data, fraction=0.046, pad=0.04).set_label("Photons")
+        fig.colorbar(im_model, ax=ax_model, fraction=0.046, pad=0.04).set_label(
+            "Photons"
+        )
+        fig.colorbar(im_resid, ax=ax_resid, fraction=0.046, pad=0.04).set_label(
+            "Data - model"
+        )
+        fig.colorbar(im_zscore, ax=ax_zscore, fraction=0.046, pad=0.04).set_label(
+            "Z-score"
+        )
 
-    fig.suptitle("Data/model/residual image diagnostics")
+    fig.suptitle("Data/model/raw residual/Z-score image diagnostics")
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
@@ -3620,6 +3661,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         _plot_image_fit(
             data_cube=cube,
             model_cube=model_cube,
+            variance_cube=variance_cube,
             output_path=artifacts["image_fit_png"],
         )
 
