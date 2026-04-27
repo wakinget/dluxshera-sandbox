@@ -278,14 +278,29 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = _build_parser().parse_args()
+def generate_obs_subblock_quicklook(
+    *,
+    cube_path: Path,
+    trace_path: Path | None = None,
+    manifest_path: Path | None = None,
+    outdir: Path | None = None,
+    write_gif: bool = True,
+    write_mp4: bool = False,
+    write_summary: bool = True,
+    write_trace_summary: bool = True,
+    stride: int = 1,
+    stretch: str = "linear",
+    pmin: float = 1.0,
+    pmax: float = 99.0,
+    fps: int = 10,
+) -> dict[str, Any]:
+    """Generate quick-look artifacts for one observation sub-block cube."""
 
-    cube_path = args.cube.resolve()
+    cube_path = cube_path.resolve()
     if not cube_path.exists():
         raise FileNotFoundError(f"Cube FITS not found: {cube_path}")
 
-    manifest_path = args.manifest.resolve() if args.manifest is not None else None
+    manifest_path = manifest_path.resolve() if manifest_path is not None else None
     if manifest_path is None:
         sibling_manifest = cube_path.parent / "manifest.json"
         if sibling_manifest.exists():
@@ -293,7 +308,7 @@ def main() -> None:
     manifest = _load_manifest(manifest_path)
 
     trace_path = _infer_trace_path(
-        trace_path=args.trace,
+        trace_path=trace_path.resolve() if trace_path is not None else None,
         manifest=manifest,
         manifest_path=manifest_path,
     )
@@ -317,64 +332,97 @@ def main() -> None:
         else None
     )
 
-    outdir = args.outdir.resolve() if args.outdir is not None else cube_path.parent / DEFAULT_OUTDIR_NAME
+    outdir = outdir.resolve() if outdir is not None else cube_path.parent / DEFAULT_OUTDIR_NAME
     outdir.mkdir(parents=True, exist_ok=True)
 
     with fits.open(cube_path) as hdul:
         cube = np.asarray(hdul[0].data)
 
     title_prefix = _title_prefix(manifest=manifest, cube_shape=cube.shape, trace=trace)
+    artifacts: dict[str, str] = {}
 
-    if not args.no_gif:
+    if write_gif:
         gif_path = outdir / "preview.gif"
         write_obs_subblock_preview_gif(
             cube,
             output_path=gif_path,
             trace=trace,
-            stride=args.stride,
-            pmin=args.pmin,
-            pmax=args.pmax,
-            stretch=args.stretch,
-            fps=args.fps,
+            stride=stride,
+            pmin=pmin,
+            pmax=pmax,
+            stretch=stretch,
+            fps=fps,
         )
         print(f"Wrote: {gif_path}")
+        artifacts["preview_gif"] = str(gif_path)
 
-    if args.mp4:
+    if write_mp4:
         mp4_path = outdir / "preview.mp4"
         try:
             write_obs_subblock_preview_mp4(
                 cube,
                 output_path=mp4_path,
                 trace=trace,
-                stride=args.stride,
-                pmin=args.pmin,
-                pmax=args.pmax,
-                stretch=args.stretch,
-                fps=args.fps,
+                stride=stride,
+                pmin=pmin,
+                pmax=pmax,
+                stretch=stretch,
+                fps=fps,
             )
             print(f"Wrote: {mp4_path}")
+            artifacts["preview_mp4"] = str(mp4_path)
         except RuntimeError as exc:
             print(f"Skipping MP4 export: {exc}")
 
-    if not args.no_summary:
+    if write_summary:
         fig, _ = make_obs_subblock_summary_figure(
             cube,
-            pmin=args.pmin,
-            pmax=args.pmax,
-            stretch=args.stretch,
+            pmin=pmin,
+            pmax=pmax,
+            stretch=stretch,
             title=title_prefix,
         )
         summary_path = outdir / "summary.png"
         fig.savefig(summary_path, dpi=180)
         plt.close(fig)
         print(f"Wrote: {summary_path}")
+        artifacts["summary_png"] = str(summary_path)
 
-    if trace is not None and not args.no_trace_summary:
+    if trace is not None and write_trace_summary:
         fig, _ = make_obs_subblock_trace_summary_figure(trace, title=title_prefix)
         trace_summary_path = outdir / "trace_summary.png"
         fig.savefig(trace_summary_path, dpi=180)
         plt.close(fig)
         print(f"Wrote: {trace_summary_path}")
+        artifacts["trace_summary_png"] = str(trace_summary_path)
+
+    return {
+        "cube_path": str(cube_path),
+        "manifest_path": None if manifest_path is None else str(manifest_path),
+        "trace_path": None if trace_path is None else str(trace_path),
+        "output_dir": str(outdir),
+        "artifacts": artifacts,
+    }
+
+
+def main(argv: list[str] | None = None) -> dict[str, Any]:
+    args = _build_parser().parse_args(argv)
+
+    return generate_obs_subblock_quicklook(
+        cube_path=args.cube,
+        trace_path=args.trace,
+        manifest_path=args.manifest,
+        outdir=args.outdir,
+        write_gif=not bool(args.no_gif),
+        write_mp4=bool(args.mp4),
+        write_summary=not bool(args.no_summary),
+        write_trace_summary=not bool(args.no_trace_summary),
+        stride=int(args.stride),
+        stretch=str(args.stretch),
+        pmin=float(args.pmin),
+        pmax=float(args.pmax),
+        fps=int(args.fps),
+    )
 
 
 if __name__ == "__main__":

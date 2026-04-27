@@ -201,6 +201,38 @@ That avoids nested timestamps like
 `Results/.../<trace_timestamp>/<render_timestamp>/` unless you explicitly want
 that shape.
 
+### 5b) Lightweight case helper for repeated studies
+
+For repeated synthetic studies, use the narrow case runner:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_case.py \
+  --results-root Results/obs_subblock_test1 \
+  --case-name subblock_01 \
+  --stages trace,render,quicklook,inference
+```
+
+This keeps the same explicit stage model, but it:
+
+- writes case-local `trace_config.json`, `render_config.json`, and
+  `inference_config.json`
+- wires stage-to-stage paths under one stable case root
+- writes a small `case_summary.json`
+- lets you rerun subsets such as `--stages render,inference` after a trace or
+  render already exists in the case layout
+
+Useful study-level overrides include:
+
+- `--n-frames`
+- `--dt-s`
+- `--exposure-time-s`
+- `--noise enabled|disabled`
+- `--trace-path`
+- `--cube-path`
+- `--truth-trace-path`
+- `--manifest-path`
+- `--dry-run`
+
 ### 6) Generate quick-look diagnostics
 
 ```bash
