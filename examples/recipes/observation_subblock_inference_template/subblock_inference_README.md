@@ -102,6 +102,23 @@ Each study mode writes a small machine-readable `summary.json` under
 `study/<mode>/` plus mode-specific artifacts such as Fisher summaries,
 profile curves, or nuisance-bias summaries.
 
+For the first worked shared-parameter screening case, use the study-specific
+plate-scale runner:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_plate_scale_fisher_screen.py \
+  --study-root Results/plate_scale_fisher_alpha_cen
+```
+
+This runs the explicit `fisher_only` plate-scale matrix over:
+
+- target: `ALPHA_CEN`
+- frame counts: `1, 5, 20, 50`
+- noise modes: `noiseless`, `shot_noise_only`
+
+and writes per-case Fisher/Schur summaries plus aggregate CSV/JSON/PNG review
+artifacts at the study root.
+
 ## Adam hyperparameter sweep
 
 Use `examples/scripts/sweep_obs_subblock_adam.py` to run the small Adam sweep

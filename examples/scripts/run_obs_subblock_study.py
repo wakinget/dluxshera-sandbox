@@ -163,6 +163,67 @@ def parse_scalar_grid(raw: str | Sequence[float] | None) -> tuple[float, ...]:
     return tuple(values)
 
 
+def derive_scalar_information_metrics(
+    *,
+    f_pp: float | None,
+    i_marg: float | None,
+) -> dict[str, Any]:
+    """Derive scalar Fisher screening summaries with safe invalid handling."""
+
+    f_pp_is_finite = f_pp is not None and np.isfinite(f_pp)
+    i_marg_is_finite = i_marg is not None and np.isfinite(i_marg)
+
+    sigma_cond: float | None
+    if f_pp_is_finite and float(f_pp) > 0.0:
+        sigma_cond = float(1.0 / np.sqrt(float(f_pp)))
+    elif f_pp_is_finite and float(f_pp) == 0.0:
+        sigma_cond = float("inf")
+    else:
+        sigma_cond = None
+
+    sigma_marg: float | None
+    if i_marg_is_finite and float(i_marg) > 0.0:
+        sigma_marg = float(1.0 / np.sqrt(float(i_marg)))
+    elif i_marg_is_finite and float(i_marg) == 0.0:
+        sigma_marg = float("inf")
+    else:
+        sigma_marg = None
+
+    absorption_fraction: float | None = None
+    if f_pp_is_finite and i_marg_is_finite and float(f_pp) > 0.0:
+        absorption_fraction = float(1.0 - (float(i_marg) / float(f_pp)))
+
+    if not f_pp_is_finite:
+        marginalization_status = "nonfinite_conditional_information"
+    elif float(f_pp) < 0.0:
+        marginalization_status = "negative_conditional_information"
+    elif not i_marg_is_finite:
+        marginalization_status = "nonfinite_marginal_information"
+    elif float(i_marg) < 0.0:
+        marginalization_status = "negative_marginal_information"
+    elif float(i_marg) == 0.0:
+        marginalization_status = "zero_marginal_information"
+    else:
+        marginalization_status = "ok"
+
+    return {
+        "f_pp": None if f_pp is None else float(f_pp),
+        "i_marg": None if i_marg is None else float(i_marg),
+        "sigma_cond": sigma_cond,
+        "sigma_marg": sigma_marg,
+        "absorption_fraction": absorption_fraction,
+        "f_pp_is_finite": bool(f_pp_is_finite),
+        "i_marg_is_finite": bool(i_marg_is_finite),
+        "valid_conditional_sigma": bool(
+            sigma_cond is not None and np.isfinite(sigma_cond) and float(f_pp) > 0.0
+        ),
+        "valid_marginal_sigma": bool(
+            sigma_marg is not None and np.isfinite(sigma_marg) and float(i_marg) > 0.0
+        ),
+        "marginalization_status": marginalization_status,
+    }
+
+
 def _study_value_token(value: float) -> str:
     """Return a compact filesystem-safe token for one scalar study value."""
 
@@ -228,6 +289,20 @@ def _get_nested_scalar(mapping: dict[str, Any] | None, dotted_key: str) -> float
     if isinstance(current, bool) or not isinstance(current, (int, float)):
         return None
     return float(current)
+
+
+def _resolve_target_name(cfg: dict[str, Any] | None) -> str | None:
+    """Return `system.source.target` when available."""
+
+    if not isinstance(cfg, dict):
+        return None
+    source_cfg = cfg.get("source")
+    if not isinstance(source_cfg, dict):
+        return None
+    target = source_cfg.get("target")
+    if not isinstance(target, str) or not target.strip():
+        return None
+    return target.strip()
 
 
 def _case_layout(case_root: Path):
@@ -395,6 +470,11 @@ def _build_study_templates(
         },
         "resolved_truth_value": resolved_truth,
         "resolved_assumed_value": resolved_assumed,
+        "resolved_target_name": (
+            _resolve_target_name(inference_cfg.get("system"))
+            or _resolve_target_name(render_cfg.get("system"))
+            or _resolve_target_name(trace_cfg.get("system"))
+        ),
     }
 
 
@@ -621,6 +701,9 @@ def _evaluate_fisher_only(
     config_path: Path,
     output_dir: Path,
     candidate_key: str,
+    truth_value: float | None = None,
+    noise_mode: str | None = None,
+    target_name: str | None = None,
 ) -> dict[str, Any]:
     """Compute a dense Fisher/Schur screening summary without optimization."""
 
@@ -658,13 +741,37 @@ def _evaluate_fisher_only(
     else:
         schur = candidate_block - candidate_cross.T @ np.linalg.pinv(nuisance_block) @ candidate_cross
 
+    nuisance_block_sym = 0.5 * (nuisance_block + nuisance_block.T)
     nuisance_eigs = (
-        np.linalg.eigvalsh(0.5 * (nuisance_block + nuisance_block.T))
+        np.linalg.eigvalsh(nuisance_block_sym)
         if nuisance_dim > 0
         else np.asarray([], dtype=float)
     )
+    nuisance_rank = int(np.linalg.matrix_rank(nuisance_block)) if nuisance_dim > 0 else 0
+    nuisance_cond = (
+        float(np.linalg.cond(nuisance_block))
+        if nuisance_dim > 0
+        else None
+    )
+    nuisance_status = "none"
+    if nuisance_dim > 0:
+        if nuisance_rank < nuisance_dim:
+            nuisance_status = "rank_deficient"
+        elif nuisance_cond is None or not np.isfinite(nuisance_cond):
+            nuisance_status = "singular_or_nonfinite_condition"
+        elif nuisance_cond > 1.0e12:
+            nuisance_status = "ill_conditioned"
+        else:
+            nuisance_status = "ok"
+
     direct_candidate_info = float(np.asarray(candidate_block, dtype=float).squeeze())
     schur_scalar = float(np.asarray(schur, dtype=float).squeeze())
+    scalar_metrics = derive_scalar_information_metrics(
+        f_pp=direct_candidate_info,
+        i_marg=schur_scalar,
+    )
+    candidate_reference_value = float(np.asarray(theta_ref[nuisance_dim:], dtype=float).squeeze())
+    resolved_target_name = target_name or _resolve_target_name(context["system_cfg"])
 
     output_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -680,17 +787,29 @@ def _evaluate_fisher_only(
     summary = {
         "mode": MODE_FISHER_ONLY,
         "candidate_parameter": candidate_key,
+        "target_name": resolved_target_name,
+        "truth_value": None if truth_value is None else float(truth_value),
+        "candidate_reference_value": candidate_reference_value,
+        "noise_mode": noise_mode,
+        "frame_count": int(layout.n_frame),
         "theta_reference_source": context["theta_reference_source"],
         "theta_dim": int(layout.theta_size),
         "nuisance_dim": nuisance_dim,
         "candidate_dim": candidate_dim,
         "frame_keys": list(layout.frame_keys),
         "shared_keys": list(layout.shared_keys),
+        "nuisance_block_rank": nuisance_rank,
+        "nuisance_block_condition_number": nuisance_cond,
+        "nuisance_block_status": nuisance_status,
+        "used_pseudoinverse": True,
+        **scalar_metrics,
         "direct_candidate_information": direct_candidate_info,
         "schur_complement_information": schur_scalar,
         "candidate_information_retained_fraction": (
             None
-            if direct_candidate_info == 0.0
+            if scalar_metrics["f_pp"] is None
+            or scalar_metrics["i_marg"] is None
+            or direct_candidate_info == 0.0
             else float(schur_scalar / direct_candidate_info)
         ),
         "nuisance_block_min_eig": (
@@ -1023,6 +1142,11 @@ def run_obs_subblock_study(
         "summary_path": str(summary_path.resolve()),
         "dry_run": bool(dry_run),
         "candidate_parameter": candidate,
+        "target_name": template_info["resolved_target_name"],
+        "n_frames_requested": n_frames,
+        "dt_s_requested": dt_s,
+        "exposure_time_s_requested": exposure_time_s,
+        "noise_mode_requested": noise_mode,
         "truth_value_requested": None if truth_value is None else float(truth_value),
         "assumed_value_requested": None if assumed_value is None else float(assumed_value),
         "scan_values_requested": [float(value) for value in scan_values],
@@ -1114,6 +1238,9 @@ def run_obs_subblock_study(
             config_path=fisher_config_path,
             output_dir=study_root,
             candidate_key=candidate,
+            truth_value=summary.get("rendered_truth_value", template_info["resolved_truth_value"]),
+            noise_mode=noise_mode,
+            target_name=summary["target_name"],
         )
         summary["fisher_summary"] = fisher_summary
         _write_json(summary_path, summary)

@@ -228,6 +228,28 @@ def test_parse_helpers_validate_mode_candidate_and_grid():
         module.parse_scalar_grid("")
 
 
+def test_derive_scalar_information_metrics_handles_nonpositive_marginal_info():
+    module = _load_script_module()
+
+    valid = module.derive_scalar_information_metrics(f_pp=4.0, i_marg=1.0)
+    assert valid["sigma_cond"] == pytest.approx(0.5)
+    assert valid["sigma_marg"] == pytest.approx(1.0)
+    assert valid["absorption_fraction"] == pytest.approx(0.75)
+    assert valid["marginalization_status"] == "ok"
+    assert valid["valid_marginal_sigma"] is True
+
+    zero_marg = module.derive_scalar_information_metrics(f_pp=4.0, i_marg=0.0)
+    assert zero_marg["sigma_marg"] == float("inf")
+    assert zero_marg["valid_marginal_sigma"] is False
+    assert zero_marg["marginalization_status"] == "zero_marginal_information"
+
+    negative_marg = module.derive_scalar_information_metrics(f_pp=4.0, i_marg=-1.0)
+    assert negative_marg["sigma_marg"] is None
+    assert negative_marg["valid_marginal_sigma"] is False
+    assert negative_marg["absorption_fraction"] == pytest.approx(1.25)
+    assert negative_marg["marginalization_status"] == "negative_marginal_information"
+
+
 def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
     module = _load_script_module()
     trace_template, render_template, inference_template = _write_templates(tmp_path)
