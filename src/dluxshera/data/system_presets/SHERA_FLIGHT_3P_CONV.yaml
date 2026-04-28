@@ -1,0 +1,74 @@
+system:
+  source:
+    kind: alpha_cen
+    target: ALPHA_CEN
+    wavelength_m: 5.5e-07
+    bandwidth_m: 4.1e-08
+    n_lambda: 3
+    exposure_time_s: 1800.0
+    x_position_as: 0.0
+    y_position_as: 0.0
+  optics:
+    kind: three_plane
+    psf_npix: 256
+    oversample: 3
+    pupil_npix: 256
+    m1_diameter_m: 0.22
+    m2_diameter_m: 0.025
+    m1_focal_length_m: 0.604353
+    m2_focal_length_m: -0.0545
+    m1_m2_separation_m: 0.55413
+    pixel_pitch_m: 4.6e-06
+    n_struts: 3
+    strut_width_m: 0.002
+    strut_rotation_deg: -90.0
+    throughput: 1.0
+    primary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+    secondary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+    dp_path: src/dluxshera/data/pupils/diffractive_pupil.npy
+    dp_design_wavelength_m: 5.5e-07
+  detector:
+    model: HWK4123
+    layers:
+    - name: pixel_mtf
+      kind: ApplyConvolution
+      kernel:
+        kind: box
+        width_x: 1.0
+        width_y: 1.0
+        kernel_size: 3
+        units: detector_pix
+    - name: diffusion
+      kind: ApplyConvolution
+      kernel:
+        kind: gaussian
+        sigma_x: 0.15
+        sigma_y: 0.15
+        theta_deg: 0.0
+        kernel_size: 9
+        units: detector_pix
+    - name: pixel_offsets
+      kind: ApplyPixelOffsets
+      dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
+      dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
+    - name: pixel_response
+      kind: ApplyPixelResponse
+      prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
+    - name: jitter
+      kind: ApplyConvolution
+      kernel:
+        kind: gaussian
+        sigma_x: 0.5
+        sigma_y: 0.5
+        theta_deg: 0.0
+        kernel_size: 5
+        units: detector_pix
+    - name: smear
+      kind: ApplyConvolution
+      kernel:
+        kind: line
+        length: 0.5
+        theta_deg: 45.0
+        sigma_perp: 0.1
+        kernel_size: 11
+        units: detector_pix
