@@ -55,6 +55,53 @@ Set `data.manifest` explicitly only when the render manifest is not a sibling
 of the cube. Set `data.truth_trace` explicitly only when you want to override the
 manifest-derived truth path.
 
+## Lightweight screening harness
+
+For repeated screening studies, use
+`examples/scripts/run_obs_subblock_study.py`. It keeps the existing
+trace -> render -> quick-look -> inference recipes visible, but adds explicit
+study modes under the same stable case root:
+
+- `full_case`
+- `fisher_only`
+- `profile_objective`
+- `nuisance_absorption`
+
+Example plate-scale screening runs:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
+  --results-root Results/obs_subblock_screening \
+  --case-name plate_scale_case_01 \
+  --mode fisher_only \
+  --candidate optics.plate_scale_as_per_pix \
+  --truth-value 0.006
+```
+
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
+  --results-root Results/obs_subblock_screening \
+  --case-name plate_scale_case_01 \
+  --mode profile_objective \
+  --candidate optics.plate_scale_as_per_pix \
+  --scan-values 0.0058,0.0060,0.0062
+```
+
+The harness reuses the repeated-study case layout:
+
+```text
+Results/<study>/<case>/
+  trace/
+  render/
+  render/quicklook/
+  inference/
+  study/<mode>/
+```
+
+Each study mode writes a small machine-readable `summary.json` under
+`study/<mode>/` plus mode-specific artifacts such as Fisher summaries,
+profile curves, or nuisance-bias summaries.
+
 ## Adam hyperparameter sweep
 
 Use `examples/scripts/sweep_obs_subblock_adam.py` to run the small Adam sweep

@@ -28,6 +28,7 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -134,6 +135,7 @@ def _load_module(module_path: Path, module_name: str):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load module at {module_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
