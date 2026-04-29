@@ -35,8 +35,12 @@ from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
 from dluxshera.utils.obs_subblock_keys import (
-    OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS,
+    ObsSubblockKeyAddress,
+    get_obs_subblock_mapping_value,
+    get_obs_subblock_store_value,
     parse_obs_subblock_key_address,
+    set_obs_subblock_mapping_value,
+    validate_supported_obs_subblock_key_addresses,
 )
 from dluxshera.utils.obs_subblock_trace import load_obs_subblock_trace_csv
 
@@ -119,24 +123,47 @@ def parse_study_mode(raw_mode: str) -> str:
     return mode
 
 
-def parse_scalar_candidate_parameter(raw_key: str | None) -> str | None:
-    """Validate the narrow first-pass candidate-parameter contract."""
+def parse_candidate_parameter_address(
+    raw_key: str | None,
+    *,
+    forward_spec: Any | None = None,
+    reference_store: Any | None = None,
+) -> ObsSubblockKeyAddress | None:
+    """Parse and validate one scalar-or-indexed candidate key address."""
 
     if raw_key is None:
         return None
     address = parse_obs_subblock_key_address(str(raw_key))
-    if address.index is not None:
-        raise ValueError(
-            "The study harness currently supports one scalar candidate "
-            "parameter at a time; indexed vector components are not supported."
-        )
-    if address.base_key not in OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS:
-        raise ValueError(
-            "Unsupported scalar candidate parameter "
-            f"{address.canonical!r}. Supported scalar keys are: "
-            + ", ".join(OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS)
-        )
-    return address.canonical
+    validate_supported_obs_subblock_key_addresses(
+        (address,),
+        forward_spec=forward_spec,
+        reference_store=reference_store,
+    )
+    return address
+
+
+def parse_scalar_candidate_parameter(raw_key: str | None) -> str | None:
+    """Backward-compatible wrapper returning the canonical candidate string."""
+
+    address = parse_candidate_parameter_address(raw_key)
+    return None if address is None else address.canonical
+
+
+def _candidate_metadata(candidate_key: str | None) -> dict[str, Any]:
+    """Return stable candidate metadata fields for summaries and tables."""
+
+    if candidate_key is None:
+        return {
+            "candidate_parameter": None,
+            "candidate_base_key": None,
+            "candidate_index": None,
+        }
+    address = parse_obs_subblock_key_address(candidate_key)
+    return {
+        "candidate_parameter": address.canonical,
+        "candidate_base_key": address.base_key,
+        "candidate_index": address.index,
+    }
 
 
 def parse_scalar_grid(raw: str | Sequence[float] | None) -> tuple[float, ...]:
@@ -516,6 +543,7 @@ def _evaluate_candidate_sensitivity(
     binder = context["binder"]
     base_store = context["base_store"]
     forward_spec = context["forward_spec"]
+    candidate_address = parse_obs_subblock_key_address(candidate_key)
 
     theta_candidate_index: int | None = None
     shared_candidate_index: int | None = None
@@ -524,7 +552,11 @@ def _evaluate_candidate_sensitivity(
         shared_candidate_index = list(layout.shared_keys).index(candidate_key)
         theta_candidate_index = int(layout.n_frame * layout.frame_width + shared_candidate_index)
 
-    field = forward_spec.get(candidate_key) if candidate_key in forward_spec else None
+    field = (
+        forward_spec.get(candidate_address.base_key)
+        if candidate_address.base_key in forward_spec
+        else None
+    )
     field_found = field is not None
     binding_present = bool(getattr(field, "binding", None)) if field_found else False
     candidate_field = None if field is None else _candidate_field_payload(field)
@@ -550,7 +582,7 @@ def _evaluate_candidate_sensitivity(
         if theta_candidate_index is None
         else float(theta_reference[int(theta_candidate_index)])
     )
-    base_store_value = _scalar_or_none(base_store.get(candidate_key, default=None))
+    base_store_value = get_obs_subblock_store_value(base_store, address=candidate_address)
 
     theta_state_ref = recipe._unpack_active_state(layout, recipe.jnp.asarray(theta_reference))
     reference_shared = np.asarray(theta_state_ref.shared, dtype=float)
@@ -565,7 +597,10 @@ def _evaluate_candidate_sensitivity(
         key_specs=layout.shared_specs,
         values=recipe.jnp.asarray(reference_shared),
     )
-    reference_store_value = _scalar_or_none(reference_store.get(candidate_key, default=None))
+    reference_store_value = get_obs_subblock_store_value(
+        reference_store,
+        address=candidate_address,
+    )
     reference_frame_store = reference_store
     reference_frame_store_value = None
     if int(layout.n_frame) > 0 and int(layout.frame_width) > 0:
@@ -581,8 +616,9 @@ def _evaluate_candidate_sensitivity(
                 shared_store=reference_store,
                 shared_specs=layout.shared_specs,
             )
-        reference_frame_store_value = _scalar_or_none(
-            reference_frame_store.get(candidate_key, default=None)
+        reference_frame_store_value = get_obs_subblock_store_value(
+            reference_frame_store,
+            address=candidate_address,
         )
 
     perturbation_rows: list[dict[str, Any]] = []
@@ -624,7 +660,10 @@ def _evaluate_candidate_sensitivity(
             key_specs=layout.shared_specs,
             values=recipe.jnp.asarray(perturbed_shared),
         )
-        perturbed_store_value = _scalar_or_none(perturbed_store.get(candidate_key, default=None))
+        perturbed_store_value = get_obs_subblock_store_value(
+            perturbed_store,
+            address=candidate_address,
+        )
         perturbed_frame_store = perturbed_store
         perturbed_frame_store_value = None
         if int(layout.n_frame) > 0 and int(layout.frame_width) > 0:
@@ -640,8 +679,9 @@ def _evaluate_candidate_sensitivity(
                     shared_store=perturbed_store,
                     shared_specs=layout.shared_specs,
                 )
-            perturbed_frame_store_value = _scalar_or_none(
-                perturbed_frame_store.get(candidate_key, default=None)
+            perturbed_frame_store_value = get_obs_subblock_store_value(
+                perturbed_frame_store,
+                address=candidate_address,
             )
 
         telescope_ref = binder._apply_runtime_updates(reference_frame_store)
@@ -759,7 +799,7 @@ def _evaluate_candidate_sensitivity(
     )
 
     return {
-        "candidate_parameter": candidate_key,
+        **_candidate_metadata(candidate_key),
         "candidate_reference_value": candidate_reference_value,
         "truth_value": None if truth_value is None else float(truth_value),
         "theta_candidate_index": theta_candidate_index,
@@ -880,6 +920,16 @@ def _study_value_token(value: float) -> str:
     return text.replace(".", "p")
 
 
+def _candidate_token(candidate_key: str) -> str:
+    """Return a compact filesystem-safe token for one canonical candidate key."""
+
+    address = parse_obs_subblock_key_address(candidate_key)
+    token = address.base_key.replace(".", "_")
+    if address.index is not None:
+        token = f"{token}_i{address.index}"
+    return token
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -904,38 +954,60 @@ def _ensure_mapping(parent: dict[str, Any], key: str, *, path: str) -> dict[str,
     return value
 
 
-def _set_nested_scalar(mapping: dict[str, Any], dotted_key: str, value: float) -> None:
-    """Set a scalar dotted-key value inside a nested mapping."""
+def _resolve_template_system_context(template_path: Path) -> dict[str, Any]:
+    """Resolve one template's system block and default store for candidate work."""
 
-    current = mapping
-    parts = dotted_key.split(".")
-    for part in parts[:-1]:
-        child = current.get(part)
-        if child is None:
-            current[part] = {}
-            child = current[part]
-        if not isinstance(child, dict):
-            raise ValueError(
-                f"Cannot set nested scalar {dotted_key!r}; path component {part!r} "
-                "is not a mapping."
-            )
-        current = child
-    current[parts[-1]] = float(value)
+    user_cfg = load_user_config(
+        config_path=template_path.resolve(),
+        system_preset=None,
+        experiment_preset=None,
+    )
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    if not isinstance(system_cfg, dict):
+        raise ValueError(f"Template {template_path} must resolve a system mapping.")
+    forward_spec = compose_forward_spec(system_cfg)
+    store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    return {
+        "resolved_cfg": resolved_cfg,
+        "system_cfg": system_cfg,
+        "forward_spec": forward_spec,
+        "store": store,
+    }
 
 
-def _get_nested_scalar(mapping: dict[str, Any] | None, dotted_key: str) -> float | None:
-    """Read a scalar dotted-key value from a nested mapping when present."""
+def _resolve_candidate_mapping_value(
+    mapping: dict[str, Any] | None,
+    *,
+    candidate_key: str,
+) -> float | None:
+    """Read one scalar-or-indexed candidate value from a nested mapping."""
 
-    if not isinstance(mapping, dict):
-        return None
-    current: Any = mapping
-    for part in dotted_key.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    if isinstance(current, bool) or not isinstance(current, (int, float)):
-        return None
-    return float(current)
+    return get_obs_subblock_mapping_value(
+        mapping,
+        address=parse_obs_subblock_key_address(candidate_key),
+    )
+
+
+def _set_candidate_mapping_value(
+    mapping: dict[str, Any],
+    *,
+    candidate_key: str,
+    value: float,
+    reference_store: ParameterStore | None = None,
+) -> None:
+    """Patch one scalar-or-indexed candidate value into a nested mapping."""
+
+    address = parse_obs_subblock_key_address(candidate_key)
+    reference_vector = None
+    if address.index is not None and reference_store is not None:
+        reference_vector = np.asarray(reference_store.get(address.base_key), dtype=float)
+    set_obs_subblock_mapping_value(
+        mapping,
+        address=address,
+        value=value,
+        reference_vector=reference_vector,
+    )
 
 
 def _resolve_target_name(cfg: dict[str, Any] | None) -> str | None:
@@ -1004,9 +1076,9 @@ def _truth_value_from_render_manifest(manifest_path: Path | None, candidate_key:
         return None
     manifest = _read_json(manifest_path)
     shared_truth = manifest.get("shared_truth")
-    truth_value = _get_nested_scalar(
+    truth_value = _resolve_candidate_mapping_value(
         shared_truth if isinstance(shared_truth, dict) else None,
-        candidate_key,
+        candidate_key=candidate_key,
     )
     if truth_value is not None:
         return truth_value
@@ -1016,7 +1088,7 @@ def _truth_value_from_render_manifest(manifest_path: Path | None, candidate_key:
     resolved_cfg = system_payload.get("resolved_config")
     if not isinstance(resolved_cfg, dict):
         return None
-    return _get_nested_scalar(resolved_cfg, candidate_key)
+    return _resolve_candidate_mapping_value(resolved_cfg, candidate_key=candidate_key)
 
 
 def _build_study_templates(
@@ -1038,10 +1110,44 @@ def _build_study_templates(
     trace_cfg = load_config_file(trace_template)
     render_cfg = load_config_file(render_template)
     inference_cfg = load_config_file(inference_template)
+    trace_context = None
+    render_context = None
+    inference_context = None
+    candidate_address = None
+    if candidate_key is not None:
+        trace_context = _resolve_template_system_context(trace_template)
+        render_context = _resolve_template_system_context(render_template)
+        inference_context = _resolve_template_system_context(inference_template)
+        candidate_address = parse_candidate_parameter_address(
+            candidate_key,
+            forward_spec=inference_context["forward_spec"],
+            reference_store=inference_context["store"],
+        )
+        validate_supported_obs_subblock_key_addresses(
+            (candidate_address,),
+            forward_spec=trace_context["forward_spec"],
+            reference_store=trace_context["store"],
+        )
+        validate_supported_obs_subblock_key_addresses(
+            (candidate_address,),
+            forward_spec=render_context["forward_spec"],
+            reference_store=render_context["store"],
+        )
+        validate_supported_obs_subblock_key_addresses(
+            (candidate_address,),
+            forward_spec=inference_context["forward_spec"],
+            reference_store=inference_context["store"],
+        )
+        candidate_key = candidate_address.canonical
 
     if candidate_key is not None and truth_value is not None:
         trace_system_cfg = _ensure_mapping(trace_cfg, "system", path="root")
-        _set_nested_scalar(trace_system_cfg, candidate_key, truth_value)
+        _set_candidate_mapping_value(
+            trace_system_cfg,
+            candidate_key=candidate_key,
+            value=truth_value,
+            reference_store=None if trace_context is None else trace_context["store"],
+        )
 
         render_experiment_cfg = _ensure_mapping(render_cfg, "experiment", path="root")
         render_truth_cfg = _ensure_mapping(
@@ -1049,11 +1155,21 @@ def _build_study_templates(
             "truth",
             path="experiment",
         )
-        _set_nested_scalar(render_truth_cfg, candidate_key, truth_value)
+        _set_candidate_mapping_value(
+            render_truth_cfg,
+            candidate_key=candidate_key,
+            value=truth_value,
+            reference_store=None if render_context is None else render_context["store"],
+        )
 
     if candidate_key is not None and assumed_value is not None:
         inference_system_cfg = _ensure_mapping(inference_cfg, "system", path="root")
-        _set_nested_scalar(inference_system_cfg, candidate_key, assumed_value)
+        _set_candidate_mapping_value(
+            inference_system_cfg,
+            candidate_key=candidate_key,
+            value=assumed_value,
+            reference_store=None if inference_context is None else inference_context["store"],
+        )
 
     if mode in {MODE_FISHER_ONLY, MODE_PROFILE_OBJECTIVE, MODE_NUISANCE_ABSORPTION}:
         inference_experiment_cfg = _ensure_mapping(inference_cfg, "experiment", path="root")
@@ -1110,7 +1226,15 @@ def _build_study_templates(
         if reference_value is None:
             reference_value = assumed_value
         if reference_value is None:
-            reference_value = _get_nested_scalar(inference_cfg.get("system"), candidate_key)
+            reference_value = _resolve_candidate_mapping_value(
+                inference_cfg.get("system"),
+                candidate_key=candidate_key,
+            )
+        if reference_value is None and candidate_address is not None and inference_context is not None:
+            reference_value = get_obs_subblock_store_value(
+                inference_context["store"],
+                address=candidate_address,
+            )
         if reference_value is None:
             raise ValueError(
                 "Unable to resolve a reference value for fisher_only mode. "
@@ -1129,15 +1253,42 @@ def _build_study_templates(
     resolved_assumed = (
         None
         if candidate_key is None
-        else _get_nested_scalar(inference_cfg.get("system"), candidate_key)
+        else _resolve_candidate_mapping_value(
+            inference_cfg.get("system"),
+            candidate_key=candidate_key,
+        )
     )
+    if (
+        resolved_assumed is None
+        and candidate_address is not None
+        and inference_context is not None
+    ):
+        resolved_assumed = get_obs_subblock_store_value(
+            inference_context["store"],
+            address=candidate_address,
+        )
     resolved_truth = truth_value
     if candidate_key is not None and resolved_truth is None:
         render_truth_cfg = render_cfg.get("experiment", {}).get("truth")
         if isinstance(render_truth_cfg, dict):
-            resolved_truth = _get_nested_scalar(render_truth_cfg, candidate_key)
+            resolved_truth = _resolve_candidate_mapping_value(
+                render_truth_cfg,
+                candidate_key=candidate_key,
+            )
         if resolved_truth is None:
-            resolved_truth = _get_nested_scalar(render_cfg.get("system"), candidate_key)
+            resolved_truth = _resolve_candidate_mapping_value(
+                render_cfg.get("system"),
+                candidate_key=candidate_key,
+            )
+        if (
+            resolved_truth is None
+            and candidate_address is not None
+            and render_context is not None
+        ):
+            resolved_truth = get_obs_subblock_store_value(
+                render_context["store"],
+                address=candidate_address,
+            )
 
     return {
         "paths": {
@@ -1642,7 +1793,7 @@ def _evaluate_fisher_only(
 
     summary = {
         "mode": MODE_FISHER_ONLY,
-        "candidate_parameter": candidate_key,
+        **_candidate_metadata(candidate_key),
         "fisher_method": fisher_method,
         "target_name": resolved_target_name,
         "truth_value": None if truth_value is None else float(truth_value),
@@ -1765,7 +1916,13 @@ def _build_study_inference_config(
 
     if candidate_key is not None and assumed_value is not None:
         system_cfg = case_module._ensure_mapping(cfg, "system", path="root")
-        _set_nested_scalar(system_cfg, candidate_key, assumed_value)
+        template_context = _resolve_template_system_context(template_path)
+        _set_candidate_mapping_value(
+            system_cfg,
+            candidate_key=candidate_key,
+            value=assumed_value,
+            reference_store=template_context["store"],
+        )
 
     inference_cfg = case_module._ensure_mapping(cfg["experiment"], "inference", path="experiment")
     diagnostics_cfg = case_module._ensure_mapping(
@@ -1886,7 +2043,7 @@ def _run_profile_objective(
     runs_dir = study_root / "runs"
     rows: list[dict[str, Any]] = []
     for value in scan_values:
-        run_label = f"{candidate_key.split('.')[-1]}_{_study_value_token(value)}"
+        run_label = f"{_candidate_token(candidate_key)}_{_study_value_token(value)}"
         run_root = runs_dir / run_label
         cfg = _build_study_inference_config(
             template_path=template_path,
@@ -1938,7 +2095,7 @@ def _run_profile_objective(
     summary = {
         "mode": MODE_PROFILE_OBJECTIVE,
         "case_root": str(case_root.resolve()),
-        "candidate_parameter": candidate_key,
+        **_candidate_metadata(candidate_key),
         "scan_values": [float(value) for value in scan_values],
         "dry_run": bool(dry_run),
         "summary_path": str(summary_path.resolve()),
@@ -1981,7 +2138,7 @@ def _run_nuisance_absorption(
     summary = {
         "mode": MODE_NUISANCE_ABSORPTION,
         "case_root": str(case_root.resolve()),
-        "candidate_parameter": candidate_key,
+        **_candidate_metadata(candidate_key),
         "assumed_value": float(assumed_value),
         "dry_run": bool(dry_run),
         "summary_path": str((study_root / "summary.json").resolve()),
@@ -2041,7 +2198,8 @@ def run_obs_subblock_study(
     """Run one observation sub-block screening study."""
 
     study_mode = parse_study_mode(mode)
-    candidate = parse_scalar_candidate_parameter(candidate_key)
+    candidate_address = parse_candidate_parameter_address(candidate_key)
+    candidate = None if candidate_address is None else candidate_address.canonical
     if study_mode != MODE_FULL_CASE and candidate is None:
         raise ValueError(f"{study_mode} mode requires --candidate.")
     if study_mode == MODE_PROFILE_OBJECTIVE and not scan_values:
@@ -2074,7 +2232,7 @@ def run_obs_subblock_study(
         "study_root": str(study_root),
         "summary_path": str(summary_path.resolve()),
         "dry_run": bool(dry_run),
-        "candidate_parameter": candidate,
+        **_candidate_metadata(candidate),
         "target_name": template_info["resolved_target_name"],
         "n_frames_requested": n_frames,
         "dt_s_requested": dt_s,
@@ -2274,7 +2432,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidate",
         default=None,
-        help="Canonical scalar candidate parameter key, for example optics.plate_scale_as_per_pix.",
+        help=(
+            "Canonical scalar or indexed candidate key, for example "
+            "optics.plate_scale_as_per_pix or optics.primary.zernike_coeffs_nm[3]."
+        ),
     )
     parser.add_argument(
         "--truth-value",

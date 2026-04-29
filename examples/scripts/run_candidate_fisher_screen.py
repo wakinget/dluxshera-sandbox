@@ -1,16 +1,15 @@
-"""Run the first worked plate-scale Fisher screening study.
+"""Run a worked Fisher screening study for one scalar or indexed candidate.
 
-This script is intentionally study-specific. It defines a small fixed matrix
-over one shared candidate parameter and one target:
+This entrypoint stays intentionally narrow:
 
-- candidate: ``optics.plate_scale_as_per_pix``
-- target: ``ALPHA_CEN``
-- frame counts: ``1, 5, 20, 50``
-- noise modes: ``noiseless`` and ``shot_noise_only``
+- one shared candidate parameter at a time
+- one target at a time
+- an explicit frame-count x noise-mode matrix
+- the existing ``fisher_only`` harness path underneath
 
-Each case is executed through the existing ``fisher_only`` harness path. The
-script then writes aggregate CSV/JSON summaries and a small set of review plots
-under one study root.
+The candidate may be an ordinary scalar key such as
+``optics.plate_scale_as_per_pix`` or one indexed component such as
+``optics.primary.zernike_coeffs_nm[3]``.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,10 +33,16 @@ from dluxshera.config.io import load_config_file, load_user_config
 from dluxshera.config.resolver import resolve_config
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.obs_subblock_keys import (
+    get_obs_subblock_mapping_value,
+    get_obs_subblock_store_value,
+    parse_obs_subblock_key_address,
+    validate_supported_obs_subblock_key_addresses,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results" / "plate_scale_fisher_alpha_cen"
+DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results"
 DEFAULT_TRACE_TEMPLATE = (
     REPO_ROOT
     / "examples"
@@ -58,23 +64,24 @@ DEFAULT_INFERENCE_TEMPLATE = (
     / "observation_subblock_inference_template"
     / "subblock_inference_prescription.yaml"
 )
-STUDY_SCHEMA_VERSION = "plate_scale_fisher_screen.v1"
+STUDY_SCHEMA_VERSION = "candidate_fisher_screen.v1"
 STUDY_MODE = "fisher_only"
-# CANDIDATE_PARAMETERS = ("optics.plate_scale_as_per_pix",
-#                         "source.separation_as",
-#                         "source.log_flux_total",
-#                         "source.contrast",
-#                         "optics.primary.zernike_coeffs_nm")
-CANDIDATE_PARAMETER = "optics.plate_scale_as_per_pix"
-TARGET_NAME = "ALPHA_CEN"
-DEFAULT_FRAME_COUNTS = (1, 2, 5, 10, 20, 50, 100)
+# CANDIDATE_LIST = ("optics.plate_scale_as_per_pix",
+#                   "source.separation_as",
+#                   "source.log_flux_total",
+#                   "source.contrast",
+#                   "optics.primary.zernike_coeffs_nm[0]",
+#                   "optics.secondary.zernike_coeffs_nm[0]")
+DEFAULT_CANDIDATE_KEY = "optics.plate_scale_as_per_pix"
+DEFAULT_TARGET_NAME = "ALPHA_CEN"
+DEFAULT_FRAME_COUNTS = (1, 2, 5, 10, 20, 50)
 SUPPORTED_NOISE_MODES = ("noiseless", "shot_noise_only")
 
 
 def _screen_log(study_root: Path, message: str, **fields: Any) -> None:
-    """Print and append one flushed progress line for the plate-scale study."""
+    """Print and append one flushed progress line for the worked Fisher study."""
 
-    parts = [f"[plate_scale_fisher_screen] {message}"]
+    parts = [f"[candidate_fisher_screen] {message}"]
     for key, value in fields.items():
         if value is None:
             continue
@@ -87,9 +94,12 @@ def _screen_log(study_root: Path, message: str, **fields: Any) -> None:
 
 
 @dataclass(frozen=True)
-class PlateScaleFisherCase:
-    """One explicit case in the worked plate-scale Fisher matrix."""
+class WorkedFisherCase:
+    """One explicit case in the worked single-candidate Fisher matrix."""
 
+    candidate_key: str
+    candidate_base_key: str
+    candidate_index: int | None
     target_name: str
     frame_count: int
     noise_mode: str
@@ -110,7 +120,7 @@ def _load_module(module_path: Path, module_name: str):
 def _load_study_module():
     return _load_module(
         REPO_ROOT / "examples" / "scripts" / "run_obs_subblock_study.py",
-        "obs_subblock_plate_scale_fisher_study_module",
+        "obs_subblock_candidate_fisher_study_module",
     )
 
 
@@ -159,17 +169,85 @@ def _ensure_mapping(parent: dict[str, Any], key: str, *, path: str) -> dict[str,
     return value
 
 
-def _get_nested_scalar(mapping: dict[str, Any] | None, dotted_key: str) -> float | None:
-    if not isinstance(mapping, dict):
-        return None
-    current: Any = mapping
-    for part in dotted_key.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    if isinstance(current, bool) or not isinstance(current, (int, float)):
-        return None
-    return float(current)
+def _candidate_metadata(candidate_key: str) -> dict[str, Any]:
+    address = parse_obs_subblock_key_address(candidate_key)
+    return {
+        "candidate": address.canonical,
+        "candidate_base_key": address.base_key,
+        "candidate_index": address.index,
+    }
+
+
+def _slugify_text(text: str) -> str:
+    """Return a compact filesystem-safe slug for free-text labels."""
+
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(text).strip().lower())
+    slug = slug.strip("_")
+    return slug or "unnamed"
+
+
+def _candidate_slug(candidate_key: str) -> str:
+    address = parse_obs_subblock_key_address(candidate_key)
+    slug = address.base_key.replace(".", "_")
+    if address.index is not None:
+        slug = f"{slug}_i{address.index}"
+    return slug
+
+
+def _candidate_plot_label(candidate_key: str) -> str:
+    return parse_obs_subblock_key_address(candidate_key).canonical
+
+
+def _plot_title(candidate_key: str, plot_title: str) -> str:
+    """Return the standardized multi-line title for Fisher screen plots."""
+
+    return f"Fisher Screening\n{_candidate_plot_label(candidate_key)}\n{plot_title}"
+
+
+def _artifact_prefix(candidate_key: str) -> str:
+    return f"{_candidate_slug(candidate_key)}_fisher"
+
+
+def _derive_study_root(
+    *,
+    candidate_key: str,
+    target_name: str,
+    results_root: Path = DEFAULT_RESULTS_ROOT,
+) -> Path:
+    return results_root.resolve() / (
+        f"{_candidate_slug(candidate_key)}_fisher_{_slugify_text(target_name)}"
+    )
+
+
+def _resolve_template_context(template_path: Path) -> dict[str, Any]:
+    user_cfg = load_user_config(
+        config_path=template_path.resolve(),
+        system_preset=None,
+        experiment_preset=None,
+    )
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    if not isinstance(system_cfg, dict):
+        raise ValueError(f"Template {template_path} must resolve a system mapping.")
+    forward_spec = compose_forward_spec(system_cfg)
+    store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    return {
+        "resolved_cfg": resolved_cfg,
+        "system_cfg": system_cfg,
+        "forward_spec": forward_spec,
+        "store": store,
+    }
+
+
+def _resolve_candidate_mapping_value(
+    mapping: dict[str, Any] | None,
+    *,
+    candidate_key: str,
+) -> float | None:
+    return get_obs_subblock_mapping_value(
+        mapping,
+        address=parse_obs_subblock_key_address(candidate_key),
+    )
 
 
 def _resolve_target_name(cfg: dict[str, Any] | None) -> str | None:
@@ -236,17 +314,20 @@ def parse_noise_modes(raw: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(values)
 
 
-def build_plate_scale_fisher_case_specs(
+def build_candidate_fisher_case_specs(
     *,
     study_root: Path,
+    candidate_key: str = DEFAULT_CANDIDATE_KEY,
     frame_counts: Sequence[int] = DEFAULT_FRAME_COUNTS,
     noise_modes: Sequence[str] = SUPPORTED_NOISE_MODES,
-    target_name: str = TARGET_NAME,
-) -> tuple[PlateScaleFisherCase, ...]:
-    """Expand the explicit 8-case study matrix into stable case roots."""
+    target_name: str = DEFAULT_TARGET_NAME,
+) -> tuple[WorkedFisherCase, ...]:
+    """Expand the explicit worked-study matrix into stable case roots."""
 
-    specs: list[PlateScaleFisherCase] = []
-    target_slug = target_name.lower()
+    metadata = _candidate_metadata(candidate_key)
+    specs: list[WorkedFisherCase] = []
+    target_slug = _slugify_text(target_name)
+    candidate_slug = _candidate_slug(candidate_key)
     for noise_mode in noise_modes:
         if noise_mode not in SUPPORTED_NOISE_MODES:
             raise ValueError(
@@ -257,9 +338,14 @@ def build_plate_scale_fisher_case_specs(
         for frame_count in frame_counts:
             if int(frame_count) <= 0:
                 raise ValueError("Frame counts must be positive integers.")
-            case_name = f"{target_slug}_n{int(frame_count):03d}_{noise_mode}"
+            case_name = (
+                f"{target_slug}_{candidate_slug}_n{int(frame_count):03d}_{noise_mode}"
+            )
             specs.append(
-                PlateScaleFisherCase(
+                WorkedFisherCase(
+                    candidate_key=metadata["candidate"],
+                    candidate_base_key=metadata["candidate_base_key"],
+                    candidate_index=metadata["candidate_index"],
                     target_name=target_name,
                     frame_count=int(frame_count),
                     noise_mode=noise_mode,
@@ -270,41 +356,60 @@ def build_plate_scale_fisher_case_specs(
     return tuple(specs)
 
 
-def resolve_plate_scale_truth_and_target(
+def resolve_candidate_truth_and_target(
     *,
+    candidate_key: str,
     render_template: Path,
     inference_template: Path,
 ) -> tuple[float, str]:
-    """Resolve the baseline plate scale and target name from the study templates."""
+    """Resolve one candidate truth/reference value and target name from templates."""
 
+    address = parse_obs_subblock_key_address(candidate_key)
     candidate_value: float | None = None
     resolved_target: str | None = None
-    for template_path in (render_template, inference_template):
-        user_cfg = load_user_config(
-            config_path=template_path.resolve(),
-            system_preset=None,
-            experiment_preset=None,
-        )
-        resolved_cfg = resolve_config(user_cfg)
-        system_cfg = resolved_cfg.get("system")
+    render_context = _resolve_template_context(render_template)
+    inference_context = _resolve_template_context(inference_template)
+    validate_supported_obs_subblock_key_addresses(
+        (address,),
+        forward_spec=render_context["forward_spec"],
+        reference_store=render_context["store"],
+    )
+    validate_supported_obs_subblock_key_addresses(
+        (address,),
+        forward_spec=inference_context["forward_spec"],
+        reference_store=inference_context["store"],
+    )
+    for template_context in (render_context, inference_context):
+        system_cfg = template_context["system_cfg"]
+        resolved_cfg = template_context["resolved_cfg"]
         if candidate_value is None:
-            candidate_value = _get_nested_scalar(system_cfg, CANDIDATE_PARAMETER)
-            if candidate_value is None and isinstance(system_cfg, dict):
-                forward_spec = compose_forward_spec(system_cfg)
-                store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(
-                    forward_spec
+            experiment_cfg = resolved_cfg.get("experiment")
+            truth_cfg = None
+            if isinstance(experiment_cfg, dict):
+                truth_cfg = experiment_cfg.get("truth")
+            if isinstance(truth_cfg, dict):
+                candidate_value = _resolve_candidate_mapping_value(
+                    truth_cfg,
+                    candidate_key=candidate_key,
                 )
-                raw_value = store.get(CANDIDATE_PARAMETER)
-                if raw_value is not None:
-                    candidate_value = float(raw_value)
+            if candidate_value is None:
+                candidate_value = _resolve_candidate_mapping_value(
+                    system_cfg,
+                    candidate_key=candidate_key,
+                )
+            if candidate_value is None:
+                candidate_value = get_obs_subblock_store_value(
+                    template_context["store"],
+                    address=address,
+                )
         if resolved_target is None:
             resolved_target = _resolve_target_name(system_cfg)
     if candidate_value is None:
         raise ValueError(
-            "Unable to resolve the baseline plate scale from the configured templates."
+            "Unable to resolve the baseline candidate value from the configured templates."
         )
     if resolved_target is None:
-        resolved_target = TARGET_NAME
+        resolved_target = DEFAULT_TARGET_NAME
     return float(candidate_value), resolved_target
 
 
@@ -336,7 +441,7 @@ def write_noise_mode_render_template(
 
 def build_case_row(
     *,
-    case: PlateScaleFisherCase,
+    case: WorkedFisherCase,
     truth_value: float,
     case_summary: dict[str, Any] | None,
     error_message: str | None = None,
@@ -345,7 +450,9 @@ def build_case_row(
 
     base_row: dict[str, Any] = {
         "target": case.target_name,
-        "candidate": CANDIDATE_PARAMETER,
+        "candidate": case.candidate_key,
+        "candidate_base_key": case.candidate_base_key,
+        "candidate_index": case.candidate_index,
         "study_mode": STUDY_MODE,
         "frame_count": int(case.frame_count),
         "noise_mode": case.noise_mode,
@@ -435,7 +542,7 @@ def _stat_value(mapping: dict[str, Any] | None, key: str) -> Any:
 
 def build_noise_audit_row(
     *,
-    case: PlateScaleFisherCase,
+    case: WorkedFisherCase,
     truth_value: float,
     case_summary: dict[str, Any] | None,
     error_message: str | None = None,
@@ -444,7 +551,9 @@ def build_noise_audit_row(
 
     row: dict[str, Any] = {
         "target": case.target_name,
-        "candidate": CANDIDATE_PARAMETER,
+        "candidate": case.candidate_key,
+        "candidate_base_key": case.candidate_base_key,
+        "candidate_index": case.candidate_index,
         "frame_count": int(case.frame_count),
         "noise_mode": case.noise_mode,
         "truth_value": float(truth_value),
@@ -563,6 +672,10 @@ def build_noise_audit_comparisons(
 ) -> list[dict[str, Any]]:
     """Build per-frame-count noiseless vs shot-noise comparison rows."""
 
+    candidate = None
+    candidate_base_key = None
+    candidate_index = None
+    target = None
     by_key: dict[tuple[int, str], dict[str, Any]] = {}
     for row in rows:
         if row.get("case_status") != "ok":
@@ -571,6 +684,10 @@ def build_noise_audit_comparisons(
         noise_mode = row.get("noise_mode")
         if frame_count is None or noise_mode is None:
             continue
+        candidate = row.get("candidate")
+        candidate_base_key = row.get("candidate_base_key")
+        candidate_index = row.get("candidate_index")
+        target = row.get("target")
         by_key[(int(frame_count), str(noise_mode))] = row
 
     comparisons: list[dict[str, Any]] = []
@@ -595,6 +712,10 @@ def build_noise_audit_comparisons(
 
         comparisons.append(
             {
+                "candidate": candidate,
+                "candidate_base_key": candidate_base_key,
+                "candidate_index": candidate_index,
+                "target": target,
                 "frame_count": int(frame_count),
                 "shot_to_noiseless_f_pp_ratio": _ratio("f_pp"),
                 "shot_to_noiseless_i_marg_ratio": _ratio("i_marg"),
@@ -620,30 +741,43 @@ def build_noise_audit_comparisons(
 
 def _augment_case_outputs(
     *,
-    case: PlateScaleFisherCase,
+    case: WorkedFisherCase,
     truth_value: float,
     case_summary: dict[str, Any],
 ) -> dict[str, Any]:
     """Add stable study-matrix metadata to case-local Fisher outputs."""
 
-    summary_path_value = case_summary.get("summary_path")
-    if isinstance(summary_path_value, str) and summary_path_value.strip():
-        summary_path = Path(summary_path_value).resolve()
-        summary_payload = _read_json(summary_path)
-        summary_payload["plate_scale_fisher_case"] = {
-            "target": case.target_name,
-            "candidate": CANDIDATE_PARAMETER,
-            "frame_count": int(case.frame_count),
-            "noise_mode": case.noise_mode,
-            "truth_value": float(truth_value),
-            "study_mode": STUDY_MODE,
-        }
-        _write_json(summary_path, summary_payload)
-        case_summary = summary_payload
+    summary_path = (case.case_root / "study" / STUDY_MODE / "summary.json").resolve()
+    fallback_summary_path_value = case_summary.get("summary_path")
+    if not summary_path.exists() and isinstance(fallback_summary_path_value, str):
+        fallback_summary_path = Path(fallback_summary_path_value).resolve()
+        if fallback_summary_path.exists():
+            summary_path = fallback_summary_path
 
-    fisher_summary = case_summary.get("fisher_summary")
+    if summary_path.exists():
+        summary_payload = _read_json(summary_path)
+    else:
+        summary_payload = dict(case_summary)
+
+    summary_payload["case_root"] = str(case.case_root.resolve())
+    summary_payload["study_root"] = str(summary_path.parent.resolve())
+    summary_payload["summary_path"] = str(summary_path.resolve())
+    summary_payload["candidate_fisher_case"] = {
+        "target": case.target_name,
+        "candidate": case.candidate_key,
+        "candidate_base_key": case.candidate_base_key,
+        "candidate_index": case.candidate_index,
+        "frame_count": int(case.frame_count),
+        "noise_mode": case.noise_mode,
+        "truth_value": float(truth_value),
+        "study_mode": STUDY_MODE,
+    }
+
+    fisher_summary = summary_payload.get("fisher_summary")
     if not isinstance(fisher_summary, dict):
-        return case_summary
+        if summary_path.parent.exists():
+            _write_json(summary_path, summary_payload)
+        return summary_payload
 
     fisher_summary.update(
         {
@@ -652,17 +786,59 @@ def _augment_case_outputs(
             "noise_mode": case.noise_mode,
             "frame_count": int(case.frame_count),
             "study_mode": STUDY_MODE,
+            "candidate_parameter": case.candidate_key,
+            "candidate_base_key": case.candidate_base_key,
+            "candidate_index": case.candidate_index,
         }
     )
     artifacts = fisher_summary.get("artifacts")
-    if isinstance(artifacts, dict):
-        fisher_summary_path_value = artifacts.get("fisher_summary_json")
-        if isinstance(fisher_summary_path_value, str) and fisher_summary_path_value.strip():
-            _write_json(Path(fisher_summary_path_value).resolve(), fisher_summary)
-    case_summary["fisher_summary"] = fisher_summary
-    if isinstance(summary_path_value, str) and summary_path_value.strip():
-        _write_json(Path(summary_path_value).resolve(), case_summary)
-    return case_summary
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    local_artifacts = {
+        "fisher_summary_json": summary_path.parent / "fisher_summary.json",
+        "fisher_blocks_npz": summary_path.parent / "fisher_blocks.npz",
+        "candidate_sensitivity_json": summary_path.parent / "candidate_sensitivity.json",
+        "noise_audit_json": summary_path.parent / "noise_audit.json",
+    }
+    for key, artifact_path in local_artifacts.items():
+        if artifact_path.exists() or key not in artifacts:
+            artifacts[key] = str(artifact_path.resolve())
+    fisher_summary["artifacts"] = artifacts
+    fisher_summary_path = Path(artifacts["fisher_summary_json"]).resolve()
+    _write_json(fisher_summary_path, fisher_summary)
+    summary_payload["fisher_summary"] = fisher_summary
+    _write_json(summary_path, summary_payload)
+    return summary_payload
+
+
+def _load_existing_case_summary(case: WorkedFisherCase) -> dict[str, Any] | None:
+    """Load one reusable case-local Fisher summary when it already exists."""
+
+    summary_path = (case.case_root / "study" / STUDY_MODE / "summary.json").resolve()
+    fisher_summary_path = (case.case_root / "study" / STUDY_MODE / "fisher_summary.json").resolve()
+    if not summary_path.exists() and not fisher_summary_path.exists():
+        return None
+
+    summary_payload: dict[str, Any] = {}
+    if summary_path.exists():
+        loaded = _read_json(summary_path)
+        if isinstance(loaded, dict):
+            summary_payload = loaded
+
+    fisher_summary = summary_payload.get("fisher_summary")
+    if not isinstance(fisher_summary, dict):
+        if not fisher_summary_path.exists():
+            return None
+        fisher_summary = _read_json(fisher_summary_path)
+        if not isinstance(fisher_summary, dict):
+            return None
+        summary_payload["fisher_summary"] = fisher_summary
+
+    summary_payload.setdefault("dry_run", False)
+    summary_payload["case_root"] = str(case.case_root.resolve())
+    summary_payload["study_root"] = str(summary_path.parent.resolve())
+    summary_payload["summary_path"] = str(summary_path.resolve())
+    return summary_payload
 
 
 def plot_metric_vs_frame_count(
@@ -673,6 +849,7 @@ def plot_metric_vs_frame_count(
     y_label: str,
     title: str,
     log_y: bool,
+    frame_counts: Sequence[int],
 ) -> Path:
     """Plot one scalar summary against frame count for the two study noise modes."""
 
@@ -712,7 +889,7 @@ def plot_metric_vs_frame_count(
     ax.set_xlabel("Frame Count")
     ax.set_ylabel(y_label)
     ax.set_title(title)
-    ax.set_xticks(list(DEFAULT_FRAME_COUNTS))
+    ax.set_xticks([int(value) for value in frame_counts])
     if log_y:
         ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
@@ -726,9 +903,10 @@ def plot_metric_vs_frame_count(
     return output_path
 
 
-def write_plate_scale_fisher_artifacts(
+def write_candidate_fisher_artifacts(
     *,
     study_root: Path,
+    candidate_key: str,
     rows: Sequence[dict[str, Any]],
     noise_audit_rows: Sequence[dict[str, Any]],
     case_summaries: Sequence[dict[str, Any]],
@@ -740,14 +918,16 @@ def write_plate_scale_fisher_artifacts(
 ) -> dict[str, Any]:
     """Write the aggregate CSV/JSON/plot outputs for the worked study."""
 
-    csv_path = study_root / "plate_scale_fisher_summary.csv"
-    json_path = study_root / "plate_scale_fisher_summary.json"
-    noise_audit_csv = study_root / "plate_scale_fisher_noise_audit.csv"
-    noise_audit_json = study_root / "plate_scale_fisher_noise_audit.json"
-    sigma_marg_plot = study_root / "sigma_marg_vs_frame_count.png"
-    absorption_plot = study_root / "absorption_fraction_vs_frame_count.png"
-    sigma_cond_plot = study_root / "sigma_cond_vs_frame_count.png"
-    variance_mean_plot = study_root / "variance_mean_vs_frame_count.png"
+    candidate_meta = _candidate_metadata(candidate_key)
+    artifact_prefix = _artifact_prefix(candidate_key)
+    csv_path = study_root / f"{artifact_prefix}_summary.csv"
+    json_path = study_root / f"{artifact_prefix}_summary.json"
+    noise_audit_csv = study_root / f"{artifact_prefix}_noise_audit.csv"
+    noise_audit_json = study_root / f"{artifact_prefix}_noise_audit.json"
+    sigma_marg_plot = study_root / f"{artifact_prefix}_sigma_marg_vs_frame_count.png"
+    absorption_plot = study_root / f"{artifact_prefix}_absorption_fraction_vs_frame_count.png"
+    sigma_cond_plot = study_root / f"{artifact_prefix}_sigma_cond_vs_frame_count.png"
+    variance_mean_plot = study_root / f"{artifact_prefix}_variance_mean_vs_frame_count.png"
 
     _write_rows_csv(csv_path, rows)
     _write_rows_csv(noise_audit_csv, noise_audit_rows)
@@ -756,39 +936,43 @@ def write_plate_scale_fisher_artifacts(
         metric_key="sigma_marg",
         output_path=sigma_marg_plot,
         y_label="Marginalized Sigma",
-        title="Plate Scale Fisher Screening: Marginalized Sigma",
+        title=_plot_title(candidate_key, "Marginalized Sigma"),
         log_y=True,
+        frame_counts=frame_counts,
     )
     plot_metric_vs_frame_count(
         rows=rows,
         metric_key="absorption_fraction",
         output_path=absorption_plot,
         y_label="Absorption Fraction",
-        title="Plate Scale Fisher Screening: Absorption Fraction",
+        title=_plot_title(candidate_key, "Absorption Fraction"),
         log_y=False,
+        frame_counts=frame_counts,
     )
     plot_metric_vs_frame_count(
         rows=rows,
         metric_key="sigma_cond",
         output_path=sigma_cond_plot,
         y_label="Conditional Sigma",
-        title="Plate Scale Fisher Screening: Conditional Sigma",
+        title=_plot_title(candidate_key, "Conditional Sigma"),
         log_y=True,
+        frame_counts=frame_counts,
     )
     plot_metric_vs_frame_count(
         rows=noise_audit_rows,
         metric_key="variance_mean",
         output_path=variance_mean_plot,
         y_label="Variance Mean",
-        title="Plate Scale Fisher Screening: Variance Mean",
+        title=_plot_title(candidate_key, "Variance Mean"),
         log_y=True,
+        frame_counts=frame_counts,
     )
 
     noise_audit_comparisons = build_noise_audit_comparisons(noise_audit_rows)
     _write_json(
         noise_audit_json,
         {
-            "candidate": CANDIDATE_PARAMETER,
+            **candidate_meta,
             "target": target_name,
             "frame_counts": [int(value) for value in frame_counts],
             "noise_modes": list(noise_modes),
@@ -800,7 +984,8 @@ def write_plate_scale_fisher_artifacts(
     summary = {
         "schema_version": STUDY_SCHEMA_VERSION,
         "study_mode": STUDY_MODE,
-        "candidate": CANDIDATE_PARAMETER,
+        **candidate_meta,
+        "study_root": str(study_root.resolve()),
         "target": target_name,
         "truth_value": float(truth_value),
         "frame_counts": [int(value) for value in frame_counts],
@@ -829,43 +1014,58 @@ def write_plate_scale_fisher_artifacts(
     return summary
 
 
-def run_plate_scale_fisher_screen(
+def run_candidate_fisher_screen(
     *,
-    study_root: Path,
+    study_root: Path | None = None,
+    candidate_key: str = DEFAULT_CANDIDATE_KEY,
     trace_template: Path = DEFAULT_TRACE_TEMPLATE,
     render_template: Path = DEFAULT_RENDER_TEMPLATE,
     inference_template: Path = DEFAULT_INFERENCE_TEMPLATE,
     frame_counts: Sequence[int] = DEFAULT_FRAME_COUNTS,
     noise_modes: Sequence[str] = SUPPORTED_NOISE_MODES,
+    reuse_existing_cases: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run the explicit Alpha Cen plate-scale Fisher matrix and aggregate outputs."""
+    """Run the worked Fisher matrix for one scalar or indexed candidate."""
 
+    candidate_key = parse_obs_subblock_key_address(candidate_key).canonical
+    study_module = _load_study_module()
+    truth_value, resolved_target = resolve_candidate_truth_and_target(
+        candidate_key=candidate_key,
+        render_template=render_template,
+        inference_template=inference_template,
+    )
+    target_name = resolved_target or DEFAULT_TARGET_NAME
+    study_root = (
+        _derive_study_root(
+            candidate_key=candidate_key,
+            target_name=target_name,
+            results_root=DEFAULT_RESULTS_ROOT,
+        )
+        if study_root is None
+        else study_root
+    )
     study_root = study_root.resolve()
     study_root.mkdir(parents=True, exist_ok=True)
     _screen_log(
         study_root,
         "study.start",
         study_root_path=study_root,
+        candidate=candidate_key,
         frame_counts=[int(value) for value in frame_counts],
         noise_modes=list(noise_modes),
         dry_run=bool(dry_run),
     )
-    study_module = _load_study_module()
-    truth_value, resolved_target = resolve_plate_scale_truth_and_target(
-        render_template=render_template,
-        inference_template=inference_template,
-    )
-    target_name = resolved_target or TARGET_NAME
     _screen_log(
         study_root,
         "study.config",
-        candidate=CANDIDATE_PARAMETER,
+        candidate=candidate_key,
         target=target_name,
         truth_value=truth_value,
     )
-    cases = build_plate_scale_fisher_case_specs(
+    cases = build_candidate_fisher_case_specs(
         study_root=study_root,
+        candidate_key=candidate_key,
         frame_counts=frame_counts,
         noise_modes=noise_modes,
         target_name=target_name,
@@ -893,6 +1093,40 @@ def run_plate_scale_fisher_screen(
             noise_mode=case.noise_mode,
             case_root=case.case_root,
         )
+        existing_case_summary = (
+            None
+            if dry_run or not reuse_existing_cases
+            else _load_existing_case_summary(case)
+        )
+        if existing_case_summary is not None:
+            case_summary = _augment_case_outputs(
+                case=case,
+                truth_value=truth_value,
+                case_summary=existing_case_summary,
+            )
+            _screen_log(
+                study_root,
+                "case.reuse",
+                case_name=case.case_name,
+                case_status="ok",
+                case_summary_path=case_summary.get("summary_path"),
+            )
+            case_summaries.append(case_summary)
+            rows.append(
+                build_case_row(
+                    case=case,
+                    truth_value=truth_value,
+                    case_summary=case_summary,
+                )
+            )
+            noise_audit_rows.append(
+                build_noise_audit_row(
+                    case=case,
+                    truth_value=truth_value,
+                    case_summary=case_summary,
+                )
+            )
+            continue
         try:
             case_summary = study_module.run_obs_subblock_study(
                 mode=STUDY_MODE,
@@ -900,7 +1134,7 @@ def run_plate_scale_fisher_screen(
                 trace_template=trace_template.resolve(),
                 render_template=noise_templates[case.noise_mode],
                 inference_template=inference_template.resolve(),
-                candidate_key=CANDIDATE_PARAMETER,
+                candidate_key=case.candidate_key,
                 truth_value=truth_value,
                 n_frames=int(case.frame_count),
                 noise_mode=(
@@ -947,6 +1181,39 @@ def run_plate_scale_fisher_screen(
                 )
             )
         except Exception as exc:
+            existing_case_summary = (
+                None if dry_run else _load_existing_case_summary(case)
+            )
+            if existing_case_summary is not None:
+                case_summary = _augment_case_outputs(
+                    case=case,
+                    truth_value=truth_value,
+                    case_summary=existing_case_summary,
+                )
+                case_summaries.append(case_summary)
+                rows.append(
+                    build_case_row(
+                        case=case,
+                        truth_value=truth_value,
+                        case_summary=case_summary,
+                    )
+                )
+                noise_audit_rows.append(
+                    build_noise_audit_row(
+                        case=case,
+                        truth_value=truth_value,
+                        case_summary=case_summary,
+                    )
+                )
+                _screen_log(
+                    study_root,
+                    "case.reuse_after_error",
+                    case_name=case.case_name,
+                    case_status="ok",
+                    error_message=str(exc),
+                    case_summary_path=case_summary.get("summary_path"),
+                )
+                continue
             rows.append(
                 build_case_row(
                     case=case,
@@ -971,8 +1238,9 @@ def run_plate_scale_fisher_screen(
                 error_message=str(exc),
             )
 
-    summary = write_plate_scale_fisher_artifacts(
+    summary = write_candidate_fisher_artifacts(
         study_root=study_root,
+        candidate_key=candidate_key,
         rows=rows,
         noise_audit_rows=noise_audit_rows,
         case_summaries=case_summaries,
@@ -1014,13 +1282,24 @@ def run_plate_scale_fisher_screen(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the first worked plate-scale fisher_only screening study."
+        description="Run the worked fisher_only screening study for one scalar or indexed candidate."
     )
     parser.add_argument(
         "--study-root",
         type=Path,
-        default=DEFAULT_RESULTS_ROOT,
-        help="Study output root for the 8-case Alpha Cen plate-scale matrix.",
+        default=None,
+        help=(
+            "Optional explicit study output root. When omitted, the script writes to "
+            "Results/<candidate_slug>_fisher_<target_slug>/."
+        ),
+    )
+    parser.add_argument(
+        "--candidate",
+        default=DEFAULT_CANDIDATE_KEY,
+        help=(
+            "Canonical candidate key, for example optics.plate_scale_as_per_pix or "
+            "optics.primary.zernike_coeffs_nm[3]."
+        ),
     )
     parser.add_argument(
         "--trace-template",
@@ -1043,12 +1322,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frame-counts",
         default=None,
-        help="Optional comma-separated frame counts. Default: 1,5,20,50.",
+        help="Optional comma-separated frame counts. Default: 1,2,5,10,20,50.",
     )
     parser.add_argument(
         "--noise-modes",
         default=None,
         help="Optional comma-separated noise modes. Default: noiseless,shot_noise_only.",
+    )
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help=(
+            "Recompute Fisher cases even when a case-local study summary already exists. "
+            "By default, reruns reuse existing successful case outputs."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -1062,16 +1349,18 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     args = _build_parser().parse_args(argv)
     frame_counts = parse_frame_counts(args.frame_counts)
     noise_modes = parse_noise_modes(args.noise_modes)
-    summary = run_plate_scale_fisher_screen(
+    summary = run_candidate_fisher_screen(
         study_root=args.study_root,
+        candidate_key=args.candidate,
         trace_template=args.trace_template,
         render_template=args.render_template,
         inference_template=args.inference_template,
         frame_counts=frame_counts,
         noise_modes=noise_modes,
+        reuse_existing_cases=not bool(args.force_rerun),
         dry_run=bool(args.dry_run),
     )
-    print(f"Study root: {args.study_root.resolve()}")
+    print(f"Study root: {summary['study_root']}")
     print(f"Cases: {summary['case_count']}")
     print(f"Aggregate JSON: {summary['artifacts']['aggregate_json']}")
     return summary

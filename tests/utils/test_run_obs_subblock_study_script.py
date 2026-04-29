@@ -183,6 +183,8 @@ def _write_case_render_artifacts(
     case_root: Path,
     *,
     truth_value: float = 0.01,
+    shared_truth: dict | None = None,
+    resolved_system: dict | None = None,
 ) -> tuple[Path, Path, Path, Path]:
     render_dir = case_root / "render"
     render_dir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +200,16 @@ def _write_case_render_artifacts(
         encoding="utf-8",
     )
     manifest_path = render_dir / "manifest.json"
+    manifest_shared_truth = (
+        {"optics": {"plate_scale_as_per_pix": truth_value}}
+        if shared_truth is None
+        else shared_truth
+    )
+    manifest_resolved_system = (
+        {"optics": {"plate_scale_as_per_pix": truth_value}}
+        if resolved_system is None
+        else resolved_system
+    )
     _write_json(
         manifest_path,
         {
@@ -206,10 +218,8 @@ def _write_case_render_artifacts(
                 "variance_fits": variance_path.name,
                 "frame_truth_csv": truth_path.name,
             },
-            "shared_truth": {"optics": {"plate_scale_as_per_pix": truth_value}},
-            "system": {
-                "resolved_config": {"optics": {"plate_scale_as_per_pix": truth_value}}
-            },
+            "shared_truth": manifest_shared_truth,
+            "system": {"resolved_config": manifest_resolved_system},
         },
     )
     return cube_path, variance_path, truth_path, manifest_path
@@ -239,13 +249,19 @@ def test_parse_helpers_validate_mode_candidate_and_grid():
     assert module.parse_scalar_candidate_parameter("optics.plate_scale_as_per_pix") == (
         "optics.plate_scale_as_per_pix"
     )
+    assert module.parse_scalar_candidate_parameter(
+        "optics.primary.zernike_coeffs_nm[3]"
+    ) == "optics.primary.zernike_coeffs_nm[3]"
     assert module.parse_scalar_grid("0.99,1.0,1.01") == (0.99, 1.0, 1.01)
 
     with pytest.raises(ValueError, match="Unsupported study mode"):
         module.parse_study_mode("profile")
 
-    with pytest.raises(ValueError, match="scalar candidate"):
-        module.parse_scalar_candidate_parameter("optics.primary.zernike_coeffs_nm[0]")
+    with pytest.raises(ValueError, match="Invalid observation-subblock key syntax"):
+        module.parse_scalar_candidate_parameter("optics.primary.zernike_coeffs_nm[abc]")
+
+    with pytest.raises(ValueError, match="Unsupported observation-subblock varying key"):
+        module.parse_scalar_candidate_parameter("detector.read_noise_e")
 
     with pytest.raises(ValueError, match="at least one value"):
         module.parse_scalar_grid("")
@@ -505,6 +521,8 @@ def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
     assert summary["summary_path"] == str(summary_path.resolve())
     assert summary["case_prep_stages_executed"] == []
     assert summary["rendered_truth_value"] == 0.0125
+    assert summary["candidate_base_key"] == "optics.plate_scale_as_per_pix"
+    assert summary["candidate_index"] is None
     assert summary["target_name"] == "ALPHA_CEN"
     assert fisher_cfg["experiment"]["inference"]["active"]["shared_keys"] == [
         "optics.plate_scale_as_per_pix"
@@ -528,6 +546,91 @@ def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
         fisher_cfg["experiment"]["inference"]["objective"]["noise_model"]["variance_model"]
         == "provided_cube"
     )
+    assert _resolve_relative(
+        fisher_config_path,
+        fisher_cfg["experiment"]["inference"]["objective"]["noise_model"]["path"],
+    ) == variance_path.resolve()
+
+
+def test_candidate_address_validation_rejects_out_of_range_index(tmp_path: Path):
+    module = _load_script_module()
+    _trace_template, _render_template, inference_template = _write_templates(tmp_path)
+    template_context = module._resolve_template_system_context(inference_template)
+
+    with pytest.raises(ValueError, match="out of bounds"):
+        module.parse_candidate_parameter_address(
+            "optics.primary.zernike_coeffs_nm[999]",
+            forward_spec=template_context["forward_spec"],
+            reference_store=template_context["store"],
+        )
+
+
+def test_fisher_only_dry_run_supports_indexed_candidate_metadata_and_init(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_fisher_indexed"
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+        shared_truth={
+            "optics": {
+                "primary": {"zernike_coeffs_nm": [0.0, 0.0, 0.0, 12.5, 0.0, 0.0, 0.0, 0.0]}
+            }
+        },
+        resolved_system={
+            "optics": {
+                "primary": {"zernike_coeffs_nm": [0.0, 0.0, 0.0, 12.5, 0.0, 0.0, 0.0, 0.0]}
+            }
+        },
+    )
+
+    summary = module.run_obs_subblock_study(
+        mode="fisher_only",
+        case_root=case_root,
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        candidate_key="optics.primary.zernike_coeffs_nm[3]",
+        truth_value=12.5,
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    fisher_config_path = case_root / "study" / "fisher_only" / "fisher" / "inference_config.json"
+    fisher_cfg = _read_json(fisher_config_path)
+    render_cfg = _read_json(case_root / "study" / "fisher_only" / "templates" / "render_template.json")
+    trace_cfg = _read_json(case_root / "study" / "fisher_only" / "templates" / "trace_template.json")
+
+    assert summary["candidate_parameter"] == "optics.primary.zernike_coeffs_nm[3]"
+    assert summary["candidate_base_key"] == "optics.primary.zernike_coeffs_nm"
+    assert summary["candidate_index"] == 3
+    assert summary["rendered_truth_value"] == pytest.approx(12.5)
+    assert summary["case_prep_stages_executed"] == []
+    assert fisher_cfg["experiment"]["inference"]["active"]["shared_keys"] == [
+        "optics.primary.zernike_coeffs_nm[3]"
+    ]
+    assert fisher_cfg["experiment"]["inference"]["init"]["shared"] == {
+        "optics.primary.zernike_coeffs_nm[3]": 12.5
+    }
+    assert (
+        render_cfg["experiment"]["truth"]["optics"]["primary"]["zernike_coeffs_nm"][3]
+        == pytest.approx(12.5)
+    )
+    assert (
+        trace_cfg["system"]["optics"]["primary"]["zernike_coeffs_nm"][3]
+        == pytest.approx(12.5)
+    )
+    assert _resolve_relative(
+        fisher_config_path,
+        fisher_cfg["experiment"]["inference"]["data"]["cube"],
+    ) == cube_path.resolve()
+    assert _resolve_relative(
+        fisher_config_path,
+        fisher_cfg["experiment"]["inference"]["data"]["truth_trace"],
+    ) == truth_path.resolve()
+    assert _resolve_relative(
+        fisher_config_path,
+        fisher_cfg["experiment"]["inference"]["data"]["manifest"],
+    ) == manifest_path.resolve()
     assert _resolve_relative(
         fisher_config_path,
         fisher_cfg["experiment"]["inference"]["objective"]["noise_model"]["path"],

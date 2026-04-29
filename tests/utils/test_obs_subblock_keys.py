@@ -9,8 +9,11 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_keys import (
     apply_obs_subblock_overrides_preserving_derived,
+    get_obs_subblock_mapping_value,
+    get_obs_subblock_store_value,
     parse_obs_subblock_key_address,
     parse_obs_subblock_varying_keys,
+    set_obs_subblock_mapping_value,
     split_obs_subblock_frame_overrides,
     validate_supported_obs_subblock_key_addresses,
 )
@@ -70,6 +73,80 @@ def test_index_out_of_bounds_rejected_when_store_available():
             forward_spec=spec,
             reference_store=store,
         )
+
+
+def test_get_obs_subblock_mapping_value_supports_scalar_and_indexed_addresses():
+    mapping = {
+        "source": {"log_flux_total": 12.5},
+        "optics": {
+            "primary": {"zernike_coeffs_nm": [0.0, 1.5, -2.0, 3.5]},
+        },
+    }
+
+    assert get_obs_subblock_mapping_value(
+        mapping,
+        address=parse_obs_subblock_key_address("source.log_flux_total"),
+    ) == pytest.approx(12.5)
+    assert get_obs_subblock_mapping_value(
+        mapping,
+        address=parse_obs_subblock_key_address("optics.primary.zernike_coeffs_nm[3]"),
+    ) == pytest.approx(3.5)
+    assert (
+        get_obs_subblock_mapping_value(
+            mapping,
+            address=parse_obs_subblock_key_address("source.contrast"),
+        )
+        is None
+    )
+
+
+def test_set_obs_subblock_mapping_value_patches_scalar_and_indexed_addresses():
+    mapping = {
+        "system": {
+            "source": {"contrast": 0.1},
+            "optics": {
+                "primary": {"zernike_coeffs_nm": [0.0, 1.0, 2.0, 3.0]},
+            },
+        }
+    }
+
+    set_obs_subblock_mapping_value(
+        mapping["system"],
+        address=parse_obs_subblock_key_address("source.contrast"),
+        value=0.25,
+    )
+    set_obs_subblock_mapping_value(
+        mapping["system"],
+        address=parse_obs_subblock_key_address("optics.primary.zernike_coeffs_nm[2]"),
+        value=-4.5,
+    )
+
+    assert mapping["system"]["source"]["contrast"] == pytest.approx(0.25)
+    assert mapping["system"]["optics"]["primary"]["zernike_coeffs_nm"] == [
+        0.0,
+        1.0,
+        -4.5,
+        3.0,
+    ]
+
+
+def test_set_obs_subblock_mapping_value_can_seed_missing_indexed_vector_from_store():
+    _spec, store = _forward_spec_and_store()
+    mapping = {"optics": {"kind": "three_plane", "primary": {}}}
+    address = parse_obs_subblock_key_address("optics.primary.zernike_coeffs_nm[3]")
+    reference_vector = np.asarray(store.get(address.base_key), dtype=float)
+
+    set_obs_subblock_mapping_value(
+        mapping,
+        address=address,
+        value=7.25,
+        reference_vector=reference_vector,
+    )
+
+    patched = np.asarray(mapping["optics"]["primary"]["zernike_coeffs_nm"], dtype=float)
+    assert patched.shape == reference_vector.shape
+    assert patched[3] == pytest.approx(7.25)
+    assert np.allclose(np.delete(patched, 3), np.delete(reference_vector, 3))
 
 
 def test_explicit_plate_scale_override_survives_refresh():
@@ -183,3 +260,12 @@ def test_indexed_zernike_components_update_independently():
     assert np.isclose(primary[1], 10.0)
     assert np.isclose(primary[4], -5.0)
     assert np.isclose(secondary[2], 3.5)
+
+
+def test_get_obs_subblock_store_value_supports_indexed_candidates():
+    _spec, store = _forward_spec_and_store()
+    address = parse_obs_subblock_key_address("optics.primary.zernike_coeffs_nm[1]")
+
+    assert get_obs_subblock_store_value(store, address=address) == pytest.approx(
+        float(np.asarray(store.get(address.base_key))[1])
+    )

@@ -102,29 +102,41 @@ Each study mode writes a small machine-readable `summary.json` under
 `study/<mode>/` plus mode-specific artifacts such as Fisher summaries,
 profile curves, or nuisance-bias summaries.
 
-For the first worked shared-parameter screening case, use the study-specific
-plate-scale runner:
+For the worked Fisher / Schur shared-parameter screening case, use the
+study-specific runner:
 
 ```bash
-PYTHONPATH=src python examples/scripts/run_plate_scale_fisher_screen.py \
-  --study-root Results/plate_scale_fisher_alpha_cen
+PYTHONPATH=src python examples/scripts/run_candidate_fisher_screen.py \
+  --candidate optics.plate_scale_as_per_pix
 ```
 
-This runs the explicit `fisher_only` plate-scale matrix over:
+This runs the explicit `fisher_only` matrix for one canonical candidate key at
+a time. Supported examples include:
+
+- `optics.plate_scale_as_per_pix`
+- `source.log_flux_total`
+- `source.contrast`
+- `source.separation_as`
+- `optics.primary.zernike_coeffs_nm[3]`
+
+The worked matrix remains:
 
 - target: `ALPHA_CEN`
 - frame counts: `1, 5, 20, 50`
 - noise modes: `noiseless`, `shot_noise_only`
 
 and writes per-case Fisher/Schur summaries plus aggregate CSV/JSON/PNG review
-artifacts at the study root.
+artifacts under a derived study root of the form:
+
+- `Results/<candidate_slug>_fisher_<target_slug>/`
 
 For focused diagnosis of the expensive Fisher stage, narrow the matrix with the
 existing subset flags. For example:
 
 ```bash
-PYTHONPATH=src python examples/scripts/run_plate_scale_fisher_screen.py \
-  --study-root Results/plate_scale_fisher_alpha_cen_debug \
+PYTHONPATH=src python examples/scripts/run_candidate_fisher_screen.py \
+  --candidate optics.primary.zernike_coeffs_nm[3] \
+  --study-root Results/optics_primary_zernike_coeffs_nm_i3_fisher_debug \
   --frame-counts 1,5,20 \
   --noise-modes noiseless
 ```

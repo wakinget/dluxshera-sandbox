@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -225,6 +225,107 @@ def get_obs_subblock_store_value(
     return float(array_value[address.index])
 
 
+def get_obs_subblock_mapping_value(
+    mapping: Mapping[str, Any] | None,
+    *,
+    address: ObsSubblockKeyAddress,
+) -> float | None:
+    """Return a scalar mapping value for scalar or indexed key addresses.
+
+    Missing paths return ``None`` so callers can fall back to resolved-store
+    defaults. Present-but-incompatible values raise explicit errors.
+    """
+
+    if mapping is None:
+        return None
+    current: Any = mapping
+    for part in address.base_key.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+
+    if isinstance(current, bool):
+        raise ValueError(f"Key {address.base_key!r} must be numeric.")
+
+    array_value = np.asarray(current)
+    if address.index is None:
+        if array_value.ndim != 0:
+            raise ValueError(
+                f"Key {address.base_key!r} is vector-valued; use indexed syntax."
+            )
+        return float(array_value)
+
+    if array_value.ndim != 1:
+        raise ValueError(
+            f"Key {address.base_key!r} is not 1D vector-valued and cannot be indexed."
+        )
+    if address.index >= int(array_value.shape[0]):
+        raise ValueError(
+            f"Key {address.canonical!r} index is out of bounds "
+            f"(length={array_value.shape[0]})."
+        )
+    return float(array_value[address.index])
+
+
+def set_obs_subblock_mapping_value(
+    mapping: MutableMapping[str, Any],
+    *,
+    address: ObsSubblockKeyAddress,
+    value: Any,
+    reference_vector: Sequence[Any] | np.ndarray | None = None,
+) -> None:
+    """Set one scalar or indexed candidate value inside a nested mapping.
+
+    Indexed updates write the full vector back into the mapping so preset-backed
+    system configs can be overridden by one explicit component at a time.
+    """
+
+    if not isinstance(mapping, MutableMapping):
+        raise ValueError("Target mapping must be a mutable mapping/dict.")
+
+    scalar_value = _coerce_finite_float(value, path=address.canonical)
+    current = mapping
+    parts = address.base_key.split(".")
+    for part in parts[:-1]:
+        child = current.get(part)
+        if child is None:
+            current[part] = {}
+            child = current[part]
+        if not isinstance(child, MutableMapping):
+            raise ValueError(
+                f"Cannot set key {address.canonical!r}; path component {part!r} "
+                "is not a mapping."
+            )
+        current = child
+
+    leaf = parts[-1]
+    if address.index is None:
+        current[leaf] = float(scalar_value)
+        return
+
+    existing = current.get(leaf)
+    if existing is None:
+        if reference_vector is None:
+            raise ValueError(
+                f"Cannot set indexed key {address.canonical!r}; base vector "
+                f"{address.base_key!r} is missing and no reference vector was provided."
+            )
+        vector_value = np.asarray(reference_vector, dtype=float).copy()
+    else:
+        vector_value = np.asarray(existing, dtype=float).copy()
+    if vector_value.ndim != 1:
+        raise ValueError(
+            f"Key {address.base_key!r} is not 1D vector-valued and cannot be indexed."
+        )
+    if address.index >= int(vector_value.shape[0]):
+        raise ValueError(
+            f"Key {address.canonical!r} index is out of bounds "
+            f"(length={vector_value.shape[0]})."
+        )
+    vector_value[address.index] = float(scalar_value)
+    current[leaf] = vector_value.tolist()
+
+
 def collect_obs_subblock_anchor_values(
     store: Any,
     *,
@@ -348,10 +449,12 @@ __all__ = [
     "apply_obs_subblock_overrides_preserving_derived",
     "canonical_obs_subblock_varying_keys",
     "collect_obs_subblock_anchor_values",
+    "get_obs_subblock_mapping_value",
     "get_obs_subblock_store_value",
     "parse_obs_subblock_key_address",
     "parse_obs_subblock_varying_keys",
     "partition_obs_subblock_overrides_by_kind",
+    "set_obs_subblock_mapping_value",
     "split_obs_subblock_frame_overrides",
     "validate_supported_obs_subblock_key_addresses",
 ]
