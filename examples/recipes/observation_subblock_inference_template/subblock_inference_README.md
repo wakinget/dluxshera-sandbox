@@ -119,6 +119,16 @@ This runs the explicit `fisher_only` plate-scale matrix over:
 and writes per-case Fisher/Schur summaries plus aggregate CSV/JSON/PNG review
 artifacts at the study root.
 
+For focused diagnosis of the expensive Fisher stage, narrow the matrix with the
+existing subset flags. For example:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_plate_scale_fisher_screen.py \
+  --study-root Results/plate_scale_fisher_alpha_cen_debug \
+  --frame-counts 1,5,20 \
+  --noise-modes noiseless
+```
+
 ## Adam hyperparameter sweep
 
 Use `examples/scripts/sweep_obs_subblock_adam.py` to run the small Adam sweep
@@ -287,7 +297,9 @@ The current tested workflow is:
 - `temporal.frame_model.kind` must be `independent`
 - `objective.kind` must be `nll`
 - `objective.noise_model.kind` must be `gaussian`
-- `objective.noise_model.variance_model` must be `data` (or optional debug `scalar`)
+- `objective.noise_model.variance_model` is typically `data`, optional debug `scalar`,
+  or `provided_cube` when a study or helper wants to reuse an explicit variance
+  cube written by the renderer
 
 The solve assumes the resolved top-level `system` block is the fixed shared
 state for the block solve. `experiment.truth` is not used for shared overrides

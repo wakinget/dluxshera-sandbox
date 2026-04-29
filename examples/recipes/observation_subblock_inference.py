@@ -789,10 +789,69 @@ def _apply_runtime_active_values(
     )
 
 
+def _preserve_shared_derived_active_values(
+    *,
+    frame_store: ParameterStore,
+    shared_store: ParameterStore,
+    shared_specs: tuple[ActiveKeySpec, ...],
+) -> ParameterStore:
+    """Restore active shared derived values after a frame-level store update.
+
+    Frame-level active updates currently flow through
+    ``apply_obs_subblock_overrides_preserving_derived()``, which refreshes all
+    derived values from the updated primitive state before reapplying only the
+    derived overrides present in that specific call. When a frame update is
+    applied on top of an already-updated ``shared_store``, any active shared
+    derived values would otherwise snap back to their reference-derived values.
+
+    This helper preserves only the active shared derived keys already present in
+    ``shared_store`` so they remain live through the subsequent
+    ``binder.model(...)`` evaluation. Public/store-facing active keys remain the
+    canonical resolved keys such as ``optics.plate_scale_as_per_pix``; runtime
+    binding fields like ``optics.psf_pixel_scale`` are still handled only by the
+    binder.
+    """
+
+    derived_shared_specs = tuple(spec for spec in shared_specs if spec.kind == "derived")
+    if not derived_shared_specs:
+        return frame_store
+
+    def _store_value_for_active_spec(store: ParameterStore, spec: ActiveKeySpec) -> jnp.ndarray:
+        value = jnp.asarray(store.get(spec.address.base_key))
+        if spec.address.index is None:
+            if value.ndim != 0:
+                raise ValueError(
+                    f"Shared derived active key {spec.canonical!r} is not scalar-valued."
+                )
+            return value
+        if value.ndim != 1:
+            raise ValueError(
+                f"Shared derived active key {spec.canonical!r} is not 1D vector-valued."
+            )
+        return value[spec.address.index]
+
+    shared_values = jnp.asarray(
+        [
+            _store_value_for_active_spec(shared_store, spec)
+            for spec in derived_shared_specs
+        ],
+        dtype=float,
+    )
+    _, derived_overrides = _build_runtime_overrides(
+        reference_store=frame_store,
+        key_specs=derived_shared_specs,
+        values=shared_values,
+    )
+    if not derived_overrides:
+        return frame_store
+    return frame_store.replace(dict(derived_overrides))
+
+
 def _build_variance_cube(
     *,
     data_cube: np.ndarray,
     noise_model_cfg: dict[str, Any],
+    config_path: Path | None = None,
 ) -> np.ndarray:
     """Build the Gaussian variance cube requested by ``objective.noise_model``."""
 
@@ -829,6 +888,32 @@ def _build_variance_cube(
             )
         )
         return np.full_like(data_cube, scalar_value, dtype=float)
+
+    if variance_model == "provided_cube":
+        path_value = noise_model_cfg.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError(
+                "objective.noise_model.path is required when variance_model='provided_cube'."
+            )
+        variance_path = _resolve_relative_path(
+            path_value,
+            config_path=config_path,
+            field_name="experiment.inference.objective.noise_model.path",
+        )
+        if not variance_path.exists():
+            raise FileNotFoundError(f"Provided variance FITS not found: {variance_path}")
+        with fits.open(variance_path) as hdul:
+            variance_cube = np.asarray(hdul[0].data, dtype=float)
+        if variance_cube.shape != data_cube.shape:
+            raise ValueError(
+                "Provided variance cube must match observation cube shape. "
+                f"variance_shape={variance_cube.shape}, data_shape={data_cube.shape}."
+            )
+        if not np.all(np.isfinite(variance_cube)):
+            raise ValueError("Provided variance cube contains non-finite values.")
+        if np.any(variance_cube <= 0.0):
+            raise ValueError("Provided variance cube must be strictly positive.")
+        return variance_cube
 
     raise ValueError(f"Unsupported objective.noise_model.variance_model: {variance_model!r}")
 
@@ -982,6 +1067,11 @@ def _build_objective_bundle(
             forward_spec=forward_spec,
             key_specs=layout.frame_specs,
             values=frame_values,
+        )
+        frame_store = _preserve_shared_derived_active_values(
+            frame_store=frame_store,
+            shared_store=shared_store,
+            shared_specs=layout.shared_specs,
         )
         frame_delta = binder.strip_structural(frame_store)
         return binder.model(frame_delta)
@@ -2635,6 +2725,18 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         "variance_model",
         path="experiment.inference.objective.noise_model",
     )
+    provided_variance_path = noise_model_cfg.get("path")
+    if variance_model == "provided_cube":
+        if not isinstance(provided_variance_path, str) or not provided_variance_path.strip():
+            raise ValueError(
+                "experiment.inference.objective.noise_model.path must be a "
+                "non-empty string when variance_model='provided_cube'."
+            )
+        provided_variance_path = provided_variance_path.strip()
+    elif provided_variance_path is not None and not isinstance(provided_variance_path, str):
+        raise ValueError(
+            "experiment.inference.objective.noise_model.path must be a string when provided."
+        )
     scalar_variance = noise_model_cfg.get("scalar")
     if scalar_variance is not None:
         scalar_variance = coerce_numeric_value(
@@ -2830,6 +2932,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                 "noise_model": {
                     "kind": noise_model_kind,
                     "variance_model": variance_model,
+                    "path": provided_variance_path,
                     "scalar": scalar_variance,
                 },
             },
@@ -3150,6 +3253,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     variance_cube = _build_variance_cube(
         data_cube=cube,
         noise_model_cfg=inference_cfg["objective"]["noise_model"],
+        config_path=cfg_path,
     )
     print(
         "Objective setup: "

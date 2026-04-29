@@ -413,6 +413,7 @@ def generate_obs_subblock(
         + (" (first frame may include JIT compilation)" if trace.frame_count > 0 else "")
     )
     frame_images: list[np.ndarray] = []
+    frame_variances: list[np.ndarray] = []
     resolved_truth_rows: list[dict[str, Any]] = []
     frame_iter = trace.rows
     if progress_enabled:
@@ -439,17 +440,19 @@ def generate_obs_subblock(
         frame_delta = binder.strip_structural(frame_store)
 
         frame_image = binder.model(frame_delta)
+        noise_key = rng_key
         if noise_cfg["enabled"]:
             rng_key, noise_key = jr.split(rng_key)
-            frame_image, _ = apply_observation_noise(
-                frame_image,
-                noise_cfg=noise_cfg,
-                rng_key=noise_key,
-                detector_spec=getattr(binder.detector, "spec", None),
-                exposure_time_s=frame_store.get("source.exposure_time_s", default=None),
-            )
+        frame_image, frame_variance = apply_observation_noise(
+            frame_image,
+            noise_cfg=noise_cfg,
+            rng_key=noise_key,
+            detector_spec=getattr(binder.detector, "spec", None),
+            exposure_time_s=frame_store.get("source.exposure_time_s", default=None),
+        )
 
         frame_images.append(np.asarray(frame_image))
+        frame_variances.append(np.asarray(frame_variance))
 
         resolved_row = dict(trace_row)
         for address in varying_addresses:
@@ -461,12 +464,18 @@ def generate_obs_subblock(
 
     print("Writing FITS cube, truth CSV, and manifest...")
     cube = np.stack(frame_images, axis=0)
+    variance_cube = np.stack(frame_variances, axis=0)
     runtime_info = {
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
     }
     render_info = {
         "cube_dtype": str(cube.dtype),
         "cube_dtype_source": "in_memory_before_fits_write",
+        "variance_dtype": str(variance_cube.dtype),
+        "variance_dtype_source": "in_memory_before_fits_write",
+        "variance_basis": (
+            "apply_observation_noise output (expected observation variance)"
+        ),
     }
     write_obs_subblock_cube_fits(
         output_path=artifacts["cube_fits"],
@@ -474,6 +483,15 @@ def generate_obs_subblock(
         header_cards={
             "SCHEMA": MANIFEST_SCHEMA_VERSION,
             "NFRAME": cube.shape[0],
+        },
+    )
+    write_obs_subblock_cube_fits(
+        output_path=artifacts["variance_fits"],
+        cube=variance_cube,
+        header_cards={
+            "SCHEMA": MANIFEST_SCHEMA_VERSION,
+            "NFRAME": variance_cube.shape[0],
+            "IMTYPE": "VARIANCE",
         },
     )
 

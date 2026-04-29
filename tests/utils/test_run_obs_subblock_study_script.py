@@ -6,6 +6,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,12 +17,31 @@ SCRIPT_PATH = (
     / "scripts"
     / "run_obs_subblock_study.py"
 )
+RECIPE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "recipes"
+    / "observation_subblock_inference.py"
+)
 
 
 def _load_script_module():
     spec = importlib.util.spec_from_file_location(
         "run_obs_subblock_study_script",
         SCRIPT_PATH,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_recipe_module():
+    spec = importlib.util.spec_from_file_location(
+        "observation_subblock_inference_recipe_unit_tests",
+        RECIPE_PATH,
     )
     assert spec is not None
     assert spec.loader is not None
@@ -163,11 +183,13 @@ def _write_case_render_artifacts(
     case_root: Path,
     *,
     truth_value: float = 0.01,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path]:
     render_dir = case_root / "render"
     render_dir.mkdir(parents=True, exist_ok=True)
     cube_path = render_dir / "obs_subblock_cube.fits"
     cube_path.write_bytes(b"cube")
+    variance_path = render_dir / "obs_subblock_variance.fits"
+    variance_path.write_bytes(b"variance")
     truth_path = render_dir / "obs_subblock_truth.csv"
     truth_path.write_text(
         "frame_index,time_s,source.x_position_as,source.y_position_as\n"
@@ -181,6 +203,7 @@ def _write_case_render_artifacts(
         {
             "artifacts": {
                 "cube_fits": cube_path.name,
+                "variance_fits": variance_path.name,
                 "frame_truth_csv": truth_path.name,
             },
             "shared_truth": {"optics": {"plate_scale_as_per_pix": truth_value}},
@@ -189,7 +212,7 @@ def _write_case_render_artifacts(
             },
         },
     )
-    return cube_path, truth_path, manifest_path
+    return cube_path, variance_path, truth_path, manifest_path
 
 
 def _resolve_relative(config_path: Path, value: str) -> Path:
@@ -250,11 +273,215 @@ def test_derive_scalar_information_metrics_handles_nonpositive_marginal_info():
     assert negative_marg["marginalization_status"] == "negative_marginal_information"
 
 
+def test_finite_difference_information_from_cube_derivative_respects_reductions():
+    module = _load_script_module()
+
+    dmodel_dp = module.np.asarray(
+        [
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[0.5, 1.0], [1.5, 2.0]],
+        ],
+        dtype=float,
+    )
+    variance_cube = module.np.ones_like(dmodel_dp)
+
+    info_sum = module._finite_difference_information_from_cube_derivative(
+        dmodel_dp=dmodel_dp,
+        variance_cube=variance_cube,
+        frame_reduce="sum",
+        subblock_reduce="sum",
+    )
+    info_mean = module._finite_difference_information_from_cube_derivative(
+        dmodel_dp=dmodel_dp,
+        variance_cube=variance_cube,
+        frame_reduce="sum",
+        subblock_reduce="mean",
+    )
+
+    assert info_sum == pytest.approx(37.5)
+    assert info_mean == pytest.approx(18.75)
+
+
+def test_classify_candidate_runtime_status_distinguishes_disconnected_candidates():
+    module = _load_script_module()
+
+    assert (
+        module._classify_candidate_runtime_status(
+            candidate_found_in_layout=True,
+            field_found=True,
+            binding_present=True,
+            store_changed=True,
+            model_changes=False,
+            finite_difference_f_pp=0.0,
+            fisher_f_pp=0.0,
+        )
+        == "candidate_changes_store_but_not_model"
+    )
+    assert (
+        module._classify_candidate_runtime_status(
+            candidate_found_in_layout=True,
+            field_found=True,
+            binding_present=True,
+            store_changed=True,
+            model_changes=True,
+            finite_difference_f_pp=2.0,
+            fisher_f_pp=0.0,
+        )
+        == "fisher_assembly_suspect"
+    )
+
+
+def test_preserve_shared_derived_active_values_restores_shared_candidate_after_frame_update():
+    recipe = _load_recipe_module()
+    candidate_key = "optics.plate_scale_as_per_pix"
+    shared_spec = recipe.ActiveKeySpec(
+        canonical=candidate_key,
+        address=recipe.parse_obs_subblock_varying_keys([candidate_key])[0],
+        kind="derived",
+    )
+    shared_store = recipe.ParameterStore.from_dict(
+        {
+            candidate_key: 0.12443914,
+            "source.x_position_as": 0.0,
+        }
+    )
+    frame_store = recipe.ParameterStore.from_dict(
+        {
+            candidate_key: 0.12320707,
+            "source.x_position_as": 0.05,
+        }
+    )
+
+    preserved = recipe._preserve_shared_derived_active_values(
+        frame_store=frame_store,
+        shared_store=shared_store,
+        shared_specs=(shared_spec,),
+    )
+
+    assert float(preserved.get(candidate_key)) == pytest.approx(0.12443914)
+    assert float(preserved.get("source.x_position_as")) == pytest.approx(0.05)
+
+
+def test_fisher_only_auto_switches_to_structured_arrowhead_for_large_theta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_script_module()
+    candidate_key = "optics.plate_scale_as_per_pix"
+    n_frame = 11
+    frame_width = 3
+    shared_width = 1
+    theta_size = n_frame * frame_width + shared_width
+
+    class _FakeRecipe:
+        class jnp:
+            @staticmethod
+            def asarray(value):
+                return value
+
+        @staticmethod
+        def _unpack_active_state(layout, theta_flat):
+            frame_size = layout.n_frame * layout.frame_width
+            frame_flat = theta_flat[:frame_size]
+            frame_rows = [
+                frame_flat[index * layout.frame_width : (index + 1) * layout.frame_width]
+                for index in range(layout.n_frame)
+            ]
+            return SimpleNamespace(frame=frame_rows, shared=theta_flat[frame_size:])
+
+        @staticmethod
+        def build_independent_frame_curvature_blocks(**_kwargs):
+            blocks = tuple(
+                SimpleNamespace(
+                    frame_block=module.np.eye(frame_width) * 4.0,
+                    coupling_block=module.np.full((frame_width, shared_width), 0.5),
+                    shared_block=module.np.asarray([[2.0]]),
+                )
+                for _ in range(n_frame)
+            )
+            return SimpleNamespace(blocks=blocks, shared_dim=shared_width)
+
+        @staticmethod
+        def fim_theta(*_args, **_kwargs):
+            raise AssertionError("dense fim_theta should not be used for theta_size > 30")
+
+    fake_layout = SimpleNamespace(
+        n_frame=n_frame,
+        frame_width=frame_width,
+        shared_width=shared_width,
+        theta_size=theta_size,
+        frame_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ),
+        shared_keys=(candidate_key,),
+    )
+    theta_reference = module.np.zeros(theta_size, dtype=float)
+
+    monkeypatch.setattr(
+        module,
+        "_prepare_inference_context",
+        lambda **_kwargs: {
+            "recipe": _FakeRecipe,
+            "layout": fake_layout,
+            "theta_reference": theta_reference,
+            "theta_reference_source": "truth_trace",
+            "objective_bundle": SimpleNamespace(frame_data_term_fn=lambda *_args: 0.0),
+            "inference_cfg": {"objective": {"subblock_reduce": "sum"}},
+            "system_cfg": {"source": {"target": "ALPHA_CEN"}},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_evaluate_candidate_sensitivity",
+        lambda **_kwargs: {
+            "conclusion": "candidate_changes_model",
+            "compact": {
+                "candidate_model_rms_delta_1pct": 0.25,
+                "candidate_loss_delta_1pct": 0.5,
+                "frame_store_preserves_candidate": True,
+                "finite_difference_f_pp": 21.5,
+                "candidate_runtime_status": "candidate_changes_model",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_build_fisher_noise_audit",
+        lambda _context: {
+            "variance_model": "provided_cube",
+            "variance_source": "provided_cube",
+            "cube_stats": {"mean": 2.0},
+            "variance_stats": {"mean": 3.0},
+        },
+    )
+
+    summary = module._evaluate_fisher_only(
+        config_path=tmp_path / "fisher_config.json",
+        output_dir=tmp_path / "study",
+        candidate_key=candidate_key,
+        truth_value=0.01,
+        noise_mode="noiseless",
+        target_name="ALPHA_CEN",
+    )
+
+    assert summary["fisher_method"] == "structured_arrowhead"
+    assert summary["dense_global_fim_materialized"] is False
+    assert summary["structured_block_count"] == n_frame
+    assert summary["f_pp"] == pytest.approx(22.0)
+    assert summary["i_marg"] == pytest.approx(19.9375)
+    assert summary["candidate_runtime_status"] == "candidate_changes_model"
+    assert summary["frame_store_preserves_candidate"] is True
+    assert summary["finite_difference_f_pp"] == pytest.approx(21.5)
+    assert summary["noise_audit"]["variance_source"] == "provided_cube"
+
+
 def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
     module = _load_script_module()
     trace_template, render_template, inference_template = _write_templates(tmp_path)
     case_root = tmp_path / "Results" / "case_fisher"
-    cube_path, truth_path, manifest_path = _write_case_render_artifacts(
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
         case_root,
         truth_value=0.0125,
     )
@@ -267,6 +494,7 @@ def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
         inference_template=inference_template,
         candidate_key="optics.plate_scale_as_per_pix",
         truth_value=0.0125,
+        use_render_variance=True,
         dry_run=True,
     )
 
@@ -277,6 +505,7 @@ def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
     assert summary["summary_path"] == str(summary_path.resolve())
     assert summary["case_prep_stages_executed"] == []
     assert summary["rendered_truth_value"] == 0.0125
+    assert summary["target_name"] == "ALPHA_CEN"
     assert fisher_cfg["experiment"]["inference"]["active"]["shared_keys"] == [
         "optics.plate_scale_as_per_pix"
     ]
@@ -295,6 +524,35 @@ def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
         fisher_config_path,
         fisher_cfg["experiment"]["inference"]["data"]["manifest"],
     ) == manifest_path.resolve()
+    assert (
+        fisher_cfg["experiment"]["inference"]["objective"]["noise_model"]["variance_model"]
+        == "provided_cube"
+    )
+    assert _resolve_relative(
+        fisher_config_path,
+        fisher_cfg["experiment"]["inference"]["objective"]["noise_model"]["path"],
+    ) == variance_path.resolve()
+
+
+def test_fisher_only_dry_run_without_existing_render_is_plan_only(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_fisher_plan_only"
+
+    summary = module.run_obs_subblock_study(
+        mode="fisher_only",
+        case_root=case_root,
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        candidate_key="optics.plate_scale_as_per_pix",
+        truth_value=0.0125,
+        dry_run=True,
+    )
+
+    assert summary["dry_run"] is True
+    assert summary["case_prep_stages_executed"] == ["trace", "render"]
+    assert "case_prep_summary_path" not in summary
 
 
 def test_profile_objective_reuses_existing_render_outputs_and_writes_curve(
@@ -304,7 +562,7 @@ def test_profile_objective_reuses_existing_render_outputs_and_writes_curve(
     module = _load_script_module()
     trace_template, render_template, inference_template = _write_templates(tmp_path)
     case_root = tmp_path / "Results" / "case_profile"
-    cube_path, _truth_path, _manifest_path = _write_case_render_artifacts(case_root)
+    cube_path, _variance_path, _truth_path, _manifest_path = _write_case_render_artifacts(case_root)
 
     def fake_inference_runner(config_path: Path, run_root: Path, dry_run: bool) -> dict:
         assert dry_run is False

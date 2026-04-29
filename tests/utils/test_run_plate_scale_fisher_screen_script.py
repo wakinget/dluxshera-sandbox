@@ -81,6 +81,13 @@ def test_build_plate_scale_fisher_case_specs_expands_expected_8_cases(tmp_path: 
     assert {case.noise_mode for case in cases} == {"noiseless", "shot_noise_only"}
 
 
+def test_parse_frame_counts_and_noise_modes_accept_subset_strings():
+    module = _load_script_module()
+
+    assert module.parse_frame_counts("1,5") == (1, 5)
+    assert module.parse_noise_modes("noiseless") == ("noiseless",)
+
+
 def test_write_plate_scale_fisher_artifacts_writes_csv_json_and_plots(tmp_path: Path):
     module = _load_script_module()
 
@@ -130,6 +137,44 @@ def test_write_plate_scale_fisher_artifacts_writes_csv_json_and_plots(tmp_path: 
             "nuisance_block_status": "ok",
         },
     ]
+    noise_audit_rows = [
+        {
+            "target": "ALPHA_CEN",
+            "candidate": "optics.plate_scale_as_per_pix",
+            "frame_count": 1,
+            "noise_mode": "noiseless",
+            "case_status": "ok",
+            "variance_model": "provided_cube",
+            "variance_source": "provided_cube",
+            "cube_mean": 10.0,
+            "variance_mean": 12.0,
+            "data_as_variance_mean": 10.0,
+            "render_variance_mean": 12.0,
+            "f_pp": 4.0,
+            "i_marg": 1.0,
+            "sigma_cond": 0.5,
+            "sigma_marg": 1.0,
+            "absorption_fraction": 0.75,
+        },
+        {
+            "target": "ALPHA_CEN",
+            "candidate": "optics.plate_scale_as_per_pix",
+            "frame_count": 5,
+            "noise_mode": "shot_noise_only",
+            "case_status": "ok",
+            "variance_model": "provided_cube",
+            "variance_source": "provided_cube",
+            "cube_mean": 10.1,
+            "variance_mean": 12.1,
+            "data_as_variance_mean": 9.1,
+            "render_variance_mean": 12.1,
+            "f_pp": 9.0,
+            "i_marg": 4.0,
+            "sigma_cond": 1.0 / 3.0,
+            "sigma_marg": 0.5,
+            "absorption_fraction": 5.0 / 9.0,
+        },
+    ]
     case_summaries = [
         {"summary_path": str(tmp_path / "cases" / "case_a" / "summary.json")},
         {"summary_path": str(tmp_path / "cases" / "case_b" / "summary.json")},
@@ -138,6 +183,7 @@ def test_write_plate_scale_fisher_artifacts_writes_csv_json_and_plots(tmp_path: 
     summary = module.write_plate_scale_fisher_artifacts(
         study_root=tmp_path,
         rows=rows,
+        noise_audit_rows=noise_audit_rows,
         case_summaries=case_summaries,
         truth_value=0.006,
         target_name="ALPHA_CEN",
@@ -148,18 +194,28 @@ def test_write_plate_scale_fisher_artifacts_writes_csv_json_and_plots(tmp_path: 
 
     csv_path = tmp_path / "plate_scale_fisher_summary.csv"
     json_path = tmp_path / "plate_scale_fisher_summary.json"
+    noise_audit_csv = tmp_path / "plate_scale_fisher_noise_audit.csv"
+    noise_audit_json = tmp_path / "plate_scale_fisher_noise_audit.json"
     loaded_json = _read_json(json_path)
+    loaded_noise_json = _read_json(noise_audit_json)
     csv_rows = list(csv.DictReader(csv_path.open("r", encoding="utf-8", newline="")))
+    audit_csv_rows = list(
+        csv.DictReader(noise_audit_csv.open("r", encoding="utf-8", newline=""))
+    )
 
     assert summary["artifacts"]["aggregate_csv"] == str(csv_path.resolve())
     assert loaded_json["target"] == "ALPHA_CEN"
     assert loaded_json["candidate"] == "optics.plate_scale_as_per_pix"
     assert len(csv_rows) == 2
+    assert len(audit_csv_rows) == 2
     assert "sigma_marg" in csv_rows[0]
     assert "target" in csv_rows[0]
+    assert "comparisons" in loaded_noise_json
     assert (tmp_path / "sigma_marg_vs_frame_count.png").exists()
     assert (tmp_path / "absorption_fraction_vs_frame_count.png").exists()
     assert (tmp_path / "sigma_cond_vs_frame_count.png").exists()
+    assert (tmp_path / "variance_mean_vs_frame_count.png").exists()
+    assert loaded_json["artifacts"]["progress_log"] == str((tmp_path / "progress.log").resolve())
 
 
 def test_run_plate_scale_fisher_screen_aggregates_stubbed_case_runs(
@@ -212,6 +268,18 @@ def test_run_plate_scale_fisher_screen_aggregates_stubbed_case_runs(
                 "valid_marginal_sigma": True,
                 "marginalization_status": "ok",
                 "nuisance_block_status": "ok",
+                "noise_audit": {
+                    "variance_model": "provided_cube",
+                    "variance_source": "provided_cube",
+                    "cube_stats": {"mean": 10.0},
+                    "variance_stats": {"mean": 12.0},
+                    "data_as_variance_stats": {"mean": 8.0},
+                    "render_variance_stats": {"mean": 12.0},
+                    "data_variance_floor_clipped_count": 0,
+                    "variance_mean_over_cube_mean": 1.2,
+                    "data_variance_mean_over_cube_mean": 0.8,
+                    "render_variance_mean_over_cube_mean": 1.2,
+                },
                 "artifacts": {
                     "fisher_summary_json": str(fisher_summary_path.resolve()),
                     "fisher_blocks_npz": str(fisher_blocks_path.resolve()),
@@ -264,3 +332,4 @@ def test_run_plate_scale_fisher_screen_aggregates_stubbed_case_runs(
     }
     assert all(row["target"] == "ALPHA_CEN" for row in aggregate_csv_rows)
     assert all(row["case_status"] == "ok" for row in aggregate_csv_rows)
+    assert (tmp_path / "study" / "progress.log").exists()

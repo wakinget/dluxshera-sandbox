@@ -60,10 +60,30 @@ DEFAULT_INFERENCE_TEMPLATE = (
 )
 STUDY_SCHEMA_VERSION = "plate_scale_fisher_screen.v1"
 STUDY_MODE = "fisher_only"
+# CANDIDATE_PARAMETERS = ("optics.plate_scale_as_per_pix",
+#                         "source.separation_as",
+#                         "source.log_flux_total",
+#                         "source.contrast",
+#                         "optics.primary.zernike_coeffs_nm")
 CANDIDATE_PARAMETER = "optics.plate_scale_as_per_pix"
 TARGET_NAME = "ALPHA_CEN"
-DEFAULT_FRAME_COUNTS = (1, 5, 20, 50)
+DEFAULT_FRAME_COUNTS = (1, 2, 5, 10, 20, 50, 100)
 SUPPORTED_NOISE_MODES = ("noiseless", "shot_noise_only")
+
+
+def _screen_log(study_root: Path, message: str, **fields: Any) -> None:
+    """Print and append one flushed progress line for the plate-scale study."""
+
+    parts = [f"[plate_scale_fisher_screen] {message}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    line = " ".join(parts)
+    print(line, flush=True)
+    study_root.mkdir(parents=True, exist_ok=True)
+    with (study_root / "progress.log").open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
 
 
 @dataclass(frozen=True)
@@ -339,11 +359,17 @@ def build_case_row(
         "fisher_blocks_npz": None,
         "reference_value": None,
         "nuisance_keys": None,
+        "fisher_method": None,
         "f_pp": None,
         "i_marg": None,
         "sigma_cond": None,
         "sigma_marg": None,
         "absorption_fraction": None,
+        "candidate_runtime_status": None,
+        "finite_difference_f_pp": None,
+        "candidate_model_rms_delta_1pct": None,
+        "candidate_loss_delta_1pct": None,
+        "frame_store_preserves_candidate": None,
         "f_pp_is_finite": None,
         "i_marg_is_finite": None,
         "valid_conditional_sigma": None,
@@ -373,11 +399,21 @@ def build_case_row(
             ),
             "reference_value": fisher_summary.get("candidate_reference_value"),
             "nuisance_keys": "|".join(fisher_summary.get("frame_keys", [])),
+            "fisher_method": fisher_summary.get("fisher_method"),
             "f_pp": fisher_summary.get("f_pp"),
             "i_marg": fisher_summary.get("i_marg"),
             "sigma_cond": fisher_summary.get("sigma_cond"),
             "sigma_marg": fisher_summary.get("sigma_marg"),
             "absorption_fraction": fisher_summary.get("absorption_fraction"),
+            "candidate_runtime_status": fisher_summary.get("candidate_runtime_status"),
+            "finite_difference_f_pp": fisher_summary.get("finite_difference_f_pp"),
+            "candidate_model_rms_delta_1pct": fisher_summary.get(
+                "candidate_model_rms_delta_1pct"
+            ),
+            "candidate_loss_delta_1pct": fisher_summary.get("candidate_loss_delta_1pct"),
+            "frame_store_preserves_candidate": fisher_summary.get(
+                "frame_store_preserves_candidate"
+            ),
             "f_pp_is_finite": fisher_summary.get("f_pp_is_finite"),
             "i_marg_is_finite": fisher_summary.get("i_marg_is_finite"),
             "valid_conditional_sigma": fisher_summary.get("valid_conditional_sigma"),
@@ -387,6 +423,199 @@ def build_case_row(
         }
     )
     return base_row
+
+
+def _stat_value(mapping: dict[str, Any] | None, key: str) -> Any:
+    """Read one scalar stat from a mapping when available."""
+
+    if not isinstance(mapping, dict):
+        return None
+    return mapping.get(key)
+
+
+def build_noise_audit_row(
+    *,
+    case: PlateScaleFisherCase,
+    truth_value: float,
+    case_summary: dict[str, Any] | None,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    """Flatten one case's cube/variance audit into the aggregate audit contract."""
+
+    row: dict[str, Any] = {
+        "target": case.target_name,
+        "candidate": CANDIDATE_PARAMETER,
+        "frame_count": int(case.frame_count),
+        "noise_mode": case.noise_mode,
+        "truth_value": float(truth_value),
+        "case_name": case.case_name,
+        "case_root": str(case.case_root),
+        "case_status": "error" if error_message is not None else "planned",
+        "error_message": error_message,
+        "variance_model": None,
+        "variance_source": None,
+        "render_variance_artifact_available": None,
+        "render_variance_artifact_used": None,
+        "cube_sum": None,
+        "cube_mean": None,
+        "cube_min": None,
+        "cube_max": None,
+        "cube_zero_count": None,
+        "variance_sum": None,
+        "variance_mean": None,
+        "variance_min": None,
+        "variance_max": None,
+        "variance_zero_count": None,
+        "data_as_variance_mean": None,
+        "data_as_variance_min": None,
+        "data_variance_floor_clipped_count": None,
+        "render_variance_mean": None,
+        "render_variance_min": None,
+        "variance_mean_over_cube_mean": None,
+        "data_variance_mean_over_cube_mean": None,
+        "render_variance_mean_over_cube_mean": None,
+        "f_pp": None,
+        "i_marg": None,
+        "sigma_cond": None,
+        "sigma_marg": None,
+        "absorption_fraction": None,
+    }
+    if case_summary is None:
+        return row
+
+    fisher_summary = case_summary.get("fisher_summary")
+    if not isinstance(fisher_summary, dict):
+        if error_message is None:
+            row["case_status"] = "planned" if case_summary.get("dry_run") else "missing_summary"
+        return row
+
+    noise_audit = fisher_summary.get("noise_audit")
+    cube_stats = noise_audit.get("cube_stats") if isinstance(noise_audit, dict) else None
+    variance_stats = noise_audit.get("variance_stats") if isinstance(noise_audit, dict) else None
+    data_variance_stats = (
+        noise_audit.get("data_as_variance_stats") if isinstance(noise_audit, dict) else None
+    )
+    render_variance_stats = (
+        noise_audit.get("render_variance_stats") if isinstance(noise_audit, dict) else None
+    )
+
+    row.update(
+        {
+            "case_status": "ok",
+            "variance_model": None if not isinstance(noise_audit, dict) else noise_audit.get("variance_model"),
+            "variance_source": None if not isinstance(noise_audit, dict) else noise_audit.get("variance_source"),
+            "render_variance_artifact_available": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("render_variance_artifact_available")
+            ),
+            "render_variance_artifact_used": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("render_variance_artifact_used")
+            ),
+            "cube_sum": _stat_value(cube_stats, "sum"),
+            "cube_mean": _stat_value(cube_stats, "mean"),
+            "cube_min": _stat_value(cube_stats, "min"),
+            "cube_max": _stat_value(cube_stats, "max"),
+            "cube_zero_count": _stat_value(cube_stats, "zero_count"),
+            "variance_sum": _stat_value(variance_stats, "sum"),
+            "variance_mean": _stat_value(variance_stats, "mean"),
+            "variance_min": _stat_value(variance_stats, "min"),
+            "variance_max": _stat_value(variance_stats, "max"),
+            "variance_zero_count": _stat_value(variance_stats, "zero_count"),
+            "data_as_variance_mean": _stat_value(data_variance_stats, "mean"),
+            "data_as_variance_min": _stat_value(data_variance_stats, "min"),
+            "data_variance_floor_clipped_count": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("data_variance_floor_clipped_count")
+            ),
+            "render_variance_mean": _stat_value(render_variance_stats, "mean"),
+            "render_variance_min": _stat_value(render_variance_stats, "min"),
+            "variance_mean_over_cube_mean": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("variance_mean_over_cube_mean")
+            ),
+            "data_variance_mean_over_cube_mean": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("data_variance_mean_over_cube_mean")
+            ),
+            "render_variance_mean_over_cube_mean": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("render_variance_mean_over_cube_mean")
+            ),
+            "f_pp": fisher_summary.get("f_pp"),
+            "i_marg": fisher_summary.get("i_marg"),
+            "sigma_cond": fisher_summary.get("sigma_cond"),
+            "sigma_marg": fisher_summary.get("sigma_marg"),
+            "absorption_fraction": fisher_summary.get("absorption_fraction"),
+        }
+    )
+    return row
+
+
+def build_noise_audit_comparisons(
+    rows: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build per-frame-count noiseless vs shot-noise comparison rows."""
+
+    by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in rows:
+        if row.get("case_status") != "ok":
+            continue
+        frame_count = row.get("frame_count")
+        noise_mode = row.get("noise_mode")
+        if frame_count is None or noise_mode is None:
+            continue
+        by_key[(int(frame_count), str(noise_mode))] = row
+
+    comparisons: list[dict[str, Any]] = []
+    for frame_count in sorted({key[0] for key in by_key}):
+        noiseless = by_key.get((frame_count, "noiseless"))
+        shot = by_key.get((frame_count, "shot_noise_only"))
+        if noiseless is None or shot is None:
+            continue
+
+        def _ratio(numerator_key: str, denominator_key: str | None = None) -> float | None:
+            denom_key = numerator_key if denominator_key is None else denominator_key
+            numerator = shot.get(numerator_key)
+            denominator = noiseless.get(denom_key)
+            try:
+                numerator_f = float(numerator)
+                denominator_f = float(denominator)
+            except (TypeError, ValueError):
+                return None
+            if denominator_f == 0.0:
+                return None
+            return float(numerator_f / denominator_f)
+
+        comparisons.append(
+            {
+                "frame_count": int(frame_count),
+                "shot_to_noiseless_f_pp_ratio": _ratio("f_pp"),
+                "shot_to_noiseless_i_marg_ratio": _ratio("i_marg"),
+                "shot_to_noiseless_sigma_marg_ratio": _ratio("sigma_marg"),
+                "shot_to_noiseless_cube_mean_ratio": _ratio("cube_mean"),
+                "shot_to_noiseless_variance_mean_ratio": _ratio("variance_mean"),
+                "shot_to_noiseless_data_as_variance_mean_ratio": _ratio(
+                    "data_as_variance_mean"
+                ),
+                "noiseless_variance_model": noiseless.get("variance_model"),
+                "shot_noise_variance_model": shot.get("variance_model"),
+                "noiseless_data_variance_floor_clipped_count": noiseless.get(
+                    "data_variance_floor_clipped_count"
+                ),
+                "shot_noise_data_variance_floor_clipped_count": shot.get(
+                    "data_variance_floor_clipped_count"
+                ),
+            }
+        )
+
+    return comparisons
 
 
 def _augment_case_outputs(
@@ -501,6 +730,7 @@ def write_plate_scale_fisher_artifacts(
     *,
     study_root: Path,
     rows: Sequence[dict[str, Any]],
+    noise_audit_rows: Sequence[dict[str, Any]],
     case_summaries: Sequence[dict[str, Any]],
     truth_value: float,
     target_name: str,
@@ -512,11 +742,15 @@ def write_plate_scale_fisher_artifacts(
 
     csv_path = study_root / "plate_scale_fisher_summary.csv"
     json_path = study_root / "plate_scale_fisher_summary.json"
+    noise_audit_csv = study_root / "plate_scale_fisher_noise_audit.csv"
+    noise_audit_json = study_root / "plate_scale_fisher_noise_audit.json"
     sigma_marg_plot = study_root / "sigma_marg_vs_frame_count.png"
     absorption_plot = study_root / "absorption_fraction_vs_frame_count.png"
     sigma_cond_plot = study_root / "sigma_cond_vs_frame_count.png"
+    variance_mean_plot = study_root / "variance_mean_vs_frame_count.png"
 
     _write_rows_csv(csv_path, rows)
+    _write_rows_csv(noise_audit_csv, noise_audit_rows)
     plot_metric_vs_frame_count(
         rows=rows,
         metric_key="sigma_marg",
@@ -541,6 +775,27 @@ def write_plate_scale_fisher_artifacts(
         title="Plate Scale Fisher Screening: Conditional Sigma",
         log_y=True,
     )
+    plot_metric_vs_frame_count(
+        rows=noise_audit_rows,
+        metric_key="variance_mean",
+        output_path=variance_mean_plot,
+        y_label="Variance Mean",
+        title="Plate Scale Fisher Screening: Variance Mean",
+        log_y=True,
+    )
+
+    noise_audit_comparisons = build_noise_audit_comparisons(noise_audit_rows)
+    _write_json(
+        noise_audit_json,
+        {
+            "candidate": CANDIDATE_PARAMETER,
+            "target": target_name,
+            "frame_counts": [int(value) for value in frame_counts],
+            "noise_modes": list(noise_modes),
+            "rows": list(noise_audit_rows),
+            "comparisons": noise_audit_comparisons,
+        },
+    )
 
     summary = {
         "schema_version": STUDY_SCHEMA_VERSION,
@@ -557,11 +812,17 @@ def write_plate_scale_fisher_artifacts(
         "artifacts": {
             "aggregate_csv": str(csv_path.resolve()),
             "aggregate_json": str(json_path.resolve()),
+            "noise_audit_csv": str(noise_audit_csv.resolve()),
+            "noise_audit_json": str(noise_audit_json.resolve()),
             "sigma_marg_plot": str(sigma_marg_plot.resolve()),
             "absorption_fraction_plot": str(absorption_plot.resolve()),
             "sigma_cond_plot": str(sigma_cond_plot.resolve()),
+            "variance_mean_plot": str(variance_mean_plot.resolve()),
+            "progress_log": str((study_root / "progress.log").resolve()),
         },
         "cases": list(rows),
+        "noise_audit_rows": list(noise_audit_rows),
+        "noise_audit_comparisons": noise_audit_comparisons,
         "case_summaries": list(case_summaries),
     }
     _write_json(json_path, summary)
@@ -582,12 +843,27 @@ def run_plate_scale_fisher_screen(
 
     study_root = study_root.resolve()
     study_root.mkdir(parents=True, exist_ok=True)
+    _screen_log(
+        study_root,
+        "study.start",
+        study_root_path=study_root,
+        frame_counts=[int(value) for value in frame_counts],
+        noise_modes=list(noise_modes),
+        dry_run=bool(dry_run),
+    )
     study_module = _load_study_module()
     truth_value, resolved_target = resolve_plate_scale_truth_and_target(
         render_template=render_template,
         inference_template=inference_template,
     )
     target_name = resolved_target or TARGET_NAME
+    _screen_log(
+        study_root,
+        "study.config",
+        candidate=CANDIDATE_PARAMETER,
+        target=target_name,
+        truth_value=truth_value,
+    )
     cases = build_plate_scale_fisher_case_specs(
         study_root=study_root,
         frame_counts=frame_counts,
@@ -606,8 +882,17 @@ def run_plate_scale_fisher_screen(
     }
 
     rows: list[dict[str, Any]] = []
+    noise_audit_rows: list[dict[str, Any]] = []
     case_summaries: list[dict[str, Any]] = []
     for case in cases:
+        _screen_log(
+            study_root,
+            "case.start",
+            case_name=case.case_name,
+            frame_count=case.frame_count,
+            noise_mode=case.noise_mode,
+            case_root=case.case_root,
+        )
         try:
             case_summary = study_module.run_obs_subblock_study(
                 mode=STUDY_MODE,
@@ -621,6 +906,7 @@ def run_plate_scale_fisher_screen(
                 noise_mode=(
                     "disabled" if case.noise_mode == "noiseless" else "enabled"
                 ),
+                use_render_variance=True,
                 dry_run=bool(dry_run),
             )
             case_summary = _augment_case_outputs(
@@ -628,9 +914,33 @@ def run_plate_scale_fisher_screen(
                 truth_value=truth_value,
                 case_summary=case_summary,
             )
+            fisher_summary = case_summary.get("fisher_summary")
+            _screen_log(
+                study_root,
+                "case.done",
+                case_name=case.case_name,
+                case_status="ok",
+                fisher_method=(
+                    None
+                    if not isinstance(fisher_summary, dict)
+                    else fisher_summary.get("fisher_method")
+                ),
+                marginalization_status=(
+                    None
+                    if not isinstance(fisher_summary, dict)
+                    else fisher_summary.get("marginalization_status")
+                ),
+            )
             case_summaries.append(case_summary)
             rows.append(
                 build_case_row(
+                    case=case,
+                    truth_value=truth_value,
+                    case_summary=case_summary,
+                )
+            )
+            noise_audit_rows.append(
+                build_noise_audit_row(
                     case=case,
                     truth_value=truth_value,
                     case_summary=case_summary,
@@ -645,16 +955,59 @@ def run_plate_scale_fisher_screen(
                     error_message=str(exc),
                 )
             )
+            noise_audit_rows.append(
+                build_noise_audit_row(
+                    case=case,
+                    truth_value=truth_value,
+                    case_summary=None,
+                    error_message=str(exc),
+                )
+            )
+            _screen_log(
+                study_root,
+                "case.done",
+                case_name=case.case_name,
+                case_status="error",
+                error_message=str(exc),
+            )
 
     summary = write_plate_scale_fisher_artifacts(
         study_root=study_root,
         rows=rows,
+        noise_audit_rows=noise_audit_rows,
         case_summaries=case_summaries,
         truth_value=truth_value,
         target_name=target_name,
         frame_counts=frame_counts,
         noise_modes=noise_modes,
         dry_run=dry_run,
+    )
+    if summary.get("noise_audit_comparisons"):
+        largest = max(
+            (
+                row
+                for row in summary["noise_audit_comparisons"]
+                if row.get("shot_to_noiseless_f_pp_ratio") is not None
+            ),
+            key=lambda row: float(row["shot_to_noiseless_f_pp_ratio"]),
+            default=None,
+        )
+        if largest is not None:
+            _screen_log(
+                study_root,
+                "noise.audit.summary",
+                frame_count=largest["frame_count"],
+                shot_to_noiseless_f_pp_ratio=largest["shot_to_noiseless_f_pp_ratio"],
+                shot_to_noiseless_variance_mean_ratio=largest[
+                    "shot_to_noiseless_variance_mean_ratio"
+                ],
+            )
+    _screen_log(
+        study_root,
+        "study.done",
+        case_count=summary["case_count"],
+        successful_case_count=summary["successful_case_count"],
+        failed_case_count=summary["failed_case_count"],
     )
     return summary
 

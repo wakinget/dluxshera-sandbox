@@ -36,10 +36,12 @@ def build_obs_subblock_artifact_paths(
     """Return canonical artifact paths for one rendered sub-block."""
 
     cube_path = outdir / f"{file_prefix}_{timestamp}_cube.fits"
+    variance_path = outdir / f"{file_prefix}_{timestamp}_variance.fits"
     truth_path = outdir / f"{file_prefix}_{timestamp}_frame_truth.csv"
     manifest_path = outdir / "manifest.json"
     return {
         "cube_fits": cube_path,
+        "variance_fits": variance_path,
         "frame_truth_csv": truth_path,
         "manifest_json": manifest_path,
     }
