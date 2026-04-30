@@ -22,18 +22,29 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 
+from dluxshera.config.io import load_user_config
+from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.observation_belief import (
     ObservationBeliefState,
     ObservationThetaLayout,
     SubblockSummary,
+    accumulate_summary_information,
     build_observation_eigenbasis,
+    build_prior_whitened_information_gain_matrix,
     update_observation_belief,
+)
+from dluxshera.params.store import ParameterStore
+from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.obs_subblock_keys import (
+    get_obs_subblock_store_value,
+    parse_obs_subblock_key_address,
 )
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results" / "observation_belief_demo"
+DEFAULT_SYSTEM_PRESET = "SHERA_FLIGHT_3P"
 DEFAULT_ZERNIKE_INDICES = (0, 1, 2, 3, 4, 5)
 DEMO_SCHEMA_VERSION = "observation_belief_demo.v1"
 
@@ -162,33 +173,79 @@ def build_demo_theta_layout_config(
     }
 
 
-def build_default_prior(
+def build_prior_store_from_system(
+    *,
+    config_path: Path | None = None,
+    system_preset: str | None = DEFAULT_SYSTEM_PRESET,
+) -> tuple[ParameterStore, Any, dict[str, Any]]:
+    """Resolve one system config and return a refreshed forward store."""
+
+    user_cfg = load_user_config(
+        config_path=config_path.resolve() if config_path is not None else None,
+        system_preset=system_preset,
+        experiment_preset=None,
+    )
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    if not isinstance(system_cfg, Mapping):
+        raise ValueError("Observation belief demo requires a resolved 'system' block.")
+
+    forward_spec = compose_forward_spec(system_cfg)
+    store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    provenance = {
+        "prior_mean_source": "resolved_system_store",
+        "system_preset": None if system_preset is None else str(system_preset),
+        "system_config_path": None
+        if config_path is None
+        else str(config_path.resolve()),
+        "resolved_system": {
+            "source_kind": system_cfg.get("source", {}).get("kind"),
+            "source_target": system_cfg.get("source", {}).get("target"),
+            "optics_kind": system_cfg.get("optics", {}).get("kind"),
+            "detector_model": system_cfg.get("detector", {}).get("model"),
+        },
+    }
+    return store, forward_spec, provenance
+
+
+def build_prior_mean_from_store(
     labels: Sequence[str],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return narrow default prior means and sigmas for the demo layout."""
+    *,
+    store: ParameterStore,
+) -> np.ndarray:
+    """Return the observation-level prior mean vector from a resolved store."""
 
     mean = np.zeros((len(labels),), dtype=float)
+    for index, label in enumerate(labels):
+        address = parse_obs_subblock_key_address(label)
+        try:
+            mean[index] = get_obs_subblock_store_value(store, address=address)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                f"Unable to resolve prior mean for observation label {label!r} "
+                "from the resolved system store."
+            ) from exc
+    return mean
+
+
+def build_default_prior_sigma(labels: Sequence[str]) -> np.ndarray:
+    """Return narrow hard-coded prior sigma defaults for the demo layout."""
+
     sigma = np.zeros((len(labels),), dtype=float)
     for index, label in enumerate(labels):
         if label == "source.separation_as":
-            mean[index] = 10.0
-            sigma[index] = 0.40
+            sigma[index] = 0.1
         elif label == "source.log_flux_total":
-            mean[index] = 12.0
-            sigma[index] = 0.20
+            sigma[index] = 0.10
         elif label == "source.contrast":
-            mean[index] = 3.0
-            sigma[index] = 0.30
+            sigma[index] = 0.10
         elif label == "optics.plate_scale_as_per_pix":
-            mean[index] = 0.030
-            sigma[index] = 0.0015
+            sigma[index] = 0.001
         elif "zernike_coeffs_nm" in label:
-            mean[index] = 0.0
-            sigma[index] = 12.0
+            sigma[index] = 3.0
         else:
-            mean[index] = 0.0
             sigma[index] = 1.0
-    return mean, sigma
+    return sigma
 
 
 def build_synthetic_truth(
@@ -250,13 +307,16 @@ def build_synthetic_reduced_information(
     contrast_index = label_to_index.get("source.contrast")
     plate_scale_index = label_to_index.get("optics.plate_scale_as_per_pix")
 
-    scalar_weights = {
+    # Synthetic row strengths used to build the toy reduced-information matrix.
+    # These are not prior weights and are not intended to represent a
+    # calibrated image-domain Fisher calculation.
+    synthetic_scalar_information_weights = {
         "source.separation_as": 2.2,
         "source.log_flux_total": 2.8,
         "source.contrast": 2.0,
         "optics.plate_scale_as_per_pix": 1.6,
     }
-    for label, base_weight in scalar_weights.items():
+    for label, base_weight in synthetic_scalar_information_weights.items():
         if label not in label_to_index:
             continue
         vector = np.zeros((theta_size,), dtype=float)
@@ -265,8 +325,8 @@ def build_synthetic_reduced_information(
             vector[plate_scale_index] = 0.25
         if label == "source.contrast" and log_flux_index is not None:
             vector[log_flux_index] = 0.20
-        weight = base_weight * (0.85 + 0.30 * rng.random())
-        _append_row(vector, weight)
+        row_weight = base_weight * (0.85 + 0.30 * rng.random())
+        _append_row(vector, row_weight)
 
     scalar_indices = [
         index
@@ -380,6 +440,12 @@ def build_posterior_table_rows(
                 "prior_sigma": float(prior_sigma[index]),
                 "posterior_sigma": float(posterior_sigma[index]),
                 "posterior_error": float(posterior_mean[index] - truth[index]),
+                "posterior_sigma_over_prior_sigma": float(
+                    posterior_sigma[index] / prior_sigma[index]
+                ),
+                "posterior_error_over_prior_sigma": float(
+                    (posterior_mean[index] - truth[index]) / prior_sigma[index]
+                ),
             }
         )
     return rows
@@ -390,6 +456,7 @@ def build_cumulative_update_rows(
     labels: Sequence[str],
     cumulative_steps: Sequence[Any],
     truth: np.ndarray,
+    prior_sigma: np.ndarray,
 ) -> list[dict[str, Any]]:
     """Return one row per cumulative update step."""
 
@@ -408,8 +475,49 @@ def build_cumulative_update_rows(
         for index, slug in enumerate(slugs):
             row[f"posterior_sigma__{slug}"] = float(sigma[index])
             row[f"posterior_error__{slug}"] = float(step.mean[index] - truth[index])
+            row[f"posterior_sigma_over_prior_sigma__{slug}"] = float(
+                sigma[index] / prior_sigma[index]
+            )
+            row[f"abs_posterior_error_over_prior_sigma__{slug}"] = float(
+                np.abs(step.mean[index] - truth[index]) / prior_sigma[index]
+            )
+            row[f"posterior_variance_over_prior_variance__{slug}"] = float(
+                np.square(sigma[index] / prior_sigma[index])
+            )
         rows.append(row)
     return rows
+
+
+def _plot_history(
+    *,
+    path: Path,
+    labels: Sequence[str],
+    x: np.ndarray,
+    y_matrix: np.ndarray,
+    ylabel: str,
+    title: str,
+    use_log_scale: bool = True,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for index, label in enumerate(labels):
+        y_values = np.asarray(y_matrix[:, index], dtype=float)
+        if use_log_scale:
+            ax.semilogy(
+                x,
+                np.clip(y_values, 1.0e-12, None),
+                marker="o",
+                label=_display_label(label),
+            )
+        else:
+            ax.plot(x, y_values, marker="o", label=_display_label(label))
+    ax.set_xlabel("Accumulated Subblocks")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
 
 
 def _plot_posterior_sigma_history(
@@ -420,17 +528,14 @@ def _plot_posterior_sigma_history(
 ) -> None:
     x = np.asarray([step.n_subblocks for step in cumulative_steps], dtype=int)
     sigma_matrix = np.vstack([step.sigma() for step in cumulative_steps])
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for index, label in enumerate(labels):
-        ax.semilogy(x, sigma_matrix[:, index], marker="o", label=_display_label(label))
-    ax.set_xlabel("Accumulated Subblocks")
-    ax.set_ylabel("Posterior Sigma")
-    ax.set_title("Posterior Sigma vs Accumulated Subblocks")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", fontsize=8, ncol=2)
-    fig.tight_layout()
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+    _plot_history(
+        path=path,
+        labels=labels,
+        x=x,
+        y_matrix=sigma_matrix,
+        ylabel="Posterior Sigma",
+        title="Posterior Sigma vs Accumulated Subblocks",
+    )
 
 
 def _plot_posterior_error_history(
@@ -442,35 +547,72 @@ def _plot_posterior_error_history(
 ) -> None:
     x = np.asarray([step.n_subblocks for step in cumulative_steps], dtype=int)
     error_matrix = np.vstack([np.abs(step.mean - truth) for step in cumulative_steps])
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for index, label in enumerate(labels):
-        ax.semilogy(
-            x,
-            np.clip(error_matrix[:, index], 1.0e-12, None),
-            marker="o",
-            label=_display_label(label),
-        )
-    ax.set_xlabel("Accumulated Subblocks")
-    ax.set_ylabel("Absolute Posterior Error")
-    ax.set_title("Posterior Error vs Accumulated Subblocks")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", fontsize=8, ncol=2)
-    fig.tight_layout()
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+    _plot_history(
+        path=path,
+        labels=labels,
+        x=x,
+        y_matrix=error_matrix,
+        ylabel="Absolute Posterior Error",
+        title="Posterior Error vs Accumulated Subblocks",
+    )
 
 
-def _plot_precision_eigenvalue_spectrum(
+def _plot_prior_normalized_sigma_history(
+    *,
+    path: Path,
+    labels: Sequence[str],
+    cumulative_steps: Sequence[Any],
+    prior_sigma: np.ndarray,
+) -> None:
+    x = np.asarray([step.n_subblocks for step in cumulative_steps], dtype=int)
+    sigma_ratio_matrix = np.vstack(
+        [step.sigma() / prior_sigma for step in cumulative_steps]
+    )
+    _plot_history(
+        path=path,
+        labels=labels,
+        x=x,
+        y_matrix=sigma_ratio_matrix,
+        ylabel="Posterior Sigma / Prior Sigma",
+        title="Prior-Normalized Posterior Sigma vs Accumulated Subblocks",
+    )
+
+
+def _plot_prior_normalized_error_history(
+    *,
+    path: Path,
+    labels: Sequence[str],
+    cumulative_steps: Sequence[Any],
+    truth: np.ndarray,
+    prior_sigma: np.ndarray,
+) -> None:
+    x = np.asarray([step.n_subblocks for step in cumulative_steps], dtype=int)
+    error_ratio_matrix = np.vstack(
+        [np.abs(step.mean - truth) / prior_sigma for step in cumulative_steps]
+    )
+    _plot_history(
+        path=path,
+        labels=labels,
+        x=x,
+        y_matrix=error_ratio_matrix,
+        ylabel="|Posterior Error| / Prior Sigma",
+        title="Prior-Normalized Posterior Error vs Accumulated Subblocks",
+    )
+
+
+def _plot_eigenvalue_spectrum(
     *,
     path: Path,
     eigenvalues: np.ndarray,
+    ylabel: str,
+    title: str,
 ) -> None:
     x = np.arange(1, eigenvalues.size + 1, dtype=int)
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.semilogy(x, np.clip(eigenvalues, 1.0e-12, None), marker="o")
     ax.set_xlabel("Mode Index (Strongest to Weakest)")
-    ax.set_ylabel("Precision Eigenvalue")
-    ax.set_title("Posterior Precision Eigenvalue Spectrum")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=160)
@@ -481,10 +623,45 @@ def _truth_map(labels: Sequence[str], values: np.ndarray) -> dict[str, float]:
     return {label: float(values[index]) for index, label in enumerate(labels)}
 
 
+def build_prior_whitened_eigenmode_rows(
+    *,
+    basis: Any,
+    prior_sigma: np.ndarray,
+) -> list[dict[str, Any]]:
+    """Return CSV-ready rows for prior-whitened information-gain modes."""
+
+    rows = basis.to_rows(top_k=4)
+    physical_coefficients = prior_sigma[:, None] * basis.eigenvectors
+    for mode_index, row in enumerate(rows):
+        row["gain_eigenvalue"] = row.pop("raw_eigenvalue")
+        row["gain_sigma_along_mode"] = row.pop("raw_sigma_along_mode")
+        row["floored_gain_eigenvalue"] = row.pop("floored_eigenvalue")
+        row["floored_gain_sigma_along_mode"] = row.pop("floored_sigma_along_mode")
+        row["posterior_whitened_eigenvalue"] = 1.0 + row["gain_eigenvalue"]
+        row["floored_posterior_whitened_eigenvalue"] = (
+            1.0 + row["floored_gain_eigenvalue"]
+        )
+
+        for contributor_index in range(1, 5):
+            label = row.get(f"top_label_{contributor_index}")
+            if label is None:
+                continue
+            label_index = basis.labels.index(label)
+            row[f"top_norm_coeff_{contributor_index}"] = row.pop(
+                f"top_coeff_{contributor_index}"
+            )
+            row[f"top_physical_coeff_{contributor_index}"] = float(
+                physical_coefficients[label_index, mode_index]
+            )
+    return rows
+
+
 def run_observation_belief_update_demo(
     *,
     results_dir: Path | str = DEFAULT_RESULTS_ROOT,
     run_name: str | None = None,
+    config_path: Path | None = None,
+    system_preset: str | None = DEFAULT_SYSTEM_PRESET,
     n_subblocks: int = 8,
     seed: int = 42,
     enable_zernikes: bool = True,
@@ -505,7 +682,12 @@ def run_observation_belief_update_demo(
     layout = ObservationThetaLayout.from_config(layout_config)
     rng = np.random.default_rng(int(seed))
 
-    prior_mean, prior_sigma = build_default_prior(layout.labels)
+    prior_store, _, prior_provenance = build_prior_store_from_system(
+        config_path=config_path,
+        system_preset=system_preset,
+    )
+    prior_mean = build_prior_mean_from_store(layout.labels, store=prior_store)
+    prior_sigma = build_default_prior_sigma(layout.labels)
     theta_true = build_synthetic_truth(
         prior_mean=prior_mean,
         prior_sigma=prior_sigma,
@@ -518,6 +700,7 @@ def run_observation_belief_update_demo(
         metadata={
             "generator": "run_observation_belief_update_demo.py",
             "seed": int(seed),
+            "prior_mean_provenance": dict(prior_provenance),
         },
     )
     summaries = generate_synthetic_subblock_summaries(
@@ -531,6 +714,20 @@ def run_observation_belief_update_demo(
     update_result = update_observation_belief(prior, summaries)
     eigenbasis = build_observation_eigenbasis(
         update_result.posterior.precision,
+        layout.labels,
+        eig_floor_abs=1.0e-10,
+        eig_floor_rel=1.0e-2,
+    )
+    accumulated_summary_information = accumulate_summary_information(
+        layout.labels,
+        summaries,
+    )
+    prior_whitened_gain = build_prior_whitened_information_gain_matrix(
+        accumulated_summary_information,
+        prior_sigma,
+    )
+    prior_whitened_gain_basis = build_observation_eigenbasis(
+        prior_whitened_gain,
         layout.labels,
         eig_floor_abs=1.0e-10,
         eig_floor_rel=1.0e-2,
@@ -549,8 +746,13 @@ def run_observation_belief_update_demo(
         labels=layout.labels,
         cumulative_steps=update_result.cumulative_steps,
         truth=theta_true,
+        prior_sigma=prior_sigma,
     )
     eigenmode_rows = eigenbasis.to_rows(top_k=4)
+    prior_whitened_eigenmode_rows = build_prior_whitened_eigenmode_rows(
+        basis=prior_whitened_gain_basis,
+        prior_sigma=prior_sigma,
+    )
 
     config_payload = {
         "schema_version": DEMO_SCHEMA_VERSION,
@@ -561,11 +763,19 @@ def run_observation_belief_update_demo(
         "n_subblocks": int(n_subblocks),
         "seed": int(seed),
         "dry_run": bool(dry_run),
+        "prior_mean_provenance": dict(prior_provenance),
         "theta_layout": layout_config["theta_layout"],
         "resolved_layout": layout.to_dict(),
     }
     truth_payload = {
         "labels": list(layout.labels),
+        "prior_mean_source": "resolved_system_store",
+        "truth_kind": "synthetic_offset_from_prior_mean",
+        "truth_generation": {
+            "model": "prior_mean + Normal(0, 0.55 * prior_sigma)",
+            "prior_sigma_scale": 0.55,
+        },
+        "prior_mean_provenance": dict(prior_provenance),
         "prior_mean": _truth_map(layout.labels, prior_mean),
         "prior_sigma": _truth_map(layout.labels, prior_sigma),
         "truth": _truth_map(layout.labels, theta_true),
@@ -579,11 +789,16 @@ def run_observation_belief_update_demo(
         "seed": int(seed),
         "n_subblocks": int(n_subblocks),
         "theta_layout": layout.to_dict(),
+        "prior_mean_provenance": dict(prior_provenance),
         "prior": {
             "mean": _truth_map(layout.labels, prior_mean),
             "sigma": _truth_map(layout.labels, prior_sigma),
         },
-        "truth": _truth_map(layout.labels, theta_true),
+        "truth": {
+            "kind": "synthetic_offset_from_prior_mean",
+            "generation_model": "prior_mean + Normal(0, 0.55 * prior_sigma)",
+            "values": _truth_map(layout.labels, theta_true),
+        },
         "posterior": {
             "mean": _truth_map(layout.labels, update_result.posterior.mean),
             "sigma": _truth_map(layout.labels, posterior_sigma),
@@ -603,6 +818,39 @@ def run_observation_belief_update_demo(
             "largest_eigenvalue": float(eigenbasis.eigenvalues[0]),
             "smallest_eigenvalue": float(eigenbasis.eigenvalues[-1]),
         },
+        "prior_whitened_information_gain": {
+            "condition_number": float(prior_whitened_gain_basis.condition_number),
+            "weak_mode_count": int(
+                np.count_nonzero(prior_whitened_gain_basis.weak_mode_mask)
+            ),
+            "largest_gain_eigenvalue": float(prior_whitened_gain_basis.eigenvalues[0]),
+            "smallest_gain_eigenvalue": float(
+                prior_whitened_gain_basis.eigenvalues[-1]
+            ),
+        },
+        "diagnostics": {
+            "physical_basis_reporting": (
+                "Posterior means and sigmas are reported in the native physical "
+                "parameter basis and units."
+            ),
+            "prior_normalized_reporting": (
+                "Prior-normalized cumulative diagnostics divide posterior sigma "
+                "and absolute posterior error by the diagonal prior sigma."
+            ),
+            "prior_whitened_gain_modes": (
+                "Prior-whitened eigenmodes are computed from "
+                "diag(prior_sigma) @ S_accum @ diag(prior_sigma) to show summary "
+                "information gain relative to the prior scale."
+            ),
+            "eigenvalue_flooring": (
+                "Eigenmode tables report both raw eigenvalues and floored "
+                "eigenvalues used for stable transforms."
+            ),
+            "synthetic_information_limitations": (
+                "Synthetic reduced-information matrices are toy PSD summaries "
+                "and are not calibrated image-domain Fisher matrices."
+            ),
+        },
     }
 
     artifacts: dict[str, str] = {}
@@ -611,6 +859,7 @@ def run_observation_belief_update_demo(
             "dry_run": True,
             "run_dir": str(run_dir),
             "summary": summary_payload,
+            "prior_mean_provenance": dict(prior_provenance),
             "artifacts": artifacts,
         }
 
@@ -623,16 +872,30 @@ def run_observation_belief_update_demo(
     update_summary_path = run_dir / "observation_update_summary.json"
     posterior_table_path = run_dir / "posterior_table.csv"
     eigenmode_table_path = run_dir / "eigenmode_table.csv"
+    prior_whitened_eigenmode_table_path = run_dir / "prior_whitened_eigenmode_table.csv"
     cumulative_table_path = run_dir / "cumulative_update_table.csv"
     sigma_plot_path = run_dir / "posterior_sigma_vs_n_subblocks.png"
     error_plot_path = run_dir / "posterior_error_vs_n_subblocks.png"
+    normalized_sigma_plot_path = (
+        run_dir / "posterior_sigma_over_prior_sigma_vs_n_subblocks.png"
+    )
+    normalized_error_plot_path = (
+        run_dir / "posterior_error_over_prior_sigma_vs_n_subblocks.png"
+    )
     eigen_plot_path = run_dir / "precision_eigenvalue_spectrum.png"
+    prior_whitened_gain_plot_path = (
+        run_dir / "prior_whitened_information_gain_spectrum.png"
+    )
 
     _write_json(config_path, config_payload)
     _write_json(truth_path, truth_payload)
     _write_json(update_summary_path, summary_payload)
     _write_csv_rows(posterior_table_path, posterior_rows)
     _write_csv_rows(eigenmode_table_path, eigenmode_rows)
+    _write_csv_rows(
+        prior_whitened_eigenmode_table_path,
+        prior_whitened_eigenmode_rows,
+    )
     _write_csv_rows(cumulative_table_path, cumulative_rows)
 
     for summary in summaries:
@@ -657,9 +920,30 @@ def run_observation_belief_update_demo(
         cumulative_steps=update_result.cumulative_steps,
         truth=theta_true,
     )
-    _plot_precision_eigenvalue_spectrum(
+    _plot_prior_normalized_sigma_history(
+        path=normalized_sigma_plot_path,
+        labels=layout.labels,
+        cumulative_steps=update_result.cumulative_steps,
+        prior_sigma=prior_sigma,
+    )
+    _plot_prior_normalized_error_history(
+        path=normalized_error_plot_path,
+        labels=layout.labels,
+        cumulative_steps=update_result.cumulative_steps,
+        truth=theta_true,
+        prior_sigma=prior_sigma,
+    )
+    _plot_eigenvalue_spectrum(
         path=eigen_plot_path,
         eigenvalues=eigenbasis.eigenvalues,
+        ylabel="Posterior Precision Eigenvalue",
+        title="Posterior Precision Eigenvalue Spectrum",
+    )
+    _plot_eigenvalue_spectrum(
+        path=prior_whitened_gain_plot_path,
+        eigenvalues=prior_whitened_gain_basis.eigenvalues,
+        ylabel="Prior-Whitened Information-Gain Eigenvalue",
+        title="Prior-Whitened Information-Gain Spectrum",
     )
 
     artifacts.update(
@@ -669,10 +953,22 @@ def run_observation_belief_update_demo(
             "observation_update_summary_json": str(update_summary_path),
             "posterior_table_csv": str(posterior_table_path),
             "eigenmode_table_csv": str(eigenmode_table_path),
+            "prior_whitened_eigenmode_table_csv": str(
+                prior_whitened_eigenmode_table_path
+            ),
             "cumulative_update_table_csv": str(cumulative_table_path),
             "posterior_sigma_vs_n_subblocks_png": str(sigma_plot_path),
             "posterior_error_vs_n_subblocks_png": str(error_plot_path),
+            "posterior_sigma_over_prior_sigma_vs_n_subblocks_png": str(
+                normalized_sigma_plot_path
+            ),
+            "posterior_error_over_prior_sigma_vs_n_subblocks_png": str(
+                normalized_error_plot_path
+            ),
             "precision_eigenvalue_spectrum_png": str(eigen_plot_path),
+            "prior_whitened_information_gain_spectrum_png": str(
+                prior_whitened_gain_plot_path
+            ),
             "synthetic_subblock_summaries_dir": str(summary_dir),
         }
     )
@@ -680,6 +976,7 @@ def run_observation_belief_update_demo(
         "dry_run": False,
         "run_dir": str(run_dir),
         "summary": summary_payload,
+        "prior_mean_provenance": dict(prior_provenance),
         "artifacts": artifacts,
     }
 
@@ -701,6 +998,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Run directory name. Defaults to a timestamped demo name.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional YAML/JSON config with a top-level system block.",
+    )
+    parser.add_argument(
+        "--system-preset",
+        type=str,
+        default=DEFAULT_SYSTEM_PRESET,
+        help="System preset used to derive the prior mean store.",
     )
     parser.add_argument(
         "--n-subblocks",
@@ -748,6 +1057,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     return run_observation_belief_update_demo(
         results_dir=args.results_dir,
         run_name=args.run_name,
+        config_path=args.config,
+        system_preset=args.system_preset,
         n_subblocks=args.n_subblocks,
         seed=args.seed,
         enable_zernikes=bool(args.enable_zernikes),

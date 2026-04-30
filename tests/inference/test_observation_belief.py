@@ -8,6 +8,7 @@ from dluxshera.inference.observation_belief import (
     ObservationThetaLayout,
     SubblockSummary,
     build_observation_eigenbasis,
+    build_prior_whitened_information_gain_matrix,
     schur_reduce_information,
     update_observation_belief,
 )
@@ -228,3 +229,53 @@ def test_build_observation_eigenbasis_identifies_weak_zernike_mode():
         "optics.primary.zernike_coeffs_nm[0]",
         "optics.secondary.zernike_coeffs_nm[0]",
     }
+
+
+def test_build_prior_whitened_information_gain_matrix_matches_diagonal_whitening():
+    information = np.array([[4.0, 1.5], [1.5, 9.0]])
+    prior_sigma = np.array([0.5, 2.0])
+
+    gain = build_prior_whitened_information_gain_matrix(information, prior_sigma)
+    expected = np.diag(prior_sigma) @ information @ np.diag(prior_sigma)
+
+    np.testing.assert_allclose(gain, expected)
+
+
+def test_prior_whitened_gain_eigenbasis_identifies_strongest_gain_direction():
+    labels = (
+        "source.separation_as",
+        "source.log_flux_total",
+        "source.contrast",
+    )
+    information = np.diag([0.2, 3.5, 0.1])
+    prior_sigma = np.array([1.0, 2.0, 1.0])
+
+    gain = build_prior_whitened_information_gain_matrix(information, prior_sigma)
+    basis = build_observation_eigenbasis(gain, labels)
+
+    assert basis.eigenvalues[0] == pytest.approx(14.0)
+    assert basis.mode_contributors(0, top_k=1)[0][0] == "source.log_flux_total"
+
+
+def test_observation_eigenbasis_rows_report_raw_and_floored_fields():
+    labels = (
+        "source.separation_as",
+        "source.log_flux_total",
+    )
+    precision = np.array([[2.0, 0.0], [0.0, 1.0e-8]])
+
+    basis = build_observation_eigenbasis(
+        precision,
+        labels,
+        eig_floor_rel=0.1,
+    )
+    rows = basis.to_rows(top_k=2)
+
+    assert rows[0]["raw_eigenvalue"] == pytest.approx(2.0)
+    assert rows[0]["floored_eigenvalue"] == pytest.approx(2.0)
+    assert rows[0]["was_floored"] is False
+    assert rows[1]["raw_eigenvalue"] == pytest.approx(1.0e-8)
+    assert rows[1]["floored_eigenvalue"] == pytest.approx(0.2)
+    assert rows[1]["was_floored"] is True
+    assert "raw_sigma_along_mode" in rows[1]
+    assert "floored_sigma_along_mode" in rows[1]

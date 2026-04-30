@@ -6,6 +6,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 __all__ = [
+    "accumulate_summary_information",
+    "build_prior_whitened_information_gain_matrix",
     "MatrixDiagnostics",
     "ObservationBeliefState",
     "ObservationEigenBasis",
@@ -49,6 +51,17 @@ def _as_square_matrix(
     if not np.all(np.isfinite(matrix)):
         raise ValueError(f"{name} contains non-finite values.")
     return 0.5 * (matrix + matrix.T)
+
+
+def _as_positive_vector(
+    values: Sequence[float] | np.ndarray,
+    *,
+    name: str,
+) -> np.ndarray:
+    vector = _as_vector(values, name=name)
+    if np.any(vector <= 0.0):
+        raise ValueError(f"{name} values must be strictly positive.")
+    return vector
 
 
 def _matrix_rank_tolerance(matrix: np.ndarray, *, rcond: float | None) -> float:
@@ -728,6 +741,48 @@ class ObservationUpdateResult:
         object.__setattr__(self, "metadata", dict(self.metadata))
 
 
+def accumulate_summary_information(
+    theta_labels: Sequence[str],
+    summaries: Sequence[SubblockSummary],
+) -> np.ndarray:
+    """Accumulate reduced information matrices into one global basis.
+
+    This helper is useful for diagnostics that should look only at the evidence
+    contributed by sub-block summaries, excluding the prior precision.
+    """
+
+    global_labels = _as_label_tuple(theta_labels, name="theta_labels")
+    accumulated = np.zeros((len(global_labels), len(global_labels)), dtype=float)
+    for summary in summaries:
+        summary_precision, _, _ = _summary_to_global_arrays(
+            summary,
+            global_labels=global_labels,
+        )
+        accumulated += summary_precision
+    return 0.5 * (accumulated + accumulated.T)
+
+
+def build_prior_whitened_information_gain_matrix(
+    information: Sequence[Sequence[float]] | np.ndarray,
+    prior_sigma: Sequence[float] | np.ndarray,
+) -> np.ndarray:
+    """Return the prior-whitened information-gain matrix.
+
+    For diagonal prior covariance with standard deviations ``prior_sigma``, the
+    whitened information gain is
+
+    ``Lambda_gain = diag(prior_sigma) @ information @ diag(prior_sigma)``.
+    """
+
+    information_matrix = _as_square_matrix(information, name="information")
+    sigma_vector = _as_positive_vector(prior_sigma, name="prior_sigma")
+    if information_matrix.shape != (sigma_vector.size, sigma_vector.size):
+        raise ValueError("information shape must match prior_sigma length.")
+    whitening = np.diag(sigma_vector)
+    gain = whitening @ information_matrix @ whitening
+    return 0.5 * (gain + gain.T)
+
+
 def _summary_to_global_arrays(
     summary: SubblockSummary,
     *,
@@ -937,9 +992,27 @@ class ObservationEigenBasis:
         object.__setattr__(self, "weak_mode_mask", weak_mode_mask)
 
     def sigma_along_modes(self) -> np.ndarray:
-        """Return approximate posterior sigmas along each eigenmode."""
+        """Return floored sigmas along each eigenmode for stable transforms."""
 
         return 1.0 / np.sqrt(np.clip(self.effective_eigenvalues, 1.0e-30, None))
+
+    def raw_sigma_along_modes(self) -> np.ndarray:
+        """Return raw sigmas along each eigenmode when defined."""
+
+        raw_sigma = np.full(self.eigenvalues.shape, np.inf, dtype=float)
+        positive = self.eigenvalues > 0.0
+        raw_sigma[positive] = 1.0 / np.sqrt(self.eigenvalues[positive])
+        return raw_sigma
+
+    def floored_sigma_along_modes(self) -> np.ndarray:
+        """Return floored sigmas along each eigenmode."""
+
+        return self.sigma_along_modes()
+
+    def was_floored(self) -> np.ndarray:
+        """Return a mask for modes whose raw eigenvalues were floored."""
+
+        return self.effective_eigenvalues > self.eigenvalues
 
     def physical_delta_to_eigen(
         self,
@@ -983,14 +1056,19 @@ class ObservationEigenBasis:
     def to_rows(self, *, top_k: int = 3) -> list[dict[str, Any]]:
         """Return one CSV-ready row per eigenmode."""
 
-        sigmas = self.sigma_along_modes()
+        raw_sigmas = self.raw_sigma_along_modes()
+        floored_sigmas = self.floored_sigma_along_modes()
+        floored_mask = self.was_floored()
         rows: list[dict[str, Any]] = []
         for mode_index, eigenvalue in enumerate(self.eigenvalues):
             contributors = self.mode_contributors(mode_index, top_k=top_k)
             row: dict[str, Any] = {
                 "mode_index": int(mode_index),
-                "eigenvalue": float(eigenvalue),
-                "sigma_along_mode": float(sigmas[mode_index]),
+                "raw_eigenvalue": float(eigenvalue),
+                "raw_sigma_along_mode": float(raw_sigmas[mode_index]),
+                "floored_eigenvalue": float(self.effective_eigenvalues[mode_index]),
+                "floored_sigma_along_mode": float(floored_sigmas[mode_index]),
+                "was_floored": bool(floored_mask[mode_index]),
                 "weak_mode": bool(self.weak_mode_mask[mode_index]),
                 "top_contributors": "; ".join(
                     f"{label}:{coefficient:+.6f}"
