@@ -1,4 +1,4 @@
-"""Run a synthetic observation-level belief update demo from reduced summaries."""
+"""Run an observation-level belief update demo from synthetic or real summaries."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from dluxshera.inference.observation_belief import (
     build_prior_whitened_information_gain_matrix,
     update_observation_belief,
 )
+from dluxshera.inference.observation_summary import load_subblock_summary
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_keys import (
@@ -421,7 +422,7 @@ def build_posterior_table_rows(
     labels: Sequence[str],
     prior_mean: np.ndarray,
     posterior_mean: np.ndarray,
-    truth: np.ndarray,
+    truth: np.ndarray | None,
     prior_sigma: np.ndarray,
     posterior_sigma: np.ndarray,
 ) -> list[dict[str, Any]]:
@@ -429,25 +430,25 @@ def build_posterior_table_rows(
 
     rows: list[dict[str, Any]] = []
     for index, label in enumerate(labels):
-        rows.append(
-            {
-                "label": label,
-                "display_label": _display_label(label),
-                "unit": _parameter_unit(label),
-                "prior_mean": float(prior_mean[index]),
-                "posterior_mean": float(posterior_mean[index]),
-                "truth": float(truth[index]),
-                "prior_sigma": float(prior_sigma[index]),
-                "posterior_sigma": float(posterior_sigma[index]),
-                "posterior_error": float(posterior_mean[index] - truth[index]),
-                "posterior_sigma_over_prior_sigma": float(
-                    posterior_sigma[index] / prior_sigma[index]
-                ),
-                "posterior_error_over_prior_sigma": float(
-                    (posterior_mean[index] - truth[index]) / prior_sigma[index]
-                ),
-            }
-        )
+        row = {
+            "label": label,
+            "display_label": _display_label(label),
+            "unit": _parameter_unit(label),
+            "prior_mean": float(prior_mean[index]),
+            "posterior_mean": float(posterior_mean[index]),
+            "prior_sigma": float(prior_sigma[index]),
+            "posterior_sigma": float(posterior_sigma[index]),
+            "posterior_sigma_over_prior_sigma": float(
+                posterior_sigma[index] / prior_sigma[index]
+            ),
+        }
+        rows.append(row)
+        if truth is not None:
+            rows[-1]["truth"] = float(truth[index])
+            rows[-1]["posterior_error"] = float(posterior_mean[index] - truth[index])
+            rows[-1]["posterior_error_over_prior_sigma"] = float(
+                (posterior_mean[index] - truth[index]) / prior_sigma[index]
+            )
     return rows
 
 
@@ -455,7 +456,7 @@ def build_cumulative_update_rows(
     *,
     labels: Sequence[str],
     cumulative_steps: Sequence[Any],
-    truth: np.ndarray,
+    truth: np.ndarray | None,
     prior_sigma: np.ndarray,
 ) -> list[dict[str, Any]]:
     """Return one row per cumulative update step."""
@@ -474,16 +475,17 @@ def build_cumulative_update_rows(
         }
         for index, slug in enumerate(slugs):
             row[f"posterior_sigma__{slug}"] = float(sigma[index])
-            row[f"posterior_error__{slug}"] = float(step.mean[index] - truth[index])
             row[f"posterior_sigma_over_prior_sigma__{slug}"] = float(
                 sigma[index] / prior_sigma[index]
-            )
-            row[f"abs_posterior_error_over_prior_sigma__{slug}"] = float(
-                np.abs(step.mean[index] - truth[index]) / prior_sigma[index]
             )
             row[f"posterior_variance_over_prior_variance__{slug}"] = float(
                 np.square(sigma[index] / prior_sigma[index])
             )
+            if truth is not None:
+                row[f"posterior_error__{slug}"] = float(step.mean[index] - truth[index])
+                row[f"abs_posterior_error_over_prior_sigma__{slug}"] = float(
+                    np.abs(step.mean[index] - truth[index]) / prior_sigma[index]
+                )
         rows.append(row)
     return rows
 
@@ -623,6 +625,20 @@ def _truth_map(labels: Sequence[str], values: np.ndarray) -> dict[str, float]:
     return {label: float(values[index]) for index, label in enumerate(labels)}
 
 
+def _collect_summary_labels(summaries: Sequence[SubblockSummary]) -> tuple[str, ...]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for summary in summaries:
+        for label in summary.theta_labels:
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+    if not labels:
+        raise ValueError("At least one summary label is required.")
+    return tuple(labels)
+
+
 def build_prior_whitened_eigenmode_rows(
     *,
     basis: Any,
@@ -667,20 +683,42 @@ def run_observation_belief_update_demo(
     enable_zernikes: bool = True,
     zernike_indices: Sequence[int] = DEFAULT_ZERNIKE_INDICES,
     include_plate_scale: bool = True,
+    summary_paths: Sequence[Path | str] = (),
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run the synthetic observation-level belief update demo."""
+    """Run the observation-level belief update demo from synthetic or real summaries."""
 
     resolved_run_name = run_name or f"observation_belief_demo_{timestamp_tag()}"
     run_dir = Path(results_dir).resolve() / resolved_run_name
+    summary_path_list = tuple(Path(path).resolve() for path in summary_paths)
+    use_external_summaries = bool(summary_path_list)
     zernike_indices = parse_zernike_indices(zernike_indices)
-    layout_config = build_demo_theta_layout_config(
-        enable_zernikes=enable_zernikes,
-        zernike_indices=zernike_indices,
-        include_plate_scale=include_plate_scale,
-    )
-    layout = ObservationThetaLayout.from_config(layout_config)
     rng = np.random.default_rng(int(seed))
+
+    if use_external_summaries:
+        summaries = [load_subblock_summary(path) for path in summary_path_list]
+        layout = ObservationThetaLayout(
+            labels=_collect_summary_labels(summaries),
+            label_groups=tuple(
+                "source"
+                if label.startswith("source.")
+                else "optics"
+                for label in _collect_summary_labels(summaries)
+            ),
+        )
+        layout_config = {
+            "theta_layout": {
+                "source": {},
+                "optics": {},
+            }
+        }
+    else:
+        layout_config = build_demo_theta_layout_config(
+            enable_zernikes=enable_zernikes,
+            zernike_indices=zernike_indices,
+            include_plate_scale=include_plate_scale,
+        )
+        layout = ObservationThetaLayout.from_config(layout_config)
 
     prior_store, _, prior_provenance = build_prior_store_from_system(
         config_path=config_path,
@@ -688,11 +726,13 @@ def run_observation_belief_update_demo(
     )
     prior_mean = build_prior_mean_from_store(layout.labels, store=prior_store)
     prior_sigma = build_default_prior_sigma(layout.labels)
-    theta_true = build_synthetic_truth(
-        prior_mean=prior_mean,
-        prior_sigma=prior_sigma,
-        rng=rng,
-    )
+    theta_true = None
+    if not use_external_summaries:
+        theta_true = build_synthetic_truth(
+            prior_mean=prior_mean,
+            prior_sigma=prior_sigma,
+            rng=rng,
+        )
     prior = ObservationBeliefState.from_diagonal_prior(
         theta_labels=layout.labels,
         mean=prior_mean,
@@ -701,16 +741,22 @@ def run_observation_belief_update_demo(
             "generator": "run_observation_belief_update_demo.py",
             "seed": int(seed),
             "prior_mean_provenance": dict(prior_provenance),
+            "summary_input_mode": (
+                "external_summary_artifacts"
+                if use_external_summaries
+                else "synthetic_summaries"
+            ),
         },
     )
-    summaries = generate_synthetic_subblock_summaries(
-        layout=layout,
-        prior_mean=prior_mean,
-        prior_sigma=prior_sigma,
-        theta_true=theta_true,
-        n_subblocks=int(n_subblocks),
-        rng=rng,
-    )
+    if not use_external_summaries:
+        summaries = generate_synthetic_subblock_summaries(
+            layout=layout,
+            prior_mean=prior_mean,
+            prior_sigma=prior_sigma,
+            theta_true=theta_true,
+            n_subblocks=int(n_subblocks),
+            rng=rng,
+        )
     update_result = update_observation_belief(prior, summaries)
     eigenbasis = build_observation_eigenbasis(
         update_result.posterior.precision,
@@ -760,26 +806,43 @@ def run_observation_belief_update_demo(
         "generator": "run_observation_belief_update_demo.py",
         "results_dir": str(Path(results_dir).resolve()),
         "run_name": resolved_run_name,
-        "n_subblocks": int(n_subblocks),
+        "n_subblocks": int(len(summaries)),
         "seed": int(seed),
         "dry_run": bool(dry_run),
+        "summary_input_mode": (
+            "external_summary_artifacts" if use_external_summaries else "synthetic_summaries"
+        ),
+        "summary_paths": [str(path) for path in summary_path_list],
         "prior_mean_provenance": dict(prior_provenance),
         "theta_layout": layout_config["theta_layout"],
         "resolved_layout": layout.to_dict(),
     }
-    truth_payload = {
+    truth_payload: dict[str, Any] = {
         "labels": list(layout.labels),
         "prior_mean_source": "resolved_system_store",
-        "truth_kind": "synthetic_offset_from_prior_mean",
-        "truth_generation": {
-            "model": "prior_mean + Normal(0, 0.55 * prior_sigma)",
-            "prior_sigma_scale": 0.55,
-        },
         "prior_mean_provenance": dict(prior_provenance),
         "prior_mean": _truth_map(layout.labels, prior_mean),
         "prior_sigma": _truth_map(layout.labels, prior_sigma),
-        "truth": _truth_map(layout.labels, theta_true),
     }
+    if theta_true is not None:
+        truth_payload.update(
+            {
+                "truth_kind": "synthetic_offset_from_prior_mean",
+                "truth_generation": {
+                    "model": "prior_mean + Normal(0, 0.55 * prior_sigma)",
+                    "prior_sigma_scale": 0.55,
+                },
+                "truth": _truth_map(layout.labels, theta_true),
+            }
+        )
+    else:
+        truth_payload.update(
+            {
+                "truth_kind": "not_available",
+                "truth_generation": None,
+                "truth": None,
+            }
+        )
     summary_payload = {
         "schema_version": DEMO_SCHEMA_VERSION,
         "created_at": now_iso_local_ms(),
@@ -787,18 +850,30 @@ def run_observation_belief_update_demo(
         "dry_run": bool(dry_run),
         "run_dir": str(run_dir),
         "seed": int(seed),
-        "n_subblocks": int(n_subblocks),
+        "n_subblocks": int(len(summaries)),
+        "summary_input_mode": (
+            "external_summary_artifacts" if use_external_summaries else "synthetic_summaries"
+        ),
+        "summary_paths": [str(path) for path in summary_path_list],
         "theta_layout": layout.to_dict(),
         "prior_mean_provenance": dict(prior_provenance),
         "prior": {
             "mean": _truth_map(layout.labels, prior_mean),
             "sigma": _truth_map(layout.labels, prior_sigma),
         },
-        "truth": {
-            "kind": "synthetic_offset_from_prior_mean",
-            "generation_model": "prior_mean + Normal(0, 0.55 * prior_sigma)",
-            "values": _truth_map(layout.labels, theta_true),
-        },
+        "truth": (
+            {
+                "kind": "synthetic_offset_from_prior_mean",
+                "generation_model": "prior_mean + Normal(0, 0.55 * prior_sigma)",
+                "values": _truth_map(layout.labels, theta_true),
+            }
+            if theta_true is not None
+            else {
+                "kind": "not_available",
+                "generation_model": None,
+                "values": None,
+            }
+        ),
         "posterior": {
             "mean": _truth_map(layout.labels, update_result.posterior.mean),
             "sigma": _truth_map(layout.labels, posterior_sigma),
@@ -846,9 +921,10 @@ def run_observation_belief_update_demo(
                 "Eigenmode tables report both raw eigenvalues and floored "
                 "eigenvalues used for stable transforms."
             ),
-            "synthetic_information_limitations": (
-                "Synthetic reduced-information matrices are toy PSD summaries "
-                "and are not calibrated image-domain Fisher matrices."
+            "summary_input_limitations": (
+                "Synthetic mode uses toy reduced-information matrices. External "
+                "summary mode consumes image-backed subblock_summary artifacts "
+                "without changing the observation-update math."
             ),
         },
     }
@@ -865,7 +941,8 @@ def run_observation_belief_update_demo(
 
     _ensure_dir(run_dir)
     summary_dir = run_dir / "synthetic_subblock_summaries"
-    _ensure_dir(summary_dir)
+    if not use_external_summaries:
+        _ensure_dir(summary_dir)
 
     config_path = run_dir / "config_resolved.json"
     truth_path = run_dir / "synthetic_truth.json"
@@ -898,27 +975,22 @@ def run_observation_belief_update_demo(
     )
     _write_csv_rows(cumulative_table_path, cumulative_rows)
 
-    for summary in summaries:
-        summary_json_path = summary_dir / f"{summary.subblock_id}_summary.json"
-        summary_npz_path = summary_dir / f"{summary.subblock_id}_matrices.npz"
-        _write_json(summary_json_path, summary.to_dict(include_arrays=True))
-        np.savez_compressed(
-            summary_npz_path,
-            theta_ref=summary.theta_ref,
-            reduced_information=summary.reduced_information,
-            reduced_score=summary.reduced_score,
-        )
+    if not use_external_summaries:
+        for summary in summaries:
+            summary_json_path = summary_dir / f"{summary.subblock_id}_summary.json"
+            summary_npz_path = summary_dir / f"{summary.subblock_id}_matrices.npz"
+            _write_json(summary_json_path, summary.to_dict(include_arrays=True))
+            np.savez_compressed(
+                summary_npz_path,
+                theta_ref=summary.theta_ref,
+                reduced_information=summary.reduced_information,
+                reduced_score=summary.reduced_score,
+            )
 
     _plot_posterior_sigma_history(
         path=sigma_plot_path,
         labels=layout.labels,
         cumulative_steps=update_result.cumulative_steps,
-    )
-    _plot_posterior_error_history(
-        path=error_plot_path,
-        labels=layout.labels,
-        cumulative_steps=update_result.cumulative_steps,
-        truth=theta_true,
     )
     _plot_prior_normalized_sigma_history(
         path=normalized_sigma_plot_path,
@@ -926,13 +998,20 @@ def run_observation_belief_update_demo(
         cumulative_steps=update_result.cumulative_steps,
         prior_sigma=prior_sigma,
     )
-    _plot_prior_normalized_error_history(
-        path=normalized_error_plot_path,
-        labels=layout.labels,
-        cumulative_steps=update_result.cumulative_steps,
-        truth=theta_true,
-        prior_sigma=prior_sigma,
-    )
+    if theta_true is not None:
+        _plot_posterior_error_history(
+            path=error_plot_path,
+            labels=layout.labels,
+            cumulative_steps=update_result.cumulative_steps,
+            truth=theta_true,
+        )
+        _plot_prior_normalized_error_history(
+            path=normalized_error_plot_path,
+            labels=layout.labels,
+            cumulative_steps=update_result.cumulative_steps,
+            truth=theta_true,
+            prior_sigma=prior_sigma,
+        )
     _plot_eigenvalue_spectrum(
         path=eigen_plot_path,
         eigenvalues=eigenbasis.eigenvalues,
@@ -958,20 +1037,22 @@ def run_observation_belief_update_demo(
             ),
             "cumulative_update_table_csv": str(cumulative_table_path),
             "posterior_sigma_vs_n_subblocks_png": str(sigma_plot_path),
-            "posterior_error_vs_n_subblocks_png": str(error_plot_path),
             "posterior_sigma_over_prior_sigma_vs_n_subblocks_png": str(
                 normalized_sigma_plot_path
-            ),
-            "posterior_error_over_prior_sigma_vs_n_subblocks_png": str(
-                normalized_error_plot_path
             ),
             "precision_eigenvalue_spectrum_png": str(eigen_plot_path),
             "prior_whitened_information_gain_spectrum_png": str(
                 prior_whitened_gain_plot_path
             ),
-            "synthetic_subblock_summaries_dir": str(summary_dir),
         }
     )
+    if theta_true is not None:
+        artifacts["posterior_error_vs_n_subblocks_png"] = str(error_plot_path)
+        artifacts["posterior_error_over_prior_sigma_vs_n_subblocks_png"] = str(
+            normalized_error_plot_path
+        )
+    if not use_external_summaries:
+        artifacts["synthetic_subblock_summaries_dir"] = str(summary_dir)
     return {
         "dry_run": False,
         "run_dir": str(run_dir),
@@ -982,10 +1063,10 @@ def run_observation_belief_update_demo(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser for the synthetic demo."""
+    """Build the CLI argument parser for the observation-level demo."""
 
     parser = argparse.ArgumentParser(
-        description="Run a synthetic observation-level belief update demo.",
+        description="Run an observation-level belief update demo.",
     )
     parser.add_argument(
         "--results-dir",
@@ -1042,6 +1123,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Include optics.plate_scale_as_per_pix in the observation layout.",
     )
     parser.add_argument(
+        "--summary-path",
+        dest="summary_paths",
+        action="append",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to an image-backed subblock_summary.json artifact. "
+            "Repeat to accumulate more than one real summary. When provided, "
+            "the script skips synthetic summary generation."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Resolve the synthetic update without writing artifacts.",
@@ -1064,6 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         enable_zernikes=bool(args.enable_zernikes),
         zernike_indices=parse_zernike_indices(args.zernike_indices),
         include_plate_scale=bool(args.include_plate_scale),
+        summary_paths=() if args.summary_paths is None else tuple(args.summary_paths),
         dry_run=bool(args.dry_run),
     )
 

@@ -9,6 +9,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from dluxshera.inference.observation_belief import SubblockSummary
+from dluxshera.inference.observation_summary import (
+    ImageBackedSubblockSummaryArtifact,
+    build_combined_local_parameter_layout,
+    partition_local_curvature,
+    schur_reduce_local_quadratic,
+)
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -61,6 +69,54 @@ def _write_prior_override_config(tmp_path: Path) -> Path:
         },
     )
     return config_path
+
+
+def _write_real_summary_artifact(tmp_path: Path) -> Path:
+    layout = build_combined_local_parameter_layout(
+        ("theta.source.separation_as", "theta.optics.plate_scale_as_per_pix"),
+        (
+            "phi.frame[0].source.x_position_as",
+            "phi.frame[0].source.y_position_as",
+        ),
+    )
+    gradient = np.array([-2.0, 0.25, 0.1, -0.2], dtype=float)
+    curvature = np.array(
+        [
+            [5.0, 0.1, 0.7, 0.0],
+            [0.1, 4.0, -0.2, 0.4],
+            [0.7, -0.2, 3.0, 0.1],
+            [0.0, 0.4, 0.1, 2.2],
+        ],
+        dtype=float,
+    )
+    blocks = partition_local_curvature(
+        layout=layout,
+        combined_gradient=gradient,
+        combined_curvature=curvature,
+    )
+    reduced = schur_reduce_local_quadratic(blocks=blocks)
+    summary = SubblockSummary.from_reduced_form(
+        subblock_id="subblock_000000",
+        theta_labels=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        theta_ref=np.array([11.25, 0.01]),
+        reduced_information=reduced.reduced_information,
+        reduced_score=reduced.reduced_score,
+        summary_kind="image_backed_schur",
+    )
+    artifact = ImageBackedSubblockSummaryArtifact(
+        summary=summary,
+        layout=layout,
+        theta_ref=np.array([11.25, 0.01]),
+        phi_ref=np.array([0.1, -0.2]),
+        reduced=reduced,
+        metadata={"generator": "unit_test"},
+        combined_gradient=gradient,
+        combined_curvature=curvature,
+    )
+    summary_path = tmp_path / "real_subblock_summary.json"
+    matrix_path = tmp_path / "real_subblock_summary_matrices.npz"
+    artifact.write(summary_json_path=summary_path, matrix_npz_path=matrix_path)
+    return summary_path
 
 
 def test_build_prior_mean_from_store_resolves_scalars_and_derived_values(tmp_path: Path):
@@ -351,3 +407,40 @@ def test_observation_belief_demo_writes_required_artifacts(tmp_path: Path):
     assert "raw_eigenvalue" in eigen_rows[0]
     assert "floored_eigenvalue" in eigen_rows[0]
     assert (run_dir / "synthetic_subblock_summaries").is_dir()
+
+
+def test_observation_belief_demo_loads_real_summary_artifact(tmp_path: Path):
+    module = _load_script_module()
+    config_path = _write_prior_override_config(tmp_path)
+    summary_path = _write_real_summary_artifact(tmp_path)
+
+    result = module.main(
+        [
+            "--results-dir",
+            str(tmp_path),
+            "--run-name",
+            "real_summary_case",
+            "--config",
+            str(config_path),
+            "--system-preset",
+            "SHERA_TESTBED_3P",
+            "--summary-path",
+            str(summary_path),
+        ]
+    )
+
+    artifacts = {name: Path(path) for name, path in result["artifacts"].items()}
+    summary = json.loads(
+        artifacts["observation_update_summary_json"].read_text(encoding="utf-8")
+    )
+    posterior_rows = _read_csv_rows(artifacts["posterior_table_csv"])
+
+    assert result["dry_run"] is False
+    assert summary["summary_input_mode"] == "external_summary_artifacts"
+    assert summary["update"]["n_summaries"] == 1
+    assert summary["truth"]["kind"] == "not_available"
+    assert summary["summary_paths"] == [str(summary_path.resolve())]
+    assert "posterior_error" not in posterior_rows[0]
+    assert artifacts["posterior_sigma_vs_n_subblocks_png"].exists()
+    assert artifacts["posterior_sigma_over_prior_sigma_vs_n_subblocks_png"].exists()
+    assert "synthetic_subblock_summaries_dir" not in artifacts

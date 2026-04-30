@@ -25,24 +25,41 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+import jax
+import jax.numpy as jnp
+import matplotlib
 import numpy as np
 from astropy.io import fits
 
 from dluxshera.config.io import load_config_file, load_user_config
 from dluxshera.config.resolver import resolve_config
+from dluxshera.inference.observation_belief import ObservationThetaLayout, SubblockSummary
+from dluxshera.inference.observation_summary import (
+    ImageBackedSubblockSummaryArtifact,
+    build_combined_local_parameter_layout,
+    load_subblock_summary,
+    partition_local_curvature,
+    schur_reduce_local_quadratic,
+)
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
 from dluxshera.utils.obs_subblock_keys import (
     ObsSubblockKeyAddress,
+    apply_obs_subblock_overrides_preserving_derived,
     get_obs_subblock_mapping_value,
     get_obs_subblock_store_value,
     parse_obs_subblock_key_address,
+    parse_obs_subblock_varying_keys,
+    partition_obs_subblock_overrides_by_kind,
     set_obs_subblock_mapping_value,
     validate_supported_obs_subblock_key_addresses,
 )
 from dluxshera.utils.obs_subblock_trace import load_obs_subblock_trace_csv
+
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,17 +90,28 @@ MODE_FULL_CASE = "full_case"
 MODE_FISHER_ONLY = "fisher_only"
 MODE_PROFILE_OBJECTIVE = "profile_objective"
 MODE_NUISANCE_ABSORPTION = "nuisance_absorption"
+MODE_SCHUR_SUMMARY = "schur_summary"
 SUPPORTED_MODES = (
     MODE_FULL_CASE,
     MODE_FISHER_ONLY,
     MODE_PROFILE_OBJECTIVE,
     MODE_NUISANCE_ABSORPTION,
+    MODE_SCHUR_SUMMARY,
 )
 
 SUMMARY_SCHEMA_VERSION = "obs_subblock_study_summary.v1"
 TRACE_STAGE = "trace"
 RENDER_STAGE = "render"
 FISHER_DENSE_TO_STRUCTURED_THRESHOLD_DIM = 30
+DEFAULT_SCHUR_THETA_KEYS = (
+    "source.separation_as",
+    "source.log_flux_total",
+    "source.contrast",
+    "optics.plate_scale_as_per_pix",
+)
+DEFAULT_SCHUR_ZERNIKE_INDICES = (0, 1, 2, 3, 4, 5)
+DEFAULT_SCHUR_DAMPING = 1.0e-8
+DEFAULT_SCHUR_MAX_DENSE_DIM = 80
 
 
 def _load_module(module_path: Path, module_name: str):
@@ -189,6 +217,111 @@ def parse_scalar_grid(raw: str | Sequence[float] | None) -> tuple[float, ...]:
     if not values:
         raise ValueError("--scan-values must contain at least one value.")
     return tuple(values)
+
+
+def parse_theta_keys(raw: str | Sequence[str] | None) -> tuple[str, ...]:
+    """Parse one comma-separated observation-level Theta key list."""
+
+    if raw is None:
+        return DEFAULT_SCHUR_THETA_KEYS
+    if isinstance(raw, str):
+        tokens = [part.strip() for part in raw.split(",")]
+    else:
+        tokens = [str(value).strip() for value in raw]
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if not token:
+            continue
+        address = parse_obs_subblock_key_address(token)
+        canonical = address.canonical
+        if canonical in seen:
+            raise ValueError(f"Duplicate theta key: {canonical}.")
+        seen.add(canonical)
+        values.append(canonical)
+    if not values:
+        raise ValueError("--theta-keys must contain at least one key.")
+    return tuple(values)
+
+
+def parse_zernike_indices(raw: str | Sequence[int] | None) -> tuple[int, ...]:
+    """Parse one comma-separated Zernike index list."""
+
+    if raw is None:
+        return DEFAULT_SCHUR_ZERNIKE_INDICES
+    if isinstance(raw, str):
+        tokens = [part.strip() for part in raw.split(",")]
+    else:
+        tokens = [str(value).strip() for value in raw]
+
+    values: list[int] = []
+    seen: set[int] = set()
+    for token in tokens:
+        if not token:
+            continue
+        value = int(token)
+        if value in seen:
+            raise ValueError(f"Duplicate Zernike index: {value}.")
+        seen.add(value)
+        values.append(value)
+    if not values:
+        raise ValueError("--zernike-indices must contain at least one index.")
+    return tuple(values)
+
+
+def _build_observation_theta_layout(
+    *,
+    theta_keys: Sequence[str],
+    enable_zernikes: bool,
+    zernike_indices: Sequence[int],
+) -> ObservationThetaLayout:
+    """Build the observation-level Theta layout for Schur-summary export."""
+
+    theta_keys_resolved = parse_theta_keys(theta_keys)
+    requested = set(theta_keys_resolved)
+    addresses = parse_obs_subblock_varying_keys(theta_keys_resolved)
+    validate_supported_obs_subblock_key_addresses(addresses)
+    requested_primary = sorted(
+        address.index
+        for address in addresses
+        if address.base_key == "optics.primary.zernike_coeffs_nm"
+        and address.index is not None
+    )
+    requested_secondary = sorted(
+        address.index
+        for address in addresses
+        if address.base_key == "optics.secondary.zernike_coeffs_nm"
+        and address.index is not None
+    )
+    configured_indices = list(parse_zernike_indices(zernike_indices))
+    primary_indices = requested_primary or (configured_indices if enable_zernikes else [])
+    secondary_indices = requested_secondary or (configured_indices if enable_zernikes else [])
+
+    source_cfg = {
+        "separation_as": "source.separation_as" in requested,
+        "log_flux_total": "source.log_flux_total" in requested,
+        "contrast": "source.contrast" in requested,
+    }
+    optics_cfg: dict[str, Any] = {
+        "plate_scale_as_per_pix": "optics.plate_scale_as_per_pix" in requested,
+        "primary_zernikes": {
+            "enabled": bool(primary_indices),
+            "indices": list(primary_indices),
+        },
+        "secondary_zernikes": {
+            "enabled": bool(secondary_indices),
+            "indices": list(secondary_indices),
+        },
+    }
+    return ObservationThetaLayout.from_config(
+        {
+            "theta_layout": {
+                "source": source_cfg,
+                "optics": optics_cfg,
+            }
+        }
+    )
 
 
 def _study_log(message: str, **fields: Any) -> None:
@@ -1171,7 +1304,12 @@ def _build_study_templates(
             reference_store=None if inference_context is None else inference_context["store"],
         )
 
-    if mode in {MODE_FISHER_ONLY, MODE_PROFILE_OBJECTIVE, MODE_NUISANCE_ABSORPTION}:
+    if mode in {
+        MODE_FISHER_ONLY,
+        MODE_PROFILE_OBJECTIVE,
+        MODE_NUISANCE_ABSORPTION,
+        MODE_SCHUR_SUMMARY,
+    }:
         inference_experiment_cfg = _ensure_mapping(inference_cfg, "experiment", path="root")
         inference_block_cfg = _ensure_mapping(
             inference_experiment_cfg,
@@ -1960,6 +2098,538 @@ def _build_study_inference_config(
     return cfg
 
 
+def _phi_labels_for_active_layout(recipe: Any, active_layout: Any) -> tuple[str, ...]:
+    """Return explicit phi labels in the packed active-state order."""
+
+    return tuple(f"phi.{label}" for label in recipe._theta_labels_for_layout(active_layout))
+
+
+def _theta_labels_for_observation_layout(theta_layout: ObservationThetaLayout) -> tuple[str, ...]:
+    return tuple(f"theta.{label}" for label in theta_layout.labels)
+
+
+def _theta_addresses_for_layout(
+    *,
+    theta_layout: ObservationThetaLayout,
+    forward_spec: Any,
+    base_store: ParameterStore,
+) -> tuple[ObsSubblockKeyAddress, ...]:
+    addresses = parse_obs_subblock_varying_keys(theta_layout.labels)
+    validate_supported_obs_subblock_key_addresses(
+        addresses,
+        forward_spec=forward_spec,
+        reference_store=base_store,
+    )
+    return addresses
+
+
+def _observation_theta_ref_from_store(
+    *,
+    theta_layout: ObservationThetaLayout,
+    base_store: ParameterStore,
+) -> np.ndarray:
+    return np.asarray(
+        [
+            get_obs_subblock_store_value(base_store, address=parse_obs_subblock_key_address(label))
+            for label in theta_layout.labels
+        ],
+        dtype=float,
+    )
+
+
+def _apply_theta_overrides(
+    *,
+    reference_store: ParameterStore,
+    forward_spec: Any,
+    theta_addresses: Sequence[ObsSubblockKeyAddress],
+    theta_values: jnp.ndarray,
+) -> ParameterStore:
+    """Apply observation-level Theta values to one resolved system store."""
+
+    overrides: dict[str, Any] = {}
+    for index, address in enumerate(theta_addresses):
+        value = theta_values[index]
+        if address.index is None:
+            overrides[address.base_key] = value
+            continue
+        if address.base_key in overrides:
+            vector_value = jnp.asarray(overrides[address.base_key])
+        else:
+            vector_value = jnp.asarray(reference_store.get(address.base_key))
+        overrides[address.base_key] = vector_value.at[address.index].set(value)
+
+    primitive_overrides, derived_overrides, unknown = (
+        partition_obs_subblock_overrides_by_kind(
+            overrides,
+            forward_spec=forward_spec,
+        )
+    )
+    if unknown:
+        raise ValueError(
+            "Theta overrides contain unknown or unsupported keys: "
+            + ", ".join(sorted(unknown))
+        )
+    return apply_obs_subblock_overrides_preserving_derived(
+        reference_store,
+        forward_spec=forward_spec,
+        primitive_overrides=primitive_overrides,
+        derived_overrides=derived_overrides,
+    )
+
+
+def _build_combined_local_objective(
+    *,
+    context: dict[str, Any],
+    theta_layout: ObservationThetaLayout,
+    objective_kind: str,
+) -> tuple[Any, dict[str, Any]]:
+    """Build one local objective over the packed vector ``[Theta, phi]``."""
+
+    recipe = context["recipe"]
+    active_layout = context["layout"]
+    binder = context["binder"]
+    forward_spec = context["forward_spec"]
+    base_store = context["base_store"]
+    inference_cfg = context["inference_cfg"]
+    theta_addresses = _theta_addresses_for_layout(
+        theta_layout=theta_layout,
+        forward_spec=forward_spec,
+        base_store=base_store,
+    )
+
+    data_cube = recipe.jnp.asarray(context["cube"])
+    variance_cube = recipe.jnp.asarray(context["variance_cube"])
+    frame_reduce = str(inference_cfg["objective"]["frame_reduce"])
+    subblock_reduce = str(inference_cfg["objective"]["subblock_reduce"])
+    prior_term_fn = recipe._build_prior_term_fn(inference_cfg["priors"])
+    temporal_term_fn = recipe._build_temporal_term_fn(inference_cfg["temporal"])
+
+    priors_nonempty = bool(inference_cfg["priors"]["frame"] or inference_cfg["priors"]["shared"])
+    temporal_kind = str(inference_cfg["temporal"]["frame_model"]["kind"])
+    if objective_kind not in {"data_only", "full_objective"}:
+        raise ValueError("summary objective must be 'data_only' or 'full_objective'.")
+    if objective_kind == "full_objective" and (
+        priors_nonempty or temporal_kind != "independent"
+    ):
+        raise ValueError(
+            "v0 schur_summary only supports full_objective when priors are empty "
+            "and temporal.frame_model.kind='independent'."
+        )
+
+    def _shared_store_from_local(
+        theta_values: jnp.ndarray,
+        phi_state: Any,
+    ) -> ParameterStore:
+        theta_store = _apply_theta_overrides(
+            reference_store=base_store,
+            forward_spec=forward_spec,
+            theta_addresses=theta_addresses,
+            theta_values=theta_values,
+        )
+        return recipe._apply_runtime_active_values(
+            reference_store=theta_store,
+            forward_spec=forward_spec,
+            key_specs=active_layout.shared_specs,
+            values=phi_state.shared,
+        )
+
+    def _frame_model(shared_store: ParameterStore, frame_values: jnp.ndarray) -> jnp.ndarray:
+        frame_store = recipe._apply_runtime_active_values(
+            reference_store=shared_store,
+            forward_spec=forward_spec,
+            key_specs=active_layout.frame_specs,
+            values=frame_values,
+        )
+        frame_store = recipe._preserve_shared_derived_active_values(
+            frame_store=frame_store,
+            shared_store=shared_store,
+            shared_specs=active_layout.shared_specs,
+        )
+        frame_delta = binder.strip_structural(frame_store)
+        return binder.model(frame_delta)
+
+    def _data_term(theta_values: jnp.ndarray, phi_state: Any) -> jnp.ndarray:
+        shared_store = _shared_store_from_local(theta_values, phi_state)
+
+        def _frame_loss(
+            frame_values: jnp.ndarray,
+            data_frame: jnp.ndarray,
+            variance_frame: jnp.ndarray,
+        ) -> jnp.ndarray:
+            model_frame = _frame_model(shared_store, frame_values)
+            return recipe.gaussian_image_nll(
+                model_frame,
+                data_frame,
+                variance_frame,
+                reduce=frame_reduce,
+            )
+
+        per_frame = jax.vmap(_frame_loss)(phi_state.frame, data_cube, variance_cube)
+        return recipe._reduce_subblock_terms(per_frame, reduce=subblock_reduce)
+
+    def _combined_loss(local_vector: jnp.ndarray) -> jnp.ndarray:
+        theta_values = local_vector[: theta_layout.size]
+        phi_values = local_vector[theta_layout.size :]
+        phi_state = recipe._unpack_active_state(active_layout, phi_values)
+        data_term = _data_term(theta_values, phi_state)
+        if objective_kind == "data_only":
+            return data_term
+        return data_term + prior_term_fn(phi_state) + temporal_term_fn(phi_state)
+
+    metadata = {
+        "objective_kind_requested": objective_kind,
+        "objective_kind_used": (
+            "data_only"
+            if objective_kind == "data_only"
+            else "full_objective_equivalent_to_data_only_current_template"
+        ),
+        "priors_nonempty": bool(priors_nonempty),
+        "temporal_kind": temporal_kind,
+        "inference_objective": inference_cfg["objective"],
+    }
+    return _combined_loss, metadata
+
+
+def _resolve_phi_reference_for_summary(
+    *,
+    context: dict[str, Any],
+    phi_ref_mode: str,
+    recovered_theta: np.ndarray | None = None,
+) -> tuple[np.ndarray, str]:
+    """Resolve the local fast-state reference vector for one summary export."""
+
+    recipe = context["recipe"]
+    active_layout = context["layout"]
+    if phi_ref_mode == "init":
+        return np.asarray(context["theta0"], dtype=float), "init_state"
+    if phi_ref_mode == "recovered":
+        if recovered_theta is None:
+            raise ValueError("phi_ref='recovered' requires recovered_theta.")
+        return np.asarray(recovered_theta, dtype=float), "recovered_inference_solution"
+    if phi_ref_mode == "truth":
+        theta_truth, source = recipe._resolve_theta_preconditioning_reference(
+            layout=active_layout,
+            theta0=recipe.jnp.asarray(context["theta0"]),
+            initial_state=context["initial_state"],
+            truth=context["truth"],
+            reference_mode="truth_when_available",
+        )
+        return np.asarray(theta_truth, dtype=float), str(source)
+    raise ValueError("phi_ref must be one of: recovered, truth, init.")
+
+
+def _combined_curvature_diagnostics(
+    *,
+    blocks: Any,
+) -> dict[str, Any]:
+    return {
+        "dimensions": {
+            "combined_dim": int(blocks.layout.size),
+            "n_theta": int(blocks.layout.n_theta),
+            "n_phi": int(blocks.layout.n_phi),
+        },
+        "combined_gradient_norm": float(np.linalg.norm(blocks.combined_gradient)),
+        "combined_curvature_trace": float(np.trace(blocks.combined_curvature)),
+        "combined_curvature_frobenius_norm": float(np.linalg.norm(blocks.combined_curvature)),
+        "partition_shapes": {
+            "h_tt": list(blocks.h_tt.shape),
+            "h_tp": list(blocks.h_tp.shape),
+            "h_pp": list(blocks.h_pp.shape),
+            "g_theta": list(blocks.g_theta.shape),
+            "g_phi": list(blocks.g_phi.shape),
+        },
+    }
+
+
+def _local_surrogate_validation_rows(
+    *,
+    combined_loss_fn: Any,
+    theta_layout: ObservationThetaLayout,
+    theta_ref: np.ndarray,
+    phi_ref: np.ndarray,
+    reduced_information: np.ndarray,
+    reduced_score: np.ndarray,
+    max_labels: int = 2,
+    validation_steps: int = 5,
+) -> list[dict[str, Any]]:
+    """Compare reduced quadratic predictions against fixed-phi objective slices."""
+
+    if validation_steps <= 1:
+        raise ValueError("validation_steps must be > 1.")
+    step_map = {
+        "source.separation_as": 5.0e-3,
+        "source.log_flux_total": 5.0e-2,
+        "source.contrast": 5.0e-2,
+        "optics.plate_scale_as_per_pix": 1.0e-4,
+    }
+    selected_labels = [
+        label
+        for label in (
+            "source.separation_as",
+            "optics.plate_scale_as_per_pix",
+            "source.log_flux_total",
+            "source.contrast",
+        )
+        if label in theta_layout.labels
+    ][:max_labels]
+    rows: list[dict[str, Any]] = []
+    if not selected_labels:
+        return rows
+
+    combined_ref = np.concatenate((theta_ref, phi_ref), axis=0)
+    ref_loss = float(np.asarray(combined_loss_fn(jnp.asarray(combined_ref)), dtype=float))
+    grid = np.linspace(-1.0, 1.0, int(validation_steps), dtype=float)
+    for label in selected_labels:
+        theta_index = theta_layout.labels.index(label)
+        base_step = step_map.get(label, 1.0)
+        for step_scale in grid:
+            delta_theta = np.zeros((theta_layout.size,), dtype=float)
+            delta_theta[theta_index] = float(step_scale * base_step)
+            combined_eval = np.concatenate((theta_ref + delta_theta, phi_ref), axis=0)
+            actual_loss = float(
+                np.asarray(combined_loss_fn(jnp.asarray(combined_eval)), dtype=float)
+            )
+            predicted_delta = float(
+                reduced_score @ delta_theta
+                + 0.5 * delta_theta @ reduced_information @ delta_theta
+            )
+            rows.append(
+                {
+                    "label": label,
+                    "theta_index": int(theta_index),
+                    "step_scale": float(step_scale),
+                    "step_size": float(delta_theta[theta_index]),
+                    "predicted_delta": predicted_delta,
+                    "actual_delta_fixed_phi": float(actual_loss - ref_loss),
+                }
+            )
+    return rows
+
+
+def _plot_local_surrogate_validation(
+    *,
+    rows: Sequence[dict[str, Any]],
+    output_path: Path,
+) -> None:
+    """Plot predicted versus fixed-phi actual local objective deltas."""
+
+    if not rows:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    labels = tuple(dict.fromkeys(str(row["label"]) for row in rows))
+    for label in labels:
+        label_rows = [row for row in rows if row["label"] == label]
+        x = np.asarray([float(row["step_size"]) for row in label_rows], dtype=float)
+        predicted = np.asarray(
+            [float(row["predicted_delta"]) for row in label_rows],
+            dtype=float,
+        )
+        actual = np.asarray(
+            [float(row["actual_delta_fixed_phi"]) for row in label_rows],
+            dtype=float,
+        )
+        ax.plot(x, predicted, marker="o", label=f"{label} predicted")
+        ax.plot(x, actual, marker="s", linestyle="--", label=f"{label} actual")
+    ax.set_xlabel("Theta Perturbation")
+    ax.set_ylabel("Objective Delta")
+    ax.set_title("Local Reduced-Quadratic Validation")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def _evaluate_schur_summary(
+    *,
+    config_path: Path,
+    output_dir: Path,
+    case_root: Path,
+    theta_keys: Sequence[str],
+    enable_zernikes: bool,
+    zernike_indices: Sequence[int],
+    schur_damping: float,
+    max_dense_dim: int,
+    phi_ref: str,
+    summary_objective: str,
+    validate_surrogate: bool,
+    validation_steps: int,
+    recovered_theta: np.ndarray | None = None,
+    recovered_reference_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Export one image-backed Schur-reduced summary from a prepared subblock."""
+
+    context = _prepare_inference_context(config_path=config_path)
+    theta_layout = _build_observation_theta_layout(
+        theta_keys=theta_keys,
+        enable_zernikes=enable_zernikes,
+        zernike_indices=zernike_indices,
+    )
+    theta_ref = _observation_theta_ref_from_store(
+        theta_layout=theta_layout,
+        base_store=context["base_store"],
+    )
+    phi_ref_vector, phi_ref_source = _resolve_phi_reference_for_summary(
+        context=context,
+        phi_ref_mode=phi_ref,
+        recovered_theta=recovered_theta,
+    )
+    recipe = context["recipe"]
+    phi_labels = _phi_labels_for_active_layout(recipe, context["layout"])
+    combined_layout = build_combined_local_parameter_layout(
+        _theta_labels_for_observation_layout(theta_layout),
+        phi_labels,
+    )
+    combined_dim = int(theta_layout.size + phi_ref_vector.size)
+    if combined_dim > int(max_dense_dim):
+        raise ValueError(
+            f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}."
+        )
+
+    combined_loss_fn, objective_metadata = _build_combined_local_objective(
+        context=context,
+        theta_layout=theta_layout,
+        objective_kind=summary_objective,
+    )
+    reference_vector = np.concatenate((theta_ref, phi_ref_vector), axis=0)
+    gradient = np.asarray(
+        jax.grad(combined_loss_fn)(jnp.asarray(reference_vector, dtype=float)),
+        dtype=float,
+    )
+    curvature = np.asarray(
+        jax.hessian(combined_loss_fn)(jnp.asarray(reference_vector, dtype=float)),
+        dtype=float,
+    )
+    blocks = partition_local_curvature(
+        layout=combined_layout,
+        combined_gradient=gradient,
+        combined_curvature=curvature,
+    )
+    reduced = schur_reduce_local_quadratic(
+        blocks=blocks,
+        damping=float(schur_damping),
+    )
+
+    reduced_summary = SubblockSummary.from_reduced_form(
+        subblock_id=f"{case_root.name}_subblock_summary",
+        theta_labels=theta_layout.labels,
+        theta_ref=theta_ref,
+        reduced_information=reduced.reduced_information,
+        reduced_score=reduced.reduced_score,
+        summary_kind="image_backed_schur",
+        damping_used=float(schur_damping),
+        diagnostics={
+            "phi_ref_source": phi_ref_source,
+            "objective_kind": objective_metadata["objective_kind_used"],
+            "n_phi": int(combined_layout.n_phi),
+            "local_fit_reference_kind": phi_ref,
+        },
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_json_path = output_dir / "subblock_summary.json"
+    summary_npz_path = output_dir / "subblock_summary_matrices.npz"
+    schur_diag_path = output_dir / "schur_diagnostics.json"
+    curvature_diag_path = output_dir / "combined_curvature_diagnostics.json"
+    surrogate_csv_path = output_dir / "local_surrogate_validation.csv"
+    surrogate_png_path = output_dir / "local_surrogate_validation.png"
+
+    artifact = ImageBackedSubblockSummaryArtifact(
+        summary=reduced_summary,
+        layout=combined_layout,
+        theta_ref=theta_ref,
+        phi_ref=phi_ref_vector,
+        reduced=reduced,
+        metadata={
+            "generator": "examples/scripts/run_obs_subblock_study.py",
+            "case_root": str(case_root.resolve()),
+            "config_path": str(config_path.resolve()),
+            "cube_path": str(context["cube_path"]),
+            "manifest_path": None
+            if context["manifest_path"] is None
+            else str(Path(context["manifest_path"]).resolve()),
+            "truth_trace_path": None
+            if context["trace_path"] is None
+            else str(Path(context["trace_path"]).resolve()),
+            "theta_layout": theta_layout.to_dict(),
+            "phi_ref_source": phi_ref_source,
+            "objective": objective_metadata,
+            "recovered_reference": dict(recovered_reference_metadata or {}),
+            "system": {
+                "preset": context["system_cfg"].get("preset"),
+                "resolved_config": context["system_cfg"],
+            },
+        },
+        combined_gradient=gradient,
+        combined_curvature=curvature,
+    )
+    artifact.write(
+        summary_json_path=summary_json_path,
+        matrix_npz_path=summary_npz_path,
+    )
+    _write_json(schur_diag_path, reduced.to_diagnostics_dict())
+    _write_json(
+        curvature_diag_path,
+        _combined_curvature_diagnostics(blocks=blocks),
+    )
+
+    validation_rows: list[dict[str, Any]] = []
+    if validate_surrogate:
+        validation_rows = _local_surrogate_validation_rows(
+            combined_loss_fn=combined_loss_fn,
+            theta_layout=theta_layout,
+            theta_ref=theta_ref,
+            phi_ref=phi_ref_vector,
+            reduced_information=reduced.reduced_information,
+            reduced_score=reduced.reduced_score,
+            validation_steps=validation_steps,
+        )
+        _write_rows_csv(surrogate_csv_path, validation_rows)
+        _plot_local_surrogate_validation(
+            rows=validation_rows,
+            output_path=surrogate_png_path,
+        )
+    else:
+        _write_rows_csv(surrogate_csv_path, validation_rows)
+
+    loaded_summary = load_subblock_summary(summary_json_path)
+    summary_payload = {
+        "mode": MODE_SCHUR_SUMMARY,
+        "schema_version": "image_backed_subblock_summary.v1",
+        "case_root": str(case_root.resolve()),
+        "config_path": str(config_path.resolve()),
+        "cube_path": str(context["cube_path"]),
+        "summary_json_path": str(summary_json_path.resolve()),
+        "summary_npz_path": str(summary_npz_path.resolve()),
+        "schur_diagnostics_json": str(schur_diag_path.resolve()),
+        "combined_curvature_diagnostics_json": str(curvature_diag_path.resolve()),
+        "loaded_summary_theta_labels": list(loaded_summary.theta_labels),
+        "theta_labels": list(theta_layout.labels),
+        "phi_labels": list(phi_labels),
+        "theta_ref": theta_ref.tolist(),
+        "phi_ref_source": phi_ref_source,
+        "combined_dim": combined_dim,
+        "n_theta": int(theta_layout.size),
+        "n_phi": int(phi_ref_vector.size),
+        "validate_surrogate": bool(validate_surrogate),
+        "validation_row_count": int(len(validation_rows)),
+        "artifacts": {
+            "subblock_summary_json": str(summary_json_path.resolve()),
+            "subblock_summary_matrices_npz": str(summary_npz_path.resolve()),
+            "schur_diagnostics_json": str(schur_diag_path.resolve()),
+            "combined_curvature_diagnostics_json": str(curvature_diag_path.resolve()),
+            "local_surrogate_validation_csv": str(surrogate_csv_path.resolve()),
+            "local_surrogate_validation_png": (
+                None
+                if not validate_surrogate
+                else str(surrogate_png_path.resolve())
+            ),
+        },
+    }
+    return summary_payload
+
+
 def _read_truth_comparison_metrics(
     *,
     csv_path: Path,
@@ -2193,6 +2863,15 @@ def run_obs_subblock_study(
     exposure_time_s: float | None = None,
     noise_mode: str = "inherit",
     use_render_variance: bool = False,
+    theta_keys: Sequence[str] = DEFAULT_SCHUR_THETA_KEYS,
+    enable_zernikes: bool = False,
+    zernike_indices: Sequence[int] = DEFAULT_SCHUR_ZERNIKE_INDICES,
+    schur_damping: float = DEFAULT_SCHUR_DAMPING,
+    max_dense_dim: int = DEFAULT_SCHUR_MAX_DENSE_DIM,
+    phi_ref: str = "recovered",
+    summary_objective: str = "full_objective",
+    validate_surrogate: bool = True,
+    validation_steps: int = 5,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run one observation sub-block screening study."""
@@ -2200,7 +2879,11 @@ def run_obs_subblock_study(
     study_mode = parse_study_mode(mode)
     candidate_address = parse_candidate_parameter_address(candidate_key)
     candidate = None if candidate_address is None else candidate_address.canonical
-    if study_mode != MODE_FULL_CASE and candidate is None:
+    if study_mode in {
+        MODE_FISHER_ONLY,
+        MODE_PROFILE_OBJECTIVE,
+        MODE_NUISANCE_ABSORPTION,
+    } and candidate is None:
         raise ValueError(f"{study_mode} mode requires --candidate.")
     if study_mode == MODE_PROFILE_OBJECTIVE and not scan_values:
         raise ValueError("profile_objective mode requires --scan-values.")
@@ -2242,6 +2925,17 @@ def run_obs_subblock_study(
         "truth_value_requested": None if truth_value is None else float(truth_value),
         "assumed_value_requested": None if assumed_value is None else float(assumed_value),
         "scan_values_requested": [float(value) for value in scan_values],
+        "schur_summary_requested": {
+            "theta_keys": list(parse_theta_keys(theta_keys)),
+            "enable_zernikes": bool(enable_zernikes),
+            "zernike_indices": list(parse_zernike_indices(zernike_indices)),
+            "schur_damping": float(schur_damping),
+            "max_dense_dim": int(max_dense_dim),
+            "phi_ref": str(phi_ref),
+            "summary_objective": str(summary_objective),
+            "validate_surrogate": bool(validate_surrogate),
+            "validation_steps": int(validation_steps),
+        },
         "templates": {
             "trace": str(template_paths["trace"]),
             "render": str(template_paths["render"]),
@@ -2362,6 +3056,82 @@ def run_obs_subblock_study(
         _write_json(summary_path, summary)
         return summary
 
+    if study_mode == MODE_SCHUR_SUMMARY:
+        summary_run_root = study_root / "summary_export"
+        schur_config = _build_study_inference_config(
+            template_path=template_paths["inference"],
+            run_root=summary_run_root,
+            render_inputs=render_inputs,
+            exposure_time_s=exposure_time_s,
+            candidate_key=None,
+            assumed_value=None,
+            force_truth_comparison=(phi_ref == "truth"),
+            disable_plots=True,
+            use_render_variance=bool(use_render_variance),
+        )
+        schur_config_path = summary_run_root / "inference_config.json"
+        _write_json(schur_config_path, schur_config)
+        summary["schur_config_path"] = str(schur_config_path.resolve())
+
+        planned_artifacts = {
+            "subblock_summary_json": str((study_root / "subblock_summary.json").resolve()),
+            "subblock_summary_matrices_npz": str(
+                (study_root / "subblock_summary_matrices.npz").resolve()
+            ),
+            "schur_diagnostics_json": str((study_root / "schur_diagnostics.json").resolve()),
+            "combined_curvature_diagnostics_json": str(
+                (study_root / "combined_curvature_diagnostics.json").resolve()
+            ),
+            "local_surrogate_validation_csv": str(
+                (study_root / "local_surrogate_validation.csv").resolve()
+            ),
+            "local_surrogate_validation_png": str(
+                (study_root / "local_surrogate_validation.png").resolve()
+            ),
+        }
+        summary["planned_artifacts"] = planned_artifacts
+        if dry_run:
+            _write_json(summary_path, summary)
+            return summary
+
+        recovered_theta = None
+        recovered_reference_metadata: dict[str, Any] = {}
+        if phi_ref == "recovered":
+            recovered_run_root = study_root / "reference_inference"
+            recovered_result = _default_inference_runner(
+                schur_config_path,
+                recovered_run_root,
+                False,
+            )
+            recovered_theta = np.asarray(recovered_result["theta_final"], dtype=float)
+            recovered_reference_metadata = {
+                "run_root": str(recovered_run_root.resolve()),
+                "output_dir": str(Path(recovered_result["output_dir"]).resolve()),
+                "manifest_json": recovered_result["artifacts"].get("manifest_json"),
+                "recovered_trace_csv": recovered_result["artifacts"].get("recovered_trace_csv"),
+            }
+            summary["recovered_inference"] = recovered_reference_metadata
+
+        schur_summary = _evaluate_schur_summary(
+            config_path=schur_config_path,
+            output_dir=study_root,
+            case_root=case_root,
+            theta_keys=parse_theta_keys(theta_keys),
+            enable_zernikes=bool(enable_zernikes),
+            zernike_indices=parse_zernike_indices(zernike_indices),
+            schur_damping=float(schur_damping),
+            max_dense_dim=int(max_dense_dim),
+            phi_ref=str(phi_ref),
+            summary_objective=str(summary_objective),
+            validate_surrogate=bool(validate_surrogate),
+            validation_steps=int(validation_steps),
+            recovered_theta=recovered_theta,
+            recovered_reference_metadata=recovered_reference_metadata,
+        )
+        summary["schur_summary"] = schur_summary
+        _write_json(summary_path, summary)
+        return summary
+
     nuisance_summary = _run_nuisance_absorption(
         case_root=case_root,
         study_root=study_root,
@@ -2479,6 +3249,62 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional render noise override passed through to case prep.",
     )
     parser.add_argument(
+        "--theta-keys",
+        default=",".join(DEFAULT_SCHUR_THETA_KEYS),
+        help=(
+            "Comma-separated observation-level Theta keys for schur_summary mode. "
+            "Defaults to source.separation_as, source.log_flux_total, "
+            "source.contrast, optics.plate_scale_as_per_pix."
+        ),
+    )
+    parser.add_argument(
+        "--enable-zernikes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable primary/secondary Zernike groups in schur_summary mode.",
+    )
+    parser.add_argument(
+        "--zernike-indices",
+        default=",".join(str(index) for index in DEFAULT_SCHUR_ZERNIKE_INDICES),
+        help="Comma-separated Zernike indices used when Zernikes are enabled.",
+    )
+    parser.add_argument(
+        "--schur-damping",
+        type=float,
+        default=DEFAULT_SCHUR_DAMPING,
+        help="Non-negative nuisance damping used by the Schur reduction.",
+    )
+    parser.add_argument(
+        "--max-dense-dim",
+        type=int,
+        default=DEFAULT_SCHUR_MAX_DENSE_DIM,
+        help="Maximum dense combined dimension allowed for schur_summary mode.",
+    )
+    parser.add_argument(
+        "--phi-ref",
+        choices=("recovered", "truth", "init"),
+        default="recovered",
+        help="Reference fast-state source for schur_summary mode.",
+    )
+    parser.add_argument(
+        "--summary-objective",
+        choices=("data_only", "full_objective"),
+        default="full_objective",
+        help="Local objective variant used for schur_summary mode.",
+    )
+    parser.add_argument(
+        "--validate-surrogate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run local fixed-phi surrogate validation for schur_summary mode.",
+    )
+    parser.add_argument(
+        "--validation-steps",
+        type=int,
+        default=5,
+        help="Number of perturbation points per validated Theta label.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write study templates and summary without executing renders or inference.",
@@ -2487,6 +3313,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
+    jax.config.update("jax_enable_x64", True)
     args = _build_parser().parse_args(argv)
     case_module = _load_case_runner_module()
     case_root = case_module.resolve_case_root(
@@ -2510,6 +3337,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         dt_s=args.dt_s,
         exposure_time_s=args.exposure_time_s,
         noise_mode=args.noise,
+        theta_keys=parse_theta_keys(args.theta_keys),
+        enable_zernikes=bool(args.enable_zernikes),
+        zernike_indices=parse_zernike_indices(args.zernike_indices),
+        schur_damping=float(args.schur_damping),
+        max_dense_dim=int(args.max_dense_dim),
+        phi_ref=str(args.phi_ref),
+        summary_objective=str(args.summary_objective),
+        validate_surrogate=bool(args.validate_surrogate),
+        validation_steps=int(args.validation_steps),
         dry_run=bool(args.dry_run),
     )
     print(f"Study mode: {summary['mode']}")

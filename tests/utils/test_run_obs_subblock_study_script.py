@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -246,6 +247,7 @@ def test_parse_helpers_validate_mode_candidate_and_grid():
     module = _load_script_module()
 
     assert module.parse_study_mode("profile_objective") == "profile_objective"
+    assert module.parse_study_mode("schur_summary") == "schur_summary"
     assert module.parse_scalar_candidate_parameter("optics.plate_scale_as_per_pix") == (
         "optics.plate_scale_as_per_pix"
     )
@@ -859,3 +861,181 @@ def test_full_case_mode_delegates_to_case_runner(
     assert recorded["stages"] == "trace,render"
     assert summary["case_summary_path"] == str((case_root / "case_summary.json").resolve())
     assert summary["case_stages_requested"] == ["trace", "render"]
+
+
+def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_dry_run"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="init",
+        dry_run=True,
+    )
+
+    assert summary["dry_run"] is True
+    assert "schur_config_path" in summary
+    assert Path(summary["schur_config_path"]).exists()
+    assert "planned_artifacts" in summary
+    assert (case_root / "study" / "schur_summary" / "summary.json").exists()
+
+
+def test_evaluate_schur_summary_writes_required_artifacts_with_tiny_quadratic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_script_module()
+
+    class _FakeStore:
+        def __init__(self, values):
+            self._values = dict(values)
+
+        def get(self, key):
+            return self._values[key]
+
+    class _FakeRecipe:
+        jnp = np
+
+        @staticmethod
+        def _theta_labels_for_layout(layout):
+            labels = []
+            for frame_index in range(layout.n_frame):
+                labels.extend(
+                    f"frame[{frame_index}].{key}" for key in layout.frame_keys
+                )
+            labels.extend(f"shared.{key}" for key in layout.shared_keys)
+            return labels
+
+    fake_layout = SimpleNamespace(
+        n_frame=2,
+        frame_width=2,
+        shared_width=0,
+        theta_size=4,
+        frame_keys=("source.x_position_as", "source.y_position_as"),
+        shared_keys=(),
+    )
+    fake_forward_spec = {
+        "source.separation_as": SimpleNamespace(kind="primitive", structural=False),
+        "optics.plate_scale_as_per_pix": SimpleNamespace(
+            kind="derived",
+            structural=False,
+        ),
+    }
+    fake_store = _FakeStore(
+        {
+            "source.separation_as": 1.5,
+            "optics.plate_scale_as_per_pix": 0.01,
+        }
+    )
+
+    monkeypatch.setattr(
+        module,
+        "_prepare_inference_context",
+        lambda **_kwargs: {
+            "recipe": _FakeRecipe,
+            "layout": fake_layout,
+            "base_store": fake_store,
+            "forward_spec": fake_forward_spec,
+            "theta0": np.array([0.1, -0.2, 0.0, 0.0]),
+            "initial_state": SimpleNamespace(),
+            "truth": SimpleNamespace(),
+            "cube_path": tmp_path / "cube.fits",
+            "manifest_path": tmp_path / "manifest.json",
+            "trace_path": tmp_path / "truth.csv",
+            "system_cfg": {"preset": "TEST", "source": {"target": "ALPHA_CEN"}},
+            "inference_cfg": {
+                "priors": {"frame": {}, "shared": {}},
+                "temporal": {"frame_model": {"kind": "independent"}},
+                "objective": {"frame_reduce": "sum", "subblock_reduce": "sum"},
+            },
+        },
+    )
+
+    hessian = np.array(
+        [
+            [5.0, 0.2, 1.0, 0.0, 0.2, -0.1],
+            [0.2, 4.0, 0.0, 0.5, -0.2, 0.1],
+            [1.0, 0.0, 3.0, 0.1, 0.0, 0.0],
+            [0.0, 0.5, 0.1, 2.5, 0.0, 0.0],
+            [0.2, -0.2, 0.0, 0.0, 2.0, 0.3],
+            [-0.1, 0.1, 0.0, 0.0, 0.3, 1.8],
+        ],
+        dtype=float,
+    )
+    hessian = 0.5 * (hessian + hessian.T)
+    gradient = np.array([-1.5, 0.75, 0.25, -0.1, 0.3, -0.2], dtype=float)
+    reference = np.array([1.5, 0.01, 0.1, -0.2, 0.0, 0.0], dtype=float)
+
+    def _fake_build_combined_local_objective(**_kwargs):
+        def _loss(local_vector):
+            delta = module.jnp.asarray(local_vector, dtype=float) - module.jnp.asarray(
+                reference,
+                dtype=float,
+            )
+            return (
+                module.jnp.asarray(gradient, dtype=float) @ delta
+                + 0.5
+                * delta
+                @ module.jnp.asarray(hessian, dtype=float)
+                @ delta
+            )
+
+        return _loss, {
+            "objective_kind_requested": "data_only",
+            "objective_kind_used": "data_only",
+            "priors_nonempty": False,
+            "temporal_kind": "independent",
+        }
+
+    monkeypatch.setattr(
+        module,
+        "_build_combined_local_objective",
+        _fake_build_combined_local_objective,
+    )
+
+    summary = module._evaluate_schur_summary(
+        config_path=tmp_path / "inference_config.json",
+        output_dir=tmp_path / "study" / "schur_summary",
+        case_root=tmp_path / "case",
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        enable_zernikes=False,
+        zernike_indices=(0, 1),
+        schur_damping=1.0e-8,
+        max_dense_dim=20,
+        phi_ref="init",
+        summary_objective="data_only",
+        validate_surrogate=True,
+        validation_steps=5,
+    )
+
+    artifacts = {name: Path(path) for name, path in summary["artifacts"].items()}
+    for key in (
+        "subblock_summary_json",
+        "subblock_summary_matrices_npz",
+        "schur_diagnostics_json",
+        "combined_curvature_diagnostics_json",
+        "local_surrogate_validation_csv",
+    ):
+        assert key in artifacts
+        assert artifacts[key].exists()
+        assert artifacts[key].stat().st_size > 0
+
+    payload = _read_json(artifacts["subblock_summary_json"])
+    assert payload["theta_labels"] == [
+        "source.separation_as",
+        "optics.plate_scale_as_per_pix",
+    ]
+    assert payload["phi_labels"] == [
+        "phi.frame[0].source.x_position_as",
+        "phi.frame[0].source.y_position_as",
+        "phi.frame[1].source.x_position_as",
+        "phi.frame[1].source.y_position_as",
+    ]
+    assert summary["loaded_summary_theta_labels"] == payload["theta_labels"]

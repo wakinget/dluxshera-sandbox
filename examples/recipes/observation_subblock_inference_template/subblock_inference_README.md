@@ -141,6 +141,95 @@ PYTHONPATH=src python examples/scripts/run_candidate_fisher_screen.py \
   --noise-modes noiseless
 ```
 
+## Image-backed Schur summary validation
+
+Use the new `schur_summary` study mode to validate one real image-backed
+`SubblockSummary` before attempting any larger observation-level workflow.
+
+The recommended first validation case is deliberately small:
+
+- `n_frames: 3`
+- render noise disabled
+- registration-only fast state
+- observation-level Theta keys:
+  - `source.separation_as`
+  - `source.log_flux_total`
+  - `source.contrast`
+  - `optics.plate_scale_as_per_pix`
+- Zernikes disabled
+
+From repo root:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
+  --results-root Results/obs_subblock_summary_validation \
+  --case-name schur_smoke_001 \
+  --mode schur_summary \
+  --n-frames 3 \
+  --noise disabled \
+  --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
+  --max-dense-dim 80 \
+  --schur-damping 1e-8
+```
+
+This prepares the tiny case, runs the reference registration solve when
+`phi_ref=recovered`, computes the dense local curvature over `[Theta, phi]`,
+Schur-reduces the fast block, and writes:
+
+- `subblock_summary.json`
+- `subblock_summary_matrices.npz`
+- `schur_diagnostics.json`
+- `combined_curvature_diagnostics.json`
+- `local_surrogate_validation.csv`
+
+Inspect the exported summary:
+
+```bash
+PYTHONPATH=src python examples/scripts/inspect_subblock_summary.py \
+  Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/subblock_summary.json
+```
+
+Optionally write the compact inspection report to JSON:
+
+```bash
+PYTHONPATH=src python examples/scripts/inspect_subblock_summary.py \
+  Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/subblock_summary.json \
+  --report-json Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/inspection_report.json
+```
+
+Then run a one-summary observation update from the exported artifact:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_belief_update_demo.py \
+  --summary-path Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/subblock_summary.json \
+  --results-dir Results/observation_belief_from_real_summary \
+  --run-name schur_smoke_001
+```
+
+This keeps the prior mean store-derived, loads the real summary through the
+shared loader, and writes the normal posterior/eigen diagnostics without any
+special-case observation-update code.
+
+### First-run checklist
+
+- `theta_labels` match the requested scalar Theta keys.
+- `phi_labels` match the registration variables and frame count.
+- `subblock_summary.json`, `subblock_summary_matrices.npz`, and
+  `schur_diagnostics.json` exist.
+- `H_pp` rank and condition number are finite and not unexpectedly singular.
+- Schur damping is not obviously dominating the nuisance solve.
+- `reduced_information` is symmetric within tolerance and has nonzero
+  information for at least one Theta label.
+- `reduced_score` is finite.
+- `local_surrogate_validation.csv` shows the predicted and fixed-phi actual
+  objective deltas with consistent local sign near `theta_ref`.
+- The one-summary observation update writes posterior artifacts successfully.
+
+The current surrogate validation compares the reduced quadratic against
+fixed-phi objective slices only. That is not yet a full nuisance-profiled
+validation, but it is still the first useful check of the curvature and score
+sign convention.
+
 ## Adam hyperparameter sweep
 
 Use `examples/scripts/sweep_obs_subblock_adam.py` to run the small Adam sweep
