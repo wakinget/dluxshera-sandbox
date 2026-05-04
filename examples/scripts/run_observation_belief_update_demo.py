@@ -1015,7 +1015,7 @@ def run_observation_belief_update_demo(
         update_result.posterior.precision,
         layout.labels,
         eig_floor_abs=1.0e-10,
-        eig_floor_rel=1.0e-2,
+        eig_floor_rel=1.0e-10,
     )
     accumulated_summary_information = accumulate_summary_information(
         layout.labels,
@@ -1029,7 +1029,7 @@ def run_observation_belief_update_demo(
         prior_whitened_gain,
         layout.labels,
         eig_floor_abs=1.0e-10,
-        eig_floor_rel=1.0e-2,
+        eig_floor_rel=1.0e-10,
     )
 
     posterior_sigma = update_result.posterior.sigma()
