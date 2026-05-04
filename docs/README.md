@@ -30,6 +30,7 @@ Working practices, priorities, and lessons learned.
 Hands-on guides for common workflows.
 - [Canonical astrometry demo](tutorials/canonical_astrometry_demo.md)
 - [Modeling overview](tutorials/modeling_overview.md)
+- [Image-backed observation subblock Schur summary workflow](tutorials/observation_subblock_schur_summary_workflow.md)
 
 ## Archive
 Retired references kept for historical context.

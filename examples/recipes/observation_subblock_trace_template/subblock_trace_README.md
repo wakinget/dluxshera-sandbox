@@ -13,6 +13,27 @@ Recommended workflow:
 ## Files
 
 - `subblock_trace_prescription.yaml`: generalized trace-generation example
+- `subblock_trace_registration_iid_prescription.yaml`: registration-iid trace
+  template for image-backed Schur summary validation smoke tests
+
+## Registration-iid Schur template
+
+`subblock_trace_registration_iid_prescription.yaml` is the recommended trace
+template for `run_obs_subblock_study.py --mode schur_summary`. It models
+registration truth as iid X, Y, and PA jitter around nominal values and does
+not include the older hidden plate-scale constant offset by default.
+
+Use this file when validating the image-backed Schur summary workflow before
+scaling to multi-subblock observation updates. It can be edited directly,
+copied into a case, or passed explicitly:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
+  --mode schur_summary \
+  --case-name my_schur_case \
+  --trace-template examples/recipes/observation_subblock_trace_template/subblock_trace_registration_iid_prescription.yaml \
+  --dry-run
+```
 
 ## Path resolution
 

@@ -440,8 +440,27 @@ def make_binder_nll_fn(
 
     def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
         full_store = store_unpack_params(sub_spec, theta, base_forward_store)
-        # Keep binder.model on the non-structural fast path.
-        return binder.strip_structural(subset_store(full_store, infer_keys))
+        store_delta = subset_store(full_store, infer_keys)
+
+        # Keep binder.model on the non-structural fast path when the binder
+        # exposes the full convenience API, but allow lightweight binder test
+        # doubles that only advertise structural keys.
+        strip_structural = getattr(binder, "strip_structural", None)
+        if callable(strip_structural):
+            return strip_structural(store_delta)
+
+        structural_store_keys = getattr(binder, "structural_store_keys", None)
+        if callable(structural_store_keys):
+            structural = structural_store_keys()
+            if structural:
+                filtered = {
+                    key: value
+                    for key, value in store_delta.items()
+                    if key not in structural
+                }
+                return ParameterStore.from_dict(filtered)
+
+        return store_delta
 
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         store_delta = theta_to_store_delta(theta)

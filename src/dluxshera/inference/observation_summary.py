@@ -22,6 +22,7 @@ __all__ = [
     "SchurReducedLocalQuadratic",
     "build_combined_local_parameter_layout",
     "inspect_subblock_summary_artifact",
+    "load_subblock_summary_artifact_payload",
     "load_subblock_summary",
     "partition_local_curvature",
     "schur_reduce_local_quadratic",
@@ -446,6 +447,7 @@ class ImageBackedSubblockSummaryArtifact:
             "config_path": self.metadata.get("config_path"),
             "objective": self.metadata.get("objective"),
             "system": self.metadata.get("system"),
+            "prior_context": self.metadata.get("prior_context"),
             "recovered_reference": self.metadata.get("recovered_reference"),
             "theta_labels": list(self.summary.theta_labels),
             "phi_labels": list(self.layout.phi_labels),
@@ -506,6 +508,14 @@ def load_subblock_summary(summary_json_path: Path | str) -> SubblockSummary:
         summary_kind=str(payload.get("summary_kind", "image_backed_schur")),
         diagnostics=payload.get("summary_diagnostics", payload.get("diagnostics", {})),
     )
+
+
+def load_subblock_summary_artifact_payload(
+    summary_json_path: Path | str,
+) -> dict[str, Any]:
+    """Load the raw JSON payload for one image-backed summary artifact."""
+
+    return _load_summary_json(Path(summary_json_path).resolve())
 
 
 def validate_subblock_summary_artifact(

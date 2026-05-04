@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
 from dluxshera.params.store import ParameterStore
+from dluxshera.params.transforms import transform_source_raw_fluxes
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_keys import (
+    apply_jax_safe_source_photometry_update,
     apply_obs_subblock_overrides_preserving_derived,
+    apply_obs_subblock_runtime_overrides_without_refresh,
     get_obs_subblock_mapping_value,
     get_obs_subblock_store_value,
     parse_obs_subblock_key_address,
@@ -201,6 +206,90 @@ def test_explicit_log_flux_override_survives_refresh():
         float(np.asarray(frame_store.get("source.log_flux_total"))),
         12.5,
     )
+
+
+def test_jax_safe_source_photometry_update_matches_transform_semantics():
+    store = ParameterStore.from_dict(
+        {
+            "source.log_flux_total": 12.0,
+            "source.contrast": 3.0,
+            "source.raw_fluxes": np.zeros(2, dtype=float),
+        }
+    )
+
+    updated = apply_jax_safe_source_photometry_update(
+        store,
+        log_flux_total=12.3,
+        contrast=2.5,
+    )
+    expected = transform_source_raw_fluxes(
+        {
+            "source.log_flux_total": 12.3,
+            "source.contrast": 2.5,
+        }
+    )
+
+    np.testing.assert_allclose(updated.get("source.raw_fluxes"), expected)
+    assert float(np.asarray(updated.get("source.log_flux_total"))) == pytest.approx(12.3)
+    assert float(np.asarray(updated.get("source.contrast"))) == pytest.approx(2.5)
+
+
+def test_jax_safe_source_photometry_update_supports_gradients():
+    store = ParameterStore.from_dict(
+        {
+            "source.log_flux_total": 12.0,
+            "source.contrast": 3.0,
+            "source.raw_fluxes": np.zeros(2, dtype=float),
+        }
+    )
+
+    def _loss_log_flux(log_flux_total):
+        updated = apply_jax_safe_source_photometry_update(
+            store,
+            log_flux_total=log_flux_total,
+            contrast=3.0,
+        )
+        return jnp.sum(jnp.asarray(updated.get("source.raw_fluxes"), dtype=float))
+
+    def _loss_contrast(contrast):
+        updated = apply_jax_safe_source_photometry_update(
+            store,
+            log_flux_total=12.0,
+            contrast=contrast,
+        )
+        return jnp.asarray(updated.get("source.raw_fluxes"), dtype=float)[0]
+
+    grad_log_flux = jax.grad(_loss_log_flux)(jnp.asarray(12.0, dtype=float))
+    grad_contrast = jax.grad(_loss_contrast)(jnp.asarray(3.0, dtype=float))
+
+    assert np.isfinite(np.asarray(grad_log_flux)).all()
+    assert np.isfinite(np.asarray(grad_contrast)).all()
+    assert float(np.asarray(grad_log_flux)) > 0.0
+
+
+def test_runtime_overrides_without_refresh_preserve_active_source_values():
+    spec, base_store = _forward_spec_and_store()
+
+    updated = apply_obs_subblock_runtime_overrides_without_refresh(
+        base_store,
+        overrides_flat={
+            "source.log_flux_total": 12.5,
+            "source.contrast": 2.75,
+            "optics.plate_scale_as_per_pix": 0.111,
+        },
+        forward_spec=spec,
+    )
+
+    expected_raw_fluxes = transform_source_raw_fluxes(
+        {
+            "source.log_flux_total": 12.5,
+            "source.contrast": 2.75,
+        }
+    )
+    assert float(np.asarray(updated.get("source.log_flux_total"))) == pytest.approx(12.5)
+    assert float(np.asarray(updated.get("source.contrast"))) == pytest.approx(2.75)
+    assert float(np.asarray(updated.get("optics.plate_scale_as_per_pix"))) == pytest.approx(0.111)
+    np.testing.assert_allclose(updated.get("source.raw_fluxes"), expected_raw_fluxes)
 
 
 def test_absent_derived_override_falls_back_to_refreshed_value():

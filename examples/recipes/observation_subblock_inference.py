@@ -101,7 +101,7 @@ from dluxshera.utils.obs_subblock_io import (
 )
 from dluxshera.utils.obs_subblock_keys import (
     ObsSubblockKeyAddress,
-    apply_obs_subblock_overrides_preserving_derived,
+    apply_obs_subblock_runtime_overrides_without_refresh,
     canonical_obs_subblock_varying_keys,
     get_obs_subblock_store_value,
     parse_obs_subblock_varying_keys,
@@ -771,7 +771,14 @@ def _apply_runtime_active_values(
     key_specs: tuple[ActiveKeySpec, ...],
     values: jnp.ndarray,
 ) -> ParameterStore:
-    """Apply a frame or shared active-value vector to a reference store."""
+    """Apply a frame or shared active-value vector to a reference store.
+
+    This runtime path mirrors canonical packed-theta inference semantics:
+    active values are authoritative overlays on a resolved base store. We avoid
+    calling full ``refresh_derived(...)`` here so traced local objectives can
+    carry active source photometry values without re-entering transform code
+    that expects concrete Python scalars.
+    """
 
     if not key_specs:
         return reference_store
@@ -781,11 +788,10 @@ def _apply_runtime_active_values(
         key_specs=key_specs,
         values=values,
     )
-    return apply_obs_subblock_overrides_preserving_derived(
+    return apply_obs_subblock_runtime_overrides_without_refresh(
         reference_store,
+        overrides_flat={**primitive_overrides, **derived_overrides},
         forward_spec=forward_spec,
-        primitive_overrides=primitive_overrides,
-        derived_overrides=derived_overrides,
     )
 
 
@@ -797,12 +803,10 @@ def _preserve_shared_derived_active_values(
 ) -> ParameterStore:
     """Restore active shared derived values after a frame-level store update.
 
-    Frame-level active updates currently flow through
-    ``apply_obs_subblock_overrides_preserving_derived()``, which refreshes all
-    derived values from the updated primitive state before reapplying only the
-    derived overrides present in that specific call. When a frame update is
-    applied on top of an already-updated ``shared_store``, any active shared
-    derived values would otherwise snap back to their reference-derived values.
+    Frame-level active updates are applied on top of an already-updated
+    ``shared_store``. This helper remains defensive for shared derived keys so
+    they stay live even if a future runtime update path rebuilds intermediate
+    derived quantities differently.
 
     This helper preserves only the active shared derived keys already present in
     ``shared_store`` so they remain live through the subsequent

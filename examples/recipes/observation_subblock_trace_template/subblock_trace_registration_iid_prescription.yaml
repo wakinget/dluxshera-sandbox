@@ -1,0 +1,98 @@
+# System block is only required when one or more varying keys omits `base`
+# If system is omitted, `base` values must be provided.
+system:
+  preset: SHERA_FLIGHT_3P
+  source:
+    target: ALPHA_CEN
+    exposure_time_s: 0.05
+
+experiment:
+  kind: subblock_trace_generation
+  seed: 42
+  notes: "Observation sub-block trace-builder template for iid registration parameters. Used in the Schur summary workflow."
+
+  trace:
+    n_frames: 20
+    dt_s: 0.05 # Controls frame timing, not exposure time.
+    varying_keys:
+      - source.x_position_as
+      - source.y_position_as
+      - source.position_angle_deg
+#      - optics.primary.zernike_coeffs_nm[0]
+    plan: # Describe the desired motion for each varying_key
+      source.x_position_as:
+        base: 0.0
+        effects:
+          - kind: iid_jitter
+            center: 0.000
+            sigma: 0.1
+      source.y_position_as:
+        base: 0.0
+        effects:
+          - kind: iid_jitter
+            center: 0.000
+            sigma: 0.1
+      source.position_angle_deg:
+        effects:
+          - kind: iid_jitter
+            center: 0.000
+            sigma: 2e-3
+
+  outputs:
+    # Relative paths are resolved from this prescription file's directory.
+    outdir: ../../../Results/subblock_traces
+    file_prefix: subblock_trace
+    write_manifest: true
+
+
+# ----------------------------------------------------------------------
+# Trace effect reference
+#
+# Final per-frame value for each varying key is:
+#   value(t) = base + sum(all effect contributions at frame t)
+#
+# Notes:
+# - effect `start` or `center` values are additive terms
+# - they apply on top of `base`
+# - effect outputs are additive and order-independent in meaning
+#
+# Supported effects:
+#
+# 1) constant_offset
+#    effects:
+#      - kind: constant_offset
+#        offset: 0.0002
+#
+# 2) linear_drift
+#    effects:
+#      - kind: linear_drift
+#        start: 0.0
+#        rate_per_s: 0.1
+#
+# 3) random_walk
+#    effects:
+#      - kind: random_walk
+#        start: 0.0
+#        sigma_step: 0.001
+#
+#    Notes:
+#    - this is a cumulative stochastic process, not independent jitter
+#    - `start` is the initial contribution of the walk term itself
+#
+# 4) iid_jitter
+#    effects:
+#      - kind: iid_jitter
+#        center: 0.0
+#        sigma: 0.002
+#
+# 5) explicit
+#    directly specify the additive per-frame contribution
+#
+#    effects:
+#      - kind: explicit
+#        values: [0.0, 0.1, 0.2, 0.1, 0.0]
+#
+#    Notes:
+#    - length of `values` must equal `n_frames`
+#    - useful for custom traces or debugging
+# ----------------------------------------------------------------------

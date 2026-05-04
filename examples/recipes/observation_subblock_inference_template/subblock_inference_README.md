@@ -145,17 +145,24 @@ PYTHONPATH=src python examples/scripts/run_candidate_fisher_screen.py \
 
 Use the new `schur_summary` study mode to validate one real image-backed
 `SubblockSummary` before attempting any larger observation-level workflow.
+For a narrative hands-on walkthrough, see
+`docs/tutorials/observation_subblock_schur_summary_workflow.md`.
+The recommended Schur validation path uses the registration-iid trace template
+at
+`examples/recipes/observation_subblock_trace_template/subblock_trace_registration_iid_prescription.yaml`.
 
 The recommended first validation case is deliberately small:
 
 - `n_frames: 3`
 - render noise disabled
+- registration-iid X/Y/PA truth jitter
 - registration-only fast state
 - observation-level Theta keys:
   - `source.separation_as`
   - `source.log_flux_total`
   - `source.contrast`
   - `optics.plate_scale_as_per_pix`
+- `phi_ref: truth_when_available`
 - Zernikes disabled
 
 From repo root:
@@ -163,17 +170,44 @@ From repo root:
 ```bash
 PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
   --results-root Results/obs_subblock_summary_validation \
-  --case-name schur_smoke_001 \
+  --case-name schur_smoke_four_scalar \
   --mode schur_summary \
   --n-frames 3 \
   --noise disabled \
   --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
+  --phi-ref truth_when_available \
+  --max-dense-dim 80 \
+  --schur-damping 1e-8 \
+  --dry-run
+```
+
+Review the written plan first:
+
+- `study/schur_summary/schur_summary_plan.json`
+- `study/schur_summary/summary.json`
+
+The plan is the fastest review artifact. It summarizes the resolved trace
+truth setup, optimizer initialization, `phi_ref`, preconditioning status, and
+planned output paths. When a frame-truth CSV already exists, it also links
+`study/schur_summary/frame_truth_preview.json`.
+
+Then run the actual smoke path:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
+  --results-root Results/obs_subblock_summary_validation \
+  --case-name schur_smoke_four_scalar \
+  --mode schur_summary \
+  --n-frames 3 \
+  --noise disabled \
+  --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
+  --phi-ref truth_when_available \
   --max-dense-dim 80 \
   --schur-damping 1e-8
 ```
 
-This prepares the tiny case, runs the reference registration solve when
-`phi_ref=recovered`, computes the dense local curvature over `[Theta, phi]`,
+This prepares the tiny case, uses the truth-backed registration reference when
+available, computes the dense local curvature over `[Theta, phi]`,
 Schur-reduces the fast block, and writes:
 
 - `subblock_summary.json`
@@ -181,39 +215,103 @@ Schur-reduces the fast block, and writes:
 - `schur_diagnostics.json`
 - `combined_curvature_diagnostics.json`
 - `local_surrogate_validation.csv`
+- `frame_truth_preview.json`
+- `schur_summary_audit.json`
+
+Concise smoke-test progression:
+
+1. Run the command with `--dry-run`.
+2. Inspect `schur_summary_plan.json`, especially `trace_truth`,
+   `inference_init`, `phi_ref_mode`, and `preconditioning`.
+3. Run the same command without `--dry-run`.
+4. Inspect `subblock_summary.json`.
+5. Run `inspect_subblock_summary.py` and inspect `inspection_report.json`.
+6. Inspect `local_surrogate_validation.csv` and the audit summary of it.
+7. Run the one-summary observation update.
+8. Inspect `observation_update_summary.json["prior_mean_source"]` and the
+   posterior table.
+
+Reference glossary:
+
+- Truth trace: simulated frame-level values used to render the image cube.
+- Optimizer initialization: active-state values where registration inference
+  starts if a recovered reference solve runs.
+- `phi_ref`: fast-state point used to linearize the Schur summary.
+- Recovered reference: a `phi_ref` obtained from registration inference.
+- `preconditioning_reference`: point used to build optimizer preconditioning.
+- `theta_ref`: slow observation-level point used to linearize the summary.
+- Observation prior mean: belief mean used by the observation update; in
+  real-summary mode it defaults to the summary `theta_ref`.
+
+The exporter now applies `source.log_flux_total` and `source.contrast` with a
+JAX-safe local runtime update path. The previous limitation was not about those
+parameters being scientifically unsupported. It came from differentiating
+through full `ParameterStore.refresh_derived(...)`, which reached transform
+functions that used Python `float(...)` on traced values. The Schur local
+objective now follows canonical inference semantics more closely: active Theta
+values are authoritative, and only the minimal dependent source photometry term
+(`source.raw_fluxes`) is repaired explicitly inside autodiff.
+
+For the smallest possible debug case, the older two-key fallback is still
+useful:
+
+```bash
+--theta-keys source.separation_as,optics.plate_scale_as_per_pix
+```
 
 Inspect the exported summary:
 
 ```bash
 PYTHONPATH=src python examples/scripts/inspect_subblock_summary.py \
-  Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/subblock_summary.json
+  Results/obs_subblock_summary_validation/schur_smoke_four_scalar/study/schur_summary/subblock_summary.json
 ```
 
 Optionally write the compact inspection report to JSON:
 
 ```bash
 PYTHONPATH=src python examples/scripts/inspect_subblock_summary.py \
-  Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/subblock_summary.json \
-  --report-json Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/inspection_report.json
+  Results/obs_subblock_summary_validation/schur_smoke_four_scalar/study/schur_summary/subblock_summary.json \
+  --report-json Results/obs_subblock_summary_validation/schur_smoke_four_scalar/study/schur_summary/inspection_report.json
 ```
 
 Then run a one-summary observation update from the exported artifact:
 
 ```bash
 PYTHONPATH=src python examples/scripts/run_observation_belief_update_demo.py \
-  --summary-path Results/obs_subblock_summary_validation/schur_smoke_001/study/schur_summary/subblock_summary.json \
+  --summary-path Results/obs_subblock_summary_validation/schur_smoke_four_scalar/study/schur_summary/subblock_summary.json \
   --results-dir Results/observation_belief_from_real_summary \
-  --run-name schur_smoke_001
+  --run-name schur_smoke_four_scalar
 ```
 
-This keeps the prior mean store-derived, loads the real summary through the
-shared loader, and writes the normal posterior/eigen diagnostics without any
-special-case observation-update code.
+In real-summary mode, the observation update now defaults the prior mean to the
+summary's own `theta_ref` context rather than silently falling back to the bare
+`SHERA_FLIGHT_3P` preset. That matters for effective render overrides such as
+short exposure time, because exposure-dependent derived quantities like
+`source.log_flux_total` should inherit the same context that produced the image
+data and Schur summary.
+
+Override the default prior context explicitly when needed:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_belief_update_demo.py \
+  --summary-path Results/obs_subblock_summary_validation/schur_smoke_four_scalar/study/schur_summary/subblock_summary.json \
+  --config path/to/prior_context.json \
+  --system-preset SHERA_FLIGHT_3P \
+  --prior-source auto \
+  --results-dir Results/observation_belief_from_real_summary \
+  --run-name schur_smoke_four_scalar_explicit_prior
+```
+
+For the default real-summary path, inspect
+`observation_update_summary.json["prior_mean_source"]`. It should report
+`summary_theta_ref` unless an explicit prior config/preset was supplied.
 
 ### First-run checklist
 
 - `theta_labels` match the requested scalar Theta keys.
 - `phi_labels` match the registration variables and frame count.
+- `schur_summary_plan.json` shows the expected `n_theta`, `n_phi`,
+  `combined_dim`, `phi_ref_mode`, and dense-dimension guard.
 - `subblock_summary.json`, `subblock_summary_matrices.npz`, and
   `schur_diagnostics.json` exist.
 - `H_pp` rank and condition number are finite and not unexpectedly singular.
@@ -221,8 +319,12 @@ special-case observation-update code.
 - `reduced_information` is symmetric within tolerance and has nonzero
   information for at least one Theta label.
 - `reduced_score` is finite.
+- If `phi_ref=recovered` is used later, the plan and console output should show
+  whether preconditioning is enabled for the reference inference solve.
 - `local_surrogate_validation.csv` shows the predicted and fixed-phi actual
   objective deltas with consistent local sign near `theta_ref`.
+- `observation_update_summary.json` reports `prior_mean_source=summary_theta_ref`
+  for the default real-summary observation update path.
 - The one-summary observation update writes posterior artifacts successfully.
 
 The current surrogate validation compares the reduced quadratic against

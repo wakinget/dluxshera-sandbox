@@ -248,6 +248,13 @@ def test_parse_helpers_validate_mode_candidate_and_grid():
 
     assert module.parse_study_mode("profile_objective") == "profile_objective"
     assert module.parse_study_mode("schur_summary") == "schur_summary"
+    assert module.parse_theta_keys(None) == (
+        "source.separation_as",
+        "source.log_flux_total",
+        "source.contrast",
+        "optics.plate_scale_as_per_pix",
+    )
+    assert module.normalize_schur_phi_ref_mode("truth") == "truth_when_available"
     assert module.parse_scalar_candidate_parameter("optics.plate_scale_as_per_pix") == (
         "optics.plate_scale_as_per_pix"
     )
@@ -267,6 +274,190 @@ def test_parse_helpers_validate_mode_candidate_and_grid():
 
     with pytest.raises(ValueError, match="at least one value"):
         module.parse_scalar_grid("")
+
+
+def test_trace_template_resolution_uses_schur_specific_default(tmp_path: Path):
+    module = _load_script_module()
+
+    schur_path, schur_source = module.resolve_study_trace_template(
+        mode="schur_summary",
+        trace_template=None,
+    )
+    fisher_path, fisher_source = module.resolve_study_trace_template(
+        mode="fisher_only",
+        trace_template=None,
+    )
+    override_path = tmp_path / "custom_trace.yaml"
+    explicit_path, explicit_source = module.resolve_study_trace_template(
+        mode="schur_summary",
+        trace_template=override_path,
+    )
+    explicit_fisher_path, explicit_fisher_source = module.resolve_study_trace_template(
+        mode="fisher_only",
+        trace_template=override_path,
+    )
+
+    assert schur_path == module.DEFAULT_SCHUR_TRACE_TEMPLATE.resolve()
+    assert schur_source == "schur_summary_default"
+    assert fisher_path == module.DEFAULT_TRACE_TEMPLATE.resolve()
+    assert fisher_source == "general_default"
+    assert explicit_path == override_path.resolve()
+    assert explicit_source == "cli_override"
+    assert explicit_fisher_path == override_path.resolve()
+    assert explicit_fisher_source == "cli_override"
+
+
+def test_registration_iid_template_supports_trace_jitter_overrides():
+    module = _load_script_module()
+    cfg = module.load_config_file(module.DEFAULT_SCHUR_TRACE_TEMPLATE)
+
+    applied = module._apply_trace_truth_overrides(
+        cfg,
+        truth_overrides={
+            "trace_x0_as": 0.0,
+            "trace_y0_as": 0.0,
+            "trace_pa0_deg": 14.508,
+        },
+        jitter_overrides={
+            "trace_jitter_x_sigma_as": 0.12,
+            "trace_jitter_y_sigma_as": 0.12,
+            "trace_jitter_pa_sigma_deg": 0.002,
+        },
+        seed=42,
+    )
+    plan = cfg["experiment"]["trace"]["plan"]
+
+    assert plan["source.x_position_as"]["effects"][0]["sigma"] == pytest.approx(0.12)
+    assert plan["source.y_position_as"]["effects"][0]["sigma"] == pytest.approx(0.12)
+    assert plan["source.position_angle_deg"]["effects"][0]["sigma"] == pytest.approx(0.002)
+    assert applied["jitter"]["source.position_angle_deg"]["effect_kind"] == "iid_jitter"
+
+
+def test_registration_iid_template_has_no_hidden_plate_scale_offset():
+    module = _load_script_module()
+    cfg = module.load_config_file(module.DEFAULT_SCHUR_TRACE_TEMPLATE)
+    trace_cfg = cfg["experiment"]["trace"]
+    plan = trace_cfg["plan"]
+
+    assert "optics.plate_scale_as_per_pix" not in trace_cfg.get("varying_keys", [])
+    plate_entry = plan.get("optics.plate_scale_as_per_pix")
+    if plate_entry is not None:
+        effects = plate_entry.get("effects", [])
+        assert not any(
+            effect.get("kind") == "constant_offset"
+            and float(effect.get("offset", 0.0)) == pytest.approx(0.0002)
+            for effect in effects
+        )
+
+
+def test_schur_theta_key_validation_accepts_four_scalar_smoke_keys():
+    module = _load_script_module()
+
+    classification = module.validate_schur_summary_theta_keys(
+        (
+            "source.separation_as",
+            "source.log_flux_total",
+            "source.contrast",
+            "optics.plate_scale_as_per_pix",
+        )
+    )
+    assert classification["supported"] == [
+        "source.separation_as",
+        "source.log_flux_total",
+        "source.contrast",
+        "optics.plate_scale_as_per_pix",
+    ]
+    assert classification["blocked"] == []
+
+
+def test_validate_schur_dense_dimension_fails_clearly():
+    module = _load_script_module()
+
+    with pytest.raises(ValueError, match="exceeds max_dense_dim=10"):
+        module._validate_schur_dense_dimension(combined_dim=11, max_dense_dim=10)
+
+
+def test_observation_theta_layout_zernike_toggle_is_explicit():
+    module = _load_script_module()
+
+    no_zernikes = module._build_observation_theta_layout(
+        theta_keys=("source.separation_as",),
+        enable_zernikes=False,
+        zernike_indices=(0, 1),
+    )
+    with_zernikes = module._build_observation_theta_layout(
+        theta_keys=("source.separation_as",),
+        enable_zernikes=True,
+        zernike_indices=(0, 1),
+    )
+
+    assert no_zernikes.labels == ("source.separation_as",)
+    assert with_zernikes.labels == (
+        "source.separation_as",
+        "optics.primary.zernike_coeffs_nm[0]",
+        "optics.primary.zernike_coeffs_nm[1]",
+        "optics.secondary.zernike_coeffs_nm[0]",
+        "optics.secondary.zernike_coeffs_nm[1]",
+    )
+
+
+def test_schur_theta_runtime_update_supports_grad_and_hessian_for_four_scalar_set(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, _render_template, inference_template = _write_templates(tmp_path)
+    template_context = module._resolve_template_system_context(inference_template)
+    theta_layout = module._build_observation_theta_layout(
+        theta_keys=(
+            "source.separation_as",
+            "source.log_flux_total",
+            "source.contrast",
+            "optics.plate_scale_as_per_pix",
+        ),
+        enable_zernikes=False,
+        zernike_indices=(0, 1),
+    )
+    theta_addresses = module._theta_addresses_for_layout(
+        theta_layout=theta_layout,
+        forward_spec=template_context["forward_spec"],
+        base_store=template_context["store"],
+    )
+    theta_ref = module._observation_theta_ref_from_store(
+        theta_layout=theta_layout,
+        base_store=template_context["store"],
+    )
+
+    def _loss(theta_values):
+        updated = module._apply_theta_overrides(
+            reference_store=template_context["store"],
+            forward_spec=template_context["forward_spec"],
+            theta_addresses=theta_addresses,
+            theta_values=module.jnp.asarray(theta_values, dtype=float),
+        )
+        raw_fluxes = module.jnp.asarray(updated.get("source.raw_fluxes"), dtype=float)
+        return (
+            0.1 * module.jnp.asarray(updated.get("source.separation_as"), dtype=float)
+            + 1.0e-6 * raw_fluxes[0]
+            + 2.0e-6 * raw_fluxes[1]
+            + 10.0 * module.jnp.asarray(updated.get("optics.plate_scale_as_per_pix"), dtype=float)
+        )
+
+    grad = module.jax.grad(_loss)(module.jnp.asarray(theta_ref, dtype=float))
+    hess = module.jax.hessian(_loss)(module.jnp.asarray(theta_ref, dtype=float))
+    updated = module._apply_theta_overrides(
+        reference_store=template_context["store"],
+        forward_spec=template_context["forward_spec"],
+        theta_addresses=theta_addresses,
+        theta_values=module.jnp.asarray(theta_ref + np.array([0.0, 0.3, -0.2, 0.001]), dtype=float),
+    )
+
+    assert grad.shape == (4,)
+    assert hess.shape == (4, 4)
+    assert np.all(np.isfinite(np.asarray(grad)))
+    assert np.all(np.isfinite(np.asarray(hess)))
+    assert float(np.asarray(updated.get("source.log_flux_total"))) == pytest.approx(
+        float(theta_ref[1] + 0.3)
+    )
 
 
 def test_derive_scalar_information_metrics_handles_nonpositive_marginal_info():
@@ -876,7 +1067,7 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
         render_template=render_template,
         inference_template=inference_template,
         theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
-        phi_ref="init",
+        phi_ref="truth_when_available",
         dry_run=True,
     )
 
@@ -884,7 +1075,282 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert "schur_config_path" in summary
     assert Path(summary["schur_config_path"]).exists()
     assert "planned_artifacts" in summary
+    assert "schur_summary_plan_path" in summary
+    plan_path = Path(summary["schur_summary_plan_path"])
+    assert plan_path.exists()
+    plan = _read_json(plan_path)
+    assert plan["n_frames"] == 3
+    assert plan["theta_labels"] == [
+        "source.separation_as",
+        "optics.plate_scale_as_per_pix",
+    ]
+    assert plan["phi_ref_mode"] == "truth_when_available"
+    assert plan["combined_dim"] == 11
+    assert plan["max_dense_dim"] == module.DEFAULT_SCHUR_MAX_DENSE_DIM
+    assert plan["dense_hessian_allowed"] is True
+    assert plan["planned_artifacts"]["subblock_summary_json"].endswith(
+        "subblock_summary.json"
+    )
+    assert "trace_truth" in plan
+    assert "inference_init" in plan
+    assert plan["reference_inference_will_run"] is False
+    assert plan["preconditioning_actually_used"] is False
+    assert plan["preconditioning_not_used_reason"] == "reference inference did not run"
+    assert plan["planned_artifacts"]["frame_truth_preview_json"].endswith(
+        "frame_truth_preview.json"
+    )
+    assert plan["planned_artifacts"]["schur_summary_audit_json"].endswith(
+        "schur_summary_audit.json"
+    )
     assert (case_root / "study" / "schur_summary" / "summary.json").exists()
+
+
+def test_build_schur_summary_plan_records_recovered_unpreconditioned_warning(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_plan_warning"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(case_root / "render" / "obs_subblock_cube.fits"),
+        truth_trace=_ResolvedInput(case_root / "render" / "obs_subblock_truth.csv"),
+        manifest=_ResolvedInput(case_root / "render" / "manifest.json"),
+    )
+    summary_run_root = case_root / "study" / "schur_summary" / "summary_export"
+    schur_cfg = module._build_study_inference_config(
+        template_path=inference_template,
+        run_root=summary_run_root,
+        render_inputs=render_inputs,
+        exposure_time_s=None,
+        candidate_key=None,
+        assumed_value=None,
+        force_truth_comparison=False,
+        disable_plots=True,
+        use_render_variance=False,
+    )
+    schur_config_path = summary_run_root / "inference_config.json"
+    _write_json(schur_config_path, schur_cfg)
+
+    plan = module._build_schur_summary_plan(
+        case_root=case_root,
+        study_root=case_root / "study" / "schur_summary",
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        source_template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        trace_template_source="cli_override",
+        schur_config_path=schur_config_path,
+        schur_config=schur_cfg,
+        render_inputs=render_inputs,
+        case_prep_stages=[],
+        n_frames_requested=3,
+        dt_s_requested=None,
+        exposure_time_s_requested=None,
+        noise_mode="disabled",
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        enable_zernikes=False,
+        zernike_indices=(0, 1),
+        schur_damping=1.0e-8,
+        max_dense_dim=80,
+        phi_ref_mode="recovered",
+        summary_objective="full_objective",
+        validate_surrogate=True,
+        validation_steps=5,
+        frame_truth_preview=None,
+        applied_trace_overrides={},
+        applied_inference_init_overrides={},
+    )
+
+    assert plan["reference_inference_will_run"] is True
+    assert plan["reference_inference_config_if_run"]["optimizer_kind"] == "sgd"
+    assert plan["reference_inference_config_if_run"]["preconditioning_enabled"] is False
+    assert plan["preconditioning_actually_used"] is False
+    assert any(
+        "phi_ref=recovered will use unpreconditioned SGD" in warning
+        for warning in plan["known_limitations_or_warnings"]
+    )
+
+
+def test_schur_summary_dry_run_trace_and_init_overrides_are_recorded(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_overrides"
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="truth_when_available",
+        trace_x0_as=1.25,
+        trace_seed=123,
+        init_x_as=0.5,
+        init_y_as=-0.25,
+        init_pa_deg=14.508,
+        dry_run=True,
+    )
+
+    copied_trace = _read_json(Path(summary["templates"]["trace"]))
+    copied_inference = _read_json(Path(summary["templates"]["inference"]))
+    assert copied_trace["experiment"]["seed"] == 123
+    assert copied_trace["experiment"]["trace"]["plan"]["source.x_position_as"]["base"] == pytest.approx(1.25)
+    init_values = copied_inference["experiment"]["inference"]["init"]["frame"]["values"]
+    assert init_values["source.x_position_as"] == pytest.approx(0.5)
+    assert init_values["source.y_position_as"] == pytest.approx(-0.25)
+    assert init_values["source.position_angle_deg"] == pytest.approx(14.508)
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    assert plan["trace_truth"]["nominal_or_base_values"]["source.x_position_as"] == pytest.approx(1.25)
+    assert plan["trace_truth"]["seed"] == 123
+    assert plan["inference_init"]["first_frame_initial_values"]["source.x_position_as"] == pytest.approx(0.5)
+    assert plan["inference_init"]["init_value_sources"]["source.x_position_as"] == "cli_override"
+
+
+def test_schur_summary_dry_run_records_default_trace_template_source(tmp_path: Path):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_default_trace_template"
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="truth_when_available",
+        trace_x0_as=0.0,
+        trace_y0_as=0.0,
+        trace_pa0_deg=14.508,
+        trace_jitter_x_sigma_as=0.12,
+        trace_jitter_y_sigma_as=0.12,
+        trace_jitter_pa_sigma_deg=0.002,
+        dry_run=True,
+    )
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    assert summary["source_templates"]["trace_source"] == "schur_summary_default"
+    assert Path(summary["source_templates"]["trace"]) == module.DEFAULT_SCHUR_TRACE_TEMPLATE.resolve()
+    assert plan["trace_template_source"] == "schur_summary_default"
+    assert Path(plan["trace_template_path"]) == module.DEFAULT_SCHUR_TRACE_TEMPLATE.resolve()
+    assert plan["registration_iid_trace_template_used"] is True
+    assert plan["trace_truth"]["registration_iid_template_used"] is True
+    assert plan["trace_truth"]["jitter_amplitudes"]["source.position_angle_deg"] == pytest.approx(0.002)
+
+
+def test_trace_override_fails_clearly_when_template_lacks_key(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+
+    with pytest.raises(ValueError, match="source.y_position_as"):
+        module.run_obs_subblock_study(
+            mode="schur_summary",
+            case_root=tmp_path / "Results" / "case_schur_bad_override",
+            trace_template=trace_template,
+            render_template=render_template,
+            inference_template=inference_template,
+            theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+            trace_y0_as=-1.0,
+            dry_run=True,
+        )
+
+
+def test_frame_truth_preview_generation_on_tiny_csv(tmp_path: Path):
+    module = _load_script_module()
+    csv_path = tmp_path / "truth.csv"
+    csv_path.write_text(
+        "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg\n"
+        "0,0.0,1.0,-1.0,90.0\n"
+        "1,0.1,1.2,-0.8,89.5\n",
+        encoding="utf-8",
+    )
+    preview_path = tmp_path / "frame_truth_preview.json"
+
+    preview = module._write_frame_truth_preview(
+        trace_csv_path=csv_path,
+        preview_path=preview_path,
+    )
+
+    assert preview_path.exists()
+    assert preview["row_count"] == 2
+    assert preview["first_rows"][0]["source.x_position_as"] == pytest.approx(1.0)
+    assert preview["column_stats"]["source.position_angle_deg"]["median"] == pytest.approx(89.75)
+
+
+def test_schur_audit_links_plan_summary_diagnostics_and_validation(tmp_path: Path):
+    module = _load_script_module()
+    study_root = tmp_path / "study" / "schur_summary"
+    plan_path = study_root / "schur_summary_plan.json"
+    validation_path = study_root / "local_surrogate_validation.csv"
+    module._write_rows_csv(
+        validation_path,
+        [
+            {
+                "label": "source.separation_as",
+                "predicted_delta": 2.0,
+                "actual_delta_fixed_phi": 1.0,
+            }
+        ],
+    )
+    plan = {
+        "case_name": "case",
+        "selected_stages": ["schur_summary_export"],
+        "reference_inference_will_run": False,
+        "reference_inference_not_run_reason": "phi_ref_mode=truth_when_available",
+        "reference_inference_config_if_run": {"optimizer_kind": "sgd"},
+        "preconditioning": {"preconditioning_actually_used": False},
+        "phi_ref_mode": "truth_when_available",
+        "n_phi": 3,
+        "phi_labels": ["phi.frame[0].source.x_position_as"],
+        "theta_labels": ["source.separation_as"],
+        "trace_truth": {"n_frames": 1},
+        "trace_template_path": str(module.DEFAULT_SCHUR_TRACE_TEMPLATE.resolve()),
+        "trace_template_source": "schur_summary_default",
+        "registration_iid_trace_template_used": True,
+        "trace_config_path": str((study_root / "templates" / "trace_template.json").resolve()),
+        "generated_case_trace_config_path": str((tmp_path / "trace_config.json").resolve()),
+        "cube_path": "cube.fits",
+        "render_config_path": "render_config.json",
+        "render_noise_mode": "disabled",
+        "inference_init": {"packed_theta_size": 3},
+        "planned_artifacts": {
+            "schur_summary_audit_json": str((study_root / "schur_summary_audit.json").resolve()),
+            "frame_truth_preview_json": str((study_root / "frame_truth_preview.json").resolve()),
+            "schur_diagnostics_json": str((study_root / "schur_diagnostics.json").resolve()),
+            "local_surrogate_validation_csv": str(validation_path.resolve()),
+        },
+    }
+    summary_payload = {
+        "phi_ref_source": "truth_trace",
+        "theta_ref": [1.0],
+        "artifacts": {
+            "subblock_summary_json": str((study_root / "subblock_summary.json").resolve()),
+            "schur_diagnostics_json": str((study_root / "schur_diagnostics.json").resolve()),
+            "local_surrogate_validation_csv": str(validation_path.resolve()),
+        },
+    }
+
+    audit = module._build_schur_summary_audit(
+        plan=plan,
+        plan_path=plan_path,
+        summary_payload=summary_payload,
+        recovered_reference_metadata={},
+        frame_truth_preview={"row_count": 1},
+    )
+
+    assert audit["plan_json"].endswith("schur_summary_plan.json")
+    assert audit["actual_artifacts"]["subblock_summary_json"].endswith("subblock_summary.json")
+    assert audit["trace_template"]["trace_template_source"] == "schur_summary_default"
+    assert audit["trace_template"]["registration_iid_trace_template_used"] is True
+    assert audit["schur_summary_diagnostics_path"].endswith("schur_diagnostics.json")
+    assert audit["local_surrogate_validation"]["labels_validated"] == ["source.separation_as"]
+    assert audit["observation_prior_recommendation"]["prior_mean_source"] == "summary_theta_ref"
 
 
 def test_evaluate_schur_summary_writes_required_artifacts_with_tiny_quadratic(
@@ -931,6 +1397,7 @@ def test_evaluate_schur_summary_writes_required_artifacts_with_tiny_quadratic(
     fake_store = _FakeStore(
         {
             "source.separation_as": 1.5,
+            "source.exposure_time_s": 0.05,
             "optics.plate_scale_as_per_pix": 0.01,
         }
     )
@@ -1038,4 +1505,6 @@ def test_evaluate_schur_summary_writes_required_artifacts_with_tiny_quadratic(
         "phi.frame[1].source.x_position_as",
         "phi.frame[1].source.y_position_as",
     ]
+    assert payload["prior_context"]["recommended_prior_mean_source"] == "summary_theta_ref"
+    assert payload["prior_context"]["effective_store_values"]["source.exposure_time_s"] == pytest.approx(0.05)
     assert summary["loaded_summary_theta_labels"] == payload["theta_labels"]

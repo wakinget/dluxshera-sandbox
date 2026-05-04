@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
 
+import jax.numpy as jnp
 import numpy as np
+
+from ..params.transforms import (
+    compute_source_raw_fluxes_from_log_flux_total_and_contrast,
+)
 
 
 OBS_SUBBLOCK_V1_DEFAULT_VARYING_KEYS: tuple[str, ...] = (
@@ -416,6 +421,97 @@ def apply_obs_subblock_overrides_preserving_derived(
     return updated
 
 
+def apply_jax_safe_source_photometry_update(
+    store: Any,
+    *,
+    log_flux_total: Any | None = None,
+    contrast: Any | None = None,
+    forward_spec: Any | None = None,
+) -> Any:
+    """Update active source photometry values without traced derived refresh.
+
+    Notes
+    -----
+    ``source.log_flux_total`` may be derived in the full forward spec, but in a
+    local inference context it can still be an authoritative active variable.
+    This helper preserves that active-value semantics and updates the dependent
+    ``source.raw_fluxes`` term with JAX-safe array operations instead of
+    calling a full ``refresh_derived(...)`` inside autodiff.
+    """
+
+    if forward_spec is not None:
+        for key in ("source.log_flux_total", "source.contrast", "source.raw_fluxes"):
+            if key not in forward_spec:
+                raise ValueError(
+                    f"JAX-safe source photometry update requires {key!r} in the forward spec."
+                )
+
+    effective_log_flux = (
+        store.get("source.log_flux_total")
+        if log_flux_total is None
+        else log_flux_total
+    )
+    effective_contrast = (
+        store.get("source.contrast")
+        if contrast is None
+        else contrast
+    )
+    effective_log_flux = jnp.asarray(effective_log_flux, dtype=float)
+    effective_contrast = jnp.asarray(effective_contrast, dtype=float)
+    raw_fluxes = compute_source_raw_fluxes_from_log_flux_total_and_contrast(
+        effective_log_flux,
+        effective_contrast,
+    )
+    return store.replace(
+        {
+            "source.log_flux_total": effective_log_flux,
+            "source.contrast": effective_contrast,
+            "source.raw_fluxes": raw_fluxes,
+        }
+    )
+
+
+def apply_obs_subblock_runtime_overrides_without_refresh(
+    store: Any,
+    *,
+    overrides_flat: Mapping[str, Any],
+    forward_spec: Any,
+) -> Any:
+    """Apply active runtime overrides without full traced derived refresh.
+
+    This mirrors the canonical inference semantics more closely than
+    ``apply_obs_subblock_overrides_preserving_derived`` for local autodiff:
+    active values are authoritative overlays on a resolved base store, and only
+    the minimal dependent quantities needed by the runtime model are refreshed
+    explicitly with JAX-safe operations.
+    """
+
+    primitive_overrides, derived_overrides, unknown = (
+        partition_obs_subblock_overrides_by_kind(
+            overrides_flat,
+            forward_spec=forward_spec,
+        )
+    )
+    if unknown:
+        raise ValueError(
+            "Runtime overrides contain unknown or unsupported keys: "
+            + ", ".join(sorted(unknown))
+        )
+
+    updated = store.replace({**primitive_overrides, **derived_overrides})
+    if (
+        "source.log_flux_total" in overrides_flat
+        or "source.contrast" in overrides_flat
+    ):
+        updated = apply_jax_safe_source_photometry_update(
+            updated,
+            log_flux_total=overrides_flat.get("source.log_flux_total"),
+            contrast=overrides_flat.get("source.contrast"),
+            forward_spec=forward_spec,
+        )
+    return updated
+
+
 def partition_obs_subblock_overrides_by_kind(
     overrides_flat: Mapping[str, Any],
     *,
@@ -447,6 +543,8 @@ __all__ = [
     "OBS_SUBBLOCK_V1_DEFAULT_VARYING_KEYS",
     "ObsSubblockKeyAddress",
     "apply_obs_subblock_overrides_preserving_derived",
+    "apply_obs_subblock_runtime_overrides_without_refresh",
+    "apply_jax_safe_source_photometry_update",
     "canonical_obs_subblock_varying_keys",
     "collect_obs_subblock_anchor_values",
     "get_obs_subblock_mapping_value",

@@ -73,19 +73,26 @@ def _write_prior_override_config(tmp_path: Path) -> Path:
 
 def _write_real_summary_artifact(tmp_path: Path) -> Path:
     layout = build_combined_local_parameter_layout(
-        ("theta.source.separation_as", "theta.optics.plate_scale_as_per_pix"),
+        (
+            "theta.source.separation_as",
+            "theta.source.log_flux_total",
+            "theta.source.contrast",
+            "theta.optics.plate_scale_as_per_pix",
+        ),
         (
             "phi.frame[0].source.x_position_as",
             "phi.frame[0].source.y_position_as",
         ),
     )
-    gradient = np.array([-2.0, 0.25, 0.1, -0.2], dtype=float)
+    gradient = np.array([-2.0, 0.15, -0.05, 0.25, 0.1, -0.2], dtype=float)
     curvature = np.array(
         [
-            [5.0, 0.1, 0.7, 0.0],
-            [0.1, 4.0, -0.2, 0.4],
-            [0.7, -0.2, 3.0, 0.1],
-            [0.0, 0.4, 0.1, 2.2],
+            [5.0, 0.2, 0.1, 0.1, 0.7, 0.0],
+            [0.2, 4.5, 0.3, -0.1, -0.2, 0.4],
+            [0.1, 0.3, 2.5, 0.05, 0.1, -0.1],
+            [0.1, -0.1, 0.05, 4.0, 0.0, 0.2],
+            [0.7, -0.2, 0.1, 0.0, 3.0, 0.1],
+            [0.0, 0.4, -0.1, 0.2, 0.1, 2.2],
         ],
         dtype=float,
     )
@@ -97,8 +104,13 @@ def _write_real_summary_artifact(tmp_path: Path) -> Path:
     reduced = schur_reduce_local_quadratic(blocks=blocks)
     summary = SubblockSummary.from_reduced_form(
         subblock_id="subblock_000000",
-        theta_labels=("source.separation_as", "optics.plate_scale_as_per_pix"),
-        theta_ref=np.array([11.25, 0.01]),
+        theta_labels=(
+            "source.separation_as",
+            "source.log_flux_total",
+            "source.contrast",
+            "optics.plate_scale_as_per_pix",
+        ),
+        theta_ref=np.array([11.25, 7.01, 3.4, 0.01]),
         reduced_information=reduced.reduced_information,
         reduced_score=reduced.reduced_score,
         summary_kind="image_backed_schur",
@@ -106,10 +118,24 @@ def _write_real_summary_artifact(tmp_path: Path) -> Path:
     artifact = ImageBackedSubblockSummaryArtifact(
         summary=summary,
         layout=layout,
-        theta_ref=np.array([11.25, 0.01]),
+        theta_ref=np.array([11.25, 7.01, 3.4, 0.01]),
         phi_ref=np.array([0.1, -0.2]),
         reduced=reduced,
-        metadata={"generator": "unit_test"},
+        metadata={
+            "generator": "unit_test",
+            "prior_context": {
+                "recommended_prior_mean_source": "summary_theta_ref",
+                "theta_ref_by_label": {
+                    "source.separation_as": 11.25,
+                    "source.log_flux_total": 7.01,
+                    "source.contrast": 3.4,
+                    "optics.plate_scale_as_per_pix": 0.01,
+                },
+                "effective_store_values": {
+                    "source.exposure_time_s": 0.05,
+                },
+            },
+        },
         combined_gradient=gradient,
         combined_curvature=curvature,
     )
@@ -117,6 +143,33 @@ def _write_real_summary_artifact(tmp_path: Path) -> Path:
     matrix_path = tmp_path / "real_subblock_summary_matrices.npz"
     artifact.write(summary_json_path=summary_path, matrix_npz_path=matrix_path)
     return summary_path
+
+
+def _write_real_summary_artifact_with_theta_ref(
+    tmp_path: Path,
+    *,
+    theta_ref: np.ndarray,
+    stem: str,
+) -> Path:
+    summary_path = _write_real_summary_artifact(tmp_path)
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    matrix_path = summary_path.parent / payload["matrix_artifact_path"]
+    with np.load(matrix_path) as arrays:
+        matrix_payload = {key: arrays[key] for key in arrays.files}
+    matrix_payload["theta_ref"] = np.asarray(theta_ref, dtype=float)
+    np.savez_compressed(matrix_path, **matrix_payload)
+    payload["theta_ref"] = np.asarray(theta_ref, dtype=float).tolist()
+    payload["subblock_id"] = stem
+    payload["prior_context"]["theta_ref_by_label"] = {
+        label: float(theta_ref[index]) for index, label in enumerate(payload["theta_labels"])
+    }
+    updated_summary_path = tmp_path / f"{stem}.json"
+    updated_matrix_path = tmp_path / f"{stem}_matrices.npz"
+    updated_summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    updated_matrix_path.write_bytes(matrix_path.read_bytes())
+    payload["matrix_artifact_path"] = updated_matrix_path.name
+    updated_summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return updated_summary_path
 
 
 def test_build_prior_mean_from_store_resolves_scalars_and_derived_values(tmp_path: Path):
@@ -440,7 +493,133 @@ def test_observation_belief_demo_loads_real_summary_artifact(tmp_path: Path):
     assert summary["update"]["n_summaries"] == 1
     assert summary["truth"]["kind"] == "not_available"
     assert summary["summary_paths"] == [str(summary_path.resolve())]
+    assert summary["prior_mean_source"] == "explicit_prior_config"
     assert "posterior_error" not in posterior_rows[0]
     assert artifacts["posterior_sigma_vs_n_subblocks_png"].exists()
     assert artifacts["posterior_sigma_over_prior_sigma_vs_n_subblocks_png"].exists()
     assert "synthetic_subblock_summaries_dir" not in artifacts
+
+
+def test_real_summary_mode_uses_theta_ref_as_prior_mean_by_default(tmp_path: Path):
+    module = _load_script_module()
+    summary_path = _write_real_summary_artifact(tmp_path)
+
+    result = module.main(
+        [
+            "--results-dir",
+            str(tmp_path),
+            "--run-name",
+            "real_summary_default_prior_case",
+            "--summary-path",
+            str(summary_path),
+        ]
+    )
+
+    summary = json.loads(
+        Path(result["artifacts"]["observation_update_summary_json"]).read_text(encoding="utf-8")
+    )
+    posterior_rows = _read_csv_rows(Path(result["artifacts"]["posterior_table_csv"]))
+    prior_mean_by_label = summary["prior"]["mean"]
+
+    assert summary["prior_mean_source"] == "summary_theta_ref"
+    assert summary["prior_mean_provenance"]["summary_theta_ref_compatibility"][
+        "all_equal_within_tolerance"
+    ] is True
+    assert prior_mean_by_label["source.log_flux_total"] == pytest.approx(7.01)
+    assert prior_mean_by_label["source.log_flux_total"] != pytest.approx(11.57, rel=1.0e-2)
+    assert posterior_rows[0]["prior_mean_source"] == "summary_theta_ref"
+
+
+def test_explicit_prior_config_overrides_summary_theta_ref(tmp_path: Path):
+    module = _load_script_module()
+    config_path = _write_prior_override_config(tmp_path)
+    summary_path = _write_real_summary_artifact(tmp_path)
+
+    result = module.main(
+        [
+            "--results-dir",
+            str(tmp_path),
+            "--run-name",
+            "real_summary_explicit_prior_case",
+            "--config",
+            str(config_path),
+            "--system-preset",
+            "SHERA_TESTBED_3P",
+            "--summary-path",
+            str(summary_path),
+        ]
+    )
+
+    summary = json.loads(
+        Path(result["artifacts"]["observation_update_summary_json"]).read_text(encoding="utf-8")
+    )
+    store, _, _ = module.build_prior_store_from_system(
+        config_path=config_path,
+        system_preset="SHERA_TESTBED_3P",
+    )
+
+    assert summary["prior_mean_source"] == "explicit_prior_config"
+    assert summary["prior"]["mean"]["source.log_flux_total"] == pytest.approx(
+        float(store.get("source.log_flux_total"))
+    )
+    assert summary["prior"]["mean"]["source.log_flux_total"] != pytest.approx(7.01)
+
+
+def test_multiple_real_summaries_with_mixed_theta_ref_record_warning(tmp_path: Path):
+    module = _load_script_module()
+    summary_path_a = _write_real_summary_artifact_with_theta_ref(
+        tmp_path,
+        theta_ref=np.array([11.25, 7.01, 3.4, 0.01]),
+        stem="summary_a",
+    )
+    summary_path_b = _write_real_summary_artifact_with_theta_ref(
+        tmp_path,
+        theta_ref=np.array([11.25, 7.25, 3.6, 0.01]),
+        stem="summary_b",
+    )
+
+    result = module.main(
+        [
+            "--results-dir",
+            str(tmp_path),
+            "--run-name",
+            "real_summary_mixed_theta_ref_case",
+            "--summary-path",
+            str(summary_path_a),
+            "--summary-path",
+            str(summary_path_b),
+        ]
+    )
+
+    summary = json.loads(
+        Path(result["artifacts"]["observation_update_summary_json"]).read_text(encoding="utf-8")
+    )
+    compatibility = summary["prior_mean_provenance"]["summary_theta_ref_compatibility"]
+
+    assert summary["prior_mean_source"] == "summary_theta_ref"
+    assert compatibility["all_equal_within_tolerance"] is False
+    assert compatibility["max_abs_spread_by_label"]["source.log_flux_total"] == pytest.approx(
+        0.24
+    )
+    assert summary["prior_warnings"]
+
+
+def test_real_summary_mode_dry_run_reports_summary_theta_ref_prior_provenance(tmp_path: Path):
+    module = _load_script_module()
+    summary_path = _write_real_summary_artifact(tmp_path)
+
+    result = module.main(
+        [
+            "--results-dir",
+            str(tmp_path),
+            "--run-name",
+            "real_summary_dry_run_case",
+            "--summary-path",
+            str(summary_path),
+            "--dry-run",
+        ]
+    )
+
+    assert result["dry_run"] is True
+    assert result["summary"]["prior_mean_source"] == "summary_theta_ref"
+    assert result["summary"]["prior"]["mean"]["source.log_flux_total"] == pytest.approx(7.01)

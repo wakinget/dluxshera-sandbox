@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
+import jax.numpy as jnp
 import numpy as np
 
 from ..components.sources import get_target_spec
@@ -197,6 +198,27 @@ def transform_source_log_flux_total(ctx: Ctx) -> float:
 # ---------------------------------------------------------------------------
 
 
+def compute_source_raw_fluxes_from_log_flux_total_and_contrast(
+    log_flux_total: Any,
+    contrast: Any,
+) -> jnp.ndarray:
+    """Return source raw fluxes using the canonical Alpha Cen convention.
+
+    Notes
+    -----
+    This helper is intentionally JAX-safe. It matches the documented transform
+    semantics for ``source.raw_fluxes`` but avoids Python scalar coercion so it
+    can be reused inside traced local inference objectives.
+    """
+
+    log_flux = jnp.asarray(log_flux_total, dtype=float)
+    contrast_value = jnp.asarray(contrast, dtype=float)
+    total_flux = jnp.power(jnp.asarray(10.0, dtype=float), log_flux)
+    flux_b = total_flux / (jnp.asarray(1.0, dtype=float) + contrast_value)
+    flux_a = contrast_value * flux_b
+    return jnp.stack((flux_a, flux_b), axis=0)
+
+
 @register_for_systems(
     "source.raw_fluxes",
     depends_on=(
@@ -216,9 +238,10 @@ def transform_source_raw_fluxes(ctx: Ctx) -> np.ndarray:
     """
     log_flux = float(ctx["source.log_flux_total"])
     contrast = float(ctx["source.contrast"])
-
-    total_flux = 10.0 ** log_flux
-    flux_B = total_flux / (1.0 + contrast)
-    flux_A = contrast * flux_B
-
-    return np.asarray([flux_A, flux_B])
+    return np.asarray(
+        compute_source_raw_fluxes_from_log_flux_total_and_contrast(
+            log_flux,
+            contrast,
+        ),
+        dtype=float,
+    )

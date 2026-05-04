@@ -23,7 +23,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -47,12 +47,11 @@ from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
 from dluxshera.utils.obs_subblock_keys import (
     ObsSubblockKeyAddress,
-    apply_obs_subblock_overrides_preserving_derived,
+    apply_obs_subblock_runtime_overrides_without_refresh,
     get_obs_subblock_mapping_value,
     get_obs_subblock_store_value,
     parse_obs_subblock_key_address,
     parse_obs_subblock_varying_keys,
-    partition_obs_subblock_overrides_by_kind,
     set_obs_subblock_mapping_value,
     validate_supported_obs_subblock_key_addresses,
 )
@@ -64,12 +63,23 @@ import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results"
+# Legacy/general observation subblock trace template used by non-Schur study
+# modes unless the user passes --trace-template.
 DEFAULT_TRACE_TEMPLATE = (
     REPO_ROOT
     / "examples"
     / "recipes"
     / "observation_subblock_trace_template"
     / "subblock_trace_prescription.yaml"
+)
+# Registration-iid template used by the image-backed Schur summary validation
+# workflow unless the user passes --trace-template.
+DEFAULT_SCHUR_TRACE_TEMPLATE = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "observation_subblock_trace_template"
+    / "subblock_trace_registration_iid_prescription.yaml"
 )
 DEFAULT_RENDER_TEMPLATE = (
     REPO_ROOT
@@ -103,15 +113,53 @@ SUMMARY_SCHEMA_VERSION = "obs_subblock_study_summary.v1"
 TRACE_STAGE = "trace"
 RENDER_STAGE = "render"
 FISHER_DENSE_TO_STRUCTURED_THRESHOLD_DIM = 30
+# The default Schur-summary smoke layout uses the intended four-scalar
+# observation-level subset while still keeping the dense Hessian small enough
+# for the v0 exporter. The traced local Theta path now applies source
+# photometry without full-store derived refresh, so source log-flux and
+# contrast can remain authoritative active variables.
 DEFAULT_SCHUR_THETA_KEYS = (
     "source.separation_as",
     "source.log_flux_total",
     "source.contrast",
     "optics.plate_scale_as_per_pix",
 )
+# Optional indexed M1/M2 Zernike components used only when
+# ``--enable-zernikes`` is requested. They are irrelevant to the first scalar
+# smoke test but provide a stable default family for later validation runs.
 DEFAULT_SCHUR_ZERNIKE_INDICES = (0, 1, 2, 3, 4, 5)
 DEFAULT_SCHUR_DAMPING = 1.0e-8
+# Safety guard for the v0 dense Hessian path over the packed ``[Theta, phi]``
+# local vector. This should prevent accidental large-frame or full-Zernike runs
+# from materializing an oversized dense Hessian before a structured path exists.
 DEFAULT_SCHUR_MAX_DENSE_DIM = 80
+SUPPORTED_SMOKE_THETA_KEYS = frozenset(
+    {
+        "source.separation_as",
+        "source.log_flux_total",
+        "source.contrast",
+        "optics.plate_scale_as_per_pix",
+    }
+)
+SCHUR_SUMMARY_PLAN_FILENAME = "schur_summary_plan.json"
+SCHUR_SUMMARY_AUDIT_FILENAME = "schur_summary_audit.json"
+FRAME_TRUTH_PREVIEW_FILENAME = "frame_truth_preview.json"
+
+TRACE_TRUTH_OVERRIDE_KEYS = {
+    "trace_x0_as": "source.x_position_as",
+    "trace_y0_as": "source.y_position_as",
+    "trace_pa0_deg": "source.position_angle_deg",
+}
+TRACE_JITTER_OVERRIDE_KEYS = {
+    "trace_jitter_x_sigma_as": "source.x_position_as",
+    "trace_jitter_y_sigma_as": "source.y_position_as",
+    "trace_jitter_pa_sigma_deg": "source.position_angle_deg",
+}
+INFERENCE_INIT_OVERRIDE_KEYS = {
+    "init_x_as": "source.x_position_as",
+    "init_y_as": "source.y_position_as",
+    "init_pa_deg": "source.position_angle_deg",
+}
 
 
 def _load_module(module_path: Path, module_name: str):
@@ -245,6 +293,54 @@ def parse_theta_keys(raw: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(values)
 
 
+def normalize_schur_phi_ref_mode(raw_mode: str) -> str:
+    """Normalize legacy and preferred Schur-summary fast-state reference modes."""
+
+    mode = str(raw_mode).strip()
+    if mode == "truth":
+        return "truth_when_available"
+    if mode not in {"recovered", "truth_when_available", "init"}:
+        raise ValueError(
+            "phi_ref must be one of: recovered, truth_when_available, init."
+        )
+    return mode
+
+
+def classify_schur_summary_theta_keys(
+    theta_keys: Sequence[str] | str | None,
+) -> dict[str, list[str]]:
+    """Classify Theta keys by current dense-autodiff Schur-summary support status."""
+
+    canonical_keys = parse_theta_keys(theta_keys)
+    supported: list[str] = []
+    experimental: list[str] = []
+    for label in canonical_keys:
+        if label in SUPPORTED_SMOKE_THETA_KEYS:
+            supported.append(label)
+        else:
+            experimental.append(label)
+    return {
+        "supported": supported,
+        "experimental": experimental,
+        "blocked": [],
+    }
+
+
+def validate_schur_summary_theta_keys(
+    theta_keys: Sequence[str] | str | None,
+) -> dict[str, list[str]]:
+    """Validate requested Schur-summary Theta keys before JAX tracing begins.
+
+    The current dense image-backed exporter applies active Theta values as a
+    direct overlay on a resolved base store. Source photometry dependents are
+    patched explicitly with JAX-safe array operations instead of differentiating
+    through a full ``refresh_derived(...)`` call.
+    """
+
+    classification = classify_schur_summary_theta_keys(theta_keys)
+    return classification
+
+
 def parse_zernike_indices(raw: str | Sequence[int] | None) -> tuple[int, ...]:
     """Parse one comma-separated Zernike index list."""
 
@@ -278,6 +374,7 @@ def _build_observation_theta_layout(
 ) -> ObservationThetaLayout:
     """Build the observation-level Theta layout for Schur-summary export."""
 
+    validate_schur_summary_theta_keys(theta_keys)
     theta_keys_resolved = parse_theta_keys(theta_keys)
     requested = set(theta_keys_resolved)
     addresses = parse_obs_subblock_varying_keys(theta_keys_resolved)
@@ -1087,6 +1184,124 @@ def _ensure_mapping(parent: dict[str, Any], key: str, *, path: str) -> dict[str,
     return value
 
 
+def _non_null_float_overrides(values: Mapping[str, float | None]) -> dict[str, float]:
+    """Return only CLI override values that were explicitly provided."""
+
+    return {key: float(value) for key, value in values.items() if value is not None}
+
+
+def _trace_plan_entry(trace_cfg: dict[str, Any], key: str) -> dict[str, Any]:
+    experiment_cfg = _ensure_mapping(trace_cfg, "experiment", path="root")
+    trace_block = _ensure_mapping(experiment_cfg, "trace", path="experiment")
+    plan_cfg = _ensure_mapping(trace_block, "plan", path="experiment.trace")
+    entry = plan_cfg.get(key)
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Trace override requested for {key!r}, but experiment.trace.plan.{key} "
+            "is not present in the trace template."
+        )
+    return entry
+
+
+def _apply_trace_truth_overrides(
+    trace_cfg: dict[str, Any],
+    *,
+    truth_overrides: Mapping[str, float],
+    jitter_overrides: Mapping[str, float],
+    seed: int | None,
+) -> dict[str, Any]:
+    """Patch the narrow smoke-test trace controls into a trace template copy."""
+
+    applied: dict[str, Any] = {"truth": {}, "jitter": {}, "seed": None}
+    for cli_name, value in truth_overrides.items():
+        trace_key = TRACE_TRUTH_OVERRIDE_KEYS[cli_name]
+        entry = _trace_plan_entry(trace_cfg, trace_key)
+        entry["base"] = float(value)
+        applied["truth"][trace_key] = {
+            "field": "base",
+            "value": float(value),
+            "source": f"--{cli_name.replace('_', '-')}",
+        }
+
+    for cli_name, value in jitter_overrides.items():
+        trace_key = TRACE_JITTER_OVERRIDE_KEYS[cli_name]
+        entry = _trace_plan_entry(trace_cfg, trace_key)
+        effects = entry.get("effects")
+        if not isinstance(effects, list):
+            raise ValueError(
+                f"Trace jitter override requested for {trace_key!r}, but "
+                f"experiment.trace.plan.{trace_key}.effects is not a list."
+            )
+        jitter_effect = None
+        jitter_field = None
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            if effect.get("kind") == "iid_jitter":
+                jitter_effect = effect
+                jitter_field = "sigma"
+                break
+            if effect.get("kind") == "random_walk":
+                jitter_effect = effect
+                jitter_field = "sigma_step"
+                break
+        if jitter_effect is None or jitter_field is None:
+            raise ValueError(
+                f"Trace jitter override requested for {trace_key!r}, but no "
+                "iid_jitter or random_walk effect exists in the trace template."
+            )
+        jitter_effect[jitter_field] = float(value)
+        applied["jitter"][trace_key] = {
+            "effect_kind": str(jitter_effect.get("kind")),
+            "field": jitter_field,
+            "value": float(value),
+            "source": f"--{cli_name.replace('_', '-')}",
+        }
+
+    if seed is not None:
+        experiment_cfg = _ensure_mapping(trace_cfg, "experiment", path="root")
+        experiment_cfg["seed"] = int(seed)
+        applied["seed"] = {"value": int(seed), "source": "--trace-seed"}
+    return applied
+
+
+def _apply_inference_init_overrides(
+    inference_cfg: dict[str, Any],
+    *,
+    init_overrides: Mapping[str, float],
+) -> dict[str, Any]:
+    """Patch the narrow registration-init controls into an inference template copy."""
+
+    applied: dict[str, Any] = {}
+    if not init_overrides:
+        return applied
+    experiment_cfg = _ensure_mapping(inference_cfg, "experiment", path="root")
+    inference_block = _ensure_mapping(experiment_cfg, "inference", path="experiment")
+    init_cfg = _ensure_mapping(inference_block, "init", path="experiment.inference")
+    frame_cfg = _ensure_mapping(init_cfg, "frame", path="experiment.inference.init")
+    values_cfg = _ensure_mapping(
+        frame_cfg,
+        "values",
+        path="experiment.inference.init.frame",
+    )
+    active_cfg = _ensure_mapping(inference_block, "active", path="experiment.inference")
+    frame_keys = set(str(key) for key in active_cfg.get("frame_keys", ()))
+    for cli_name, value in init_overrides.items():
+        init_key = INFERENCE_INIT_OVERRIDE_KEYS[cli_name]
+        if init_key not in frame_keys:
+            raise ValueError(
+                f"Inference init override requested for {init_key!r}, but that key "
+                "is not listed in experiment.inference.active.frame_keys."
+            )
+        values_cfg[init_key] = float(value)
+        applied[init_key] = {
+            "field": "experiment.inference.init.frame.values",
+            "value": float(value),
+            "source": f"--{cli_name.replace('_', '-')}",
+        }
+    return applied
+
+
 def _resolve_template_system_context(template_path: Path) -> dict[str, Any]:
     """Resolve one template's system block and default store for candidate work."""
 
@@ -1200,6 +1415,20 @@ def _study_templates_dir(case_root: Path, mode: str) -> Path:
     return _study_root(case_root, mode) / "templates"
 
 
+def resolve_study_trace_template(
+    *,
+    mode: str,
+    trace_template: Path | None,
+) -> tuple[Path, str]:
+    """Resolve the source trace template and provenance for one study mode."""
+
+    if trace_template is not None:
+        return trace_template.expanduser().resolve(), "cli_override"
+    if parse_study_mode(mode) == MODE_SCHUR_SUMMARY:
+        return DEFAULT_SCHUR_TRACE_TEMPLATE.resolve(), "schur_summary_default"
+    return DEFAULT_TRACE_TEMPLATE.resolve(), "general_default"
+
+
 def _truth_value_from_render_manifest(manifest_path: Path | None, candidate_key: str) -> float | None:
     """Resolve the rendered truth-side candidate value when available."""
 
@@ -1234,6 +1463,10 @@ def _build_study_templates(
     candidate_key: str | None,
     truth_value: float | None,
     assumed_value: float | None,
+    trace_truth_overrides: Mapping[str, float] | None = None,
+    trace_jitter_overrides: Mapping[str, float] | None = None,
+    trace_seed: int | None = None,
+    inference_init_overrides: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Write study-local template copies with narrow mode-specific patching."""
 
@@ -1243,6 +1476,16 @@ def _build_study_templates(
     trace_cfg = load_config_file(trace_template)
     render_cfg = load_config_file(render_template)
     inference_cfg = load_config_file(inference_template)
+    applied_trace_overrides = _apply_trace_truth_overrides(
+        trace_cfg,
+        truth_overrides=trace_truth_overrides or {},
+        jitter_overrides=trace_jitter_overrides or {},
+        seed=trace_seed,
+    )
+    applied_inference_init_overrides = _apply_inference_init_overrides(
+        inference_cfg,
+        init_overrides=inference_init_overrides or {},
+    )
     trace_context = None
     render_context = None
     inference_context = None
@@ -1434,6 +1677,11 @@ def _build_study_templates(
             "render": render_path,
             "inference": inference_path,
         },
+        "source_template_paths": {
+            "trace": trace_template.resolve(),
+            "render": render_template.resolve(),
+            "inference": inference_template.resolve(),
+        },
         "resolved_truth_value": resolved_truth,
         "resolved_assumed_value": resolved_assumed,
         "resolved_target_name": (
@@ -1441,6 +1689,10 @@ def _build_study_templates(
             or _resolve_target_name(render_cfg.get("system"))
             or _resolve_target_name(trace_cfg.get("system"))
         ),
+        "applied_overrides": {
+            "trace": applied_trace_overrides,
+            "inference_init": applied_inference_init_overrides,
+        },
     }
 
 
@@ -2105,6 +2357,8 @@ def _phi_labels_for_active_layout(recipe: Any, active_layout: Any) -> tuple[str,
 
 
 def _theta_labels_for_observation_layout(theta_layout: ObservationThetaLayout) -> tuple[str, ...]:
+    """Return explicit observation-level labels in packed Theta order."""
+
     return tuple(f"theta.{label}" for label in theta_layout.labels)
 
 
@@ -2114,6 +2368,8 @@ def _theta_addresses_for_layout(
     forward_spec: Any,
     base_store: ParameterStore,
 ) -> tuple[ObsSubblockKeyAddress, ...]:
+    """Resolve packed observation-level labels into validated store addresses."""
+
     addresses = parse_obs_subblock_varying_keys(theta_layout.labels)
     validate_supported_obs_subblock_key_addresses(
         addresses,
@@ -2128,6 +2384,8 @@ def _observation_theta_ref_from_store(
     theta_layout: ObservationThetaLayout,
     base_store: ParameterStore,
 ) -> np.ndarray:
+    """Read the physical-basis Theta reference vector from the resolved store."""
+
     return np.asarray(
         [
             get_obs_subblock_store_value(base_store, address=parse_obs_subblock_key_address(label))
@@ -2144,7 +2402,18 @@ def _apply_theta_overrides(
     theta_addresses: Sequence[ObsSubblockKeyAddress],
     theta_values: jnp.ndarray,
 ) -> ParameterStore:
-    """Apply observation-level Theta values to one resolved system store."""
+    """Apply observation-level Theta values to one resolved system store.
+
+    Notes
+    -----
+    The traced Schur-summary objective intentionally does *not* call full
+    ``ParameterStore.refresh_derived(...)`` here. That broader refresh path is
+    fine outside autodiff, but it reaches transform functions that still use
+    Python ``float(...)`` coercion for some source-photometry terms. The local
+    image-backed inference semantics instead mirror the canonical pack/unpack
+    path: active Theta values are authoritative overlays on a resolved base
+    store, and only minimal dependent runtime quantities are updated explicitly.
+    """
 
     overrides: dict[str, Any] = {}
     for index, address in enumerate(theta_addresses):
@@ -2158,22 +2427,10 @@ def _apply_theta_overrides(
             vector_value = jnp.asarray(reference_store.get(address.base_key))
         overrides[address.base_key] = vector_value.at[address.index].set(value)
 
-    primitive_overrides, derived_overrides, unknown = (
-        partition_obs_subblock_overrides_by_kind(
-            overrides,
-            forward_spec=forward_spec,
-        )
-    )
-    if unknown:
-        raise ValueError(
-            "Theta overrides contain unknown or unsupported keys: "
-            + ", ".join(sorted(unknown))
-        )
-    return apply_obs_subblock_overrides_preserving_derived(
+    return apply_obs_subblock_runtime_overrides_without_refresh(
         reference_store,
+        overrides_flat=overrides,
         forward_spec=forward_spec,
-        primitive_overrides=primitive_overrides,
-        derived_overrides=derived_overrides,
     )
 
 
@@ -2183,7 +2440,14 @@ def _build_combined_local_objective(
     theta_layout: ObservationThetaLayout,
     objective_kind: str,
 ) -> tuple[Any, dict[str, Any]]:
-    """Build one local objective over the packed vector ``[Theta, phi]``."""
+    """Build one local objective over the packed vector ``[Theta, phi]``.
+
+    The slow/shared observation-level ``Theta`` entries are applied to the
+    resolved system store first. The packed fast ``phi`` vector is then unpacked
+    into the frame-wise registration state used by the existing subblock
+    inference recipe. The resulting objective is the image-backed local
+    quadratic source for the dense Schur reduction.
+    """
 
     recipe = context["recipe"]
     active_layout = context["layout"]
@@ -2217,20 +2481,20 @@ def _build_combined_local_objective(
         )
 
     def _shared_store_from_local(
-        theta_values: jnp.ndarray,
-        phi_state: Any,
+        observation_theta_values: jnp.ndarray,
+        fast_phi_state: Any,
     ) -> ParameterStore:
         theta_store = _apply_theta_overrides(
             reference_store=base_store,
             forward_spec=forward_spec,
             theta_addresses=theta_addresses,
-            theta_values=theta_values,
+            theta_values=observation_theta_values,
         )
         return recipe._apply_runtime_active_values(
             reference_store=theta_store,
             forward_spec=forward_spec,
             key_specs=active_layout.shared_specs,
-            values=phi_state.shared,
+            values=fast_phi_state.shared,
         )
 
     def _frame_model(shared_store: ParameterStore, frame_values: jnp.ndarray) -> jnp.ndarray:
@@ -2248,8 +2512,8 @@ def _build_combined_local_objective(
         frame_delta = binder.strip_structural(frame_store)
         return binder.model(frame_delta)
 
-    def _data_term(theta_values: jnp.ndarray, phi_state: Any) -> jnp.ndarray:
-        shared_store = _shared_store_from_local(theta_values, phi_state)
+    def _data_term(observation_theta_values: jnp.ndarray, fast_phi_state: Any) -> jnp.ndarray:
+        shared_store = _shared_store_from_local(observation_theta_values, fast_phi_state)
 
         def _frame_loss(
             frame_values: jnp.ndarray,
@@ -2264,17 +2528,17 @@ def _build_combined_local_objective(
                 reduce=frame_reduce,
             )
 
-        per_frame = jax.vmap(_frame_loss)(phi_state.frame, data_cube, variance_cube)
+        per_frame = jax.vmap(_frame_loss)(fast_phi_state.frame, data_cube, variance_cube)
         return recipe._reduce_subblock_terms(per_frame, reduce=subblock_reduce)
 
     def _combined_loss(local_vector: jnp.ndarray) -> jnp.ndarray:
-        theta_values = local_vector[: theta_layout.size]
-        phi_values = local_vector[theta_layout.size :]
-        phi_state = recipe._unpack_active_state(active_layout, phi_values)
-        data_term = _data_term(theta_values, phi_state)
+        observation_theta_values = local_vector[: theta_layout.size]
+        fast_phi_values = local_vector[theta_layout.size :]
+        fast_phi_state = recipe._unpack_active_state(active_layout, fast_phi_values)
+        data_term = _data_term(observation_theta_values, fast_phi_state)
         if objective_kind == "data_only":
             return data_term
-        return data_term + prior_term_fn(phi_state) + temporal_term_fn(phi_state)
+        return data_term + prior_term_fn(fast_phi_state) + temporal_term_fn(fast_phi_state)
 
     metadata = {
         "objective_kind_requested": objective_kind,
@@ -2300,13 +2564,14 @@ def _resolve_phi_reference_for_summary(
 
     recipe = context["recipe"]
     active_layout = context["layout"]
-    if phi_ref_mode == "init":
+    normalized_mode = normalize_schur_phi_ref_mode(phi_ref_mode)
+    if normalized_mode == "init":
         return np.asarray(context["theta0"], dtype=float), "init_state"
-    if phi_ref_mode == "recovered":
+    if normalized_mode == "recovered":
         if recovered_theta is None:
             raise ValueError("phi_ref='recovered' requires recovered_theta.")
         return np.asarray(recovered_theta, dtype=float), "recovered_inference_solution"
-    if phi_ref_mode == "truth":
+    if normalized_mode == "truth_when_available":
         theta_truth, source = recipe._resolve_theta_preconditioning_reference(
             layout=active_layout,
             theta0=recipe.jnp.asarray(context["theta0"]),
@@ -2315,7 +2580,704 @@ def _resolve_phi_reference_for_summary(
             reference_mode="truth_when_available",
         )
         return np.asarray(theta_truth, dtype=float), str(source)
-    raise ValueError("phi_ref must be one of: recovered, truth, init.")
+    raise ValueError("phi_ref must be one of: recovered, truth_when_available, init.")
+
+
+def _validate_schur_dense_dimension(*, combined_dim: int, max_dense_dim: int) -> None:
+    """Fail early when the v0 dense Hessian path would exceed its size guard."""
+
+    if int(combined_dim) > int(max_dense_dim):
+        raise ValueError(
+            f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}. "
+            "Reduce n_frames or Theta size, or wait for a structured-curvature path."
+        )
+
+
+def _estimate_phi_labels_from_inference_cfg(
+    *,
+    inference_cfg: Mapping[str, Any],
+    n_frames: int | None,
+) -> tuple[str, ...]:
+    """Estimate packed phi labels from config-level active frame/shared keys."""
+
+    active_cfg = inference_cfg.get("active", {})
+    frame_keys = tuple(str(key) for key in active_cfg.get("frame_keys", ()))
+    shared_keys = tuple(str(key) for key in active_cfg.get("shared_keys", ()))
+    labels: list[str] = []
+    if n_frames is not None:
+        for frame_index in range(int(n_frames)):
+            labels.extend(f"phi.frame[{frame_index}].{key}" for key in frame_keys)
+    labels.extend(f"phi.shared.{key}" for key in shared_keys)
+    return tuple(labels)
+
+
+def _coerce_preview_cell(value: str | None) -> Any:
+    if value is None:
+        return None
+    text = value.strip()
+    if text == "":
+        return None
+    try:
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            return int(text)
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _read_csv_preview_rows(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        columns = list(reader.fieldnames or [])
+        rows = [
+            {str(key): _coerce_preview_cell(value) for key, value in row.items()}
+            for row in reader
+        ]
+    return columns, rows
+
+
+def _column_stats(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> dict[str, Any]:
+    stats: dict[str, Any] = {}
+    for column in columns:
+        values: list[float] = []
+        for row in rows:
+            value = row.get(column)
+            if isinstance(value, (int, float)) and np.isfinite(float(value)):
+                values.append(float(value))
+        if values:
+            arr = np.asarray(values, dtype=float)
+            stats[column] = {
+                "min": float(np.min(arr)),
+                "median": float(np.median(arr)),
+                "max": float(np.max(arr)),
+            }
+    return stats
+
+
+def _write_frame_truth_preview(
+    *,
+    trace_csv_path: Path | None,
+    preview_path: Path,
+    head_rows: int = 5,
+    tail_rows: int = 5,
+) -> dict[str, Any] | None:
+    """Write a compact frame-truth preview derived from a generated trace CSV."""
+
+    if trace_csv_path is None or not trace_csv_path.exists():
+        return None
+    columns, rows = _read_csv_preview_rows(trace_csv_path)
+    selected_columns = [
+        column
+        for column in (
+            "frame_index",
+            "time_s",
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+            "optics.plate_scale_as_per_pix",
+        )
+        if column in columns
+    ]
+    if not selected_columns:
+        selected_columns = columns[: min(len(columns), 8)]
+
+    def _select(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {column: row.get(column) for column in selected_columns}
+
+    payload = {
+        "schema_version": "frame_truth_preview.v1",
+        "source_csv_path": str(trace_csv_path.resolve()),
+        "selected_columns": selected_columns,
+        "row_count": int(len(rows)),
+        "first_rows": [_select(row) for row in rows[:head_rows]],
+        "last_rows": [_select(row) for row in rows[-tail_rows:]],
+        "column_stats": _column_stats(rows, selected_columns),
+    }
+    _write_json(preview_path, payload)
+    return payload
+
+
+def _effect_summary(effects: Any) -> list[dict[str, Any]]:
+    if not isinstance(effects, list):
+        return []
+    return [dict(effect) for effect in effects if isinstance(effect, dict)]
+
+
+def _trace_key_summary(trace_plan: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    entry = trace_plan.get(key)
+    if not isinstance(entry, Mapping):
+        return None
+    effects = _effect_summary(entry.get("effects"))
+    summary = {
+        "base": _scalar_or_none(entry.get("base")),
+        "effect_kinds": [str(effect.get("kind")) for effect in effects],
+        "effects": effects,
+        "iid_jitter_sigma": None,
+        "random_walk_sigma_step": None,
+    }
+    for effect in effects:
+        if effect.get("kind") == "iid_jitter":
+            summary["iid_jitter_sigma"] = _scalar_or_none(effect.get("sigma"))
+        if effect.get("kind") == "random_walk":
+            summary["random_walk_sigma_step"] = _scalar_or_none(effect.get("sigma_step"))
+    return summary
+
+
+def _build_trace_truth_summary(
+    *,
+    trace_template_path: Path,
+    trace_template_source: str,
+    trace_config_path: Path,
+    trace_cfg: Mapping[str, Any],
+    generated_trace_csv_path: Path | None,
+    n_frames_requested: int | None,
+    dt_s_requested: float | None,
+    exposure_time_s_requested: float | None,
+    preview: Mapping[str, Any] | None,
+    applied_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    experiment_cfg = trace_cfg.get("experiment", {})
+    trace_block = experiment_cfg.get("trace", {}) if isinstance(experiment_cfg, Mapping) else {}
+    trace_plan = trace_block.get("plan", {}) if isinstance(trace_block, Mapping) else {}
+    system_source = trace_cfg.get("system", {}).get("source", {}) if isinstance(trace_cfg.get("system"), Mapping) else {}
+    n_frames = n_frames_requested
+    if n_frames is None and isinstance(trace_block, Mapping):
+        value = trace_block.get("n_frames")
+        n_frames = None if value is None else int(value)
+    dt_s = dt_s_requested
+    if dt_s is None and isinstance(trace_block, Mapping):
+        value = trace_block.get("dt_s")
+        dt_s = None if value is None else float(value)
+    exposure_time_s = exposure_time_s_requested
+    if exposure_time_s is None and isinstance(system_source, Mapping):
+        exposure_time_s = _scalar_or_none(system_source.get("exposure_time_s"))
+    key_summaries = {
+        "x": _trace_key_summary(trace_plan, "source.x_position_as")
+        if isinstance(trace_plan, Mapping)
+        else None,
+        "y": _trace_key_summary(trace_plan, "source.y_position_as")
+        if isinstance(trace_plan, Mapping)
+        else None,
+        "position_angle": _trace_key_summary(trace_plan, "source.position_angle_deg")
+        if isinstance(trace_plan, Mapping)
+        else None,
+    }
+    column_stats = {} if preview is None else dict(preview.get("column_stats", {}))
+    first_rows = [] if preview is None else list(preview.get("first_rows", []))
+    last_rows = [] if preview is None else list(preview.get("last_rows", []))
+    return {
+        "trace_template_path": str(trace_template_path.resolve()),
+        "trace_template_source": str(trace_template_source),
+        "template_description": (
+            str(experiment_cfg.get("notes"))
+            if isinstance(experiment_cfg, Mapping)
+            and experiment_cfg.get("notes") is not None
+            else None
+        ),
+        "registration_iid_template_used": bool(
+            trace_template_path.resolve() == DEFAULT_SCHUR_TRACE_TEMPLATE.resolve()
+        ),
+        "trace_config_path": str(trace_config_path.resolve()),
+        "generated_trace_csv_path": None
+        if generated_trace_csv_path is None
+        else str(generated_trace_csv_path.resolve()),
+        "n_frames": n_frames,
+        "dt_s": dt_s,
+        "exposure_time_s": exposure_time_s,
+        "seed": experiment_cfg.get("seed") if isinstance(experiment_cfg, Mapping) else None,
+        "truth_model_by_key": key_summaries,
+        "nominal_or_base_values": {
+            "source.x_position_as": None
+            if key_summaries["x"] is None
+            else key_summaries["x"]["base"],
+            "source.y_position_as": None
+            if key_summaries["y"] is None
+            else key_summaries["y"]["base"],
+            "source.position_angle_deg": None
+            if key_summaries["position_angle"] is None
+            else key_summaries["position_angle"]["base"],
+        },
+        "jitter_amplitudes": {
+            "source.x_position_as": None
+            if key_summaries["x"] is None
+            else (
+                key_summaries["x"]["iid_jitter_sigma"]
+                if key_summaries["x"]["iid_jitter_sigma"] is not None
+                else key_summaries["x"]["random_walk_sigma_step"]
+            ),
+            "source.y_position_as": None
+            if key_summaries["y"] is None
+            else (
+                key_summaries["y"]["iid_jitter_sigma"]
+                if key_summaries["y"]["iid_jitter_sigma"] is not None
+                else key_summaries["y"]["random_walk_sigma_step"]
+            ),
+            "source.position_angle_deg": None
+            if key_summaries["position_angle"] is None
+            else (
+                key_summaries["position_angle"]["iid_jitter_sigma"]
+                if key_summaries["position_angle"]["iid_jitter_sigma"] is not None
+                else key_summaries["position_angle"]["random_walk_sigma_step"]
+            ),
+        },
+        "first_generated_frame_values": first_rows[0] if first_rows else None,
+        "last_generated_frame_values": last_rows[-1] if last_rows else None,
+        "generated_column_stats": column_stats,
+        "cli_overrides_applied": dict(applied_overrides),
+    }
+
+
+def _build_inference_init_summary(
+    *,
+    inference_cfg: Mapping[str, Any],
+    n_frames: int | None,
+    applied_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    inference_block = inference_cfg.get("inference", inference_cfg)
+    active_cfg = inference_block.get("active", {}) if isinstance(inference_block, Mapping) else {}
+    init_cfg = inference_block.get("init", {}) if isinstance(inference_block, Mapping) else {}
+    frame_cfg = init_cfg.get("frame", {}) if isinstance(init_cfg, Mapping) else {}
+    shared_cfg = init_cfg.get("shared", {}) if isinstance(init_cfg, Mapping) else {}
+    frame_keys = [str(key) for key in active_cfg.get("frame_keys", [])]
+    shared_keys = [str(key) for key in active_cfg.get("shared_keys", [])]
+    frame_values = dict(frame_cfg.get("values", {})) if isinstance(frame_cfg, Mapping) else {}
+    shared_values = dict(shared_cfg) if isinstance(shared_cfg, Mapping) else {}
+    first_frame_values = {
+        key: _scalar_or_none(frame_values.get(key))
+        for key in (
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        )
+        if key in frame_keys
+    }
+    return {
+        "active_frame_keys": frame_keys,
+        "active_shared_keys": shared_keys,
+        "frame_init_mode": frame_cfg.get("mode") if isinstance(frame_cfg, Mapping) else None,
+        "shared_init_mode": "explicit_values" if shared_values else "empty",
+        "configured_frame_init_values": frame_values,
+        "configured_shared_init_values": shared_values,
+        "init_value_sources": {
+            key: (
+                "cli_override"
+                if key in applied_overrides
+                else str(frame_cfg.get("mode", "template"))
+            )
+            for key in frame_keys
+        },
+        "packed_theta_size": (
+            None
+            if n_frames is None
+            else int(n_frames) * len(frame_keys) + len(shared_keys)
+        ),
+        "first_frame_initial_values": first_frame_values,
+        "cli_overrides_applied": dict(applied_overrides),
+    }
+
+
+def _extract_reference_inference_plan(inference_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract the optimizer and preconditioning settings for phi_ref=recovered."""
+
+    optimizer_cfg = inference_cfg.get("optimizer", {})
+    preconditioning_cfg = optimizer_cfg.get("preconditioning", {})
+    return {
+        "optimizer_kind": str(optimizer_cfg.get("kind", "unknown")),
+        "base_lr": optimizer_cfg.get("base_lr"),
+        "n_iter": optimizer_cfg.get("n_iter"),
+        "preconditioning_enabled": bool(preconditioning_cfg.get("enabled", False)),
+        "preconditioning_method": str(preconditioning_cfg.get("method", "auto")),
+        "preconditioning_reference": str(
+            preconditioning_cfg.get("reference", "truth_when_available")
+        ),
+    }
+
+
+def _summarize_local_surrogate_validation(csv_path: Path) -> dict[str, Any]:
+    """Summarize the fixed-phi local surrogate validation CSV for audit review."""
+
+    if not csv_path.exists():
+        return {
+            "path": str(csv_path.resolve()),
+            "exists": False,
+            "labels_validated": [],
+            "perturbation_count": 0,
+            "warnings": ["local_surrogate_validation.csv was not found"],
+            "interpretation_note": (
+                "Schur-reduced predictions are nuisance-adjusted; fixed-phi actual "
+                "deltas are not."
+            ),
+        }
+    _columns, rows = _read_csv_preview_rows(csv_path)
+    labels = sorted({str(row.get("label")) for row in rows if row.get("label") is not None})
+    ratios: list[float] = []
+    sign_matches: list[bool] = []
+    warnings: list[str] = []
+    for row in rows:
+        predicted = row.get("predicted_delta")
+        actual = row.get("actual_delta_fixed_phi")
+        if not isinstance(predicted, (int, float)) or not isinstance(actual, (int, float)):
+            continue
+        if float(predicted) == 0.0 or float(actual) == 0.0:
+            continue
+        sign_matches.append(bool(np.sign(float(predicted)) == np.sign(float(actual))))
+        ratios.append(float(actual) / float(predicted))
+    if sign_matches and not all(sign_matches):
+        warnings.append("At least one fixed-phi actual delta has a different sign.")
+    if not rows:
+        warnings.append("Validation CSV is empty.")
+    ratio_stats = None
+    if ratios:
+        arr = np.asarray(ratios, dtype=float)
+        ratio_stats = {
+            "min": float(np.min(arr)),
+            "median": float(np.median(arr)),
+            "max": float(np.max(arr)),
+        }
+    return {
+        "path": str(csv_path.resolve()),
+        "exists": True,
+        "labels_validated": labels,
+        "perturbation_count": int(len(rows)),
+        "matching_sign_count": int(sum(1 for value in sign_matches if value)),
+        "sign_comparison_count": int(len(sign_matches)),
+        "all_nonzero_deltas_match_sign": bool(sign_matches and all(sign_matches)),
+        "actual_fixed_phi_to_schur_predicted_ratio_stats": ratio_stats,
+        "warnings": warnings,
+        "interpretation_note": (
+            "Schur-reduced predictions are nuisance-adjusted; fixed-phi actual "
+            "deltas are fixed-phi objective slices, so imperfect agreement is expected."
+        ),
+    }
+
+
+def _build_schur_summary_audit(
+    *,
+    plan: Mapping[str, Any],
+    plan_path: Path,
+    summary_payload: Mapping[str, Any] | None,
+    recovered_reference_metadata: Mapping[str, Any],
+    frame_truth_preview: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    planned_artifacts = dict(plan.get("planned_artifacts", {}))
+    summary_artifacts = dict(summary_payload.get("artifacts", {})) if summary_payload else {}
+    surrogate_path = Path(
+        summary_artifacts.get("local_surrogate_validation_csv")
+        or planned_artifacts.get("local_surrogate_validation_csv", "")
+    )
+    local_validation = (
+        _summarize_local_surrogate_validation(surrogate_path)
+        if str(surrogate_path)
+        else {"exists": False, "warnings": ["local surrogate path was not planned"]}
+    )
+    reference_ran = bool(plan.get("reference_inference_will_run")) and bool(
+        recovered_reference_metadata
+    )
+    return {
+        "schema_version": "schur_summary_audit.v1",
+        "created_at": now_iso_local_ms(),
+        "case_name": plan.get("case_name"),
+        "mode": MODE_SCHUR_SUMMARY,
+        "selected_stages": list(plan.get("selected_stages", [])),
+        "plan_json": str(plan_path.resolve()),
+        "actual_artifacts": {
+            "plan_json": str(plan_path.resolve()),
+            "audit_json": planned_artifacts.get("schur_summary_audit_json"),
+            "frame_truth_preview_json": planned_artifacts.get("frame_truth_preview_json"),
+            **summary_artifacts,
+        },
+        "trace_truth": plan.get("trace_truth"),
+        "trace_template": {
+            "trace_template_path": plan.get("trace_template_path"),
+            "trace_template_source": plan.get("trace_template_source"),
+            "registration_iid_trace_template_used": plan.get(
+                "registration_iid_trace_template_used"
+            ),
+            "case_local_trace_template_copy": plan.get("trace_config_path"),
+            "generated_case_trace_config_path": plan.get(
+                "generated_case_trace_config_path"
+            ),
+        },
+        "frame_truth_preview": {
+            "path": planned_artifacts.get("frame_truth_preview_json"),
+            "written": frame_truth_preview is not None,
+            "row_count": None if frame_truth_preview is None else frame_truth_preview.get("row_count"),
+        },
+        "render_summary": {
+            "cube_path": plan.get("cube_path"),
+            "render_config_path": plan.get("render_config_path"),
+            "generated_case_render_config_path": plan.get(
+                "generated_case_render_config_path"
+            ),
+            "render_noise_mode": plan.get("render_noise_mode"),
+        },
+        "inference_init": plan.get("inference_init"),
+        "summary_export_inference_config_path": plan.get(
+            "summary_export_inference_config_path"
+        ),
+        "reference_inference": {
+            "status": "ran" if reference_ran else "not_run",
+            "will_run": bool(plan.get("reference_inference_will_run")),
+            "not_run_reason": None
+            if reference_ran
+            else plan.get("reference_inference_not_run_reason"),
+            "config_if_run": plan.get("reference_inference_config_if_run"),
+            "output_path": plan.get("reference_inference_output_path"),
+            "recovered_reference_source": (
+                None
+                if not recovered_reference_metadata
+                else recovered_reference_metadata.get("recovered_trace_csv")
+                or recovered_reference_metadata.get("manifest_json")
+                or recovered_reference_metadata.get("output_dir")
+            ),
+        },
+        "preconditioning": plan.get("preconditioning"),
+        "phi_reference": {
+            "phi_ref_mode": plan.get("phi_ref_mode"),
+            "phi_ref_source": None
+            if summary_payload is None
+            else summary_payload.get("phi_ref_source"),
+            "n_phi": plan.get("n_phi"),
+            "phi_labels": plan.get("phi_labels"),
+        },
+        "theta_reference": {
+            "theta_ref": None if summary_payload is None else summary_payload.get("theta_ref"),
+            "theta_labels": plan.get("theta_labels"),
+        },
+        "schur_summary_diagnostics_path": summary_artifacts.get("schur_diagnostics_json")
+        or planned_artifacts.get("schur_diagnostics_json"),
+        "local_surrogate_validation": local_validation,
+        "observation_prior_recommendation": {
+            "prior_mean_source": "summary_theta_ref",
+            "reason": (
+                "Real-summary observation updates default the prior mean to the "
+                "summary theta_ref context."
+            ),
+        },
+    }
+
+
+def _build_schur_summary_plan(
+    *,
+    case_root: Path,
+    study_root: Path,
+    template_paths: Mapping[str, Path],
+    source_template_paths: Mapping[str, Path],
+    trace_template_source: str,
+    schur_config_path: Path,
+    schur_config: Mapping[str, Any],
+    render_inputs: Any,
+    case_prep_stages: Sequence[str],
+    n_frames_requested: int | None,
+    dt_s_requested: float | None,
+    exposure_time_s_requested: float | None,
+    noise_mode: str,
+    theta_keys: Sequence[str],
+    enable_zernikes: bool,
+    zernike_indices: Sequence[int],
+    schur_damping: float,
+    max_dense_dim: int,
+    phi_ref_mode: str,
+    summary_objective: str,
+    validate_surrogate: bool,
+    validation_steps: int,
+    frame_truth_preview: Mapping[str, Any] | None,
+    applied_trace_overrides: Mapping[str, Any],
+    applied_inference_init_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a review-friendly plan for the Schur-summary smoke path.
+
+    The plan intentionally uses config-level and case-layout information so
+    `--dry-run` can explain the run before any dense JAX differentiation begins.
+    """
+
+    theta_classification = validate_schur_summary_theta_keys(theta_keys)
+    theta_layout = _build_observation_theta_layout(
+        theta_keys=theta_keys,
+        enable_zernikes=enable_zernikes,
+        zernike_indices=zernike_indices,
+    )
+    experiment_cfg = schur_config.get("experiment", {})
+    inference_cfg = experiment_cfg.get("inference", {})
+    objective_cfg = inference_cfg.get("objective", {})
+    n_frames_effective = (
+        None if n_frames_requested is None else int(n_frames_requested)
+    )
+    trace_cfg = load_config_file(template_paths["trace"])
+    if n_frames_effective is None:
+        n_frames_value = _path_value_or_missing(trace_cfg, "experiment.trace.n_frames")
+        if n_frames_value[0]:
+            n_frames_effective = int(n_frames_value[1])
+    phi_labels = _estimate_phi_labels_from_inference_cfg(
+        inference_cfg=inference_cfg,
+        n_frames=n_frames_effective,
+    )
+    n_phi = len(phi_labels)
+    combined_dim = int(theta_layout.size + n_phi)
+    dense_hessian_allowed = combined_dim <= int(max_dense_dim)
+    reference_inference = _extract_reference_inference_plan(inference_cfg)
+    preconditioning_actually_used = bool(
+        phi_ref_mode == "recovered"
+        and reference_inference["preconditioning_enabled"]
+    )
+    preconditioning_not_used_reason = None
+    if not preconditioning_actually_used:
+        if phi_ref_mode != "recovered":
+            preconditioning_not_used_reason = "reference inference did not run"
+        elif not reference_inference["preconditioning_enabled"]:
+            preconditioning_not_used_reason = "preconditioning disabled in inference config"
+    planned_artifacts = {
+        "schur_summary_plan_json": str((study_root / SCHUR_SUMMARY_PLAN_FILENAME).resolve()),
+        "schur_summary_audit_json": str(
+            (study_root / SCHUR_SUMMARY_AUDIT_FILENAME).resolve()
+        ),
+        "frame_truth_preview_json": str(
+            (study_root / FRAME_TRUTH_PREVIEW_FILENAME).resolve()
+        ),
+        "subblock_summary_json": str((study_root / "subblock_summary.json").resolve()),
+        "subblock_summary_matrices_npz": str(
+            (study_root / "subblock_summary_matrices.npz").resolve()
+        ),
+        "schur_diagnostics_json": str((study_root / "schur_diagnostics.json").resolve()),
+        "combined_curvature_diagnostics_json": str(
+            (study_root / "combined_curvature_diagnostics.json").resolve()
+        ),
+        "local_surrogate_validation_csv": str(
+            (study_root / "local_surrogate_validation.csv").resolve()
+        ),
+        "local_surrogate_validation_png": str(
+            (study_root / "local_surrogate_validation.png").resolve()
+        ),
+    }
+    warnings: list[str] = []
+    if theta_classification["experimental"]:
+        warnings.append(
+            "Experimental Theta keys requested: "
+            + ", ".join(theta_classification["experimental"])
+            + ". The first smoke path is only documented for "
+            + ", ".join(DEFAULT_SCHUR_THETA_KEYS)
+            + "."
+        )
+    if not dense_hessian_allowed:
+        warnings.append(
+            f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}."
+        )
+    if (
+        phi_ref_mode == "recovered"
+        and reference_inference["optimizer_kind"] == "sgd"
+        and not reference_inference["preconditioning_enabled"]
+    ):
+        warnings.append(
+            "phi_ref=recovered will use unpreconditioned SGD for the reference "
+            "registration solve. The recovered linearization point may be weak; "
+            "prefer phi_ref=truth_when_available for the first smoke test."
+        )
+    warnings.append(
+        "The current dense image-backed exporter is a small-case validation path, "
+        "not a scalable structured Schur extraction."
+    )
+    planned_stages = list(case_prep_stages)
+    if phi_ref_mode == "recovered":
+        planned_stages.append("reference_inference")
+    planned_stages.append("schur_summary_export")
+    return {
+        "case_name": case_root.name,
+        "case_root": str(case_root.resolve()),
+        "study_root": str(study_root.resolve()),
+        "mode": MODE_SCHUR_SUMMARY,
+        "selected_stages": planned_stages,
+        "n_frames": n_frames_effective,
+        "render_noise_mode": str(noise_mode),
+        "cube_path": None if render_inputs.cube.path is None else str(render_inputs.cube.path),
+        "trace_config_path": str(template_paths["trace"].resolve()),
+        "trace_template_path": str(source_template_paths["trace"].resolve()),
+        "trace_template_source": str(trace_template_source),
+        "registration_iid_trace_template_used": bool(
+            source_template_paths["trace"].resolve()
+            == DEFAULT_SCHUR_TRACE_TEMPLATE.resolve()
+        ),
+        "generated_case_trace_config_path": str((case_root / "trace_config.json").resolve()),
+        "render_config_path": str(template_paths["render"].resolve()),
+        "generated_case_render_config_path": str((case_root / "render_config.json").resolve()),
+        "inference_config_path": str(template_paths["inference"].resolve()),
+        "summary_export_inference_config_path": str(schur_config_path.resolve()),
+        "reference_inference_output_path": (
+            None
+            if phi_ref_mode != "recovered"
+            else str((study_root / "reference_inference" / "inference").resolve())
+        ),
+        "theta_labels": list(theta_layout.labels),
+        "theta_key_support": theta_classification,
+        "phi_labels": list(phi_labels),
+        "n_theta": int(theta_layout.size),
+        "n_phi": int(n_phi),
+        "combined_dim": int(combined_dim),
+        "max_dense_dim": int(max_dense_dim),
+        "dense_hessian_allowed": bool(dense_hessian_allowed),
+        "phi_ref_mode": str(phi_ref_mode),
+        "reference_inference_will_run": bool(phi_ref_mode == "recovered"),
+        "reference_inference_status": (
+            "configured_to_run" if phi_ref_mode == "recovered" else "not_run"
+        ),
+        "reference_inference_not_run_reason": (
+            None
+            if phi_ref_mode == "recovered"
+            else f"phi_ref_mode={phi_ref_mode}"
+        ),
+        "reference_inference_config_if_run": reference_inference,
+        "reference_inference": {
+            **reference_inference,
+            "status": "configured_to_run" if phi_ref_mode == "recovered" else "not_run",
+            "reason": None
+            if phi_ref_mode == "recovered"
+            else f"phi_ref_mode={phi_ref_mode}",
+        },
+        "preconditioning": {
+            "preconditioning_configured_enabled": bool(
+                reference_inference["preconditioning_enabled"]
+            ),
+            "preconditioning_method": reference_inference["preconditioning_method"],
+            "preconditioning_reference": reference_inference["preconditioning_reference"],
+            "preconditioning_actually_used": bool(preconditioning_actually_used),
+            "preconditioning_not_used_reason": preconditioning_not_used_reason,
+        },
+        "preconditioning_configured_enabled": bool(
+            reference_inference["preconditioning_enabled"]
+        ),
+        "preconditioning_method": reference_inference["preconditioning_method"],
+        "preconditioning_reference": reference_inference["preconditioning_reference"],
+        "preconditioning_actually_used": bool(preconditioning_actually_used),
+        "preconditioning_not_used_reason": preconditioning_not_used_reason,
+        "trace_truth": _build_trace_truth_summary(
+            trace_template_path=source_template_paths["trace"],
+            trace_template_source=trace_template_source,
+            trace_config_path=template_paths["trace"],
+            trace_cfg=trace_cfg,
+            generated_trace_csv_path=render_inputs.truth_trace.path,
+            n_frames_requested=n_frames_requested,
+            dt_s_requested=dt_s_requested,
+            exposure_time_s_requested=exposure_time_s_requested,
+            preview=frame_truth_preview,
+            applied_overrides=applied_trace_overrides,
+        ),
+        "frame_truth_preview_path": planned_artifacts["frame_truth_preview_json"],
+        "inference_init": _build_inference_init_summary(
+            inference_cfg=inference_cfg,
+            n_frames=n_frames_effective,
+            applied_overrides=applied_inference_init_overrides,
+        ),
+        "observation_prior_recommendation": {
+            "prior_mean_source": "summary_theta_ref",
+            "theta_ref_source": "summary_export_inference_config",
+        },
+        "schur_damping": float(schur_damping),
+        "summary_objective_kind": str(summary_objective),
+        "variance_model": str(objective_cfg.get("noise_model", {}).get("variance_model")),
+        "validate_surrogate": bool(validate_surrogate),
+        "validation_steps": int(validation_steps),
+        "planned_artifacts": planned_artifacts,
+        "known_limitations_or_warnings": warnings,
+    }
 
 
 def _combined_curvature_diagnostics(
@@ -2458,7 +3420,18 @@ def _evaluate_schur_summary(
     recovered_theta: np.ndarray | None = None,
     recovered_reference_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Export one image-backed Schur-reduced summary from a prepared subblock."""
+    """Export one image-backed Schur-reduced summary from a prepared subblock.
+
+    The workflow here is deliberately linear:
+
+    1. resolve the image-backed inference context for one prepared cube,
+    2. build the observation-level Theta layout and packed fast ``phi`` labels,
+    3. choose a local reference point ``[Theta_ref, phi_ref]``,
+    4. differentiate the combined local objective,
+    5. partition the dense curvature into ``tt/tp/pp`` blocks,
+    6. Schur-reduce the fast block, and
+    7. persist a loader-compatible ``SubblockSummary`` plus diagnostics.
+    """
 
     context = _prepare_inference_context(config_path=config_path)
     theta_layout = _build_observation_theta_layout(
@@ -2466,11 +3439,11 @@ def _evaluate_schur_summary(
         enable_zernikes=enable_zernikes,
         zernike_indices=zernike_indices,
     )
-    theta_ref = _observation_theta_ref_from_store(
+    observation_theta_ref_values = _observation_theta_ref_from_store(
         theta_layout=theta_layout,
         base_store=context["base_store"],
     )
-    phi_ref_vector, phi_ref_source = _resolve_phi_reference_for_summary(
+    fast_phi_ref_values, phi_ref_source = _resolve_phi_reference_for_summary(
         context=context,
         phi_ref_mode=phi_ref,
         recovered_theta=recovered_theta,
@@ -2481,30 +3454,33 @@ def _evaluate_schur_summary(
         _theta_labels_for_observation_layout(theta_layout),
         phi_labels,
     )
-    combined_dim = int(theta_layout.size + phi_ref_vector.size)
-    if combined_dim > int(max_dense_dim):
-        raise ValueError(
-            f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}."
-        )
+    combined_dim = int(theta_layout.size + fast_phi_ref_values.size)
+    _validate_schur_dense_dimension(
+        combined_dim=combined_dim,
+        max_dense_dim=int(max_dense_dim),
+    )
 
     combined_loss_fn, objective_metadata = _build_combined_local_objective(
         context=context,
         theta_layout=theta_layout,
         objective_kind=summary_objective,
     )
-    reference_vector = np.concatenate((theta_ref, phi_ref_vector), axis=0)
-    gradient = np.asarray(
-        jax.grad(combined_loss_fn)(jnp.asarray(reference_vector, dtype=float)),
+    combined_reference_vector = np.concatenate(
+        (observation_theta_ref_values, fast_phi_ref_values),
+        axis=0,
+    )
+    combined_gradient = np.asarray(
+        jax.grad(combined_loss_fn)(jnp.asarray(combined_reference_vector, dtype=float)),
         dtype=float,
     )
-    curvature = np.asarray(
-        jax.hessian(combined_loss_fn)(jnp.asarray(reference_vector, dtype=float)),
+    combined_curvature = np.asarray(
+        jax.hessian(combined_loss_fn)(jnp.asarray(combined_reference_vector, dtype=float)),
         dtype=float,
     )
     blocks = partition_local_curvature(
         layout=combined_layout,
-        combined_gradient=gradient,
-        combined_curvature=curvature,
+        combined_gradient=combined_gradient,
+        combined_curvature=combined_curvature,
     )
     reduced = schur_reduce_local_quadratic(
         blocks=blocks,
@@ -2514,7 +3490,7 @@ def _evaluate_schur_summary(
     reduced_summary = SubblockSummary.from_reduced_form(
         subblock_id=f"{case_root.name}_subblock_summary",
         theta_labels=theta_layout.labels,
-        theta_ref=theta_ref,
+        theta_ref=observation_theta_ref_values,
         reduced_information=reduced.reduced_information,
         reduced_score=reduced.reduced_score,
         summary_kind="image_backed_schur",
@@ -2538,8 +3514,8 @@ def _evaluate_schur_summary(
     artifact = ImageBackedSubblockSummaryArtifact(
         summary=reduced_summary,
         layout=combined_layout,
-        theta_ref=theta_ref,
-        phi_ref=phi_ref_vector,
+        theta_ref=observation_theta_ref_values,
+        phi_ref=fast_phi_ref_values,
         reduced=reduced,
         metadata={
             "generator": "examples/scripts/run_obs_subblock_study.py",
@@ -2554,6 +3530,35 @@ def _evaluate_schur_summary(
             else str(Path(context["trace_path"]).resolve()),
             "theta_layout": theta_layout.to_dict(),
             "phi_ref_source": phi_ref_source,
+            "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
+            "prior_context": {
+                "recommended_prior_mean_source": "summary_theta_ref",
+                "theta_ref_by_label": {
+                    label: float(observation_theta_ref_values[index])
+                    for index, label in enumerate(theta_layout.labels)
+                },
+                "effective_store_values": {
+                    "source.exposure_time_s": (
+                        float(
+                            np.asarray(context["base_store"].get("source.exposure_time_s"))
+                        )
+                        if "source.exposure_time_s" in getattr(
+                            context["base_store"],
+                            "_values",
+                            {},
+                        )
+                        else None
+                    ),
+                },
+                "provenance": {
+                    "system_preset": context["system_cfg"].get("preset"),
+                    "render_config_path": str((case_root / "render_config.json").resolve())
+                    if (case_root / "render_config.json").exists()
+                    else None,
+                    "summary_export_config_path": str(config_path.resolve()),
+                    "cube_path": str(context["cube_path"]),
+                },
+            },
             "objective": objective_metadata,
             "recovered_reference": dict(recovered_reference_metadata or {}),
             "system": {
@@ -2561,8 +3566,8 @@ def _evaluate_schur_summary(
                 "resolved_config": context["system_cfg"],
             },
         },
-        combined_gradient=gradient,
-        combined_curvature=curvature,
+        combined_gradient=combined_gradient,
+        combined_curvature=combined_curvature,
     )
     artifact.write(
         summary_json_path=summary_json_path,
@@ -2579,8 +3584,8 @@ def _evaluate_schur_summary(
         validation_rows = _local_surrogate_validation_rows(
             combined_loss_fn=combined_loss_fn,
             theta_layout=theta_layout,
-            theta_ref=theta_ref,
-            phi_ref=phi_ref_vector,
+            theta_ref=observation_theta_ref_values,
+            phi_ref=fast_phi_ref_values,
             reduced_information=reduced.reduced_information,
             reduced_score=reduced.reduced_score,
             validation_steps=validation_steps,
@@ -2607,11 +3612,12 @@ def _evaluate_schur_summary(
         "loaded_summary_theta_labels": list(loaded_summary.theta_labels),
         "theta_labels": list(theta_layout.labels),
         "phi_labels": list(phi_labels),
-        "theta_ref": theta_ref.tolist(),
+        "theta_ref": observation_theta_ref_values.tolist(),
         "phi_ref_source": phi_ref_source,
+        "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
         "combined_dim": combined_dim,
         "n_theta": int(theta_layout.size),
-        "n_phi": int(phi_ref_vector.size),
+        "n_phi": int(fast_phi_ref_values.size),
         "validate_surrogate": bool(validate_surrogate),
         "validation_row_count": int(len(validation_rows)),
         "artifacts": {
@@ -2851,7 +3857,7 @@ def run_obs_subblock_study(
     mode: str,
     case_root: Path,
     case_stages: str | Sequence[str] = "trace,render,quicklook,inference",
-    trace_template: Path = DEFAULT_TRACE_TEMPLATE,
+    trace_template: Path | None = None,
     render_template: Path = DEFAULT_RENDER_TEMPLATE,
     inference_template: Path = DEFAULT_INFERENCE_TEMPLATE,
     candidate_key: str | None = None,
@@ -2868,10 +3874,20 @@ def run_obs_subblock_study(
     zernike_indices: Sequence[int] = DEFAULT_SCHUR_ZERNIKE_INDICES,
     schur_damping: float = DEFAULT_SCHUR_DAMPING,
     max_dense_dim: int = DEFAULT_SCHUR_MAX_DENSE_DIM,
-    phi_ref: str = "recovered",
+    phi_ref: str = "truth_when_available",
     summary_objective: str = "full_objective",
     validate_surrogate: bool = True,
     validation_steps: int = 5,
+    trace_x0_as: float | None = None,
+    trace_y0_as: float | None = None,
+    trace_pa0_deg: float | None = None,
+    trace_jitter_x_sigma_as: float | None = None,
+    trace_jitter_y_sigma_as: float | None = None,
+    trace_jitter_pa_sigma_deg: float | None = None,
+    trace_seed: int | None = None,
+    init_x_as: float | None = None,
+    init_y_as: float | None = None,
+    init_pa_deg: float | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run one observation sub-block screening study."""
@@ -2879,6 +3895,7 @@ def run_obs_subblock_study(
     study_mode = parse_study_mode(mode)
     candidate_address = parse_candidate_parameter_address(candidate_key)
     candidate = None if candidate_address is None else candidate_address.canonical
+    normalized_phi_ref = normalize_schur_phi_ref_mode(phi_ref)
     if study_mode in {
         MODE_FISHER_ONLY,
         MODE_PROFILE_OBJECTIVE,
@@ -2890,6 +3907,10 @@ def run_obs_subblock_study(
     if study_mode == MODE_NUISANCE_ABSORPTION and assumed_value is None:
         raise ValueError("nuisance_absorption mode requires --assumed-value.")
 
+    resolved_trace_template, trace_template_source = resolve_study_trace_template(
+        mode=study_mode,
+        trace_template=trace_template,
+    )
     case_root = case_root.resolve()
     study_root = _study_root(case_root, study_mode)
     study_root.mkdir(parents=True, exist_ok=True)
@@ -2898,14 +3919,37 @@ def run_obs_subblock_study(
     template_info = _build_study_templates(
         mode=study_mode,
         case_root=case_root,
-        trace_template=trace_template.resolve(),
+        trace_template=resolved_trace_template,
         render_template=render_template.resolve(),
         inference_template=inference_template.resolve(),
         candidate_key=candidate,
         truth_value=truth_value,
         assumed_value=assumed_value,
+        trace_truth_overrides=_non_null_float_overrides(
+            {
+                "trace_x0_as": trace_x0_as,
+                "trace_y0_as": trace_y0_as,
+                "trace_pa0_deg": trace_pa0_deg,
+            }
+        ),
+        trace_jitter_overrides=_non_null_float_overrides(
+            {
+                "trace_jitter_x_sigma_as": trace_jitter_x_sigma_as,
+                "trace_jitter_y_sigma_as": trace_jitter_y_sigma_as,
+                "trace_jitter_pa_sigma_deg": trace_jitter_pa_sigma_deg,
+            }
+        ),
+        trace_seed=trace_seed,
+        inference_init_overrides=_non_null_float_overrides(
+            {
+                "init_x_as": init_x_as,
+                "init_y_as": init_y_as,
+                "init_pa_deg": init_pa_deg,
+            }
+        ),
     )
     template_paths = dict(template_info["paths"])
+    source_template_paths = dict(template_info["source_template_paths"])
 
     summary: dict[str, Any] = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -2931,20 +3975,41 @@ def run_obs_subblock_study(
             "zernike_indices": list(parse_zernike_indices(zernike_indices)),
             "schur_damping": float(schur_damping),
             "max_dense_dim": int(max_dense_dim),
-            "phi_ref": str(phi_ref),
+            "phi_ref": normalized_phi_ref,
             "summary_objective": str(summary_objective),
             "validate_surrogate": bool(validate_surrogate),
             "validation_steps": int(validation_steps),
+            "trace_truth_cli_overrides": {
+                "trace_x0_as": trace_x0_as,
+                "trace_y0_as": trace_y0_as,
+                "trace_pa0_deg": trace_pa0_deg,
+                "trace_jitter_x_sigma_as": trace_jitter_x_sigma_as,
+                "trace_jitter_y_sigma_as": trace_jitter_y_sigma_as,
+                "trace_jitter_pa_sigma_deg": trace_jitter_pa_sigma_deg,
+                "trace_seed": trace_seed,
+            },
+            "inference_init_cli_overrides": {
+                "init_x_as": init_x_as,
+                "init_y_as": init_y_as,
+                "init_pa_deg": init_pa_deg,
+            },
         },
         "templates": {
             "trace": str(template_paths["trace"]),
             "render": str(template_paths["render"]),
             "inference": str(template_paths["inference"]),
         },
+        "source_templates": {
+            "trace": str(source_template_paths["trace"]),
+            "trace_source": trace_template_source,
+            "render": str(source_template_paths["render"]),
+            "inference": str(source_template_paths["inference"]),
+        },
         "resolved_template_values": {
             "truth_value": template_info["resolved_truth_value"],
             "assumed_value": template_info["resolved_assumed_value"],
         },
+        "cli_overrides_applied": template_info["applied_overrides"],
     }
 
     if study_mode == MODE_FULL_CASE:
@@ -3057,6 +4122,7 @@ def run_obs_subblock_study(
         return summary
 
     if study_mode == MODE_SCHUR_SUMMARY:
+        validate_schur_summary_theta_keys(theta_keys)
         summary_run_root = study_root / "summary_export"
         schur_config = _build_study_inference_config(
             template_path=template_paths["inference"],
@@ -3065,7 +4131,7 @@ def run_obs_subblock_study(
             exposure_time_s=exposure_time_s,
             candidate_key=None,
             assumed_value=None,
-            force_truth_comparison=(phi_ref == "truth"),
+            force_truth_comparison=(normalized_phi_ref == "truth_when_available"),
             disable_plots=True,
             use_render_variance=bool(use_render_variance),
         )
@@ -3073,30 +4139,64 @@ def run_obs_subblock_study(
         _write_json(schur_config_path, schur_config)
         summary["schur_config_path"] = str(schur_config_path.resolve())
 
-        planned_artifacts = {
-            "subblock_summary_json": str((study_root / "subblock_summary.json").resolve()),
-            "subblock_summary_matrices_npz": str(
-                (study_root / "subblock_summary_matrices.npz").resolve()
-            ),
-            "schur_diagnostics_json": str((study_root / "schur_diagnostics.json").resolve()),
-            "combined_curvature_diagnostics_json": str(
-                (study_root / "combined_curvature_diagnostics.json").resolve()
-            ),
-            "local_surrogate_validation_csv": str(
-                (study_root / "local_surrogate_validation.csv").resolve()
-            ),
-            "local_surrogate_validation_png": str(
-                (study_root / "local_surrogate_validation.png").resolve()
-            ),
-        }
-        summary["planned_artifacts"] = planned_artifacts
+        frame_truth_preview = _write_frame_truth_preview(
+            trace_csv_path=render_inputs.truth_trace.path,
+            preview_path=study_root / FRAME_TRUTH_PREVIEW_FILENAME,
+        )
+        schur_plan = _build_schur_summary_plan(
+            case_root=case_root,
+            study_root=study_root,
+            template_paths=template_paths,
+            source_template_paths=source_template_paths,
+            trace_template_source=trace_template_source,
+            schur_config_path=schur_config_path,
+            schur_config=schur_config,
+            render_inputs=render_inputs,
+            case_prep_stages=summary["case_prep_stages_executed"],
+            n_frames_requested=n_frames,
+            dt_s_requested=dt_s,
+            exposure_time_s_requested=exposure_time_s,
+            noise_mode=noise_mode,
+            theta_keys=parse_theta_keys(theta_keys),
+            enable_zernikes=bool(enable_zernikes),
+            zernike_indices=parse_zernike_indices(zernike_indices),
+            schur_damping=float(schur_damping),
+            max_dense_dim=int(max_dense_dim),
+            phi_ref_mode=normalized_phi_ref,
+            summary_objective=str(summary_objective),
+            validate_surrogate=bool(validate_surrogate),
+            validation_steps=int(validation_steps),
+            frame_truth_preview=frame_truth_preview,
+            applied_trace_overrides=template_info["applied_overrides"]["trace"],
+            applied_inference_init_overrides=template_info["applied_overrides"][
+                "inference_init"
+            ],
+        )
+        schur_plan_path = study_root / SCHUR_SUMMARY_PLAN_FILENAME
+        _write_json(schur_plan_path, schur_plan)
+        summary["schur_summary_plan_path"] = str(schur_plan_path.resolve())
+        summary["schur_summary_plan"] = schur_plan
+        summary["planned_artifacts"] = dict(schur_plan["planned_artifacts"])
+        _study_log(
+            "schur_summary.plan",
+            case_name=schur_plan["case_name"],
+            phi_ref=schur_plan["phi_ref_mode"],
+            n_theta=schur_plan["n_theta"],
+            n_phi=schur_plan["n_phi"],
+            combined_dim=schur_plan["combined_dim"],
+            max_dense_dim=schur_plan["max_dense_dim"],
+            dense_hessian_allowed=schur_plan["dense_hessian_allowed"],
+            plan_path=schur_plan_path.resolve(),
+        )
+        for warning in schur_plan["known_limitations_or_warnings"]:
+            _study_log("schur_summary.warning", detail=warning)
         if dry_run:
             _write_json(summary_path, summary)
             return summary
 
         recovered_theta = None
         recovered_reference_metadata: dict[str, Any] = {}
-        if phi_ref == "recovered":
+        if normalized_phi_ref == "recovered":
             recovered_run_root = study_root / "reference_inference"
             recovered_result = _default_inference_runner(
                 schur_config_path,
@@ -3121,7 +4221,7 @@ def run_obs_subblock_study(
             zernike_indices=parse_zernike_indices(zernike_indices),
             schur_damping=float(schur_damping),
             max_dense_dim=int(max_dense_dim),
-            phi_ref=str(phi_ref),
+            phi_ref=normalized_phi_ref,
             summary_objective=str(summary_objective),
             validate_surrogate=bool(validate_surrogate),
             validation_steps=int(validation_steps),
@@ -3129,6 +4229,21 @@ def run_obs_subblock_study(
             recovered_reference_metadata=recovered_reference_metadata,
         )
         summary["schur_summary"] = schur_summary
+        frame_truth_preview = _write_frame_truth_preview(
+            trace_csv_path=render_inputs.truth_trace.path,
+            preview_path=study_root / FRAME_TRUTH_PREVIEW_FILENAME,
+        )
+        audit = _build_schur_summary_audit(
+            plan=schur_plan,
+            plan_path=schur_plan_path,
+            summary_payload=schur_summary,
+            recovered_reference_metadata=recovered_reference_metadata,
+            frame_truth_preview=frame_truth_preview,
+        )
+        audit_path = study_root / SCHUR_SUMMARY_AUDIT_FILENAME
+        _write_json(audit_path, audit)
+        summary["schur_summary_audit_path"] = str(audit_path.resolve())
+        summary["schur_summary_audit"] = audit
         _write_json(summary_path, summary)
         return summary
 
@@ -3184,8 +4299,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trace-template",
         type=Path,
-        default=DEFAULT_TRACE_TEMPLATE,
-        help="Trace template YAML/JSON path.",
+        default=None,
+        help=(
+            "Trace template YAML/JSON path. Defaults to the registration-iid "
+            "template for schur_summary mode and the general trace template for "
+            "other modes."
+        ),
     )
     parser.add_argument(
         "--render-template",
@@ -3253,8 +4372,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_SCHUR_THETA_KEYS),
         help=(
             "Comma-separated observation-level Theta keys for schur_summary mode. "
-            "Defaults to source.separation_as, source.log_flux_total, "
-            "source.contrast, optics.plate_scale_as_per_pix."
+            "Defaults to the four-scalar smoke-test set: "
+            "source.separation_as,source.log_flux_total,"
+            "source.contrast,optics.plate_scale_as_per_pix."
         ),
     )
     parser.add_argument(
@@ -3282,9 +4402,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--phi-ref",
-        choices=("recovered", "truth", "init"),
-        default="recovered",
-        help="Reference fast-state source for schur_summary mode.",
+        choices=("recovered", "truth_when_available", "truth", "init"),
+        default="truth_when_available",
+        help=(
+            "Reference fast-state source for schur_summary mode. "
+            "Use truth_when_available for the first smoke test."
+        ),
     )
     parser.add_argument(
         "--summary-objective",
@@ -3303,6 +4426,66 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Number of perturbation points per validated Theta label.",
+    )
+    parser.add_argument(
+        "--trace-x0-as",
+        type=float,
+        default=None,
+        help="Override experiment.trace.plan.source.x_position_as.base.",
+    )
+    parser.add_argument(
+        "--trace-y0-as",
+        type=float,
+        default=None,
+        help="Override experiment.trace.plan.source.y_position_as.base.",
+    )
+    parser.add_argument(
+        "--trace-pa0-deg",
+        type=float,
+        default=None,
+        help="Override experiment.trace.plan.source.position_angle_deg.base.",
+    )
+    parser.add_argument(
+        "--trace-jitter-x-sigma-as",
+        type=float,
+        default=None,
+        help="Override X iid_jitter.sigma or random_walk.sigma_step in the trace plan.",
+    )
+    parser.add_argument(
+        "--trace-jitter-y-sigma-as",
+        type=float,
+        default=None,
+        help="Override Y iid_jitter.sigma or random_walk.sigma_step in the trace plan.",
+    )
+    parser.add_argument(
+        "--trace-jitter-pa-sigma-deg",
+        type=float,
+        default=None,
+        help="Override PA iid_jitter.sigma or random_walk.sigma_step in the trace plan.",
+    )
+    parser.add_argument(
+        "--trace-seed",
+        type=int,
+        default=None,
+        help="Override experiment.seed in the copied trace template.",
+    )
+    parser.add_argument(
+        "--init-x-as",
+        type=float,
+        default=None,
+        help="Override experiment.inference.init.frame.values.source.x_position_as.",
+    )
+    parser.add_argument(
+        "--init-y-as",
+        type=float,
+        default=None,
+        help="Override experiment.inference.init.frame.values.source.y_position_as.",
+    )
+    parser.add_argument(
+        "--init-pa-deg",
+        type=float,
+        default=None,
+        help="Override experiment.inference.init.frame.values.source.position_angle_deg.",
     )
     parser.add_argument(
         "--dry-run",
@@ -3346,6 +4529,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         summary_objective=str(args.summary_objective),
         validate_surrogate=bool(args.validate_surrogate),
         validation_steps=int(args.validation_steps),
+        trace_x0_as=args.trace_x0_as,
+        trace_y0_as=args.trace_y0_as,
+        trace_pa0_deg=args.trace_pa0_deg,
+        trace_jitter_x_sigma_as=args.trace_jitter_x_sigma_as,
+        trace_jitter_y_sigma_as=args.trace_jitter_y_sigma_as,
+        trace_jitter_pa_sigma_deg=args.trace_jitter_pa_sigma_deg,
+        trace_seed=args.trace_seed,
+        init_x_as=args.init_x_as,
+        init_y_as=args.init_y_as,
+        init_pa_deg=args.init_pa_deg,
         dry_run=bool(args.dry_run),
     )
     print(f"Study mode: {summary['mode']}")
