@@ -180,6 +180,27 @@ plate-scale constant offset. New Schur summary validation runs should use the
 registration-iid template so the X/Y/PA truth model is explicit and aligned
 with the intended iid registration-jitter demonstration.
 
+## Where to change defaults
+
+Use the smallest control surface that matches the change:
+
+- Trace truth defaults live in
+  `examples/recipes/observation_subblock_trace_template/subblock_trace_registration_iid_prescription.yaml`.
+  Use narrow `--trace-*` flags for one-off smoke-test nominal and jitter values.
+- Inference initialization defaults live in
+  `examples/recipes/observation_subblock_inference_template/subblock_inference_prescription.yaml`.
+  Use `--init-x-as`, `--init-y-as`, and `--init-pa-deg` for quick registration
+  initialization checks.
+- Recovered-reference optimizer and preconditioning defaults are template-owned
+  unless you pass `--reference-preconditioning-enabled`,
+  `--reference-preconditioning-disabled`, or
+  `--reference-preconditioning-reference`.
+- Detailed recovered-reference diagnostics and plots are template-owned unless
+  you pass `--reference-diagnostics-profile none|basic|review|full`.
+- Generated case-local configs are the durable run record. The plan and audit
+  summarize the effective values and sources, including whether a value came
+  from the inference template, a generated config patch, or a CLI override.
+
 ## Step 3: Run the Schur summary export
 
 Run the same small case without `--dry-run`:

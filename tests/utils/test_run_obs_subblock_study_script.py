@@ -307,6 +307,19 @@ def test_trace_template_resolution_uses_schur_specific_default(tmp_path: Path):
     assert explicit_fisher_source == "cli_override"
 
 
+def test_schur_workflow_policy_defaults_are_discoverable():
+    module = _load_script_module()
+
+    defaults = module.SCHUR_WORKFLOW_DEFAULTS
+    reference_policy = module.SCHUR_REFERENCE_INFERENCE_POLICY
+
+    assert defaults.trace_template == module.DEFAULT_SCHUR_TRACE_TEMPLATE
+    assert defaults.theta_keys == module.DEFAULT_SCHUR_THETA_KEYS
+    assert defaults.phi_ref == "truth_when_available"
+    assert defaults.max_dense_dim == module.DEFAULT_SCHUR_MAX_DENSE_DIM
+    assert reference_policy.preconditioning_enabled == module.TEMPLATE_OWNED_DEFAULT
+
+
 def test_registration_iid_template_supports_trace_jitter_overrides():
     module = _load_script_module()
     cfg = module.load_config_file(module.DEFAULT_SCHUR_TRACE_TEMPLATE)
@@ -1096,6 +1109,12 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert plan["reference_inference_will_run"] is False
     assert plan["preconditioning_actually_used"] is False
     assert plan["preconditioning_not_used_reason"] == "reference inference did not run"
+    assert plan["summary_export_inference_config_path"].endswith("inference_config.json")
+    assert plan["reference_inference_config_if_run"]["sources"][
+        "preconditioning_enabled"
+    ] == "inference_template"
+    assert plan["preconditioning"]["sources"]["preconditioning_enabled"] == "inference_template"
+    assert "diagnostics" in plan["reference_inference_config_if_run"]
     assert plan["planned_artifacts"]["frame_truth_preview_json"].endswith(
         "frame_truth_preview.json"
     )
@@ -1146,6 +1165,13 @@ def test_build_schur_summary_plan_records_recovered_unpreconditioned_warning(tmp
         trace_template_source="cli_override",
         schur_config_path=schur_config_path,
         schur_config=schur_cfg,
+        schur_config_provenance=module._build_schur_config_provenance(
+            schur_config=schur_cfg,
+            reference_preconditioning_enabled=None,
+            reference_preconditioning_reference=None,
+            reference_diagnostics_profile=None,
+            force_truth_comparison=False,
+        ),
         render_inputs=render_inputs,
         case_prep_stages=[],
         n_frames_requested=3,
@@ -1174,6 +1200,76 @@ def test_build_schur_summary_plan_records_recovered_unpreconditioned_warning(tmp
         "phi_ref=recovered will use unpreconditioned SGD" in warning
         for warning in plan["known_limitations_or_warnings"]
     )
+
+
+def test_schur_summary_recovered_plan_reports_preconditioning_enabled_cli_source(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_recovered_precond"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="recovered",
+        reference_preconditioning_enabled=True,
+        reference_preconditioning_reference="initial",
+        reference_diagnostics_profile="review",
+        dry_run=True,
+    )
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    reference = plan["reference_inference_config_if_run"]
+    assert plan["reference_inference_will_run"] is True
+    assert reference["preconditioning_enabled"] is True
+    assert plan["preconditioning_actually_used"] is True
+    assert plan["preconditioning_not_used_reason"] is None
+    assert reference["sources"]["preconditioning_enabled"] == "cli_override"
+    assert reference["sources"]["preconditioning_reference"] == "cli_override"
+    assert reference["preconditioning_reference"] == "initial"
+    assert reference["diagnostics"]["settings"]["first_step_report"] is True
+    assert reference["diagnostics"]["sources"]["first_step_report"] == "cli_override"
+
+    generated_cfg = _read_json(Path(summary["schur_config_path"]))
+    preconditioning = generated_cfg["experiment"]["inference"]["optimizer"][
+        "preconditioning"
+    ]
+    assert preconditioning["enabled"] is True
+    assert preconditioning["reference"] == "initial"
+
+
+def test_schur_summary_recovered_plan_reports_preconditioning_disabled_template_source(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_recovered_no_precond"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="recovered",
+        dry_run=True,
+    )
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    reference = plan["reference_inference_config_if_run"]
+    assert plan["reference_inference_will_run"] is True
+    assert reference["preconditioning_enabled"] is False
+    assert plan["preconditioning_actually_used"] is False
+    assert plan["preconditioning_not_used_reason"] == (
+        "preconditioning disabled in inference config"
+    )
+    assert reference["sources"]["preconditioning_enabled"] == "inference_template"
 
 
 def test_schur_summary_dry_run_trace_and_init_overrides_are_recorded(tmp_path: Path):
@@ -1303,8 +1399,17 @@ def test_schur_audit_links_plan_summary_diagnostics_and_validation(tmp_path: Pat
         "selected_stages": ["schur_summary_export"],
         "reference_inference_will_run": False,
         "reference_inference_not_run_reason": "phi_ref_mode=truth_when_available",
-        "reference_inference_config_if_run": {"optimizer_kind": "sgd"},
+        "final_reference_inference_config_path": str(
+            (study_root / "summary_export" / "inference_config.json").resolve()
+        ),
         "preconditioning": {"preconditioning_actually_used": False},
+        "reference_inference_config_if_run": {
+            "optimizer_kind": "sgd",
+            "diagnostics": {
+                "settings": {"plots": True},
+                "sources": {"plots": "inference_template"},
+            },
+        },
         "phi_ref_mode": "truth_when_available",
         "n_phi": 3,
         "phi_labels": ["phi.frame[0].source.x_position_as"],
@@ -1348,6 +1453,10 @@ def test_schur_audit_links_plan_summary_diagnostics_and_validation(tmp_path: Pat
     assert audit["actual_artifacts"]["subblock_summary_json"].endswith("subblock_summary.json")
     assert audit["trace_template"]["trace_template_source"] == "schur_summary_default"
     assert audit["trace_template"]["registration_iid_trace_template_used"] is True
+    assert audit["reference_inference"]["final_generated_config_path"].endswith(
+        "inference_config.json"
+    )
+    assert audit["reference_diagnostics"]["settings"]["plots"] is True
     assert audit["schur_summary_diagnostics_path"].endswith("schur_diagnostics.json")
     assert audit["local_surrogate_validation"]["labels_validated"] == ["source.separation_as"]
     assert audit["observation_prior_recommendation"]["prior_mean_source"] == "summary_theta_ref"

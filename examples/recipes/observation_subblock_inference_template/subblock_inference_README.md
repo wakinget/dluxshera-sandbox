@@ -191,6 +191,20 @@ truth setup, optimizer initialization, `phi_ref`, preconditioning status, and
 planned output paths. When a frame-truth CSV already exists, it also links
 `study/schur_summary/frame_truth_preview.json`.
 
+Where to change defaults:
+
+- Trace truth defaults live in the registration-iid trace template or narrow
+  `--trace-*` CLI overrides.
+- Registration initialization defaults live in this inference template or
+  narrow `--init-*` CLI overrides.
+- Recovered-reference optimizer and preconditioning defaults live in this
+  inference template unless a `--reference-preconditioning-*` CLI override is
+  passed.
+- Detailed diagnostics and plot settings live in this inference template unless
+  `--reference-diagnostics-profile` is selected.
+- Generated case-local configs are the durable record; `schur_summary_plan.json`
+  and `schur_summary_audit.json` summarize effective values and sources.
+
 Then run the actual smoke path:
 
 ```bash

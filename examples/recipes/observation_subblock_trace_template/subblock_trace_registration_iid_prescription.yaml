@@ -18,7 +18,6 @@ experiment:
       - source.x_position_as
       - source.y_position_as
       - source.position_angle_deg
-#      - optics.primary.zernike_coeffs_nm[0]
     plan: # Describe the desired motion for each varying_key
       source.x_position_as:
         base: 0.0

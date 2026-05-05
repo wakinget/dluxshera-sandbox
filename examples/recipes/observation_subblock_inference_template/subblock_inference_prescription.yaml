@@ -159,7 +159,7 @@ experiment:
       # frame_reduce applies within each frame's pixel-domain Gaussian image NLL.
       # subblock_reduce aggregates the resulting per-frame terms across the block.
       frame_reduce: sum
-      subblock_reduce: sum
+      subblock_reduce: mean
 
       noise_model:
         # This should describe how the variance used by the Gaussian image NLL is built.
@@ -190,8 +190,8 @@ experiment:
 
     optimizer:
       kind: sgd
-      base_lr: 0.5
-      n_iter: 40
+      base_lr: 0.9
+      n_iter: 100
       # kwargs:
       #   momentum: 0.0
       #   nesterov: false
@@ -200,16 +200,16 @@ experiment:
         # frame blocks for independent-frame registration-only runs, avoiding
         # a dense full-theta Hessian. Use dense_full_theta for small debugging
         # runs that need the legacy packed-theta FIM.
-        enabled: false
+        enabled: true
         method: auto
         # Use packed truth-trace theta for synthetic/debug runs when available,
         # matching canonical's FIM-at-truth convention. Falls back to initial.
-        reference: truth_when_available
+        reference: initial
         # Legacy full-FIM stabilization knobs are accepted for compatibility
         # but are inactive for diagonal FIM methods.
-        damping: 1.0e-6
-        eig_floor_rel: 1.0e-6
-        eig_floor_abs: 1.0e-8
+#        damping: 1.0e-6
+#        eig_floor_rel: 1.0e-10
+#        eig_floor_abs: 1.0e-10
         # Optional clip for per-parameter preconditioning scales. base_lr is
         # applied separately by the optimizer.
         # lr_clip: [1.0e-4, 1.0]
@@ -233,8 +233,8 @@ experiment:
       finite_difference_check: false
       plot_parameter_history_heatmap: false
       plot_parameter_residual_history_heatmap: false
-      plot_parameter_history_lines: false
-      plot_parameter_residual_history_lines: false
+      plot_parameter_history_lines: true
+      plot_parameter_residual_history_lines: true
       top_k: 10
 
       # Other diagnostics we are considering:

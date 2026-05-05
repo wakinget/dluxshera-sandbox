@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -63,8 +64,22 @@ import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results"
-# Legacy/general observation subblock trace template used by non-Schur study
-# modes unless the user passes --trace-template.
+
+# ---------------------------------------------------------------------------
+# General study workflow defaults
+# ---------------------------------------------------------------------------
+#
+# Source precedence for generated configs:
+# 1. start from the base template selected for the study mode;
+# 2. apply workflow defaults only for fields explicitly owned by this script;
+# 3. apply generated path/data patches such as cube, manifest, truth trace,
+#    output directories, and truth-comparison requests;
+# 4. apply explicit CLI overrides, where this script exposes them.
+#
+# Template-owned defaults are intentionally not duplicated as script defaults.
+# For example, optimizer kind/base_lr/n_iter and most inference diagnostics are
+# read from the inference template unless a targeted CLI override is provided.
+
 DEFAULT_TRACE_TEMPLATE = (
     REPO_ROOT
     / "examples"
@@ -113,11 +128,20 @@ SUMMARY_SCHEMA_VERSION = "obs_subblock_study_summary.v1"
 TRACE_STAGE = "trace"
 RENDER_STAGE = "render"
 FISHER_DENSE_TO_STRUCTURED_THRESHOLD_DIM = 30
-# The default Schur-summary smoke layout uses the intended four-scalar
-# observation-level subset while still keeping the dense Hessian small enough
-# for the v0 exporter. The traced local Theta path now applies source
-# photometry without full-store derived refresh, so source log-flux and
-# contrast can remain authoritative active variables.
+
+
+# ---------------------------------------------------------------------------
+# Schur summary workflow defaults
+# ---------------------------------------------------------------------------
+
+SOURCE_INFERENCE_TEMPLATE = "inference_template"
+SOURCE_SCHUR_WORKFLOW_DEFAULT = "schur_workflow_default"
+SOURCE_CLI_OVERRIDE = "cli_override"
+SOURCE_GENERATED_CONFIG_PATCH = "generated_config_patch"
+SOURCE_INFERENCE_RECIPE_DEFAULT = "inference_recipe_default"
+SOURCE_NOT_APPLICABLE = "not_applicable"
+TEMPLATE_OWNED_DEFAULT = "template_owned"
+
 DEFAULT_SCHUR_THETA_KEYS = (
     "source.separation_as",
     "source.log_flux_total",
@@ -133,6 +157,7 @@ DEFAULT_SCHUR_DAMPING = 1.0e-8
 # local vector. This should prevent accidental large-frame or full-Zernike runs
 # from materializing an oversized dense Hessian before a structured path exists.
 DEFAULT_SCHUR_MAX_DENSE_DIM = 80
+DEFAULT_SCHUR_PHI_REF = "truth_when_available"
 SUPPORTED_SMOKE_THETA_KEYS = frozenset(
     {
         "source.separation_as",
@@ -144,6 +169,108 @@ SUPPORTED_SMOKE_THETA_KEYS = frozenset(
 SCHUR_SUMMARY_PLAN_FILENAME = "schur_summary_plan.json"
 SCHUR_SUMMARY_AUDIT_FILENAME = "schur_summary_audit.json"
 FRAME_TRUTH_PREVIEW_FILENAME = "frame_truth_preview.json"
+
+
+@dataclass(frozen=True)
+class SchurSummaryWorkflowDefaults:
+    """Collect top-level policy values owned by the Schur smoke workflow."""
+
+    trace_template: Path
+    render_template: Path
+    inference_template: Path
+    theta_keys: tuple[str, ...]
+    zernike_indices: tuple[int, ...]
+    schur_damping: float
+    max_dense_dim: int
+    phi_ref: str
+    plan_filename: str
+    audit_filename: str
+    frame_truth_preview_filename: str
+
+
+@dataclass(frozen=True)
+class SchurReferenceInferencePolicy:
+    """Document which recovered-reference inference defaults remain template-owned."""
+
+    optimizer_kind: str = TEMPLATE_OWNED_DEFAULT
+    base_lr: str = TEMPLATE_OWNED_DEFAULT
+    n_iter: str = TEMPLATE_OWNED_DEFAULT
+    preconditioning_enabled: str = TEMPLATE_OWNED_DEFAULT
+    preconditioning_method: str = TEMPLATE_OWNED_DEFAULT
+    preconditioning_reference: str = TEMPLATE_OWNED_DEFAULT
+    preconditioning_damping: str = TEMPLATE_OWNED_DEFAULT
+    preconditioning_eig_floor_rel: str = TEMPLATE_OWNED_DEFAULT
+    preconditioning_eig_floor_abs: str = TEMPLATE_OWNED_DEFAULT
+    diagnostics: str = TEMPLATE_OWNED_DEFAULT
+
+
+SCHUR_WORKFLOW_DEFAULTS = SchurSummaryWorkflowDefaults(
+    trace_template=DEFAULT_SCHUR_TRACE_TEMPLATE,
+    render_template=DEFAULT_RENDER_TEMPLATE,
+    inference_template=DEFAULT_INFERENCE_TEMPLATE,
+    theta_keys=DEFAULT_SCHUR_THETA_KEYS,
+    zernike_indices=DEFAULT_SCHUR_ZERNIKE_INDICES,
+    schur_damping=DEFAULT_SCHUR_DAMPING,
+    max_dense_dim=DEFAULT_SCHUR_MAX_DENSE_DIM,
+    phi_ref=DEFAULT_SCHUR_PHI_REF,
+    plan_filename=SCHUR_SUMMARY_PLAN_FILENAME,
+    audit_filename=SCHUR_SUMMARY_AUDIT_FILENAME,
+    frame_truth_preview_filename=FRAME_TRUTH_PREVIEW_FILENAME,
+)
+SCHUR_REFERENCE_INFERENCE_POLICY = SchurReferenceInferencePolicy()
+
+# Diagnostics profiles are optional CLI convenience patches for recovered
+# reference review. When omitted, diagnostics remain inference-template owned.
+SCHUR_REFERENCE_DIAGNOSTICS_PROFILES: dict[str, dict[str, bool]] = {
+    "none": {
+        "plots": False,
+        "compare_to_truth_when_available": False,
+        "first_step_report": False,
+        "save_first_step_json": False,
+        "save_fim_debug": False,
+        "finite_difference_check": False,
+        "plot_parameter_history_heatmap": False,
+        "plot_parameter_residual_history_heatmap": False,
+        "plot_parameter_history_lines": False,
+        "plot_parameter_residual_history_lines": False,
+    },
+    "basic": {
+        "plots": True,
+        "compare_to_truth_when_available": True,
+        "first_step_report": False,
+        "save_first_step_json": False,
+        "save_fim_debug": False,
+        "finite_difference_check": False,
+        "plot_parameter_history_heatmap": False,
+        "plot_parameter_residual_history_heatmap": False,
+        "plot_parameter_history_lines": False,
+        "plot_parameter_residual_history_lines": False,
+    },
+    "review": {
+        "plots": True,
+        "compare_to_truth_when_available": True,
+        "first_step_report": True,
+        "save_first_step_json": True,
+        "save_fim_debug": False,
+        "finite_difference_check": False,
+        "plot_parameter_history_heatmap": False,
+        "plot_parameter_residual_history_heatmap": False,
+        "plot_parameter_history_lines": True,
+        "plot_parameter_residual_history_lines": True,
+    },
+    "full": {
+        "plots": True,
+        "compare_to_truth_when_available": True,
+        "first_step_report": True,
+        "save_first_step_json": True,
+        "save_fim_debug": True,
+        "finite_difference_check": True,
+        "plot_parameter_history_heatmap": True,
+        "plot_parameter_residual_history_heatmap": True,
+        "plot_parameter_history_lines": True,
+        "plot_parameter_residual_history_lines": True,
+    },
+}
 
 TRACE_TRUTH_OVERRIDE_KEYS = {
     "trace_x0_as": "source.x_position_as",
@@ -1210,7 +1337,14 @@ def _apply_trace_truth_overrides(
     jitter_overrides: Mapping[str, float],
     seed: int | None,
 ) -> dict[str, Any]:
-    """Patch the narrow smoke-test trace controls into a trace template copy."""
+    """Patch narrow smoke-test trace controls into a trace template copy.
+
+    Policy notes:
+    - Starts from the selected trace template.
+    - Applies only explicit ``--trace-*`` CLI overrides.
+    - Does not invent stochastic effects; jitter overrides require a compatible
+      ``iid_jitter`` or ``random_walk`` effect already present in the template.
+    """
 
     applied: dict[str, Any] = {"truth": {}, "jitter": {}, "seed": None}
     for cli_name, value in truth_overrides.items():
@@ -1270,7 +1404,14 @@ def _apply_inference_init_overrides(
     *,
     init_overrides: Mapping[str, float],
 ) -> dict[str, Any]:
-    """Patch the narrow registration-init controls into an inference template copy."""
+    """Patch narrow registration-init controls into an inference template copy.
+
+    Policy notes:
+    - Starts from the selected inference template.
+    - Applies only explicit ``--init-*`` CLI overrides.
+    - Does not change active keys or frame-init mode; those remain
+      template-owned.
+    """
 
     applied: dict[str, Any] = {}
     if not init_overrides:
@@ -1300,6 +1441,161 @@ def _apply_inference_init_overrides(
             "source": f"--{cli_name.replace('_', '-')}",
         }
     return applied
+
+
+def _has_nested_key(root: Mapping[str, Any], dotted_path: str) -> bool:
+    """Return whether one dotted mapping path exists."""
+
+    current: Any = root
+    for segment in dotted_path.split("."):
+        if not isinstance(current, Mapping) or segment not in current:
+            return False
+        current = current[segment]
+    return True
+
+
+def _field_source(
+    cfg: Mapping[str, Any],
+    dotted_path: str,
+    *,
+    cli_override: bool = False,
+    generated_patch: bool = False,
+) -> str:
+    """Classify the source of one generated-config value."""
+
+    if cli_override:
+        return SOURCE_CLI_OVERRIDE
+    if generated_patch:
+        return SOURCE_GENERATED_CONFIG_PATCH
+    if _has_nested_key(cfg, dotted_path):
+        return SOURCE_INFERENCE_TEMPLATE
+    return SOURCE_INFERENCE_RECIPE_DEFAULT
+
+
+def _apply_reference_diagnostics_profile(
+    diagnostics_cfg: dict[str, Any],
+    *,
+    profile: str | None,
+) -> dict[str, str]:
+    """Patch diagnostics from a named CLI profile.
+
+    Policy notes:
+    - When ``profile`` is ``None``, diagnostics remain template-owned.
+    - A named profile intentionally overrides matching template values because
+      it is an explicit CLI review request.
+    - The returned mapping records each patched field as ``cli_override``.
+    """
+
+    if profile is None:
+        return {}
+    if profile not in SCHUR_REFERENCE_DIAGNOSTICS_PROFILES:
+        raise ValueError(
+            "reference_diagnostics_profile must be one of: "
+            + ", ".join(sorted(SCHUR_REFERENCE_DIAGNOSTICS_PROFILES))
+        )
+    sources: dict[str, str] = {}
+    for key, value in SCHUR_REFERENCE_DIAGNOSTICS_PROFILES[profile].items():
+        diagnostics_cfg[key] = bool(value)
+        sources[key] = SOURCE_CLI_OVERRIDE
+    return sources
+
+
+def _build_schur_config_provenance(
+    *,
+    schur_config: Mapping[str, Any],
+    reference_preconditioning_enabled: bool | None,
+    reference_preconditioning_reference: str | None,
+    reference_diagnostics_profile: str | None,
+    force_truth_comparison: bool,
+) -> dict[str, Any]:
+    """Build compact source labels for policy-sensitive inference config fields."""
+
+    base = "experiment.inference"
+    diagnostics_profile_fields = (
+        set(SCHUR_REFERENCE_DIAGNOSTICS_PROFILES[reference_diagnostics_profile])
+        if reference_diagnostics_profile is not None
+        else set()
+    )
+    diagnostics_fields = (
+        "plots",
+        "compare_to_truth_when_available",
+        "first_step_report",
+        "save_first_step_json",
+        "save_fim_debug",
+        "finite_difference_check",
+        "plot_parameter_history_heatmap",
+        "plot_parameter_residual_history_heatmap",
+        "plot_parameter_history_lines",
+        "plot_parameter_residual_history_lines",
+        "top_k",
+    )
+    diagnostics_sources = {
+        key: _field_source(
+            schur_config,
+            f"{base}.diagnostics.{key}",
+            cli_override=key in diagnostics_profile_fields,
+            generated_patch=(
+                key == "compare_to_truth_when_available"
+                and bool(force_truth_comparison)
+                and key not in diagnostics_profile_fields
+            ),
+        )
+        for key in diagnostics_fields
+    }
+    return {
+        "optimizer": {
+            "optimizer_kind": _field_source(
+                schur_config,
+                f"{base}.optimizer.kind",
+            ),
+            "base_lr": _field_source(
+                schur_config,
+                f"{base}.optimizer.base_lr",
+            ),
+            "n_iter": _field_source(
+                schur_config,
+                f"{base}.optimizer.n_iter",
+            ),
+        },
+        "preconditioning": {
+            "preconditioning_enabled": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.enabled",
+                cli_override=reference_preconditioning_enabled is not None,
+            ),
+            "preconditioning_method": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.method",
+            ),
+            "preconditioning_reference": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.reference",
+                cli_override=reference_preconditioning_reference is not None,
+            ),
+            "preconditioning_damping": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.damping",
+            ),
+            "preconditioning_eig_floor_rel": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.eig_floor_rel",
+            ),
+            "preconditioning_eig_floor_abs": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.eig_floor_abs",
+            ),
+            "preconditioning_lr_clip": _field_source(
+                schur_config,
+                f"{base}.optimizer.preconditioning.lr_clip",
+            ),
+        },
+        "diagnostics": diagnostics_sources,
+        "diagnostics_profile": (
+            SOURCE_CLI_OVERRIDE
+            if reference_diagnostics_profile is not None
+            else SOURCE_NOT_APPLICABLE
+        ),
+    }
 
 
 def _resolve_template_system_context(template_path: Path) -> dict[str, Any]:
@@ -1420,7 +1716,13 @@ def resolve_study_trace_template(
     mode: str,
     trace_template: Path | None,
 ) -> tuple[Path, str]:
-    """Resolve the source trace template and provenance for one study mode."""
+    """Resolve the source trace template and provenance for one study mode.
+
+    Policy notes:
+    - Explicit ``--trace-template`` wins for every mode.
+    - ``schur_summary`` otherwise uses the registration-iid Schur template.
+    - Older study modes otherwise use the general trace template.
+    """
 
     if trace_template is not None:
         return trace_template.expanduser().resolve(), "cli_override"
@@ -1468,7 +1770,15 @@ def _build_study_templates(
     trace_seed: int | None = None,
     inference_init_overrides: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Write study-local template copies with narrow mode-specific patching."""
+    """Write study-local template copies with narrow mode-specific patching.
+
+    Policy notes:
+    - Template copies are the first durable run record.
+    - Candidate truth/assumed patches are study-mode specific.
+    - Schur trace/init CLI patches are explicit and recorded.
+    - Schur diagnostics are not silently rewritten here; recovered-reference
+      diagnostics are handled by the final generated inference config helper.
+    """
 
     templates_dir = _study_templates_dir(case_root, mode)
     templates_dir.mkdir(parents=True, exist_ok=True)
@@ -1564,7 +1874,8 @@ def _build_study_templates(
             "diagnostics",
             path="experiment.inference",
         )
-        diagnostics_cfg["plots"] = False
+        if mode != MODE_SCHUR_SUMMARY:
+            diagnostics_cfg["plots"] = True
 
         if mode == MODE_NUISANCE_ABSORPTION:
             diagnostics_cfg["compare_to_truth_when_available"] = True
@@ -1708,7 +2019,13 @@ def _prepare_case_render_artifacts(
     noise_mode: str,
     dry_run: bool,
 ) -> dict[str, Any]:
-    """Ensure the case has render-ready artifacts for a screening study."""
+    """Ensure the case has render-ready artifacts for a screening study.
+
+    Policy notes:
+    - Uses the already selected case-local trace/render templates.
+    - Dry runs plan missing trace/render stages but do not create image data.
+    - Actual runs delegate mechanics to ``run_obs_subblock_case.py``.
+    """
 
     case_module = _load_case_runner_module()
     layout = case_module.build_case_layout(case_root.resolve())
@@ -2292,8 +2609,23 @@ def _build_study_inference_config(
     force_truth_comparison: bool,
     disable_plots: bool,
     use_render_variance: bool = False,
+    reference_preconditioning_enabled: bool | None = None,
+    reference_preconditioning_reference: str | None = None,
+    reference_diagnostics_profile: str | None = None,
 ) -> dict[str, Any]:
-    """Build one run-specific inference config for study-mode execution."""
+    """Build one run-specific inference config for study-mode execution.
+
+    Policy notes:
+    - Starts from the selected inference template via the case runner.
+    - Applies generated path patches for cube, truth trace, manifest, and
+      output directories.
+    - Does not silently override optimizer or preconditioning template values.
+    - Explicit reference preconditioning CLI overrides intentionally patch the
+      generated config and win over template values.
+    - A reference diagnostics profile intentionally patches matching
+      diagnostics values; otherwise diagnostics remain template-owned except
+      for generated truth-comparison requests.
+    """
 
     case_module = _load_case_runner_module()
     cfg = case_module.build_inference_case_config(
@@ -2324,6 +2656,34 @@ def _build_study_inference_config(
         diagnostics_cfg["plots"] = False
     if force_truth_comparison:
         diagnostics_cfg["compare_to_truth_when_available"] = True
+    _apply_reference_diagnostics_profile(
+        diagnostics_cfg,
+        profile=reference_diagnostics_profile,
+    )
+
+    if (
+        reference_preconditioning_enabled is not None
+        or reference_preconditioning_reference is not None
+    ):
+        optimizer_cfg = case_module._ensure_mapping(
+            inference_cfg,
+            "optimizer",
+            path="experiment.inference",
+        )
+        preconditioning_cfg = case_module._ensure_mapping(
+            optimizer_cfg,
+            "preconditioning",
+            path="experiment.inference.optimizer",
+        )
+        if reference_preconditioning_enabled is not None:
+            preconditioning_cfg["enabled"] = bool(reference_preconditioning_enabled)
+        if reference_preconditioning_reference is not None:
+            if reference_preconditioning_reference not in {"truth_when_available", "initial"}:
+                raise ValueError(
+                    "reference_preconditioning_reference must be "
+                    "'truth_when_available' or 'initial'."
+                )
+            preconditioning_cfg["reference"] = str(reference_preconditioning_reference)
 
     if use_render_variance:
         variance_path = _resolve_render_variance_artifact(render_inputs.manifest.path)
@@ -2560,7 +2920,13 @@ def _resolve_phi_reference_for_summary(
     phi_ref_mode: str,
     recovered_theta: np.ndarray | None = None,
 ) -> tuple[np.ndarray, str]:
-    """Resolve the local fast-state reference vector for one summary export."""
+    """Resolve the local fast-state reference vector for one summary export.
+
+    Policy notes:
+    - ``init`` uses optimizer initialization from the generated config.
+    - ``truth_when_available`` uses the truth trace when complete.
+    - ``recovered`` requires a completed reference inference solve.
+    """
 
     recipe = context["recipe"]
     active_layout = context["layout"]
@@ -2736,6 +3102,8 @@ def _build_trace_truth_summary(
     preview: Mapping[str, Any] | None,
     applied_overrides: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Summarize trace truth policy and generated-frame previews for the plan."""
+
     experiment_cfg = trace_cfg.get("experiment", {})
     trace_block = experiment_cfg.get("trace", {}) if isinstance(experiment_cfg, Mapping) else {}
     trace_plan = trace_block.get("plan", {}) if isinstance(trace_block, Mapping) else {}
@@ -2876,19 +3244,100 @@ def _build_inference_init_summary(
     }
 
 
-def _extract_reference_inference_plan(inference_cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract the optimizer and preconditioning settings for phi_ref=recovered."""
+def _extract_reference_diagnostics_plan(
+    inference_cfg: Mapping[str, Any],
+    *,
+    sources: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Extract reference-inference diagnostic settings and their sources."""
+
+    diagnostics_cfg = inference_cfg.get("diagnostics", {})
+    keys = (
+        "plots",
+        "compare_to_truth_when_available",
+        "first_step_report",
+        "save_first_step_json",
+        "save_fim_debug",
+        "finite_difference_check",
+        "plot_parameter_history_heatmap",
+        "plot_parameter_residual_history_heatmap",
+        "plot_parameter_history_lines",
+        "plot_parameter_residual_history_lines",
+        "top_k",
+    )
+    defaults = {
+        "plots": True,
+        "compare_to_truth_when_available": True,
+        "first_step_report": False,
+        "save_first_step_json": False,
+        "save_fim_debug": False,
+        "finite_difference_check": False,
+        "plot_parameter_history_heatmap": False,
+        "plot_parameter_residual_history_heatmap": False,
+        "plot_parameter_history_lines": False,
+        "plot_parameter_residual_history_lines": False,
+        "top_k": 10,
+    }
+    return {
+        "settings": {key: diagnostics_cfg.get(key, defaults[key]) for key in keys},
+        "sources": {
+            key: (sources or {}).get(key, SOURCE_INFERENCE_TEMPLATE)
+            for key in keys
+        },
+    }
+
+
+def _extract_reference_inference_plan(
+    inference_cfg: Mapping[str, Any],
+    *,
+    provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Extract recovered-reference optimizer, diagnostics, and provenance.
+
+    Policy notes:
+    - Values are read from the final generated inference config.
+    - Source labels describe whether each value came from the inference
+      template, an inference-recipe default, a generated config patch, or an
+      explicit CLI override.
+    - Missing preconditioning fields use the inference recipe defaults; this
+      helper must not imply that the Schur workflow silently enabled them.
+    """
 
     optimizer_cfg = inference_cfg.get("optimizer", {})
     preconditioning_cfg = optimizer_cfg.get("preconditioning", {})
+    optimizer_sources = dict((provenance or {}).get("optimizer", {}))
+    preconditioning_sources = dict((provenance or {}).get("preconditioning", {}))
+    diagnostics_sources = dict((provenance or {}).get("diagnostics", {}))
     return {
-        "optimizer_kind": str(optimizer_cfg.get("kind", "unknown")),
-        "base_lr": optimizer_cfg.get("base_lr"),
-        "n_iter": optimizer_cfg.get("n_iter"),
+        "optimizer_kind": str(optimizer_cfg.get("kind", "adam")),
+        "base_lr": optimizer_cfg.get("base_lr", 1e-2),
+        "n_iter": optimizer_cfg.get("n_iter", 100),
         "preconditioning_enabled": bool(preconditioning_cfg.get("enabled", False)),
         "preconditioning_method": str(preconditioning_cfg.get("method", "auto")),
         "preconditioning_reference": str(
             preconditioning_cfg.get("reference", "truth_when_available")
+        ),
+        "preconditioning_damping": preconditioning_cfg.get("damping", 1.0e-6),
+        "preconditioning_eig_floor_rel": preconditioning_cfg.get(
+            "eig_floor_rel",
+            1.0e-6,
+        ),
+        "preconditioning_eig_floor_abs": preconditioning_cfg.get(
+            "eig_floor_abs",
+            1.0e-8,
+        ),
+        "preconditioning_lr_clip": preconditioning_cfg.get("lr_clip"),
+        "sources": {
+            **optimizer_sources,
+            **preconditioning_sources,
+        },
+        "diagnostics": _extract_reference_diagnostics_plan(
+            inference_cfg,
+            sources=diagnostics_sources,
+        ),
+        "diagnostics_profile_source": (provenance or {}).get(
+            "diagnostics_profile",
+            SOURCE_NOT_APPLICABLE,
         ),
     }
 
@@ -2959,6 +3408,15 @@ def _build_schur_summary_audit(
     recovered_reference_metadata: Mapping[str, Any],
     frame_truth_preview: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    """Build the post-run Schur audit from the plan and observed artifacts.
+
+    Policy notes:
+    - The plan remains the before-run source of expected behavior.
+    - The audit records whether recovered-reference inference actually ran and
+      points back to the final generated inference config consumed by the
+      inference recipe.
+    """
+
     planned_artifacts = dict(plan.get("planned_artifacts", {}))
     summary_artifacts = dict(summary_payload.get("artifacts", {})) if summary_payload else {}
     surrogate_path = Path(
@@ -3023,6 +3481,9 @@ def _build_schur_summary_audit(
             else plan.get("reference_inference_not_run_reason"),
             "config_if_run": plan.get("reference_inference_config_if_run"),
             "output_path": plan.get("reference_inference_output_path"),
+            "final_generated_config_path": plan.get(
+                "final_reference_inference_config_path"
+            ),
             "recovered_reference_source": (
                 None
                 if not recovered_reference_metadata
@@ -3032,6 +3493,11 @@ def _build_schur_summary_audit(
             ),
         },
         "preconditioning": plan.get("preconditioning"),
+        "reference_diagnostics": (
+            dict(plan.get("reference_inference_config_if_run", {})).get(
+                "diagnostics"
+            )
+        ),
         "phi_reference": {
             "phi_ref_mode": plan.get("phi_ref_mode"),
             "phi_ref_source": None
@@ -3066,6 +3532,7 @@ def _build_schur_summary_plan(
     trace_template_source: str,
     schur_config_path: Path,
     schur_config: Mapping[str, Any],
+    schur_config_provenance: Mapping[str, Any],
     render_inputs: Any,
     case_prep_stages: Sequence[str],
     n_frames_requested: int | None,
@@ -3089,6 +3556,14 @@ def _build_schur_summary_plan(
 
     The plan intentionally uses config-level and case-layout information so
     `--dry-run` can explain the run before any dense JAX differentiation begins.
+
+    Policy notes:
+    - Starts from copied templates and the final generated summary-export
+      inference config.
+    - Reports script-owned Schur defaults separately from template-owned
+      recovered-reference defaults.
+    - Records source labels for optimizer, preconditioning, and diagnostics so
+      explicit template values are not mistaken for hidden script defaults.
     """
 
     theta_classification = validate_schur_summary_theta_keys(theta_keys)
@@ -3115,7 +3590,10 @@ def _build_schur_summary_plan(
     n_phi = len(phi_labels)
     combined_dim = int(theta_layout.size + n_phi)
     dense_hessian_allowed = combined_dim <= int(max_dense_dim)
-    reference_inference = _extract_reference_inference_plan(inference_cfg)
+    reference_inference = _extract_reference_inference_plan(
+        inference_cfg,
+        provenance=schur_config_provenance,
+    )
     preconditioning_actually_used = bool(
         phi_ref_mode == "recovered"
         and reference_inference["preconditioning_enabled"]
@@ -3201,6 +3679,40 @@ def _build_schur_summary_plan(
         "generated_case_render_config_path": str((case_root / "render_config.json").resolve()),
         "inference_config_path": str(template_paths["inference"].resolve()),
         "summary_export_inference_config_path": str(schur_config_path.resolve()),
+        "final_reference_inference_config_path": str(schur_config_path.resolve()),
+        "generated_config_source_precedence": [
+            "inference_template",
+            "schur_workflow_default_for_script_owned_fields",
+            "generated_config_patch",
+            "cli_override",
+        ],
+        "schur_workflow_defaults": {
+            "trace_template": str(SCHUR_WORKFLOW_DEFAULTS.trace_template.resolve()),
+            "render_template": str(SCHUR_WORKFLOW_DEFAULTS.render_template.resolve()),
+            "inference_template": str(
+                SCHUR_WORKFLOW_DEFAULTS.inference_template.resolve()
+            ),
+            "theta_keys": list(SCHUR_WORKFLOW_DEFAULTS.theta_keys),
+            "zernike_indices": list(SCHUR_WORKFLOW_DEFAULTS.zernike_indices),
+            "schur_damping": float(SCHUR_WORKFLOW_DEFAULTS.schur_damping),
+            "max_dense_dim": int(SCHUR_WORKFLOW_DEFAULTS.max_dense_dim),
+            "phi_ref": SCHUR_WORKFLOW_DEFAULTS.phi_ref,
+        },
+        "reference_inference_policy": {
+            "optimizer_kind": SCHUR_REFERENCE_INFERENCE_POLICY.optimizer_kind,
+            "base_lr": SCHUR_REFERENCE_INFERENCE_POLICY.base_lr,
+            "n_iter": SCHUR_REFERENCE_INFERENCE_POLICY.n_iter,
+            "preconditioning_enabled": (
+                SCHUR_REFERENCE_INFERENCE_POLICY.preconditioning_enabled
+            ),
+            "preconditioning_method": (
+                SCHUR_REFERENCE_INFERENCE_POLICY.preconditioning_method
+            ),
+            "preconditioning_reference": (
+                SCHUR_REFERENCE_INFERENCE_POLICY.preconditioning_reference
+            ),
+            "diagnostics": SCHUR_REFERENCE_INFERENCE_POLICY.diagnostics,
+        },
         "reference_inference_output_path": (
             None
             if phi_ref_mode != "recovered"
@@ -3238,14 +3750,42 @@ def _build_schur_summary_plan(
             ),
             "preconditioning_method": reference_inference["preconditioning_method"],
             "preconditioning_reference": reference_inference["preconditioning_reference"],
+            "preconditioning_damping": reference_inference["preconditioning_damping"],
+            "preconditioning_eig_floor_rel": reference_inference[
+                "preconditioning_eig_floor_rel"
+            ],
+            "preconditioning_eig_floor_abs": reference_inference[
+                "preconditioning_eig_floor_abs"
+            ],
             "preconditioning_actually_used": bool(preconditioning_actually_used),
             "preconditioning_not_used_reason": preconditioning_not_used_reason,
+            "sources": {
+                key: reference_inference["sources"].get(key)
+                for key in (
+                    "preconditioning_enabled",
+                    "preconditioning_method",
+                    "preconditioning_reference",
+                    "preconditioning_damping",
+                    "preconditioning_eig_floor_rel",
+                    "preconditioning_eig_floor_abs",
+                    "preconditioning_lr_clip",
+                )
+            },
         },
         "preconditioning_configured_enabled": bool(
             reference_inference["preconditioning_enabled"]
         ),
+        "preconditioning_configured_enabled_source": reference_inference["sources"].get(
+            "preconditioning_enabled"
+        ),
         "preconditioning_method": reference_inference["preconditioning_method"],
+        "preconditioning_method_source": reference_inference["sources"].get(
+            "preconditioning_method"
+        ),
         "preconditioning_reference": reference_inference["preconditioning_reference"],
+        "preconditioning_reference_source": reference_inference["sources"].get(
+            "preconditioning_reference"
+        ),
         "preconditioning_actually_used": bool(preconditioning_actually_used),
         "preconditioning_not_used_reason": preconditioning_not_used_reason,
         "trace_truth": _build_trace_truth_summary(
@@ -3874,7 +4414,7 @@ def run_obs_subblock_study(
     zernike_indices: Sequence[int] = DEFAULT_SCHUR_ZERNIKE_INDICES,
     schur_damping: float = DEFAULT_SCHUR_DAMPING,
     max_dense_dim: int = DEFAULT_SCHUR_MAX_DENSE_DIM,
-    phi_ref: str = "truth_when_available",
+    phi_ref: str = DEFAULT_SCHUR_PHI_REF,
     summary_objective: str = "full_objective",
     validate_surrogate: bool = True,
     validation_steps: int = 5,
@@ -3888,6 +4428,9 @@ def run_obs_subblock_study(
     init_x_as: float | None = None,
     init_y_as: float | None = None,
     init_pa_deg: float | None = None,
+    reference_preconditioning_enabled: bool | None = None,
+    reference_preconditioning_reference: str | None = None,
+    reference_diagnostics_profile: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run one observation sub-block screening study."""
@@ -3992,6 +4535,11 @@ def run_obs_subblock_study(
                 "init_x_as": init_x_as,
                 "init_y_as": init_y_as,
                 "init_pa_deg": init_pa_deg,
+            },
+            "reference_inference_cli_overrides": {
+                "reference_preconditioning_enabled": reference_preconditioning_enabled,
+                "reference_preconditioning_reference": reference_preconditioning_reference,
+                "reference_diagnostics_profile": reference_diagnostics_profile,
             },
         },
         "templates": {
@@ -4132,12 +4680,22 @@ def run_obs_subblock_study(
             candidate_key=None,
             assumed_value=None,
             force_truth_comparison=(normalized_phi_ref == "truth_when_available"),
-            disable_plots=True,
+            disable_plots=False,
             use_render_variance=bool(use_render_variance),
+            reference_preconditioning_enabled=reference_preconditioning_enabled,
+            reference_preconditioning_reference=reference_preconditioning_reference,
+            reference_diagnostics_profile=reference_diagnostics_profile,
         )
         schur_config_path = summary_run_root / "inference_config.json"
         _write_json(schur_config_path, schur_config)
         summary["schur_config_path"] = str(schur_config_path.resolve())
+        schur_config_provenance = _build_schur_config_provenance(
+            schur_config=schur_config,
+            reference_preconditioning_enabled=reference_preconditioning_enabled,
+            reference_preconditioning_reference=reference_preconditioning_reference,
+            reference_diagnostics_profile=reference_diagnostics_profile,
+            force_truth_comparison=(normalized_phi_ref == "truth_when_available"),
+        )
 
         frame_truth_preview = _write_frame_truth_preview(
             trace_csv_path=render_inputs.truth_trace.path,
@@ -4151,6 +4709,7 @@ def run_obs_subblock_study(
             trace_template_source=trace_template_source,
             schur_config_path=schur_config_path,
             schur_config=schur_config,
+            schur_config_provenance=schur_config_provenance,
             render_inputs=render_inputs,
             case_prep_stages=summary["case_prep_stages_executed"],
             n_frames_requested=n_frames,
@@ -4403,7 +4962,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phi-ref",
         choices=("recovered", "truth_when_available", "truth", "init"),
-        default="truth_when_available",
+        default=DEFAULT_SCHUR_PHI_REF,
         help=(
             "Reference fast-state source for schur_summary mode. "
             "Use truth_when_available for the first smoke test."
@@ -4487,6 +5046,40 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override experiment.inference.init.frame.values.source.position_angle_deg.",
     )
+    preconditioning_group = parser.add_mutually_exclusive_group()
+    preconditioning_group.add_argument(
+        "--reference-preconditioning-enabled",
+        dest="reference_preconditioning_enabled",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Enable optimizer preconditioning in the generated reference-inference config.",
+    )
+    preconditioning_group.add_argument(
+        "--reference-preconditioning-disabled",
+        dest="reference_preconditioning_enabled",
+        action="store_const",
+        const=False,
+        help="Disable optimizer preconditioning in the generated reference-inference config.",
+    )
+    parser.add_argument(
+        "--reference-preconditioning-reference",
+        choices=("initial", "truth_when_available"),
+        default=None,
+        help=(
+            "Override optimizer preconditioning reference for recovered-reference "
+            "inference. Template value is used when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--reference-diagnostics-profile",
+        choices=tuple(sorted(SCHUR_REFERENCE_DIAGNOSTICS_PROFILES)),
+        default=None,
+        help=(
+            "Optional diagnostics patch for recovered-reference review. "
+            "Template diagnostics are used when omitted."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -4539,6 +5132,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         init_x_as=args.init_x_as,
         init_y_as=args.init_y_as,
         init_pa_deg=args.init_pa_deg,
+        reference_preconditioning_enabled=args.reference_preconditioning_enabled,
+        reference_preconditioning_reference=args.reference_preconditioning_reference,
+        reference_diagnostics_profile=args.reference_diagnostics_profile,
         dry_run=bool(args.dry_run),
     )
     print(f"Study mode: {summary['mode']}")
