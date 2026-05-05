@@ -42,6 +42,12 @@ from dluxshera.inference.observation_summary import (
     partition_local_curvature,
     schur_reduce_local_quadratic,
 )
+from dluxshera.inference.structured_curvature import (
+    build_independent_frame_theta_phi_quadratic_blocks,
+    compare_structured_and_dense_schur_outputs,
+    materialize_structured_schur_sidecar_blocks,
+    schur_reduce_independent_frame_blocks,
+)
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
@@ -158,6 +164,14 @@ DEFAULT_SCHUR_DAMPING = 1.0e-8
 # from materializing an oversized dense Hessian before a structured path exists.
 DEFAULT_SCHUR_MAX_DENSE_DIM = 80
 DEFAULT_SCHUR_PHI_REF = "truth_when_available"
+SCHUR_CURVATURE_METHOD_AUTO = "auto"
+SCHUR_CURVATURE_METHOD_DENSE = "dense"
+SCHUR_CURVATURE_METHOD_STRUCTURED = "structured_independent_frames"
+SUPPORTED_SCHUR_CURVATURE_METHODS = (
+    SCHUR_CURVATURE_METHOD_AUTO,
+    SCHUR_CURVATURE_METHOD_DENSE,
+    SCHUR_CURVATURE_METHOD_STRUCTURED,
+)
 SUPPORTED_SMOKE_THETA_KEYS = frozenset(
     {
         "source.separation_as",
@@ -183,6 +197,7 @@ class SchurSummaryWorkflowDefaults:
     schur_damping: float
     max_dense_dim: int
     phi_ref: str
+    schur_curvature_method: str
     plan_filename: str
     audit_filename: str
     frame_truth_preview_filename: str
@@ -213,6 +228,7 @@ SCHUR_WORKFLOW_DEFAULTS = SchurSummaryWorkflowDefaults(
     schur_damping=DEFAULT_SCHUR_DAMPING,
     max_dense_dim=DEFAULT_SCHUR_MAX_DENSE_DIM,
     phi_ref=DEFAULT_SCHUR_PHI_REF,
+    schur_curvature_method=SCHUR_CURVATURE_METHOD_AUTO,
     plan_filename=SCHUR_SUMMARY_PLAN_FILENAME,
     audit_filename=SCHUR_SUMMARY_AUDIT_FILENAME,
     frame_truth_preview_filename=FRAME_TRUTH_PREVIEW_FILENAME,
@@ -431,6 +447,137 @@ def normalize_schur_phi_ref_mode(raw_mode: str) -> str:
             "phi_ref must be one of: recovered, truth_when_available, init."
         )
     return mode
+
+
+def normalize_schur_curvature_method(raw_method: str | None) -> str:
+    """Normalize the requested Schur-summary curvature export method."""
+
+    method = SCHUR_CURVATURE_METHOD_AUTO if raw_method is None else str(raw_method).strip()
+    if method not in SUPPORTED_SCHUR_CURVATURE_METHODS:
+        allowed = ", ".join(SUPPORTED_SCHUR_CURVATURE_METHODS)
+        raise ValueError(
+            f"schur_curvature_method must be one of: {allowed}."
+        )
+    return method
+
+
+def _structured_schur_support_from_inference_cfg(
+    *,
+    inference_cfg: Mapping[str, Any],
+    n_frames: int | None,
+) -> dict[str, Any]:
+    """Return config-level support metadata for structured Schur export."""
+
+    active_cfg = inference_cfg.get("active", {})
+    temporal_cfg = inference_cfg.get("temporal", {})
+    frame_model_cfg = (
+        temporal_cfg.get("frame_model", {})
+        if isinstance(temporal_cfg, Mapping)
+        else {}
+    )
+    frame_keys = tuple(str(key) for key in active_cfg.get("frame_keys", ()))
+    shared_keys = tuple(str(key) for key in active_cfg.get("shared_keys", ()))
+    frame_model_kind = (
+        str(frame_model_cfg.get("kind"))
+        if isinstance(frame_model_cfg, Mapping)
+        else None
+    )
+    reasons: list[str] = []
+    if n_frames is None or int(n_frames) <= 0:
+        reasons.append("n_frames is unknown or non-positive")
+    if frame_model_kind != "independent":
+        reasons.append("temporal.frame_model.kind is not independent")
+    if not frame_keys:
+        reasons.append("no frame-local active keys are configured")
+    if shared_keys:
+        reasons.append("shared active subblock state is configured")
+    supported = not reasons
+    return {
+        "supported": bool(supported),
+        "unsupported_reasons": reasons,
+        "frame_model_kind": frame_model_kind,
+        "n_frames": None if n_frames is None else int(n_frames),
+        "frame_phi_dim": int(len(frame_keys)),
+        "shared_phi_dim": int(len(shared_keys)),
+        "required_assumptions": (
+            "structured_independent_frames currently requires independent "
+            "frame model, frame-local active state, no active shared subblock "
+            "state, and per-frame objective access through "
+            "ObjectiveBundle.frame_data_term_fn."
+        ),
+    }
+
+
+def _structured_schur_support_from_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Return runtime support metadata for structured Schur export."""
+
+    layout = context["layout"]
+    inference_cfg = context["inference_cfg"]
+    support = _structured_schur_support_from_inference_cfg(
+        inference_cfg=inference_cfg,
+        n_frames=int(layout.n_frame),
+    )
+    objective_bundle = context.get("objective_bundle")
+    if not hasattr(objective_bundle, "frame_data_term_fn"):
+        support["supported"] = False
+        support.setdefault("unsupported_reasons", []).append(
+            "ObjectiveBundle.frame_data_term_fn is unavailable"
+        )
+    if int(layout.shared_width) != int(support["shared_phi_dim"]):
+        support["supported"] = False
+        support.setdefault("unsupported_reasons", []).append(
+            "runtime shared active width does not match config metadata"
+        )
+    support["frame_phi_dim"] = int(layout.frame_width)
+    support["shared_phi_dim"] = int(layout.shared_width)
+    support["n_frames"] = int(layout.n_frame)
+    return support
+
+
+def _select_schur_curvature_method(
+    *,
+    requested_method: str,
+    combined_dim: int,
+    max_dense_dim: int,
+    structured_support: Mapping[str, Any],
+) -> str:
+    """Select the effective Schur curvature method or raise a clear error."""
+
+    requested = normalize_schur_curvature_method(requested_method)
+    dense_allowed = int(combined_dim) <= int(max_dense_dim)
+    structured_supported = bool(structured_support.get("supported"))
+    unsupported_reasons = ", ".join(
+        str(reason) for reason in structured_support.get("unsupported_reasons", ())
+    )
+    structured_message = (
+        "structured_independent_frames currently requires independent frame "
+        "model, frame-local active state, no active shared subblock state, and "
+        "per-frame objective access through ObjectiveBundle.frame_data_term_fn."
+    )
+
+    if requested == SCHUR_CURVATURE_METHOD_DENSE:
+        _validate_schur_dense_dimension(
+            combined_dim=int(combined_dim),
+            max_dense_dim=int(max_dense_dim),
+        )
+        return SCHUR_CURVATURE_METHOD_DENSE
+    if requested == SCHUR_CURVATURE_METHOD_STRUCTURED:
+        if not structured_supported:
+            detail = f" Failed assumption(s): {unsupported_reasons}." if unsupported_reasons else ""
+            raise ValueError(structured_message + detail)
+        return SCHUR_CURVATURE_METHOD_STRUCTURED
+
+    if dense_allowed:
+        return SCHUR_CURVATURE_METHOD_DENSE
+    if structured_supported:
+        return SCHUR_CURVATURE_METHOD_STRUCTURED
+    detail = f" Failed assumption(s): {unsupported_reasons}." if unsupported_reasons else ""
+    raise ValueError(
+        f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}, "
+        "and structured Schur export is not available. "
+        + structured_message
+        + detail
+    )
 
 
 def classify_schur_summary_theta_keys(
@@ -2914,6 +3061,104 @@ def _build_combined_local_objective(
     return _combined_loss, metadata
 
 
+def _build_structured_schur_frame_objective(
+    *,
+    context: dict[str, Any],
+    theta_layout: ObservationThetaLayout,
+    objective_kind: str,
+) -> tuple[Any, dict[str, Any]]:
+    """Build one frame-local objective over ``[Theta, phi_i]``.
+
+    This is the script orchestration layer for structured Schur export. The
+    reusable curvature assembly and framewise Schur reduction live in
+    ``dluxshera.inference.structured_curvature``; this helper only adapts the
+    image-backed inference context into the required frame-term callable.
+    """
+
+    recipe = context["recipe"]
+    active_layout = context["layout"]
+    binder = context["binder"]
+    forward_spec = context["forward_spec"]
+    base_store = context["base_store"]
+    inference_cfg = context["inference_cfg"]
+    theta_addresses = _theta_addresses_for_layout(
+        theta_layout=theta_layout,
+        forward_spec=forward_spec,
+        base_store=base_store,
+    )
+
+    if int(active_layout.shared_width) != 0:
+        raise ValueError(
+            "structured_independent_frames currently requires no active shared "
+            "subblock state."
+        )
+
+    data_cube = recipe.jnp.asarray(context["cube"])
+    variance_cube = recipe.jnp.asarray(context["variance_cube"])
+    frame_reduce = str(inference_cfg["objective"]["frame_reduce"])
+    subblock_reduce = str(inference_cfg["objective"]["subblock_reduce"])
+    priors_nonempty = bool(
+        inference_cfg["priors"]["frame"] or inference_cfg["priors"]["shared"]
+    )
+    temporal_kind = str(inference_cfg["temporal"]["frame_model"]["kind"])
+    if objective_kind not in {"data_only", "full_objective"}:
+        raise ValueError("summary objective must be 'data_only' or 'full_objective'.")
+    if objective_kind == "full_objective" and (
+        priors_nonempty or temporal_kind != "independent"
+    ):
+        raise ValueError(
+            "structured schur_summary only supports full_objective when priors "
+            "are empty and temporal.frame_model.kind='independent'."
+        )
+
+    def _theta_store(observation_theta_values: jnp.ndarray) -> ParameterStore:
+        return _apply_theta_overrides(
+            reference_store=base_store,
+            forward_spec=forward_spec,
+            theta_addresses=theta_addresses,
+            theta_values=observation_theta_values,
+        )
+
+    def _frame_model(theta_store: ParameterStore, frame_values: jnp.ndarray) -> jnp.ndarray:
+        frame_store = recipe._apply_runtime_active_values(
+            reference_store=theta_store,
+            forward_spec=forward_spec,
+            key_specs=active_layout.frame_specs,
+            values=frame_values,
+        )
+        frame_delta = binder.strip_structural(frame_store)
+        return binder.model(frame_delta)
+
+    def _frame_loss(
+        observation_theta_values: jnp.ndarray,
+        frame_phi_values: jnp.ndarray,
+        frame_index: int,
+    ) -> jnp.ndarray:
+        theta_store = _theta_store(observation_theta_values)
+        model_frame = _frame_model(theta_store, frame_phi_values)
+        return recipe.gaussian_image_nll(
+            model_frame,
+            data_cube[int(frame_index)],
+            variance_cube[int(frame_index)],
+            reduce=frame_reduce,
+        )
+
+    metadata = {
+        "objective_kind_requested": objective_kind,
+        "objective_kind_used": (
+            "data_only"
+            if objective_kind == "data_only"
+            else "full_objective_equivalent_to_data_only_current_template"
+        ),
+        "priors_nonempty": bool(priors_nonempty),
+        "temporal_kind": temporal_kind,
+        "inference_objective": inference_cfg["objective"],
+        "structured_frame_objective": True,
+        "subblock_reduce": subblock_reduce,
+    }
+    return _frame_loss, metadata
+
+
 def _resolve_phi_reference_for_summary(
     *,
     context: dict[str, Any],
@@ -3512,6 +3757,30 @@ def _build_schur_summary_audit(
         },
         "schur_summary_diagnostics_path": summary_artifacts.get("schur_diagnostics_json")
         or planned_artifacts.get("schur_diagnostics_json"),
+        "curvature": {
+            "schur_curvature_method_requested": plan.get(
+                "schur_curvature_method_requested"
+            ),
+            "schur_curvature_method_planned": plan.get(
+                "schur_curvature_method_planned"
+            ),
+            "schur_curvature_method_used": None
+            if summary_payload is None
+            else summary_payload.get("schur_curvature_method_used"),
+            "dense_global_hessian_materialized": None
+            if summary_payload is None
+            else summary_payload.get("dense_global_hessian_materialized"),
+            "structured_curvature_used": None
+            if summary_payload is None
+            else summary_payload.get("structured_curvature_used"),
+            "structured_supported_layout": plan.get("structured_supported_layout"),
+            "structured_reduce_weight": None
+            if summary_payload is None
+            else summary_payload.get("structured_reduce_weight"),
+            "dense_vs_structured_comparison": None
+            if summary_payload is None
+            else summary_payload.get("dense_vs_structured_comparison"),
+        },
         "local_surrogate_validation": local_validation,
         "observation_prior_recommendation": {
             "prior_mean_source": "summary_theta_ref",
@@ -3544,6 +3813,7 @@ def _build_schur_summary_plan(
     zernike_indices: Sequence[int],
     schur_damping: float,
     max_dense_dim: int,
+    schur_curvature_method: str,
     phi_ref_mode: str,
     summary_objective: str,
     validate_surrogate: bool,
@@ -3590,6 +3860,22 @@ def _build_schur_summary_plan(
     n_phi = len(phi_labels)
     combined_dim = int(theta_layout.size + n_phi)
     dense_hessian_allowed = combined_dim <= int(max_dense_dim)
+    structured_support = _structured_schur_support_from_inference_cfg(
+        inference_cfg=inference_cfg,
+        n_frames=n_frames_effective,
+    )
+    curvature_method_requested = normalize_schur_curvature_method(
+        schur_curvature_method
+    )
+    try:
+        curvature_method_planned = _select_schur_curvature_method(
+            requested_method=curvature_method_requested,
+            combined_dim=combined_dim,
+            max_dense_dim=int(max_dense_dim),
+            structured_support=structured_support,
+        )
+    except ValueError:
+        curvature_method_planned = None
     reference_inference = _extract_reference_inference_plan(
         inference_cfg,
         provenance=schur_config_provenance,
@@ -3637,9 +3923,15 @@ def _build_schur_summary_plan(
             + "."
         )
     if not dense_hessian_allowed:
-        warnings.append(
-            f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}."
-        )
+        if curvature_method_planned == SCHUR_CURVATURE_METHOD_STRUCTURED:
+            warnings.append(
+                f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}; "
+                "auto will use structured_independent_frames."
+            )
+        else:
+            warnings.append(
+                f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}."
+            )
     if (
         phi_ref_mode == "recovered"
         and reference_inference["optimizer_kind"] == "sgd"
@@ -3651,8 +3943,9 @@ def _build_schur_summary_plan(
             "prefer phi_ref=truth_when_available for the first smoke test."
         )
     warnings.append(
-        "The current dense image-backed exporter is a small-case validation path, "
-        "not a scalable structured Schur extraction."
+        "Dense image-backed Schur export remains the small-case validation path; "
+        "structured_independent_frames is the first operational independent-frame "
+        "registration-only exporter."
     )
     planned_stages = list(case_prep_stages)
     if phi_ref_mode == "recovered":
@@ -3697,6 +3990,9 @@ def _build_schur_summary_plan(
             "schur_damping": float(SCHUR_WORKFLOW_DEFAULTS.schur_damping),
             "max_dense_dim": int(SCHUR_WORKFLOW_DEFAULTS.max_dense_dim),
             "phi_ref": SCHUR_WORKFLOW_DEFAULTS.phi_ref,
+            "schur_curvature_method": (
+                SCHUR_WORKFLOW_DEFAULTS.schur_curvature_method
+            ),
         },
         "reference_inference_policy": {
             "optimizer_kind": SCHUR_REFERENCE_INFERENCE_POLICY.optimizer_kind,
@@ -3726,6 +4022,25 @@ def _build_schur_summary_plan(
         "combined_dim": int(combined_dim),
         "max_dense_dim": int(max_dense_dim),
         "dense_hessian_allowed": bool(dense_hessian_allowed),
+        "schur_curvature_method_requested": curvature_method_requested,
+        "schur_curvature_method_planned": curvature_method_planned,
+        "structured_curvature_used": bool(
+            curvature_method_planned == SCHUR_CURVATURE_METHOD_STRUCTURED
+        ),
+        "dense_global_hessian_materialized": bool(
+            curvature_method_planned == SCHUR_CURVATURE_METHOD_DENSE
+        ),
+        "structured_supported_layout": bool(structured_support["supported"]),
+        "structured_support": structured_support,
+        "structured_reduce_weight": (
+            None
+            if n_frames_effective is None
+            else (
+                1.0
+                if str(objective_cfg.get("subblock_reduce")) == "sum"
+                else 1.0 / float(n_frames_effective)
+            )
+        ),
         "phi_ref_mode": str(phi_ref_mode),
         "reference_inference_will_run": bool(phi_ref_mode == "recovered"),
         "reference_inference_status": (
@@ -3908,6 +4223,75 @@ def _local_surrogate_validation_rows(
     return rows
 
 
+def _write_structured_schur_summary_artifact(
+    *,
+    summary: SubblockSummary,
+    combined_layout: Any,
+    theta_ref: np.ndarray,
+    phi_ref: np.ndarray,
+    sidecar_blocks: Mapping[str, np.ndarray],
+    structured_reduction: Any,
+    summary_json_path: Path,
+    matrix_npz_path: Path,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Write a loader-compatible structured Schur summary artifact.
+
+    The existing loader contract is preserved by writing the same reduced
+    arrays plus dense ``H_tt/H_tp/H_pp`` sidecar blocks. These sidecar blocks
+    are materialized from structured per-frame Hessians; the full packed dense
+    Hessian is not obtained through global autodiff in this path.
+    """
+
+    summary_json_path.parent.mkdir(parents=True, exist_ok=True)
+    matrix_npz_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        matrix_npz_path,
+        theta_ref=np.asarray(theta_ref, dtype=float),
+        phi_ref=np.asarray(phi_ref, dtype=float),
+        reduced_information=summary.reduced_information,
+        reduced_score=summary.reduced_score,
+        h_tt=np.asarray(sidecar_blocks["h_tt"], dtype=float),
+        h_tp=np.asarray(sidecar_blocks["h_tp"], dtype=float),
+        h_pp=np.asarray(sidecar_blocks["h_pp"], dtype=float),
+        g_theta=np.asarray(sidecar_blocks["g_theta"], dtype=float),
+        g_phi=np.asarray(sidecar_blocks["g_phi"], dtype=float),
+    )
+    created_at = now_iso_local_ms()
+    payload = {
+        "schema_version": "image_backed_subblock_summary.v1",
+        "created_at": created_at,
+        "generator": metadata.get("generator"),
+        "subblock_id": summary.subblock_id,
+        "summary_kind": summary.summary_kind,
+        "case_root": metadata.get("case_root"),
+        "cube_path": metadata.get("cube_path"),
+        "manifest_path": metadata.get("manifest_path"),
+        "truth_trace_path": metadata.get("truth_trace_path"),
+        "config_path": metadata.get("config_path"),
+        "objective": metadata.get("objective"),
+        "system": metadata.get("system"),
+        "prior_context": metadata.get("prior_context"),
+        "recovered_reference": metadata.get("recovered_reference"),
+        "theta_labels": list(summary.theta_labels),
+        "phi_labels": list(combined_layout.phi_labels),
+        "combined_labels": list(combined_layout.combined_labels),
+        "theta_ref": np.asarray(theta_ref, dtype=float).tolist(),
+        "phi_ref": np.asarray(phi_ref, dtype=float).tolist(),
+        "dimensions": {
+            "n_theta": int(combined_layout.n_theta),
+            "n_phi": int(combined_layout.n_phi),
+            "combined_dim": int(combined_layout.size),
+        },
+        "diagnostics": structured_reduction.to_diagnostics_dict(),
+        "summary_diagnostics": dict(summary.diagnostics),
+        "matrix_artifact_path": matrix_npz_path.name,
+        "metadata": dict(metadata),
+    }
+    with summary_json_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
 def _plot_local_surrogate_validation(
     *,
     rows: Sequence[dict[str, Any]],
@@ -3953,6 +4337,7 @@ def _evaluate_schur_summary(
     zernike_indices: Sequence[int],
     schur_damping: float,
     max_dense_dim: int,
+    schur_curvature_method: str,
     phi_ref: str,
     summary_objective: str,
     validate_surrogate: bool,
@@ -3967,10 +4352,9 @@ def _evaluate_schur_summary(
     1. resolve the image-backed inference context for one prepared cube,
     2. build the observation-level Theta layout and packed fast ``phi`` labels,
     3. choose a local reference point ``[Theta_ref, phi_ref]``,
-    4. differentiate the combined local objective,
-    5. partition the dense curvature into ``tt/tp/pp`` blocks,
-    6. Schur-reduce the fast block, and
-    7. persist a loader-compatible ``SubblockSummary`` plus diagnostics.
+    4. select dense or structured independent-frame curvature,
+    5. compute the reduced ``Theta`` quadratic with the selected path, and
+    6. persist a loader-compatible ``SubblockSummary`` plus diagnostics.
     """
 
     context = _prepare_inference_context(config_path=config_path)
@@ -3995,9 +4379,15 @@ def _evaluate_schur_summary(
         phi_labels,
     )
     combined_dim = int(theta_layout.size + fast_phi_ref_values.size)
-    _validate_schur_dense_dimension(
+    structured_support = _structured_schur_support_from_context(context)
+    curvature_method_requested = normalize_schur_curvature_method(
+        schur_curvature_method
+    )
+    curvature_method_used = _select_schur_curvature_method(
+        requested_method=curvature_method_requested,
         combined_dim=combined_dim,
         max_dense_dim=int(max_dense_dim),
+        structured_support=structured_support,
     )
 
     combined_loss_fn, objective_metadata = _build_combined_local_objective(
@@ -4009,30 +4399,114 @@ def _evaluate_schur_summary(
         (observation_theta_ref_values, fast_phi_ref_values),
         axis=0,
     )
-    combined_gradient = np.asarray(
-        jax.grad(combined_loss_fn)(jnp.asarray(combined_reference_vector, dtype=float)),
-        dtype=float,
+    dense_global_hessian_materialized = False
+    structured_curvature_used = (
+        curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED
     )
-    combined_curvature = np.asarray(
-        jax.hessian(combined_loss_fn)(jnp.asarray(combined_reference_vector, dtype=float)),
-        dtype=float,
-    )
-    blocks = partition_local_curvature(
-        layout=combined_layout,
-        combined_gradient=combined_gradient,
-        combined_curvature=combined_curvature,
-    )
-    reduced = schur_reduce_local_quadratic(
-        blocks=blocks,
-        damping=float(schur_damping),
-    )
+    dense_vs_structured_comparison: dict[str, Any] | None = None
+    combined_gradient: np.ndarray | None = None
+    combined_curvature: np.ndarray | None = None
+    blocks: Any | None = None
+    reduced: Any | None = None
+    structured_blocks: Any | None = None
+    structured_reduction: Any | None = None
+    structured_sidecar_blocks: dict[str, np.ndarray] | None = None
+
+    if curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE:
+        dense_global_hessian_materialized = True
+        combined_gradient = np.asarray(
+            jax.grad(combined_loss_fn)(
+                jnp.asarray(combined_reference_vector, dtype=float)
+            ),
+            dtype=float,
+        )
+        combined_curvature = np.asarray(
+            jax.hessian(combined_loss_fn)(
+                jnp.asarray(combined_reference_vector, dtype=float)
+            ),
+            dtype=float,
+        )
+        blocks = partition_local_curvature(
+            layout=combined_layout,
+            combined_gradient=combined_gradient,
+            combined_curvature=combined_curvature,
+        )
+        reduced = schur_reduce_local_quadratic(
+            blocks=blocks,
+            damping=float(schur_damping),
+        )
+        reduced_information = reduced.reduced_information
+        reduced_score = reduced.reduced_score
+    else:
+        fast_phi_state = recipe._unpack_active_state(
+            context["layout"],
+            jnp.asarray(fast_phi_ref_values, dtype=float),
+        )
+        frame_phi_ref = np.asarray(fast_phi_state.frame, dtype=float)
+        frame_loss_fn, structured_objective_metadata = (
+            _build_structured_schur_frame_objective(
+                context=context,
+                theta_layout=theta_layout,
+                objective_kind=summary_objective,
+            )
+        )
+        objective_metadata.update(structured_objective_metadata)
+        structured_blocks = build_independent_frame_theta_phi_quadratic_blocks(
+            frame_loss_fn=frame_loss_fn,
+            theta_ref=observation_theta_ref_values,
+            frame_phi_ref=frame_phi_ref,
+            subblock_reduce=str(
+                context["inference_cfg"]["objective"]["subblock_reduce"]
+            ),
+            kind=SCHUR_CURVATURE_METHOD_STRUCTURED,
+        )
+        structured_reduction = schur_reduce_independent_frame_blocks(
+            structured_blocks,
+            damping=float(schur_damping),
+        )
+        structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
+            structured_blocks
+        )
+        reduced_information = structured_reduction.reduced_information
+        reduced_score = structured_reduction.reduced_score
+
+        if combined_dim <= int(max_dense_dim):
+            dense_gradient_for_comparison = np.asarray(
+                jax.grad(combined_loss_fn)(
+                    jnp.asarray(combined_reference_vector, dtype=float)
+                ),
+                dtype=float,
+            )
+            dense_curvature_for_comparison = np.asarray(
+                jax.hessian(combined_loss_fn)(
+                    jnp.asarray(combined_reference_vector, dtype=float)
+                ),
+                dtype=float,
+            )
+            dense_blocks_for_comparison = partition_local_curvature(
+                layout=combined_layout,
+                combined_gradient=dense_gradient_for_comparison,
+                combined_curvature=dense_curvature_for_comparison,
+            )
+            dense_reduced_for_comparison = schur_reduce_local_quadratic(
+                blocks=dense_blocks_for_comparison,
+                damping=float(schur_damping),
+            )
+            dense_vs_structured_comparison = (
+                compare_structured_and_dense_schur_outputs(
+                    structured_information=reduced_information,
+                    structured_score=reduced_score,
+                    dense_information=dense_reduced_for_comparison.reduced_information,
+                    dense_score=dense_reduced_for_comparison.reduced_score,
+                )
+            )
 
     reduced_summary = SubblockSummary.from_reduced_form(
         subblock_id=f"{case_root.name}_subblock_summary",
         theta_labels=theta_layout.labels,
         theta_ref=observation_theta_ref_values,
-        reduced_information=reduced.reduced_information,
-        reduced_score=reduced.reduced_score,
+        reduced_information=reduced_information,
+        reduced_score=reduced_score,
         summary_kind="image_backed_schur",
         damping_used=float(schur_damping),
         diagnostics={
@@ -4040,6 +4514,21 @@ def _evaluate_schur_summary(
             "objective_kind": objective_metadata["objective_kind_used"],
             "n_phi": int(combined_layout.n_phi),
             "local_fit_reference_kind": phi_ref,
+            "schur_curvature_method_requested": curvature_method_requested,
+            "schur_curvature_method_used": curvature_method_used,
+            "dense_global_hessian_materialized": bool(
+                dense_global_hessian_materialized
+            ),
+            "structured_curvature_used": bool(structured_curvature_used),
+            "structured_supported_layout": bool(structured_support["supported"]),
+            "structured_reduce_weight": None
+            if structured_blocks is None
+            else float(structured_blocks.reduce_weight),
+            "n_frames": int(context["layout"].n_frame),
+            "theta_dim": int(theta_layout.size),
+            "frame_phi_dim": int(context["layout"].frame_width),
+            "shared_phi_dim": int(context["layout"].shared_width),
+            "dense_vs_structured_comparison": dense_vs_structured_comparison,
         },
     )
 
@@ -4051,73 +4540,145 @@ def _evaluate_schur_summary(
     surrogate_csv_path = output_dir / "local_surrogate_validation.csv"
     surrogate_png_path = output_dir / "local_surrogate_validation.png"
 
-    artifact = ImageBackedSubblockSummaryArtifact(
-        summary=reduced_summary,
-        layout=combined_layout,
-        theta_ref=observation_theta_ref_values,
-        phi_ref=fast_phi_ref_values,
-        reduced=reduced,
-        metadata={
-            "generator": "examples/scripts/run_obs_subblock_study.py",
-            "case_root": str(case_root.resolve()),
-            "config_path": str(config_path.resolve()),
-            "cube_path": str(context["cube_path"]),
-            "manifest_path": None
-            if context["manifest_path"] is None
-            else str(Path(context["manifest_path"]).resolve()),
-            "truth_trace_path": None
-            if context["trace_path"] is None
-            else str(Path(context["trace_path"]).resolve()),
-            "theta_layout": theta_layout.to_dict(),
-            "phi_ref_source": phi_ref_source,
-            "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
-            "prior_context": {
-                "recommended_prior_mean_source": "summary_theta_ref",
-                "theta_ref_by_label": {
-                    label: float(observation_theta_ref_values[index])
-                    for index, label in enumerate(theta_layout.labels)
-                },
-                "effective_store_values": {
-                    "source.exposure_time_s": (
-                        float(
-                            np.asarray(context["base_store"].get("source.exposure_time_s"))
-                        )
-                        if "source.exposure_time_s" in getattr(
-                            context["base_store"],
-                            "_values",
-                            {},
-                        )
-                        else None
-                    ),
-                },
-                "provenance": {
-                    "system_preset": context["system_cfg"].get("preset"),
-                    "render_config_path": str((case_root / "render_config.json").resolve())
-                    if (case_root / "render_config.json").exists()
-                    else None,
-                    "summary_export_config_path": str(config_path.resolve()),
-                    "cube_path": str(context["cube_path"]),
-                },
+    artifact_metadata = {
+        "generator": "examples/scripts/run_obs_subblock_study.py",
+        "case_root": str(case_root.resolve()),
+        "config_path": str(config_path.resolve()),
+        "cube_path": str(context["cube_path"]),
+        "manifest_path": None
+        if context["manifest_path"] is None
+        else str(Path(context["manifest_path"]).resolve()),
+        "truth_trace_path": None
+        if context["trace_path"] is None
+        else str(Path(context["trace_path"]).resolve()),
+        "theta_layout": theta_layout.to_dict(),
+        "phi_ref_source": phi_ref_source,
+        "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
+        "prior_context": {
+            "recommended_prior_mean_source": "summary_theta_ref",
+            "theta_ref_by_label": {
+                label: float(observation_theta_ref_values[index])
+                for index, label in enumerate(theta_layout.labels)
             },
-            "objective": objective_metadata,
-            "recovered_reference": dict(recovered_reference_metadata or {}),
-            "system": {
-                "preset": context["system_cfg"].get("preset"),
-                "resolved_config": context["system_cfg"],
+            "effective_store_values": {
+                "source.exposure_time_s": (
+                    float(np.asarray(context["base_store"].get("source.exposure_time_s")))
+                    if "source.exposure_time_s" in getattr(
+                        context["base_store"],
+                        "_values",
+                        {},
+                    )
+                    else None
+                ),
+            },
+            "provenance": {
+                "system_preset": context["system_cfg"].get("preset"),
+                "render_config_path": str((case_root / "render_config.json").resolve())
+                if (case_root / "render_config.json").exists()
+                else None,
+                "summary_export_config_path": str(config_path.resolve()),
+                "cube_path": str(context["cube_path"]),
             },
         },
-        combined_gradient=combined_gradient,
-        combined_curvature=combined_curvature,
+        "objective": objective_metadata,
+        "recovered_reference": dict(recovered_reference_metadata or {}),
+        "system": {
+            "preset": context["system_cfg"].get("preset"),
+            "resolved_config": context["system_cfg"],
+        },
+        "curvature": {
+            "schur_curvature_method_requested": curvature_method_requested,
+            "schur_curvature_method_used": curvature_method_used,
+            "dense_global_hessian_materialized": bool(
+                dense_global_hessian_materialized
+            ),
+            "structured_curvature_used": bool(structured_curvature_used),
+            "structured_supported_layout": bool(structured_support["supported"]),
+            "structured_support": dict(structured_support),
+            "structured_reduce_weight": None
+            if structured_blocks is None
+            else float(structured_blocks.reduce_weight),
+            "dense_vs_structured_comparison": dense_vs_structured_comparison,
+        },
+    }
+    if curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE:
+        if reduced is None or blocks is None:
+            raise RuntimeError("Dense Schur path did not produce dense blocks.")
+        artifact = ImageBackedSubblockSummaryArtifact(
+            summary=reduced_summary,
+            layout=combined_layout,
+            theta_ref=observation_theta_ref_values,
+            phi_ref=fast_phi_ref_values,
+            reduced=reduced,
+            metadata=artifact_metadata,
+            combined_gradient=combined_gradient,
+            combined_curvature=combined_curvature,
+        )
+        artifact.write(
+            summary_json_path=summary_json_path,
+            matrix_npz_path=summary_npz_path,
+        )
+        schur_diagnostics = reduced.to_diagnostics_dict()
+        curvature_diagnostics = _combined_curvature_diagnostics(blocks=blocks)
+    else:
+        if structured_reduction is None or structured_sidecar_blocks is None:
+            raise RuntimeError("Structured Schur path did not produce sidecar blocks.")
+        _write_structured_schur_summary_artifact(
+            summary=reduced_summary,
+            combined_layout=combined_layout,
+            theta_ref=observation_theta_ref_values,
+            phi_ref=fast_phi_ref_values,
+            sidecar_blocks=structured_sidecar_blocks,
+            structured_reduction=structured_reduction,
+            summary_json_path=summary_json_path,
+            matrix_npz_path=summary_npz_path,
+            metadata=artifact_metadata,
+        )
+        schur_diagnostics = structured_reduction.to_diagnostics_dict()
+        curvature_diagnostics = {
+            "dimensions": {
+                "combined_dim": int(combined_layout.size),
+                "n_theta": int(combined_layout.n_theta),
+                "n_phi": int(combined_layout.n_phi),
+                "n_frames": int(context["layout"].n_frame),
+                "frame_phi_dim": int(context["layout"].frame_width),
+                "shared_phi_dim": int(context["layout"].shared_width),
+            },
+            "dense_global_hessian_materialized": False,
+            "structured_curvature_used": True,
+            "structured_blocks": structured_blocks.to_debug_payload(
+                include_blocks=False
+            ),
+            "sidecar_policy": (
+                "Dense H_tt/H_tp/H_pp sidecar arrays are materialized from "
+                "structured per-frame curvature blocks for compatibility; the "
+                "full packed Hessian is not formed by global autodiff."
+            ),
+            "partition_shapes": {
+                "h_tt": list(structured_sidecar_blocks["h_tt"].shape),
+                "h_tp": list(structured_sidecar_blocks["h_tp"].shape),
+                "h_pp": list(structured_sidecar_blocks["h_pp"].shape),
+                "g_theta": list(structured_sidecar_blocks["g_theta"].shape),
+                "g_phi": list(structured_sidecar_blocks["g_phi"].shape),
+            },
+        }
+    schur_diagnostics.update(
+        {
+            "schur_curvature_method_requested": curvature_method_requested,
+            "schur_curvature_method_used": curvature_method_used,
+            "dense_global_hessian_materialized": bool(
+                dense_global_hessian_materialized
+            ),
+            "structured_curvature_used": bool(structured_curvature_used),
+            "structured_supported_layout": bool(structured_support["supported"]),
+            "structured_reduce_weight": None
+            if structured_blocks is None
+            else float(structured_blocks.reduce_weight),
+            "dense_vs_structured_comparison": dense_vs_structured_comparison,
+        }
     )
-    artifact.write(
-        summary_json_path=summary_json_path,
-        matrix_npz_path=summary_npz_path,
-    )
-    _write_json(schur_diag_path, reduced.to_diagnostics_dict())
-    _write_json(
-        curvature_diag_path,
-        _combined_curvature_diagnostics(blocks=blocks),
-    )
+    _write_json(schur_diag_path, schur_diagnostics)
+    _write_json(curvature_diag_path, curvature_diagnostics)
 
     validation_rows: list[dict[str, Any]] = []
     if validate_surrogate:
@@ -4126,8 +4687,8 @@ def _evaluate_schur_summary(
             theta_layout=theta_layout,
             theta_ref=observation_theta_ref_values,
             phi_ref=fast_phi_ref_values,
-            reduced_information=reduced.reduced_information,
-            reduced_score=reduced.reduced_score,
+            reduced_information=reduced_information,
+            reduced_score=reduced_score,
             validation_steps=validation_steps,
         )
         _write_rows_csv(surrogate_csv_path, validation_rows)
@@ -4158,6 +4719,17 @@ def _evaluate_schur_summary(
         "combined_dim": combined_dim,
         "n_theta": int(theta_layout.size),
         "n_phi": int(fast_phi_ref_values.size),
+        "schur_curvature_method_requested": curvature_method_requested,
+        "schur_curvature_method_used": curvature_method_used,
+        "dense_global_hessian_materialized": bool(dense_global_hessian_materialized),
+        "structured_curvature_used": bool(structured_curvature_used),
+        "structured_supported_layout": bool(structured_support["supported"]),
+        "structured_reduce_weight": None
+        if structured_blocks is None
+        else float(structured_blocks.reduce_weight),
+        "frame_phi_dim": int(context["layout"].frame_width),
+        "shared_phi_dim": int(context["layout"].shared_width),
+        "dense_vs_structured_comparison": dense_vs_structured_comparison,
         "validate_surrogate": bool(validate_surrogate),
         "validation_row_count": int(len(validation_rows)),
         "artifacts": {
@@ -4414,6 +4986,7 @@ def run_obs_subblock_study(
     zernike_indices: Sequence[int] = DEFAULT_SCHUR_ZERNIKE_INDICES,
     schur_damping: float = DEFAULT_SCHUR_DAMPING,
     max_dense_dim: int = DEFAULT_SCHUR_MAX_DENSE_DIM,
+    schur_curvature_method: str = SCHUR_CURVATURE_METHOD_AUTO,
     phi_ref: str = DEFAULT_SCHUR_PHI_REF,
     summary_objective: str = "full_objective",
     validate_surrogate: bool = True,
@@ -4439,6 +5012,9 @@ def run_obs_subblock_study(
     candidate_address = parse_candidate_parameter_address(candidate_key)
     candidate = None if candidate_address is None else candidate_address.canonical
     normalized_phi_ref = normalize_schur_phi_ref_mode(phi_ref)
+    normalized_schur_curvature_method = normalize_schur_curvature_method(
+        schur_curvature_method
+    )
     if study_mode in {
         MODE_FISHER_ONLY,
         MODE_PROFILE_OBJECTIVE,
@@ -4518,6 +5094,7 @@ def run_obs_subblock_study(
             "zernike_indices": list(parse_zernike_indices(zernike_indices)),
             "schur_damping": float(schur_damping),
             "max_dense_dim": int(max_dense_dim),
+            "schur_curvature_method": normalized_schur_curvature_method,
             "phi_ref": normalized_phi_ref,
             "summary_objective": str(summary_objective),
             "validate_surrogate": bool(validate_surrogate),
@@ -4721,6 +5298,7 @@ def run_obs_subblock_study(
             zernike_indices=parse_zernike_indices(zernike_indices),
             schur_damping=float(schur_damping),
             max_dense_dim=int(max_dense_dim),
+            schur_curvature_method=normalized_schur_curvature_method,
             phi_ref_mode=normalized_phi_ref,
             summary_objective=str(summary_objective),
             validate_surrogate=bool(validate_surrogate),
@@ -4780,6 +5358,7 @@ def run_obs_subblock_study(
             zernike_indices=parse_zernike_indices(zernike_indices),
             schur_damping=float(schur_damping),
             max_dense_dim=int(max_dense_dim),
+            schur_curvature_method=normalized_schur_curvature_method,
             phi_ref=normalized_phi_ref,
             summary_objective=str(summary_objective),
             validate_surrogate=bool(validate_surrogate),
@@ -4960,6 +5539,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum dense combined dimension allowed for schur_summary mode.",
     )
     parser.add_argument(
+        "--schur-curvature-method",
+        choices=SUPPORTED_SCHUR_CURVATURE_METHODS,
+        default=SCHUR_CURVATURE_METHOD_AUTO,
+        help=(
+            "Curvature path for schur_summary export. auto uses dense below "
+            "the max-dense-dim guard and structured_independent_frames for "
+            "supported independent-frame layouts above the guard."
+        ),
+    )
+    parser.add_argument(
         "--phi-ref",
         choices=("recovered", "truth_when_available", "truth", "init"),
         default=DEFAULT_SCHUR_PHI_REF,
@@ -5118,6 +5707,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         zernike_indices=parse_zernike_indices(args.zernike_indices),
         schur_damping=float(args.schur_damping),
         max_dense_dim=int(args.max_dense_dim),
+        schur_curvature_method=str(args.schur_curvature_method),
         phi_ref=str(args.phi_ref),
         summary_objective=str(args.summary_objective),
         validate_surrogate=bool(args.validate_surrogate),
