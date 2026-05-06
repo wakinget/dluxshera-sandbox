@@ -149,7 +149,11 @@ def _inference_template() -> dict:
                     "kind": "nll",
                     "frame_reduce": "sum",
                     "subblock_reduce": "sum",
-                    "noise_model": {"kind": "gaussian", "variance_model": "data"},
+                    "noise_model": {
+                        "kind": "gaussian",
+                        "variance_model": "data",
+                        "variance_floor": 1.0,
+                    },
                 },
                 "optimizer": {
                     "kind": "sgd",
@@ -178,6 +182,36 @@ def _write_templates(tmp_path: Path) -> tuple[Path, Path, Path]:
     _write_json(render_path, _render_template())
     _write_json(inference_path, _inference_template())
     return trace_path, render_path, inference_path
+
+
+def test_fisher_noise_audit_uses_resolved_data_variance_floor():
+    script = _load_script_module()
+    recipe = _load_recipe_module()
+    cube = np.array([[[0.0, 0.5, 1.0, 2.0]]], dtype=float)
+    noise_model_cfg = {
+        "kind": "gaussian",
+        "variance_model": "data",
+        "variance_floor": 0.5,
+    }
+    variance_cube = recipe._build_variance_cube(
+        data_cube=cube,
+        noise_model_cfg=noise_model_cfg,
+    )
+
+    audit = script._build_fisher_noise_audit(
+        {
+            "cube": cube,
+            "variance_cube": variance_cube,
+            "recipe": recipe,
+            "inference_cfg": {"objective": {"noise_model": noise_model_cfg}},
+            "manifest": None,
+            "manifest_path": None,
+        }
+    )
+
+    assert audit["data_variance_floor_value"] == 0.5
+    assert audit["data_variance_floor_source"] == "explicit_config"
+    assert audit["data_variance_floor_clipped_count"] == 2
 
 
 def _write_case_render_artifacts(
@@ -1156,6 +1190,12 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     ] == "inference_template"
     assert plan["preconditioning"]["sources"]["preconditioning_enabled"] == "inference_template"
     assert "diagnostics" in plan["reference_inference_config_if_run"]
+    summary_export_cfg = _read_json(Path(plan["summary_export_inference_config_path"]))
+    summary_noise_model = summary_export_cfg["experiment"]["inference"]["objective"][
+        "noise_model"
+    ]
+    assert summary_noise_model["variance_model"] == "data"
+    assert summary_noise_model["variance_floor"] == 1.0
     assert plan["planned_artifacts"]["frame_truth_preview_json"].endswith(
         "frame_truth_preview.json"
     )

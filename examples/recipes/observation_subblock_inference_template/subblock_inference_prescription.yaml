@@ -164,9 +164,12 @@ experiment:
       noise_model:
         # This should describe how the variance used by the Gaussian image NLL is built.
         # For shot-noise-dominated synthetic runs, "data" is the natural default:
-        # variance array = observed data cube.
+        # variance array = observed data cube clipped to variance_floor.
+        # The default floor is a near-term count-space Poisson approximation
+        # that prevents zero-count pixels from receiving extreme weight.
         kind: gaussian
         variance_model: data
+        variance_floor: 1.0
 
         # Simpler/debug option we are considering:
         # variance_model: scalar

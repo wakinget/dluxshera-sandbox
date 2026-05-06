@@ -872,6 +872,7 @@ def _build_fisher_noise_audit(context: dict[str, Any]) -> dict[str, Any]:
 
     cube = np.asarray(context["cube"], dtype=float)
     variance_cube = np.asarray(context["variance_cube"], dtype=float)
+    recipe = context["recipe"]
     inference_cfg = context["inference_cfg"]
     noise_model_cfg = inference_cfg["objective"]["noise_model"]
     variance_model = str(noise_model_cfg["variance_model"])
@@ -880,9 +881,14 @@ def _build_fisher_noise_audit(context: dict[str, Any]) -> dict[str, Any]:
 
     raw_data_stats = _array_stats(cube)
     effective_variance_stats = _array_stats(variance_cube)
-    data_floor_value = 1.0e-9
+    data_floor_value, data_floor_source = recipe._resolve_data_variance_floor(
+        noise_model_cfg,
+        path="experiment.inference.objective.noise_model.variance_floor",
+    )
     data_based_variance_cube = np.maximum(cube, data_floor_value)
     data_based_variance_stats = _array_stats(data_based_variance_cube)
+    data_floor_clipped_count = int(np.count_nonzero(cube <= data_floor_value))
+    data_floor_total = int(cube.size)
 
     render_variance_path = _resolve_manifest_artifact_path(
         manifest,
@@ -935,7 +941,31 @@ def _build_fisher_noise_audit(context: dict[str, Any]) -> dict[str, Any]:
         "data_as_variance_stats": data_based_variance_stats,
         "render_variance_stats": render_variance_stats,
         "data_variance_floor_value": data_floor_value,
-        "data_variance_floor_clipped_count": int(np.count_nonzero(cube <= data_floor_value)),
+        "data_variance_floor_source": data_floor_source,
+        "data_variance_floor_clipped_count": data_floor_clipped_count,
+        "data_variance_floor_clipped_fraction": (
+            None
+            if data_floor_total == 0
+            else float(data_floor_clipped_count / data_floor_total)
+        ),
+        "data_variance_min_before_floor": (
+            None if data_floor_total == 0 else float(np.min(cube))
+        ),
+        "data_variance_min_after_floor": (
+            None
+            if data_based_variance_cube.size == 0
+            else float(np.min(data_based_variance_cube))
+        ),
+        "data_variance_median_after_floor": (
+            None
+            if data_based_variance_cube.size == 0
+            else float(np.median(data_based_variance_cube))
+        ),
+        "data_variance_max_after_floor": (
+            None
+            if data_based_variance_cube.size == 0
+            else float(np.max(data_based_variance_cube))
+        ),
         "variance_mean_over_cube_mean": (
             None
             if cube_mean in (None, 0.0) or variance_mean is None
@@ -2850,6 +2880,7 @@ def _build_study_inference_config(
             path="experiment.inference.objective",
         )
         noise_model_cfg["variance_model"] = "provided_cube"
+        noise_model_cfg.pop("variance_floor", None)
         noise_model_cfg["path"] = case_module._path_for_config(
             variance_path,
             config_dir=run_root,

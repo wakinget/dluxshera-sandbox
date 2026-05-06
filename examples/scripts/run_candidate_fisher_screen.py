@@ -577,7 +577,10 @@ def build_noise_audit_row(
         "variance_zero_count": None,
         "data_as_variance_mean": None,
         "data_as_variance_min": None,
+        "data_variance_floor_value": None,
+        "data_variance_floor_source": None,
         "data_variance_floor_clipped_count": None,
+        "data_variance_floor_clipped_fraction": None,
         "render_variance_mean": None,
         "render_variance_min": None,
         "variance_mean_over_cube_mean": None,
@@ -635,10 +638,25 @@ def build_noise_audit_row(
             "variance_zero_count": _stat_value(variance_stats, "zero_count"),
             "data_as_variance_mean": _stat_value(data_variance_stats, "mean"),
             "data_as_variance_min": _stat_value(data_variance_stats, "min"),
+            "data_variance_floor_value": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("data_variance_floor_value")
+            ),
+            "data_variance_floor_source": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("data_variance_floor_source")
+            ),
             "data_variance_floor_clipped_count": (
                 None
                 if not isinstance(noise_audit, dict)
                 else noise_audit.get("data_variance_floor_clipped_count")
+            ),
+            "data_variance_floor_clipped_fraction": (
+                None
+                if not isinstance(noise_audit, dict)
+                else noise_audit.get("data_variance_floor_clipped_fraction")
             ),
             "render_variance_mean": _stat_value(render_variance_stats, "mean"),
             "render_variance_min": _stat_value(render_variance_stats, "min"),
@@ -727,6 +745,12 @@ def build_noise_audit_comparisons(
                 ),
                 "noiseless_variance_model": noiseless.get("variance_model"),
                 "shot_noise_variance_model": shot.get("variance_model"),
+                "noiseless_data_variance_floor_value": noiseless.get(
+                    "data_variance_floor_value"
+                ),
+                "shot_noise_data_variance_floor_value": shot.get(
+                    "data_variance_floor_value"
+                ),
                 "noiseless_data_variance_floor_clipped_count": noiseless.get(
                     "data_variance_floor_clipped_count"
                 ),

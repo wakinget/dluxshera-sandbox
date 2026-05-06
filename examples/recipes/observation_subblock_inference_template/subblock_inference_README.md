@@ -517,6 +517,9 @@ The current tested workflow is:
 - `objective.noise_model.variance_model` is typically `data`, optional debug `scalar`,
   or `provided_cube` when a study or helper wants to reuse an explicit variance
   cube written by the renderer
+- `objective.noise_model.variance_floor` applies only to `variance_model: data`;
+  it defaults to `1.0` as a count-space approximation so zero-count pixels are
+  not treated as extreme-confidence pixels
 
 The solve assumes the resolved top-level `system` block is the fixed shared
 state for the block solve. `experiment.truth` is not used for shared overrides

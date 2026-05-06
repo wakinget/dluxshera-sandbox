@@ -98,6 +98,79 @@ def test_variance_flooring_keeps_chi2_summary_finite():
         variance_cube=variance_cube,
     )
 
-    assert np.all(variance_cube >= 1e-9)
+    assert np.all(variance_cube >= 1.0)
     assert np.all(np.isfinite(summary.per_frame_chi2))
     assert np.all(np.isfinite(summary.per_frame_reduced_chi2))
+
+
+def test_data_variance_uses_default_floor():
+    recipe = _load_recipe_module()
+    data_cube = np.array([[[0.0, 0.5, 1.0, 2.0]]], dtype=float)
+
+    variance_cube = recipe._build_variance_cube(
+        data_cube=data_cube,
+        noise_model_cfg={"kind": "gaussian", "variance_model": "data"},
+    )
+
+    np.testing.assert_allclose(variance_cube, np.array([[[1.0, 1.0, 1.0, 2.0]]]))
+
+
+def test_data_variance_uses_explicit_floor():
+    recipe = _load_recipe_module()
+    data_cube = np.array([[[0.0, 0.5, 1.0, 2.0]]], dtype=float)
+
+    variance_cube = recipe._build_variance_cube(
+        data_cube=data_cube,
+        noise_model_cfg={
+            "kind": "gaussian",
+            "variance_model": "data",
+            "variance_floor": 0.25,
+        },
+    )
+
+    np.testing.assert_allclose(variance_cube, np.array([[[0.25, 0.5, 1.0, 2.0]]]))
+
+
+@pytest.mark.parametrize("variance_floor", [0, -1, "not-a-number"])
+def test_data_variance_rejects_invalid_floor(variance_floor):
+    recipe = _load_recipe_module()
+    data_cube = np.array([[[0.0, 0.5, 1.0, 2.0]]], dtype=float)
+
+    with pytest.raises(ValueError, match="variance_floor"):
+        recipe._build_variance_cube(
+            data_cube=data_cube,
+            noise_model_cfg={
+                "kind": "gaussian",
+                "variance_model": "data",
+                "variance_floor": variance_floor,
+            },
+        )
+
+
+def test_scalar_variance_ignores_variance_floor():
+    recipe = _load_recipe_module()
+    data_cube = np.array([[[0.0, 0.5, 1.0, 2.0]]], dtype=float)
+
+    variance_cube = recipe._build_variance_cube(
+        data_cube=data_cube,
+        noise_model_cfg={
+            "kind": "gaussian",
+            "variance_model": "scalar",
+            "scalar": 3.0,
+            "variance_floor": -1.0,
+        },
+    )
+
+    np.testing.assert_allclose(variance_cube, np.full_like(data_cube, 3.0))
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_data_variance_rejects_nonfinite_data(bad_value):
+    recipe = _load_recipe_module()
+    data_cube = np.array([[[1.0, bad_value]]], dtype=float)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        recipe._build_variance_cube(
+            data_cube=data_cube,
+            noise_model_cfg={"kind": "gaussian", "variance_model": "data"},
+        )

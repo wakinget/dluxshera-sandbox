@@ -121,6 +121,7 @@ MANIFEST_SCHEMA_VERSION = "subblock_inference_manifest.v1"
 GENERATOR_ID = "examples/recipes/observation_subblock_inference.py"
 JAX_ENABLE_X64 = True
 PARAMETER_RESIDUAL_LOG_FLOOR = 1.0e-18
+DEFAULT_DATA_VARIANCE_FLOOR = 1.0
 TRACE_VALIDATE_DEFAULTS = {
     "require_contiguous_frame_index": True,
     "require_monotonic_time": True,
@@ -866,14 +867,16 @@ def _build_variance_cube(
             raise ValueError(
                 "Variance model 'data' produced non-finite values in observation cube."
             )
-        floor = 1e-9
+        floor, _ = _resolve_data_variance_floor(noise_model_cfg)
         if np.any(variance_cube <= floor):
             clipped = int(np.count_nonzero(variance_cube <= floor))
             total = int(variance_cube.size)
             print(
                 "Warning: objective.noise_model.variance_model='data' encountered "
-                f"{clipped}/{total} non-positive or near-zero variance values; "
-                f"clipping to {floor}."
+                f"{clipped}/{total} values <= variance_floor={floor:g}; clipping "
+                "to the configured floor. Increase "
+                "objective.noise_model.variance_floor or use "
+                "variance_model='provided_cube' for a more physical variance basis."
             )
             variance_cube = np.maximum(variance_cube, floor)
         return variance_cube
@@ -920,6 +923,68 @@ def _build_variance_cube(
         return variance_cube
 
     raise ValueError(f"Unsupported objective.noise_model.variance_model: {variance_model!r}")
+
+
+def _resolve_data_variance_floor(
+    noise_model_cfg: dict[str, Any],
+    *,
+    path: str = "objective.noise_model.variance_floor",
+) -> tuple[float, str]:
+    """Return the configured floor for ``variance_model='data'``."""
+
+    if (
+        "variance_floor" not in noise_model_cfg
+        or noise_model_cfg.get("variance_floor") is None
+    ):
+        return DEFAULT_DATA_VARIANCE_FLOOR, "default"
+    return (
+        float(
+            coerce_numeric_value(
+                noise_model_cfg["variance_floor"],
+                path=path,
+                must_be_positive=True,
+            )
+        ),
+        "explicit_config",
+    )
+
+
+def _data_variance_floor_diagnostics(
+    *,
+    data_cube: np.ndarray,
+    variance_cube: np.ndarray,
+    noise_model_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Summarize data-floor behavior for lightweight provenance records."""
+
+    variance_model = str(noise_model_cfg["variance_model"])
+    if variance_model != "data":
+        return {}
+    floor, source = _resolve_data_variance_floor(noise_model_cfg)
+    data_arr = np.asarray(data_cube, dtype=float)
+    variance_arr = np.asarray(variance_cube, dtype=float)
+    clipped_count = int(np.count_nonzero(data_arr <= floor))
+    total = int(data_arr.size)
+    return {
+        "variance_floor": float(floor),
+        "variance_floor_source": source,
+        "variance_floor_clipped_count": clipped_count,
+        "variance_floor_clipped_fraction": (
+            None if total == 0 else float(clipped_count / total)
+        ),
+        "variance_min_before_floor": None
+        if total == 0
+        else float(np.min(data_arr)),
+        "variance_min_after_floor": None
+        if variance_arr.size == 0
+        else float(np.min(variance_arr)),
+        "variance_median_after_floor": None
+        if variance_arr.size == 0
+        else float(np.median(variance_arr)),
+        "variance_max_after_floor": None
+        if variance_arr.size == 0
+        else float(np.max(variance_arr)),
+    }
 
 
 def _normalize_objective_reductions(
@@ -2748,6 +2813,12 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
             path="experiment.inference.objective.noise_model.scalar",
             must_be_positive=True,
         )
+    data_variance_floor: float | None = None
+    if variance_model == "data":
+        data_variance_floor, _ = _resolve_data_variance_floor(
+            noise_model_cfg,
+            path="experiment.inference.objective.noise_model.variance_floor",
+        )
 
     optimizer_cfg = _optional_dict(inference_cfg, "optimizer", path="experiment.inference")
     optimizer_kind = str(optimizer_cfg.get("kind", "adam"))
@@ -2938,6 +3009,7 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                     "variance_model": variance_model,
                     "path": provided_variance_path,
                     "scalar": scalar_variance,
+                    "variance_floor": data_variance_floor,
                 },
             },
             "optimizer": {
@@ -3882,6 +3954,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "priors": to_jsonable_obs_subblock_payload(inference_cfg["priors"]),
         "temporal": to_jsonable_obs_subblock_payload(inference_cfg["temporal"]),
         "objective": to_jsonable_obs_subblock_payload(inference_cfg["objective"]),
+        "variance_diagnostics": _data_variance_floor_diagnostics(
+            data_cube=cube,
+            variance_cube=variance_cube,
+            noise_model_cfg=inference_cfg["objective"]["noise_model"],
+        ),
         "optimizer": {
             "kind": optimizer_cfg["kind"],
             "base_lr": float(optimizer_cfg["base_lr"]),

@@ -14,6 +14,7 @@ from dluxshera.inference.observation_belief import (
     SubblockSummary,
     update_observation_belief,
 )
+from dluxshera.inference.observation_forecast import PriorContext
 
 
 SCRIPT_PATH = (
@@ -106,6 +107,23 @@ def test_parse_n_subblocks_grid_rejects_invalid_inputs(raw: str, match: str):
         module.parse_n_subblocks_grid(raw)
 
 
+def test_parse_simulator_mode_accepts_supported_modes():
+    module = _load_script_module()
+
+    assert module.parse_simulator_mode("replicate") == "replicate"
+    assert (
+        module.parse_simulator_mode("fixed_information_score_noise")
+        == "fixed_information_score_noise"
+    )
+
+
+def test_parse_simulator_mode_rejects_unsupported_mode():
+    module = _load_script_module()
+
+    with pytest.raises(ValueError, match="Unsupported"):
+        module.parse_simulator_mode("bootstrap_real_summaries")
+
+
 def test_replicate_mode_repeats_one_input_summary():
     module = _load_script_module()
     summary = SubblockSummary.from_reduced_form(
@@ -153,6 +171,98 @@ def test_replicate_mode_tiles_multiple_input_summaries():
     ]
 
 
+def test_truth_vector_construction_supports_theta_ref_prior_explicit_and_offset(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    labels = ("source.separation_as", "source.contrast")
+    summary = SubblockSummary.from_reduced_form(
+        subblock_id="source_a",
+        theta_labels=labels,
+        theta_ref=np.array([1.25, 3.5]),
+        reduced_information=np.eye(2),
+        reduced_score=np.zeros(2),
+    )
+    prior_context = PriorContext(
+        theta_labels=labels,
+        prior_mean=np.array([1.0, 4.0]),
+        prior_mean_source="unit_test",
+        provenance={},
+    )
+
+    theta_true, provenance = module.construct_truth_vector(
+        theta_labels=labels,
+        summaries=[summary],
+        prior_context=prior_context,
+        truth_mode="theta-ref",
+    )
+    np.testing.assert_allclose(theta_true, [1.25, 3.5])
+    assert provenance["truth_mode"] == "theta-ref"
+
+    theta_true, _ = module.construct_truth_vector(
+        theta_labels=labels,
+        summaries=[summary],
+        prior_context=prior_context,
+        truth_mode="prior-mean",
+    )
+    np.testing.assert_allclose(theta_true, [1.0, 4.0])
+
+    truth_path = tmp_path / "truth.json"
+    truth_path.write_text(
+        json.dumps({"source.separation_as": 1.1, "source.contrast": 3.2}),
+        encoding="utf-8",
+    )
+    theta_true, _ = module.construct_truth_vector(
+        theta_labels=labels,
+        summaries=[summary],
+        prior_context=prior_context,
+        truth_mode="explicit",
+        truth_json_path=truth_path,
+    )
+    np.testing.assert_allclose(theta_true, [1.1, 3.2])
+
+    theta_true, _ = module.construct_truth_vector(
+        theta_labels=labels,
+        summaries=[summary],
+        prior_context=prior_context,
+        truth_mode="offset",
+        truth_offset="source.separation_as=0.05,source.contrast=-0.25",
+    )
+    np.testing.assert_allclose(theta_true, [1.30, 3.25])
+
+
+def test_explicit_truth_json_requires_every_label(tmp_path: Path):
+    module = _load_script_module()
+    labels = ("source.separation_as", "source.contrast")
+    summary = SubblockSummary.from_reduced_form(
+        subblock_id="source_a",
+        theta_labels=labels,
+        theta_ref=np.array([1.25, 3.5]),
+        reduced_information=np.eye(2),
+        reduced_score=np.zeros(2),
+    )
+    prior_context = PriorContext(
+        theta_labels=labels,
+        prior_mean=np.array([1.0, 4.0]),
+        prior_mean_source="unit_test",
+        provenance={},
+    )
+    truth_path = tmp_path / "truth_missing.json"
+    truth_path.write_text(
+        json.dumps({"source.separation_as": 1.1}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing"):
+        module.construct_truth_vector(
+            theta_labels=labels,
+            summaries=[summary],
+            prior_context=prior_context,
+            truth_mode="explicit",
+            truth_json_path=truth_path,
+        )
+
+
 def test_identical_theta_labels_validation_accepts_matching_labels():
     module = _load_script_module()
     summaries = [
@@ -191,6 +301,141 @@ def test_identical_theta_labels_validation_rejects_mismatched_labels():
 
     with pytest.raises(ValueError, match="identical theta_labels"):
         module.require_identical_theta_labels([first, second])
+
+
+def test_score_noise_sampling_reproducibility_and_alpha_zero():
+    module = _load_script_module()
+    information = np.array([[2.0, 0.2], [0.2, 1.0]], dtype=float)
+
+    noise, diagnostics = module.sample_score_noise_from_information(
+        information,
+        np.random.default_rng(123),
+        alpha=0.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+    np.testing.assert_allclose(noise, np.zeros(2))
+    assert diagnostics["sampling_method"] == "eigen_psd_floor"
+
+    first, _ = module.sample_score_noise_from_information(
+        information,
+        np.random.default_rng(123),
+        alpha=1.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+    second, _ = module.sample_score_noise_from_information(
+        information,
+        np.random.default_rng(123),
+        alpha=1.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+    third, _ = module.sample_score_noise_from_information(
+        information,
+        np.random.default_rng(124),
+        alpha=1.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+    np.testing.assert_allclose(first, second)
+    assert first.shape == (2,)
+    assert not np.allclose(first, third)
+
+
+def test_score_noise_sampling_floors_small_negative_eigenvalues_and_rejects_large():
+    module = _load_script_module()
+    small_negative = np.diag([1.0, -1.0e-14])
+    noise, diagnostics = module.sample_score_noise_from_information(
+        small_negative,
+        np.random.default_rng(123),
+        alpha=1.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+    assert noise.shape == (2,)
+    assert diagnostics["n_eigenvalues_below_floor"] >= 1
+
+    with pytest.raises(ValueError, match="negative eigenvalues"):
+        module.sample_score_noise_from_information(
+            np.diag([1.0, -1.0e-3]),
+            np.random.default_rng(123),
+            alpha=1.0,
+            eig_floor_abs=0.0,
+            eig_floor_rel=1.0e-12,
+        )
+
+
+def test_score_noise_synthesis_uses_expected_score_and_nested_prefixes():
+    module = _load_script_module()
+    summary = SubblockSummary.from_reduced_form(
+        subblock_id="source_a",
+        theta_labels=("source.separation_as", "source.contrast"),
+        theta_ref=np.array([1.0, 2.0]),
+        reduced_information=np.array([[2.0, 0.5], [0.5, 1.0]], dtype=float),
+        reduced_score=np.zeros(2),
+    )
+    theta_true = np.array([0.75, 2.25], dtype=float)
+
+    batch = module.synthesize_score_noise_summaries(
+        [summary],
+        n_subblocks=10,
+        theta_true=theta_true,
+        rng=np.random.default_rng(123),
+        trial_id=0,
+        score_noise_alpha=0.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+
+    expected_score = summary.reduced_information @ (summary.theta_ref - theta_true)
+    np.testing.assert_allclose(batch.summaries[0].reduced_score, expected_score)
+    assert [item.subblock_id for item in batch.summaries[:3]] == [
+        item.subblock_id for item in batch.summaries
+    ][:3]
+    assert batch.provenance["nested_prefix_policy"].startswith("synthesize_max_grid")
+
+    weak_prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=summary.theta_labels,
+        mean=np.array([0.0, 0.0]),
+        sigma=np.array([1.0e6, 1.0e6]),
+    )
+    update = update_observation_belief(weak_prior, batch.summaries[:10])
+    np.testing.assert_allclose(update.posterior.mean, theta_true, rtol=1.0e-6)
+
+
+def test_score_noise_synthesis_tiles_multiple_templates_in_input_order():
+    module = _load_script_module()
+    summaries = [
+        SubblockSummary.from_reduced_form(
+            subblock_id=f"source_{index}",
+            theta_labels=("source.separation_as",),
+            theta_ref=np.array([1.0 + index]),
+            reduced_information=np.array([[2.0 + index]]),
+            reduced_score=np.zeros(1),
+        )
+        for index in range(2)
+    ]
+
+    batch = module.synthesize_score_noise_summaries(
+        summaries,
+        n_subblocks=5,
+        theta_true=np.array([1.0]),
+        rng=np.random.default_rng(123),
+        trial_id=2,
+        score_noise_alpha=0.0,
+        eig_floor_abs=0.0,
+        eig_floor_rel=1.0e-12,
+    )
+
+    assert batch.source_indices == (0, 1, 0, 1, 0)
+    assert [row["source_template_index"] for row in batch.diagnostics] == [
+        0,
+        1,
+        0,
+        1,
+        0,
+    ]
 
 
 def test_forecast_row_reports_separation_sigma_in_arcsec_and_microarcseconds():
@@ -347,3 +592,63 @@ def test_summary_simulator_main_writes_required_artifacts(tmp_path: Path):
     assert posterior_rows[0]["units"] == "arcsec"
     assert len(information_rows) == 2
     assert "posterior_precision_rank_estimate" in information_rows[0]
+
+
+def test_score_noise_mode_writes_stochastic_artifacts(tmp_path: Path):
+    module = _load_script_module()
+    summary_path = _write_summary_json(tmp_path, stem="summary_score_noise")
+
+    result = module.main(
+        [
+            "--summary-json",
+            str(summary_path),
+            "--mode",
+            "fixed_information_score_noise",
+            "--n-subblocks",
+            "1,3",
+            "--n-trials",
+            "3",
+            "--seed",
+            "123",
+            "--score-noise-alpha",
+            "1.0",
+            "--truth-mode",
+            "theta-ref",
+            "--results-root",
+            str(tmp_path / "results"),
+            "--run-name",
+            "score_noise_case",
+        ]
+    )
+
+    artifacts = {name: Path(path) for name, path in result["artifacts"].items()}
+    for key in (
+        "manifest_json",
+        "trial_forecast_results_csv",
+        "forecast_results_csv",
+        "trial_posterior_table_csv",
+        "stochastic_synthesis_diagnostics_csv",
+        "information_diagnostics_csv",
+        "separation_error_vs_n_subblocks_png",
+    ):
+        assert key in artifacts
+        assert artifacts[key].exists()
+        assert artifacts[key].stat().st_size > 0
+
+    manifest = json.loads(artifacts["manifest_json"].read_text(encoding="utf-8"))
+    trial_rows = _read_csv_rows(artifacts["trial_forecast_results_csv"])
+    aggregate_rows = _read_csv_rows(artifacts["forecast_results_csv"])
+    posterior_rows = _read_csv_rows(artifacts["trial_posterior_table_csv"])
+
+    assert manifest["mode"] == "fixed_information_score_noise"
+    assert manifest["stochastic_mode"]["n_trials"] == 3
+    assert manifest["stochastic_mode"]["seed"] == 123
+    assert manifest["stochastic_mode"]["score_noise_alpha"] == 1.0
+    assert manifest["stochastic_mode"]["truth"]["truth_mode"] == "theta-ref"
+    assert "source.separation_as" in manifest["stochastic_mode"]["truth"]["truth"]
+    assert len(trial_rows) == 6
+    assert len(aggregate_rows) == 2
+    assert len(posterior_rows) == 12
+    assert "separation_truth_as" in trial_rows[0]
+    assert "separation_error_uas" in trial_rows[0]
+    assert "separation_rms_error_uas" in aggregate_rows[0]
