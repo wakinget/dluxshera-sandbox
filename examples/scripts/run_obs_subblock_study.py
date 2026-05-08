@@ -21,7 +21,12 @@ import csv
 import importlib.util
 import json
 import os
+import platform
+import resource
+import subprocess
 import sys
+import time
+import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -33,6 +38,7 @@ import numpy as np
 from astropy.io import fits
 
 from dluxshera.config.io import load_config_file, load_user_config
+from dluxshera.config.numeric import coerce_numeric_value, normalize_optimizer_kwargs
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.observation_belief import ObservationThetaLayout, SubblockSummary
 from dluxshera.inference.observation_summary import (
@@ -162,7 +168,8 @@ DEFAULT_SCHUR_DAMPING = 1.0e-8
 # Safety guard for the v0 dense Hessian path over the packed ``[Theta, phi]``
 # local vector. This should prevent accidental large-frame or full-Zernike runs
 # from materializing an oversized dense Hessian before a structured path exists.
-DEFAULT_SCHUR_MAX_DENSE_DIM = 80
+DEFAULT_SCHUR_MAX_DENSE_DIM = 40
+DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE = False
 DEFAULT_SCHUR_PHI_REF = "truth_when_available"
 SCHUR_CURVATURE_METHOD_AUTO = "auto"
 SCHUR_CURVATURE_METHOD_DENSE = "dense"
@@ -196,6 +203,7 @@ class SchurSummaryWorkflowDefaults:
     zernike_indices: tuple[int, ...]
     schur_damping: float
     max_dense_dim: int
+    validate_structured_against_dense: bool
     phi_ref: str
     schur_curvature_method: str
     plan_filename: str
@@ -227,6 +235,7 @@ SCHUR_WORKFLOW_DEFAULTS = SchurSummaryWorkflowDefaults(
     zernike_indices=DEFAULT_SCHUR_ZERNIKE_INDICES,
     schur_damping=DEFAULT_SCHUR_DAMPING,
     max_dense_dim=DEFAULT_SCHUR_MAX_DENSE_DIM,
+    validate_structured_against_dense=DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     phi_ref=DEFAULT_SCHUR_PHI_REF,
     schur_curvature_method=SCHUR_CURVATURE_METHOD_AUTO,
     plan_filename=SCHUR_SUMMARY_PLAN_FILENAME,
@@ -578,6 +587,53 @@ def _select_schur_curvature_method(
         + structured_message
         + detail
     )
+
+
+def _dense_vs_structured_comparison_state(
+    *,
+    requested: bool,
+    curvature_method_used: str | None,
+    combined_dim: int,
+    max_dense_dim: int,
+) -> dict[str, Any]:
+    """Return validation-only dense comparison state for audit payloads."""
+
+    method = (
+        None
+        if curvature_method_used is None
+        else normalize_schur_curvature_method(curvature_method_used)
+    )
+    if method != SCHUR_CURVATURE_METHOD_STRUCTURED:
+        return {
+            "dense_vs_structured_comparison_requested": bool(requested),
+            "dense_vs_structured_comparison_run": False,
+            "dense_vs_structured_comparison_skipped_reason": "curvature_method_not_structured",
+            "max_dense_dim": int(max_dense_dim),
+            "combined_dim": int(combined_dim),
+        }
+    if not requested:
+        return {
+            "dense_vs_structured_comparison_requested": False,
+            "dense_vs_structured_comparison_run": False,
+            "dense_vs_structured_comparison_skipped_reason": "not_requested",
+            "max_dense_dim": int(max_dense_dim),
+            "combined_dim": int(combined_dim),
+        }
+    if int(combined_dim) > int(max_dense_dim):
+        return {
+            "dense_vs_structured_comparison_requested": True,
+            "dense_vs_structured_comparison_run": False,
+            "dense_vs_structured_comparison_skipped_reason": "combined_dim_exceeds_max_dense_dim",
+            "max_dense_dim": int(max_dense_dim),
+            "combined_dim": int(combined_dim),
+        }
+    return {
+        "dense_vs_structured_comparison_requested": True,
+        "dense_vs_structured_comparison_run": True,
+        "dense_vs_structured_comparison_skipped_reason": None,
+        "max_dense_dim": int(max_dense_dim),
+        "combined_dim": int(combined_dim),
+    }
 
 
 def classify_schur_summary_theta_keys(
@@ -1478,6 +1534,173 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _maxrss_to_mb(value: float) -> float:
+    """Normalize ``resource.ru_maxrss`` to MB on macOS and Linux."""
+
+    if sys.platform == "darwin":
+        return float(value) / (1024.0 * 1024.0)
+    return float(value) / 1024.0
+
+
+def _current_rss_mb() -> tuple[float | None, str | None]:
+    """Return current process RSS in MB using isolated best-effort probes."""
+
+    if sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "rss=", "-p", str(os.getpid())],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if completed.returncode == 0 and completed.stdout.strip():
+                return float(completed.stdout.strip().splitlines()[-1]) / 1024.0, None
+            return None, (completed.stderr or "ps returned no rss").strip()
+        except Exception as exc:
+            return None, str(exc)
+    statm_path = Path("/proc/self/statm")
+    if statm_path.exists():
+        try:
+            pages = int(statm_path.read_text(encoding="utf-8").split()[1])
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return float(pages * page_size) / (1024.0 * 1024.0), None
+        except Exception as exc:
+            return None, str(exc)
+    return None, "current RSS unavailable on this platform"
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert diagnostic metadata to JSON-safe values without raising."""
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def array_memory_metadata(value: Any) -> dict[str, Any]:
+    """Return shape/dtype/byte metadata for an array-like diagnostic value."""
+
+    shape = getattr(value, "shape", None)
+    dtype = getattr(value, "dtype", None)
+    nbytes = getattr(value, "nbytes", None)
+    return {
+        "shape": None if shape is None else [int(dim) for dim in tuple(shape)],
+        "dtype": None if dtype is None else str(dtype),
+        "nbytes": None if nbytes is None else int(nbytes),
+        "mb": None if nbytes is None else float(nbytes) / (1024.0 * 1024.0),
+    }
+
+
+def named_array_memory_metadata(**arrays: Any) -> dict[str, Any]:
+    """Build JSON-safe array metadata for stage diagnostics."""
+
+    return {
+        name: array_memory_metadata(array)
+        for name, array in arrays.items()
+        if array is not None
+    }
+
+
+def capture_memory_snapshot(stage: str, **metadata: Any) -> dict[str, Any]:
+    """Capture one best-effort process memory snapshot for diagnostics.
+
+    This records Python heap statistics only when ``tracemalloc`` is enabled.
+    Those numbers do not include JAX/XLA native allocations; RSS/max RSS are the
+    broad process-level evidence for those allocations.
+    """
+
+    measurement_errors: dict[str, str] = {}
+    rss_mb, rss_error = _current_rss_mb()
+    if rss_error:
+        measurement_errors["rss_mb"] = rss_error
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        peak_rss_mb = _maxrss_to_mb(float(usage.ru_maxrss))
+    except Exception as exc:
+        peak_rss_mb = None
+        measurement_errors["peak_rss_mb"] = str(exc)
+
+    tracemalloc_current_mb = None
+    tracemalloc_peak_mb = None
+    if tracemalloc.is_tracing():
+        try:
+            current, peak = tracemalloc.get_traced_memory()
+            tracemalloc_current_mb = float(current) / (1024.0 * 1024.0)
+            tracemalloc_peak_mb = float(peak) / (1024.0 * 1024.0)
+        except Exception as exc:
+            measurement_errors["tracemalloc"] = str(exc)
+
+    payload = {
+        "timestamp": now_iso_local_ms(),
+        "monotonic_seconds": time.monotonic(),
+        "stage": str(stage),
+        "pid": os.getpid(),
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "python": platform.python_version(),
+        },
+        "rss_mb": rss_mb,
+        "peak_rss_mb": peak_rss_mb,
+        "tracemalloc_current_mb": tracemalloc_current_mb,
+        "tracemalloc_peak_mb": tracemalloc_peak_mb,
+        "metadata": _json_safe(metadata),
+    }
+    if measurement_errors:
+        payload["measurement_errors"] = measurement_errors
+    return payload
+
+
+class MemoryDiagnosticsRecorder:
+    """Append memory snapshots to JSONL and retain a compact in-process audit."""
+
+    def __init__(self, path: Path, *, enable_tracemalloc: bool = True):
+        self.path = path.resolve()
+        self.stages: list[str] = []
+        self.peak_rss_mb_observed: float | None = None
+        self.last_record: dict[str, Any] | None = None
+        if enable_tracemalloc and not tracemalloc.is_tracing():
+            tracemalloc.start()
+
+    def record(self, stage: str, **metadata: Any) -> dict[str, Any]:
+        snapshot = capture_memory_snapshot(stage, **metadata)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(snapshot, default=str) + "\n")
+        self.stages.append(str(stage))
+        peak = snapshot.get("peak_rss_mb")
+        if isinstance(peak, (int, float)):
+            self.peak_rss_mb_observed = (
+                float(peak)
+                if self.peak_rss_mb_observed is None
+                else max(self.peak_rss_mb_observed, float(peak))
+            )
+        self.last_record = snapshot
+        return snapshot
+
+    def audit_payload(self, **metadata: Any) -> dict[str, Any]:
+        return {
+            "diagnostics_enabled": True,
+            "timeline_jsonl": str(self.path),
+            "stages_recorded": list(self.stages),
+            "peak_rss_mb_observed": self.peak_rss_mb_observed,
+            "last_stage": None if self.last_record is None else self.last_record.get("stage"),
+            "last_successful_stage": None
+            if self.last_record is None
+            else self.last_record.get("stage"),
+            **_json_safe(metadata),
+        }
+
+
 def _ensure_mapping(parent: dict[str, Any], key: str, *, path: str) -> dict[str, Any]:
     value = parent.get(key)
     if value is None:
@@ -1677,6 +1900,217 @@ def _apply_reference_diagnostics_profile(
     return sources
 
 
+def parse_reference_optimizer_kwargs(raw_values: Sequence[str] | None) -> dict[str, Any]:
+    """Parse repeatable ``KEY=VALUE`` optimizer kwargs from the CLI."""
+
+    if not raw_values:
+        return {}
+    parsed: dict[str, Any] = {}
+    for raw in raw_values:
+        text = str(raw).strip()
+        if "=" not in text:
+            raise ValueError(
+                "reference optimizer kwargs must use KEY=VALUE syntax; "
+                f"received {raw!r}."
+            )
+        key, value = text.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("reference optimizer kwargs must use non-empty keys.")
+        parsed[key] = value.strip()
+    return parsed
+
+
+def parse_reference_preconditioning_lr_clip(raw: str | None) -> tuple[float, float] | None:
+    """Parse ``MIN,MAX`` learning-rate clip bounds for reference preconditioning."""
+
+    if raw is None:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    if len(parts) != 2 or not all(parts):
+        raise ValueError("--reference-preconditioning-lr-clip must be MIN,MAX.")
+    lr_min = float(
+        coerce_numeric_value(
+            parts[0],
+            path="--reference-preconditioning-lr-clip[0]",
+            must_be_positive=True,
+        )
+    )
+    lr_max = float(
+        coerce_numeric_value(
+            parts[1],
+            path="--reference-preconditioning-lr-clip[1]",
+            must_be_positive=True,
+        )
+    )
+    if lr_max < lr_min:
+        raise ValueError("--reference-preconditioning-lr-clip max must be >= min.")
+    return (lr_min, lr_max)
+
+
+def apply_reference_optimizer_overrides(
+    inference_cfg: dict[str, Any],
+    *,
+    optimizer_kind: str | None = None,
+    base_lr: float | None = None,
+    n_iter: int | None = None,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
+    preconditioning_enabled: bool | None = None,
+    preconditioning_method: str | None = None,
+    preconditioning_reference: str | None = None,
+    preconditioning_damping: float | None = None,
+    preconditioning_eig_floor_rel: float | None = None,
+    preconditioning_eig_floor_abs: float | None = None,
+    preconditioning_lr_clip: tuple[float, float] | None = None,
+) -> dict[str, str]:
+    """Patch explicit recovered-reference optimizer overrides into config.
+
+    Called only by the Schur-summary study config builder.  Omitted values are
+    left untouched so template-owned optimizer settings remain authoritative.
+    Returned source labels use ``SOURCE_CLI_OVERRIDE`` for every patched field.
+    """
+
+    optimizer_cfg = _ensure_mapping(
+        inference_cfg,
+        "optimizer",
+        path="experiment.inference",
+    )
+    current_kind = str(optimizer_cfg.get("kind", "adam")).strip().lower()
+    sources: dict[str, str] = {}
+
+    if optimizer_kind is not None:
+        normalized_kind = str(optimizer_kind).strip().lower()
+        if normalized_kind not in {"sgd", "adam"}:
+            raise ValueError("reference_optimizer_kind must be 'sgd' or 'adam'.")
+        optimizer_cfg["kind"] = normalized_kind
+        current_kind = normalized_kind
+        sources["optimizer_kind"] = SOURCE_CLI_OVERRIDE
+
+    if base_lr is not None:
+        optimizer_cfg["base_lr"] = float(
+            coerce_numeric_value(
+                base_lr,
+                path="reference_base_lr",
+                must_be_positive=True,
+            )
+        )
+        sources["base_lr"] = SOURCE_CLI_OVERRIDE
+
+    if n_iter is not None:
+        n_iter_int = int(n_iter)
+        if n_iter_int <= 0:
+            raise ValueError("reference_n_iter must be > 0.")
+        optimizer_cfg["n_iter"] = n_iter_int
+        sources["n_iter"] = SOURCE_CLI_OVERRIDE
+
+    if optimizer_kwargs:
+        optimizer_cfg["kwargs"] = normalize_optimizer_kwargs(
+            current_kind,
+            optimizer_kwargs,
+            path="reference_optimizer_kwargs",
+        )
+        sources["optimizer_kwargs"] = SOURCE_CLI_OVERRIDE
+
+    if (
+        preconditioning_enabled is not None
+        or preconditioning_method is not None
+        or preconditioning_reference is not None
+        or preconditioning_damping is not None
+        or preconditioning_eig_floor_rel is not None
+        or preconditioning_eig_floor_abs is not None
+        or preconditioning_lr_clip is not None
+    ):
+        preconditioning_cfg = _ensure_mapping(
+            optimizer_cfg,
+            "preconditioning",
+            path="experiment.inference.optimizer",
+        )
+        if preconditioning_enabled is not None:
+            preconditioning_cfg["enabled"] = bool(preconditioning_enabled)
+            sources["preconditioning_enabled"] = SOURCE_CLI_OVERRIDE
+        if preconditioning_method is not None:
+            recipe = _load_inference_recipe_module()
+            preconditioning_cfg["method"] = recipe._normalize_preconditioning_method(
+                preconditioning_method
+            )
+            sources["preconditioning_method"] = SOURCE_CLI_OVERRIDE
+        if preconditioning_reference is not None:
+            if preconditioning_reference not in {"truth_when_available", "initial"}:
+                raise ValueError(
+                    "reference_preconditioning_reference must be "
+                    "'truth_when_available' or 'initial'."
+                )
+            preconditioning_cfg["reference"] = str(preconditioning_reference)
+            sources["preconditioning_reference"] = SOURCE_CLI_OVERRIDE
+        if preconditioning_damping is not None:
+            preconditioning_cfg["damping"] = float(
+                coerce_numeric_value(
+                    preconditioning_damping,
+                    path="reference_preconditioning_damping",
+                    must_be_nonnegative=True,
+                )
+            )
+            sources["preconditioning_damping"] = SOURCE_CLI_OVERRIDE
+        if preconditioning_eig_floor_rel is not None:
+            preconditioning_cfg["eig_floor_rel"] = float(
+                coerce_numeric_value(
+                    preconditioning_eig_floor_rel,
+                    path="reference_preconditioning_eig_floor_rel",
+                    must_be_nonnegative=True,
+                )
+            )
+            sources["preconditioning_eig_floor_rel"] = SOURCE_CLI_OVERRIDE
+        if preconditioning_eig_floor_abs is not None:
+            preconditioning_cfg["eig_floor_abs"] = float(
+                coerce_numeric_value(
+                    preconditioning_eig_floor_abs,
+                    path="reference_preconditioning_eig_floor_abs",
+                    must_be_nonnegative=True,
+                )
+            )
+            sources["preconditioning_eig_floor_abs"] = SOURCE_CLI_OVERRIDE
+        if preconditioning_lr_clip is not None:
+            preconditioning_cfg["lr_clip"] = [
+                float(preconditioning_lr_clip[0]),
+                float(preconditioning_lr_clip[1]),
+            ]
+            sources["preconditioning_lr_clip"] = SOURCE_CLI_OVERRIDE
+
+    return sources
+
+
+def _reference_optimizer_override_sources(
+    *,
+    optimizer_kind: str | None = None,
+    base_lr: float | None = None,
+    n_iter: int | None = None,
+    optimizer_kwargs: Mapping[str, Any] | None = None,
+    preconditioning_enabled: bool | None = None,
+    preconditioning_method: str | None = None,
+    preconditioning_reference: str | None = None,
+    preconditioning_damping: float | None = None,
+    preconditioning_eig_floor_rel: float | None = None,
+    preconditioning_eig_floor_abs: float | None = None,
+    preconditioning_lr_clip: tuple[float, float] | None = None,
+) -> dict[str, str]:
+    """Return provenance labels for explicitly requested optimizer overrides."""
+
+    raw = {
+        "optimizer_kind": optimizer_kind,
+        "base_lr": base_lr,
+        "n_iter": n_iter,
+        "optimizer_kwargs": optimizer_kwargs if optimizer_kwargs else None,
+        "preconditioning_enabled": preconditioning_enabled,
+        "preconditioning_method": preconditioning_method,
+        "preconditioning_reference": preconditioning_reference,
+        "preconditioning_damping": preconditioning_damping,
+        "preconditioning_eig_floor_rel": preconditioning_eig_floor_rel,
+        "preconditioning_eig_floor_abs": preconditioning_eig_floor_abs,
+        "preconditioning_lr_clip": preconditioning_lr_clip,
+    }
+    return {key: SOURCE_CLI_OVERRIDE for key, value in raw.items() if value is not None}
+
+
 def _build_schur_config_provenance(
     *,
     schur_config: Mapping[str, Any],
@@ -1684,6 +2118,7 @@ def _build_schur_config_provenance(
     reference_preconditioning_reference: str | None,
     reference_diagnostics_profile: str | None,
     force_truth_comparison: bool,
+    reference_optimizer_sources: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build compact source labels for policy-sensitive inference config fields."""
 
@@ -1693,6 +2128,7 @@ def _build_schur_config_provenance(
         if reference_diagnostics_profile is not None
         else set()
     )
+    optimizer_override_sources = dict(reference_optimizer_sources or {})
     diagnostics_fields = (
         "plots",
         "compare_to_truth_when_available",
@@ -1724,46 +2160,76 @@ def _build_schur_config_provenance(
             "optimizer_kind": _field_source(
                 schur_config,
                 f"{base}.optimizer.kind",
+                cli_override=optimizer_override_sources.get("optimizer_kind")
+                == SOURCE_CLI_OVERRIDE,
             ),
             "base_lr": _field_source(
                 schur_config,
                 f"{base}.optimizer.base_lr",
+                cli_override=optimizer_override_sources.get("base_lr")
+                == SOURCE_CLI_OVERRIDE,
             ),
             "n_iter": _field_source(
                 schur_config,
                 f"{base}.optimizer.n_iter",
+                cli_override=optimizer_override_sources.get("n_iter")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "optimizer_kwargs": _field_source(
+                schur_config,
+                f"{base}.optimizer.kwargs",
+                cli_override=optimizer_override_sources.get("optimizer_kwargs")
+                == SOURCE_CLI_OVERRIDE,
             ),
         },
         "preconditioning": {
             "preconditioning_enabled": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.enabled",
-                cli_override=reference_preconditioning_enabled is not None,
+                cli_override=(
+                    reference_preconditioning_enabled is not None
+                    or optimizer_override_sources.get("preconditioning_enabled")
+                    == SOURCE_CLI_OVERRIDE
+                ),
             ),
             "preconditioning_method": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.method",
+                cli_override=optimizer_override_sources.get("preconditioning_method")
+                == SOURCE_CLI_OVERRIDE,
             ),
             "preconditioning_reference": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.reference",
-                cli_override=reference_preconditioning_reference is not None,
+                cli_override=(
+                    reference_preconditioning_reference is not None
+                    or optimizer_override_sources.get("preconditioning_reference")
+                    == SOURCE_CLI_OVERRIDE
+                ),
             ),
             "preconditioning_damping": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.damping",
+                cli_override=optimizer_override_sources.get("preconditioning_damping")
+                == SOURCE_CLI_OVERRIDE,
             ),
             "preconditioning_eig_floor_rel": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.eig_floor_rel",
+                cli_override=optimizer_override_sources.get("preconditioning_eig_floor_rel")
+                == SOURCE_CLI_OVERRIDE,
             ),
             "preconditioning_eig_floor_abs": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.eig_floor_abs",
+                cli_override=optimizer_override_sources.get("preconditioning_eig_floor_abs")
+                == SOURCE_CLI_OVERRIDE,
             ),
             "preconditioning_lr_clip": _field_source(
                 schur_config,
                 f"{base}.optimizer.preconditioning.lr_clip",
+                cli_override=optimizer_override_sources.get("preconditioning_lr_clip")
+                == SOURCE_CLI_OVERRIDE,
             ),
         },
         "diagnostics": diagnostics_sources,
@@ -2194,7 +2660,8 @@ def _prepare_case_render_artifacts(
     dt_s: float | None,
     exposure_time_s: float | None,
     noise_mode: str,
-    dry_run: bool,
+    render_seed: int | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Ensure the case has render-ready artifacts for a screening study.
 
@@ -2244,6 +2711,7 @@ def _prepare_case_render_artifacts(
                 dt_s=dt_s,
                 exposure_time_s=exposure_time_s,
                 noise_mode=noise_mode,
+                render_seed=render_seed,
                 dry_run=dry_run,
             )
             render_inputs = case_module._discover_case_render_inputs(layout)
@@ -2786,8 +3254,18 @@ def _build_study_inference_config(
     force_truth_comparison: bool,
     disable_plots: bool,
     use_render_variance: bool = False,
+    variance_floor: float | None = None,
+    reference_optimizer_kind: str | None = None,
+    reference_base_lr: float | None = None,
+    reference_n_iter: int | None = None,
+    reference_optimizer_kwargs: Mapping[str, Any] | None = None,
     reference_preconditioning_enabled: bool | None = None,
+    reference_preconditioning_method: str | None = None,
     reference_preconditioning_reference: str | None = None,
+    reference_preconditioning_damping: float | None = None,
+    reference_preconditioning_eig_floor_rel: float | None = None,
+    reference_preconditioning_eig_floor_abs: float | None = None,
+    reference_preconditioning_lr_clip: tuple[float, float] | None = None,
     reference_diagnostics_profile: str | None = None,
 ) -> dict[str, Any]:
     """Build one run-specific inference config for study-mode execution.
@@ -2837,30 +3315,33 @@ def _build_study_inference_config(
         diagnostics_cfg,
         profile=reference_diagnostics_profile,
     )
-
-    if (
-        reference_preconditioning_enabled is not None
-        or reference_preconditioning_reference is not None
-    ):
-        optimizer_cfg = case_module._ensure_mapping(
+    if variance_floor is not None:
+        objective_cfg = case_module._ensure_mapping(
             inference_cfg,
-            "optimizer",
+            "objective",
             path="experiment.inference",
         )
-        preconditioning_cfg = case_module._ensure_mapping(
-            optimizer_cfg,
-            "preconditioning",
-            path="experiment.inference.optimizer",
+        noise_model_cfg = case_module._ensure_mapping(
+            objective_cfg,
+            "noise_model",
+            path="experiment.inference.objective",
         )
-        if reference_preconditioning_enabled is not None:
-            preconditioning_cfg["enabled"] = bool(reference_preconditioning_enabled)
-        if reference_preconditioning_reference is not None:
-            if reference_preconditioning_reference not in {"truth_when_available", "initial"}:
-                raise ValueError(
-                    "reference_preconditioning_reference must be "
-                    "'truth_when_available' or 'initial'."
-                )
-            preconditioning_cfg["reference"] = str(reference_preconditioning_reference)
+        noise_model_cfg["variance_floor"] = float(variance_floor)
+
+    apply_reference_optimizer_overrides(
+        inference_cfg,
+        optimizer_kind=reference_optimizer_kind,
+        base_lr=reference_base_lr,
+        n_iter=reference_n_iter,
+        optimizer_kwargs=reference_optimizer_kwargs,
+        preconditioning_enabled=reference_preconditioning_enabled,
+        preconditioning_method=reference_preconditioning_method,
+        preconditioning_reference=reference_preconditioning_reference,
+        preconditioning_damping=reference_preconditioning_damping,
+        preconditioning_eig_floor_rel=reference_preconditioning_eig_floor_rel,
+        preconditioning_eig_floor_abs=reference_preconditioning_eig_floor_abs,
+        preconditioning_lr_clip=reference_preconditioning_lr_clip,
+    )
 
     if use_render_variance:
         variance_path = _resolve_render_variance_artifact(render_inputs.manifest.path)
@@ -3588,6 +4069,7 @@ def _extract_reference_inference_plan(
         "optimizer_kind": str(optimizer_cfg.get("kind", "adam")),
         "base_lr": optimizer_cfg.get("base_lr", 1e-2),
         "n_iter": optimizer_cfg.get("n_iter", 100),
+        "optimizer_kwargs": dict(optimizer_cfg.get("kwargs", {})),
         "preconditioning_enabled": bool(preconditioning_cfg.get("enabled", False)),
         "preconditioning_method": str(preconditioning_cfg.get("method", "auto")),
         "preconditioning_reference": str(
@@ -3811,6 +4293,19 @@ def _build_schur_summary_audit(
             "dense_vs_structured_comparison": None
             if summary_payload is None
             else summary_payload.get("dense_vs_structured_comparison"),
+            "dense_vs_structured_comparison_requested": plan.get(
+                "dense_vs_structured_comparison_requested"
+            ),
+            "dense_vs_structured_comparison_run": None
+            if summary_payload is None
+            else summary_payload.get("dense_vs_structured_comparison_run"),
+            "dense_vs_structured_comparison_skipped_reason": None
+            if summary_payload is None
+            else summary_payload.get(
+                "dense_vs_structured_comparison_skipped_reason"
+            ),
+            "max_dense_dim": plan.get("max_dense_dim"),
+            "combined_dim": plan.get("combined_dim"),
         },
         "local_surrogate_validation": local_validation,
         "observation_prior_recommendation": {
@@ -3848,7 +4343,8 @@ def _build_schur_summary_plan(
     phi_ref_mode: str,
     summary_objective: str,
     validate_surrogate: bool,
-    validation_steps: int,
+    validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
+    validation_steps: int = 5,
     frame_truth_preview: Mapping[str, Any] | None,
     applied_trace_overrides: Mapping[str, Any],
     applied_inference_init_overrides: Mapping[str, Any],
@@ -3907,6 +4403,12 @@ def _build_schur_summary_plan(
         )
     except ValueError:
         curvature_method_planned = None
+    dense_comparison_state = _dense_vs_structured_comparison_state(
+        requested=bool(validate_structured_against_dense),
+        curvature_method_used=curvature_method_planned,
+        combined_dim=combined_dim,
+        max_dense_dim=int(max_dense_dim),
+    )
     reference_inference = _extract_reference_inference_plan(
         inference_cfg,
         provenance=schur_config_provenance,
@@ -4020,6 +4522,9 @@ def _build_schur_summary_plan(
             "zernike_indices": list(SCHUR_WORKFLOW_DEFAULTS.zernike_indices),
             "schur_damping": float(SCHUR_WORKFLOW_DEFAULTS.schur_damping),
             "max_dense_dim": int(SCHUR_WORKFLOW_DEFAULTS.max_dense_dim),
+            "validate_structured_against_dense": bool(
+                SCHUR_WORKFLOW_DEFAULTS.validate_structured_against_dense
+            ),
             "phi_ref": SCHUR_WORKFLOW_DEFAULTS.phi_ref,
             "schur_curvature_method": (
                 SCHUR_WORKFLOW_DEFAULTS.schur_curvature_method
@@ -4055,6 +4560,7 @@ def _build_schur_summary_plan(
         "dense_hessian_allowed": bool(dense_hessian_allowed),
         "schur_curvature_method_requested": curvature_method_requested,
         "schur_curvature_method_planned": curvature_method_planned,
+        **dense_comparison_state,
         "structured_curvature_used": bool(
             curvature_method_planned == SCHUR_CURVATURE_METHOD_STRUCTURED
         ),
@@ -4160,6 +4666,7 @@ def _build_schur_summary_plan(
         "summary_objective_kind": str(summary_objective),
         "variance_model": str(objective_cfg.get("noise_model", {}).get("variance_model")),
         "validate_surrogate": bool(validate_surrogate),
+        "validate_structured_against_dense": bool(validate_structured_against_dense),
         "validation_steps": int(validation_steps),
         "planned_artifacts": planned_artifacts,
         "known_limitations_or_warnings": warnings,
@@ -4372,9 +4879,11 @@ def _evaluate_schur_summary(
     phi_ref: str,
     summary_objective: str,
     validate_surrogate: bool,
-    validation_steps: int,
+    validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
+    validation_steps: int = 5,
     recovered_theta: np.ndarray | None = None,
     recovered_reference_metadata: Mapping[str, Any] | None = None,
+    memory_recorder: MemoryDiagnosticsRecorder | None = None,
 ) -> dict[str, Any]:
     """Export one image-backed Schur-reduced summary from a prepared subblock.
 
@@ -4388,6 +4897,11 @@ def _evaluate_schur_summary(
     6. persist a loader-compatible ``SubblockSummary`` plus diagnostics.
     """
 
+    def record(stage: str, **metadata: Any) -> None:
+        if memory_recorder is not None:
+            memory_recorder.record(stage, **metadata)
+
+    record("theta_phi_layout.start", config_path=config_path)
     context = _prepare_inference_context(config_path=config_path)
     theta_layout = _build_observation_theta_layout(
         theta_keys=theta_keys,
@@ -4398,10 +4912,17 @@ def _evaluate_schur_summary(
         theta_layout=theta_layout,
         base_store=context["base_store"],
     )
+    record("phi_ref.resolve.start", phi_ref_mode=phi_ref)
     fast_phi_ref_values, phi_ref_source = _resolve_phi_reference_for_summary(
         context=context,
         phi_ref_mode=phi_ref,
         recovered_theta=recovered_theta,
+    )
+    record(
+        "phi_ref.resolve.done",
+        phi_ref_mode=phi_ref,
+        phi_ref_source=phi_ref_source,
+        arrays=named_array_memory_metadata(phi_ref=fast_phi_ref_values),
     )
     recipe = context["recipe"]
     phi_labels = _phi_labels_for_active_layout(recipe, context["layout"])
@@ -4411,8 +4932,28 @@ def _evaluate_schur_summary(
     )
     combined_dim = int(theta_layout.size + fast_phi_ref_values.size)
     structured_support = _structured_schur_support_from_context(context)
+    record(
+        "theta_phi_layout.done",
+        n_frames=int(context["layout"].n_frame),
+        n_theta=int(theta_layout.size),
+        n_phi=int(fast_phi_ref_values.size),
+        combined_dim=combined_dim,
+        frame_phi_dim=int(context["layout"].frame_width),
+        shared_phi_dim=int(context["layout"].shared_width),
+        arrays=named_array_memory_metadata(
+            theta_ref=observation_theta_ref_values,
+            phi_ref=fast_phi_ref_values,
+        ),
+    )
     curvature_method_requested = normalize_schur_curvature_method(
         schur_curvature_method
+    )
+    record(
+        "curvature_method.select.start",
+        schur_curvature_method_requested=curvature_method_requested,
+        combined_dim=combined_dim,
+        max_dense_dim=int(max_dense_dim),
+        structured_supported_layout=bool(structured_support["supported"]),
     )
     curvature_method_used = _select_schur_curvature_method(
         requested_method=curvature_method_requested,
@@ -4420,11 +4961,28 @@ def _evaluate_schur_summary(
         max_dense_dim=int(max_dense_dim),
         structured_support=structured_support,
     )
+    record(
+        "curvature_method.select.done",
+        schur_curvature_method_requested=curvature_method_requested,
+        schur_curvature_method_used=curvature_method_used,
+        dense_global_hessian_materialized=(
+            curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE
+        ),
+        structured_curvature_used=(
+            curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED
+        ),
+    )
 
+    record("objective_context.start", summary_objective=summary_objective)
     combined_loss_fn, objective_metadata = _build_combined_local_objective(
         context=context,
         theta_layout=theta_layout,
         objective_kind=summary_objective,
+    )
+    record(
+        "objective_context.done",
+        objective_kind_used=objective_metadata["objective_kind_used"],
+        subblock_reduce=context["inference_cfg"]["objective"].get("subblock_reduce"),
     )
     combined_reference_vector = np.concatenate(
         (observation_theta_ref_values, fast_phi_ref_values),
@@ -4435,6 +4993,12 @@ def _evaluate_schur_summary(
         curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED
     )
     dense_vs_structured_comparison: dict[str, Any] | None = None
+    dense_comparison_state = _dense_vs_structured_comparison_state(
+        requested=bool(validate_structured_against_dense),
+        curvature_method_used=curvature_method_used,
+        combined_dim=combined_dim,
+        max_dense_dim=int(max_dense_dim),
+    )
     combined_gradient: np.ndarray | None = None
     combined_curvature: np.ndarray | None = None
     blocks: Any | None = None
@@ -4444,6 +5008,13 @@ def _evaluate_schur_summary(
     structured_sidecar_blocks: dict[str, np.ndarray] | None = None
 
     if curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE:
+        record(
+            "dense_curvature.start",
+            combined_dim=combined_dim,
+            arrays=named_array_memory_metadata(
+                combined_reference_vector=combined_reference_vector
+            ),
+        )
         dense_global_hessian_materialized = True
         combined_gradient = np.asarray(
             jax.grad(combined_loss_fn)(
@@ -4462,12 +5033,30 @@ def _evaluate_schur_summary(
             combined_gradient=combined_gradient,
             combined_curvature=combined_curvature,
         )
+        record(
+            "dense_curvature.done",
+            arrays=named_array_memory_metadata(
+                combined_gradient=combined_gradient,
+                combined_curvature=combined_curvature,
+                H_tt=blocks.h_tt,
+                H_tp=blocks.h_tp,
+                H_pp=blocks.h_pp,
+            ),
+        )
+        record("dense_schur_reduce.start")
         reduced = schur_reduce_local_quadratic(
             blocks=blocks,
             damping=float(schur_damping),
         )
         reduced_information = reduced.reduced_information
         reduced_score = reduced.reduced_score
+        record(
+            "dense_schur_reduce.done",
+            arrays=named_array_memory_metadata(
+                reduced_information=reduced_information,
+                reduced_score=reduced_score,
+            ),
+        )
     else:
         fast_phi_state = recipe._unpack_active_state(
             context["layout"],
@@ -4482,6 +5071,17 @@ def _evaluate_schur_summary(
             )
         )
         objective_metadata.update(structured_objective_metadata)
+        record(
+            "structured_curvature.blocks.start",
+            n_frames=int(context["layout"].n_frame),
+            n_theta=int(theta_layout.size),
+            frame_phi_dim=int(context["layout"].frame_width),
+            shared_phi_dim=int(context["layout"].shared_width),
+            subblock_reduce=str(
+                context["inference_cfg"]["objective"]["subblock_reduce"]
+            ),
+            arrays=named_array_memory_metadata(frame_phi_ref=frame_phi_ref),
+        )
         structured_blocks = build_independent_frame_theta_phi_quadratic_blocks(
             frame_loss_fn=frame_loss_fn,
             theta_ref=observation_theta_ref_values,
@@ -4491,17 +5091,60 @@ def _evaluate_schur_summary(
             ),
             kind=SCHUR_CURVATURE_METHOD_STRUCTURED,
         )
+        record(
+            "structured_curvature.blocks.done",
+            n_frames=int(context["layout"].n_frame),
+            reduce_weight=float(structured_blocks.reduce_weight),
+            per_frame_arrays=[
+                {
+                    "frame_index": int(block.frame_index),
+                    "H_tt": array_memory_metadata(block.h_tt),
+                    "H_tp": array_memory_metadata(block.h_tphi),
+                    "H_pp": array_memory_metadata(block.h_phiphi),
+                    "g_theta": array_memory_metadata(block.g_theta),
+                    "g_phi": array_memory_metadata(block.g_phi),
+                }
+                for block in structured_blocks.blocks
+            ],
+        )
+        record(
+            "structured_schur_reduce.start",
+            subblock_reduce=str(
+                context["inference_cfg"]["objective"]["subblock_reduce"]
+            ),
+            reduce_weight=float(structured_blocks.reduce_weight),
+        )
         structured_reduction = schur_reduce_independent_frame_blocks(
             structured_blocks,
             damping=float(schur_damping),
         )
+        record(
+            "structured_schur_reduce.done",
+            arrays=named_array_memory_metadata(
+                reduced_information=structured_reduction.reduced_information,
+                reduced_score=structured_reduction.reduced_score,
+            ),
+        )
+        record("materialize_sidecar_blocks.start")
         structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
             structured_blocks
+        )
+        record(
+            "materialize_sidecar_blocks.done",
+            arrays={
+                key: array_memory_metadata(value)
+                for key, value in structured_sidecar_blocks.items()
+            },
         )
         reduced_information = structured_reduction.reduced_information
         reduced_score = structured_reduction.reduced_score
 
-        if combined_dim <= int(max_dense_dim):
+        if dense_comparison_state["dense_vs_structured_comparison_run"]:
+            record(
+                "dense_vs_structured_comparison.start",
+                combined_dim=combined_dim,
+                max_dense_dim=int(max_dense_dim),
+            )
             dense_gradient_for_comparison = np.asarray(
                 jax.grad(combined_loss_fn)(
                     jnp.asarray(combined_reference_vector, dtype=float)
@@ -4531,7 +5174,18 @@ def _evaluate_schur_summary(
                     dense_score=dense_reduced_for_comparison.reduced_score,
                 )
             )
+            record(
+                "dense_vs_structured_comparison.done",
+                comparison=dense_vs_structured_comparison,
+            )
 
+    record(
+        "subblock_summary.build.start",
+        arrays=named_array_memory_metadata(
+            reduced_information=reduced_information,
+            reduced_score=reduced_score,
+        ),
+    )
     reduced_summary = SubblockSummary.from_reduced_form(
         subblock_id=f"{case_root.name}_subblock_summary",
         theta_labels=theta_layout.labels,
@@ -4560,7 +5214,15 @@ def _evaluate_schur_summary(
             "frame_phi_dim": int(context["layout"].frame_width),
             "shared_phi_dim": int(context["layout"].shared_width),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            **dense_comparison_state,
         },
+    )
+    record(
+        "subblock_summary.build.done",
+        n_frames=int(context["layout"].n_frame),
+        n_theta=int(theta_layout.size),
+        n_phi=int(fast_phi_ref_values.size),
+        combined_dim=combined_dim,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -4630,11 +5292,32 @@ def _evaluate_schur_summary(
             if structured_blocks is None
             else float(structured_blocks.reduce_weight),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            **dense_comparison_state,
         },
     }
     if curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE:
         if reduced is None or blocks is None:
             raise RuntimeError("Dense Schur path did not produce dense blocks.")
+        record(
+            "materialize_sidecar_blocks.start",
+            path="dense",
+            arrays=named_array_memory_metadata(
+                H_tt=blocks.h_tt,
+                H_tp=blocks.h_tp,
+                H_pp=blocks.h_pp,
+            ),
+        )
+        record(
+            "materialize_sidecar_blocks.done",
+            path="dense",
+            arrays=named_array_memory_metadata(
+                H_tt=blocks.h_tt,
+                H_tp=blocks.h_tp,
+                H_pp=blocks.h_pp,
+                g_theta=blocks.g_theta,
+                g_phi=blocks.g_phi,
+            ),
+        )
         artifact = ImageBackedSubblockSummaryArtifact(
             summary=reduced_summary,
             layout=combined_layout,
@@ -4645,15 +5328,34 @@ def _evaluate_schur_summary(
             combined_gradient=combined_gradient,
             combined_curvature=combined_curvature,
         )
+        record(
+            "subblock_summary.write.start",
+            summary_json_path=summary_json_path,
+            matrix_npz_path=summary_npz_path,
+            dense_global_hessian_materialized=True,
+        )
         artifact.write(
             summary_json_path=summary_json_path,
             matrix_npz_path=summary_npz_path,
+        )
+        record(
+            "subblock_summary.write.done",
+            summary_json_path=summary_json_path,
+            matrix_npz_path=summary_npz_path,
+            summary_json_written=summary_json_path.exists(),
+            matrix_npz_written=summary_npz_path.exists(),
         )
         schur_diagnostics = reduced.to_diagnostics_dict()
         curvature_diagnostics = _combined_curvature_diagnostics(blocks=blocks)
     else:
         if structured_reduction is None or structured_sidecar_blocks is None:
             raise RuntimeError("Structured Schur path did not produce sidecar blocks.")
+        record(
+            "subblock_summary.write.start",
+            summary_json_path=summary_json_path,
+            matrix_npz_path=summary_npz_path,
+            dense_global_hessian_materialized=False,
+        )
         _write_structured_schur_summary_artifact(
             summary=reduced_summary,
             combined_layout=combined_layout,
@@ -4664,6 +5366,13 @@ def _evaluate_schur_summary(
             summary_json_path=summary_json_path,
             matrix_npz_path=summary_npz_path,
             metadata=artifact_metadata,
+        )
+        record(
+            "subblock_summary.write.done",
+            summary_json_path=summary_json_path,
+            matrix_npz_path=summary_npz_path,
+            summary_json_written=summary_json_path.exists(),
+            matrix_npz_written=summary_npz_path.exists(),
         )
         schur_diagnostics = structured_reduction.to_diagnostics_dict()
         curvature_diagnostics = {
@@ -4706,6 +5415,7 @@ def _evaluate_schur_summary(
             if structured_blocks is None
             else float(structured_blocks.reduce_weight),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            **dense_comparison_state,
         }
     )
     _write_json(schur_diag_path, schur_diagnostics)
@@ -4731,6 +5441,12 @@ def _evaluate_schur_summary(
         _write_rows_csv(surrogate_csv_path, validation_rows)
 
     loaded_summary = load_subblock_summary(summary_json_path)
+    record(
+        "subblock_summary.validate.done",
+        loaded_theta_labels=list(loaded_summary.theta_labels),
+        summary_json_written=summary_json_path.exists(),
+        matrix_npz_written=summary_npz_path.exists(),
+    )
     summary_payload = {
         "mode": MODE_SCHUR_SUMMARY,
         "schema_version": "image_backed_subblock_summary.v1",
@@ -4761,7 +5477,9 @@ def _evaluate_schur_summary(
         "frame_phi_dim": int(context["layout"].frame_width),
         "shared_phi_dim": int(context["layout"].shared_width),
         "dense_vs_structured_comparison": dense_vs_structured_comparison,
+        **dense_comparison_state,
         "validate_surrogate": bool(validate_surrogate),
+        "validate_structured_against_dense": bool(validate_structured_against_dense),
         "validation_row_count": int(len(validation_rows)),
         "artifacts": {
             "subblock_summary_json": str(summary_json_path.resolve()),
@@ -5019,8 +5737,10 @@ def run_obs_subblock_study(
     max_dense_dim: int = DEFAULT_SCHUR_MAX_DENSE_DIM,
     schur_curvature_method: str = SCHUR_CURVATURE_METHOD_AUTO,
     phi_ref: str = DEFAULT_SCHUR_PHI_REF,
+    variance_floor: float | None = None,
     summary_objective: str = "full_objective",
     validate_surrogate: bool = True,
+    validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     validation_steps: int = 5,
     trace_x0_as: float | None = None,
     trace_y0_as: float | None = None,
@@ -5029,12 +5749,24 @@ def run_obs_subblock_study(
     trace_jitter_y_sigma_as: float | None = None,
     trace_jitter_pa_sigma_deg: float | None = None,
     trace_seed: int | None = None,
+    render_seed: int | None = None,
     init_x_as: float | None = None,
     init_y_as: float | None = None,
     init_pa_deg: float | None = None,
     reference_preconditioning_enabled: bool | None = None,
+    reference_optimizer_kind: str | None = None,
+    reference_base_lr: float | None = None,
+    reference_n_iter: int | None = None,
+    reference_optimizer_kwargs: Mapping[str, Any] | None = None,
+    reference_preconditioning_method: str | None = None,
     reference_preconditioning_reference: str | None = None,
+    reference_preconditioning_damping: float | None = None,
+    reference_preconditioning_eig_floor_rel: float | None = None,
+    reference_preconditioning_eig_floor_abs: float | None = None,
+    reference_preconditioning_lr_clip: tuple[float, float] | None = None,
     reference_diagnostics_profile: str | None = None,
+    memory_diagnostics: bool = False,
+    memory_diagnostics_file: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run one observation sub-block screening study."""
@@ -5065,6 +5797,24 @@ def run_obs_subblock_study(
     study_root = _study_root(case_root, study_mode)
     study_root.mkdir(parents=True, exist_ok=True)
     summary_path = study_root / "summary.json"
+    memory_recorder: MemoryDiagnosticsRecorder | None = None
+    memory_audit_path: Path | None = None
+    if memory_diagnostics and study_mode == MODE_SCHUR_SUMMARY:
+        memory_timeline_path = (
+            memory_diagnostics_file.resolve()
+            if memory_diagnostics_file is not None
+            else study_root / "schur_summary_memory_timeline.jsonl"
+        )
+        memory_recorder = MemoryDiagnosticsRecorder(memory_timeline_path)
+        memory_audit_path = study_root / "schur_summary_memory_audit.json"
+        memory_recorder.record(
+            "schur_summary.start",
+            case_root=case_root,
+            study_root=study_root,
+            n_frames=n_frames,
+            phi_ref=normalized_phi_ref,
+            schur_curvature_method_requested=normalized_schur_curvature_method,
+        )
 
     template_info = _build_study_templates(
         mode=study_mode,
@@ -5127,8 +5877,10 @@ def run_obs_subblock_study(
             "max_dense_dim": int(max_dense_dim),
             "schur_curvature_method": normalized_schur_curvature_method,
             "phi_ref": normalized_phi_ref,
+            "variance_floor": variance_floor,
             "summary_objective": str(summary_objective),
             "validate_surrogate": bool(validate_surrogate),
+            "validate_structured_against_dense": bool(validate_structured_against_dense),
             "validation_steps": int(validation_steps),
             "trace_truth_cli_overrides": {
                 "trace_x0_as": trace_x0_as,
@@ -5138,6 +5890,7 @@ def run_obs_subblock_study(
                 "trace_jitter_y_sigma_as": trace_jitter_y_sigma_as,
                 "trace_jitter_pa_sigma_deg": trace_jitter_pa_sigma_deg,
                 "trace_seed": trace_seed,
+                "render_seed": render_seed,
             },
             "inference_init_cli_overrides": {
                 "init_x_as": init_x_as,
@@ -5145,10 +5898,27 @@ def run_obs_subblock_study(
                 "init_pa_deg": init_pa_deg,
             },
             "reference_inference_cli_overrides": {
+                "reference_optimizer_kind": reference_optimizer_kind,
+                "reference_base_lr": reference_base_lr,
+                "reference_n_iter": reference_n_iter,
+                "reference_optimizer_kwargs": dict(reference_optimizer_kwargs or {}),
                 "reference_preconditioning_enabled": reference_preconditioning_enabled,
+                "reference_preconditioning_method": reference_preconditioning_method,
                 "reference_preconditioning_reference": reference_preconditioning_reference,
-                "reference_diagnostics_profile": reference_diagnostics_profile,
-            },
+                "reference_preconditioning_damping": reference_preconditioning_damping,
+                "reference_preconditioning_eig_floor_rel": reference_preconditioning_eig_floor_rel,
+                "reference_preconditioning_eig_floor_abs": reference_preconditioning_eig_floor_abs,
+                "reference_preconditioning_lr_clip": (
+                    None
+                    if reference_preconditioning_lr_clip is None
+                    else list(reference_preconditioning_lr_clip)
+                ),
+            "reference_diagnostics_profile": reference_diagnostics_profile,
+            "memory_diagnostics": bool(memory_diagnostics),
+            "memory_diagnostics_file": None
+            if memory_diagnostics_file is None
+            else str(memory_diagnostics_file),
+        },
         },
         "templates": {
             "trace": str(template_paths["trace"]),
@@ -5167,6 +5937,12 @@ def run_obs_subblock_study(
         },
         "cli_overrides_applied": template_info["applied_overrides"],
     }
+    if memory_recorder is not None:
+        summary["memory_diagnostics"] = {
+            "enabled": True,
+            "timeline_jsonl": str(memory_recorder.path),
+            "audit_json": None if memory_audit_path is None else str(memory_audit_path),
+        }
 
     if study_mode == MODE_FULL_CASE:
         case_module = _load_case_runner_module()
@@ -5187,6 +5963,13 @@ def run_obs_subblock_study(
         _write_json(summary_path, summary)
         return summary
 
+    if memory_recorder is not None:
+        memory_recorder.record(
+            "case_prepare.start",
+            n_frames=n_frames,
+            noise_mode=noise_mode,
+            dry_run=dry_run,
+        )
     prep = _prepare_case_render_artifacts(
         case_root=case_root,
         template_paths=template_paths,
@@ -5196,8 +5979,20 @@ def run_obs_subblock_study(
         dt_s=dt_s,
         exposure_time_s=exposure_time_s,
         noise_mode=noise_mode,
+        render_seed=render_seed,
         dry_run=dry_run,
     )
+    if memory_recorder is not None:
+        memory_recorder.record(
+            "case_prepare.done",
+            stages_executed=list(prep["stages_executed"]),
+            cube_path=None
+            if prep["render_inputs"].cube.path is None
+            else prep["render_inputs"].cube.path,
+            manifest_path=None
+            if prep["render_inputs"].manifest.path is None
+            else prep["render_inputs"].manifest.path,
+        )
     render_inputs = prep["render_inputs"]
     summary["case_prep_stages_executed"] = list(prep["stages_executed"])
     if prep["case_prep_summary"] is not None:
@@ -5243,6 +6038,7 @@ def run_obs_subblock_study(
             force_truth_comparison=False,
             disable_plots=True,
             use_render_variance=bool(use_render_variance),
+            variance_floor=variance_floor,
         )
         fisher_config_path = fisher_config_root / "inference_config.json"
         _write_json(fisher_config_path, fisher_config)
@@ -5290,8 +6086,18 @@ def run_obs_subblock_study(
             force_truth_comparison=(normalized_phi_ref == "truth_when_available"),
             disable_plots=False,
             use_render_variance=bool(use_render_variance),
+            variance_floor=variance_floor,
+            reference_optimizer_kind=reference_optimizer_kind,
+            reference_base_lr=reference_base_lr,
+            reference_n_iter=reference_n_iter,
+            reference_optimizer_kwargs=reference_optimizer_kwargs,
             reference_preconditioning_enabled=reference_preconditioning_enabled,
+            reference_preconditioning_method=reference_preconditioning_method,
             reference_preconditioning_reference=reference_preconditioning_reference,
+            reference_preconditioning_damping=reference_preconditioning_damping,
+            reference_preconditioning_eig_floor_rel=reference_preconditioning_eig_floor_rel,
+            reference_preconditioning_eig_floor_abs=reference_preconditioning_eig_floor_abs,
+            reference_preconditioning_lr_clip=reference_preconditioning_lr_clip,
             reference_diagnostics_profile=reference_diagnostics_profile,
         )
         schur_config_path = summary_run_root / "inference_config.json"
@@ -5299,6 +6105,19 @@ def run_obs_subblock_study(
         summary["schur_config_path"] = str(schur_config_path.resolve())
         schur_config_provenance = _build_schur_config_provenance(
             schur_config=schur_config,
+            reference_optimizer_sources=_reference_optimizer_override_sources(
+                optimizer_kind=reference_optimizer_kind,
+                base_lr=reference_base_lr,
+                n_iter=reference_n_iter,
+                optimizer_kwargs=reference_optimizer_kwargs,
+                preconditioning_enabled=reference_preconditioning_enabled,
+                preconditioning_method=reference_preconditioning_method,
+                preconditioning_reference=reference_preconditioning_reference,
+                preconditioning_damping=reference_preconditioning_damping,
+                preconditioning_eig_floor_rel=reference_preconditioning_eig_floor_rel,
+                preconditioning_eig_floor_abs=reference_preconditioning_eig_floor_abs,
+                preconditioning_lr_clip=reference_preconditioning_lr_clip,
+            ),
             reference_preconditioning_enabled=reference_preconditioning_enabled,
             reference_preconditioning_reference=reference_preconditioning_reference,
             reference_diagnostics_profile=reference_diagnostics_profile,
@@ -5333,6 +6152,7 @@ def run_obs_subblock_study(
             phi_ref_mode=normalized_phi_ref,
             summary_objective=str(summary_objective),
             validate_surrogate=bool(validate_surrogate),
+            validate_structured_against_dense=bool(validate_structured_against_dense),
             validation_steps=int(validation_steps),
             frame_truth_preview=frame_truth_preview,
             applied_trace_overrides=template_info["applied_overrides"]["trace"],
@@ -5354,11 +6174,42 @@ def run_obs_subblock_study(
             combined_dim=schur_plan["combined_dim"],
             max_dense_dim=schur_plan["max_dense_dim"],
             dense_hessian_allowed=schur_plan["dense_hessian_allowed"],
+            effective_method=schur_plan["schur_curvature_method_planned"],
+            dense_comparison_requested=schur_plan[
+                "dense_vs_structured_comparison_requested"
+            ],
+            dense_comparison_run=schur_plan["dense_vs_structured_comparison_run"],
+            reference_optimizer_kind=schur_plan["reference_inference_config_if_run"][
+                "optimizer_kind"
+            ],
+            reference_base_lr=schur_plan["reference_inference_config_if_run"][
+                "base_lr"
+            ],
+            reference_n_iter=schur_plan["reference_inference_config_if_run"][
+                "n_iter"
+            ],
             plan_path=schur_plan_path.resolve(),
         )
         for warning in schur_plan["known_limitations_or_warnings"]:
             _study_log("schur_summary.warning", detail=warning)
         if dry_run:
+            if memory_recorder is not None:
+                memory_recorder.record(
+                    "schur_summary.done",
+                    dry_run=True,
+                    summary_json_written=False,
+                    matrix_npz_written=False,
+                )
+                if memory_audit_path is not None:
+                    _write_json(
+                        memory_audit_path,
+                        memory_recorder.audit_payload(
+                            n_frames=schur_plan.get("n_frames"),
+                            schur_curvature_method_used=None,
+                            summary_json_written=False,
+                            matrix_npz_written=False,
+                        ),
+                    )
             _write_json(summary_path, summary)
             return summary
 
@@ -5366,18 +6217,39 @@ def run_obs_subblock_study(
         recovered_reference_metadata: dict[str, Any] = {}
         if normalized_phi_ref == "recovered":
             recovered_run_root = study_root / "reference_inference"
+            if memory_recorder is not None:
+                memory_recorder.record(
+                    "reference_inference.start",
+                    run_root=recovered_run_root,
+                    config_path=schur_config_path,
+                )
             recovered_result = _default_inference_runner(
                 schur_config_path,
                 recovered_run_root,
                 False,
             )
             recovered_theta = np.asarray(recovered_result["theta_final"], dtype=float)
+            if memory_recorder is not None:
+                memory_recorder.record(
+                    "reference_inference.done",
+                    run_root=recovered_run_root,
+                    output_dir=Path(recovered_result["output_dir"]),
+                    arrays=named_array_memory_metadata(theta_final=recovered_theta),
+                )
             recovered_reference_metadata = {
                 "run_root": str(recovered_run_root.resolve()),
                 "output_dir": str(Path(recovered_result["output_dir"]).resolve()),
                 "manifest_json": recovered_result["artifacts"].get("manifest_json"),
                 "recovered_trace_csv": recovered_result["artifacts"].get("recovered_trace_csv"),
             }
+            if memory_recorder is not None:
+                memory_recorder.record(
+                    "reference_inference.manifest_loaded",
+                    manifest_json=recovered_reference_metadata.get("manifest_json"),
+                    recovered_trace_csv=recovered_reference_metadata.get(
+                        "recovered_trace_csv"
+                    ),
+                )
             summary["recovered_inference"] = recovered_reference_metadata
 
         schur_summary = _evaluate_schur_summary(
@@ -5393,9 +6265,11 @@ def run_obs_subblock_study(
             phi_ref=normalized_phi_ref,
             summary_objective=str(summary_objective),
             validate_surrogate=bool(validate_surrogate),
+            validate_structured_against_dense=bool(validate_structured_against_dense),
             validation_steps=int(validation_steps),
             recovered_theta=recovered_theta,
             recovered_reference_metadata=recovered_reference_metadata,
+            memory_recorder=memory_recorder,
         )
         summary["schur_summary"] = schur_summary
         frame_truth_preview = _write_frame_truth_preview(
@@ -5413,6 +6287,39 @@ def run_obs_subblock_study(
         _write_json(audit_path, audit)
         summary["schur_summary_audit_path"] = str(audit_path.resolve())
         summary["schur_summary_audit"] = audit
+        if memory_recorder is not None:
+            memory_recorder.record(
+                "schur_summary.done",
+                n_frames=schur_summary.get("n_frames"),
+                schur_curvature_method_used=schur_summary.get(
+                    "schur_curvature_method_used"
+                ),
+                summary_json_written=Path(
+                    schur_summary["artifacts"]["subblock_summary_json"]
+                ).exists(),
+                matrix_npz_written=Path(
+                    schur_summary["artifacts"]["subblock_summary_matrices_npz"]
+                ).exists(),
+            )
+            if memory_audit_path is not None:
+                _write_json(
+                    memory_audit_path,
+                    memory_recorder.audit_payload(
+                        n_frames=schur_summary.get("n_frames"),
+                        schur_curvature_method_used=schur_summary.get(
+                            "schur_curvature_method_used"
+                        ),
+                        summary_json_written=Path(
+                            schur_summary["artifacts"]["subblock_summary_json"]
+                        ).exists(),
+                        matrix_npz_written=Path(
+                            schur_summary["artifacts"]["subblock_summary_matrices_npz"]
+                        ).exists(),
+                    ),
+                )
+                summary["memory_diagnostics"]["audit_json"] = str(
+                    memory_audit_path.resolve()
+                )
         _write_json(summary_path, summary)
         return summary
 
@@ -5589,6 +6496,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--variance-floor",
+        type=float,
+        default=None,
+        help="Optional inference noise-model variance floor override.",
+    )
+    parser.add_argument(
         "--summary-objective",
         choices=("data_only", "full_objective"),
         default="full_objective",
@@ -5599,6 +6512,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Run local fixed-phi surrogate validation for schur_summary mode.",
+    )
+    parser.add_argument(
+        "--validate-structured-against-dense",
+        action="store_true",
+        default=False,
+        help=(
+            "Validation-only: compare structured Schur output to dense autodiff "
+            "when structured mode is used and combined_dim <= max_dense_dim."
+        ),
     )
     parser.add_argument(
         "--validation-steps",
@@ -5649,6 +6571,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override experiment.seed in the copied trace template.",
     )
     parser.add_argument(
+        "--render-seed",
+        type=int,
+        default=None,
+        help="Override experiment.seed in the copied render template.",
+    )
+    parser.add_argument(
         "--init-x-as",
         type=float,
         default=None,
@@ -5665,6 +6593,31 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Override experiment.inference.init.frame.values.source.position_angle_deg.",
+    )
+    parser.add_argument(
+        "--reference-optimizer-kind",
+        choices=("sgd", "adam"),
+        default=None,
+        help="Override experiment.inference.optimizer.kind for recovered-reference inference.",
+    )
+    parser.add_argument(
+        "--reference-base-lr",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.base_lr for recovered-reference inference.",
+    )
+    parser.add_argument(
+        "--reference-n-iter",
+        type=int,
+        default=None,
+        help="Override experiment.inference.optimizer.n_iter for recovered-reference inference.",
+    )
+    parser.add_argument(
+        "--reference-optimizer-kwarg",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help="Repeatable optimizer kwarg override, for example b1=0.8.",
     )
     preconditioning_group = parser.add_mutually_exclusive_group()
     preconditioning_group.add_argument(
@@ -5683,6 +6636,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable optimizer preconditioning in the generated reference-inference config.",
     )
     parser.add_argument(
+        "--reference-preconditioning-method",
+        default=None,
+        help="Override experiment.inference.optimizer.preconditioning.method.",
+    )
+    parser.add_argument(
         "--reference-preconditioning-reference",
         choices=("initial", "truth_when_available"),
         default=None,
@@ -5692,12 +6650,50 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reference-preconditioning-damping",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.preconditioning.damping.",
+    )
+    parser.add_argument(
+        "--reference-preconditioning-eig-floor-rel",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.preconditioning.eig_floor_rel.",
+    )
+    parser.add_argument(
+        "--reference-preconditioning-eig-floor-abs",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.preconditioning.eig_floor_abs.",
+    )
+    parser.add_argument(
+        "--reference-preconditioning-lr-clip",
+        default=None,
+        help="Override experiment.inference.optimizer.preconditioning.lr_clip as MIN,MAX.",
+    )
+    parser.add_argument(
         "--reference-diagnostics-profile",
         choices=tuple(sorted(SCHUR_REFERENCE_DIAGNOSTICS_PROFILES)),
         default=None,
         help=(
             "Optional diagnostics patch for recovered-reference review. "
             "Template diagnostics are used when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--memory-diagnostics",
+        action="store_true",
+        default=False,
+        help="Enable stage-level memory diagnostics for Schur-summary runs.",
+    )
+    parser.add_argument(
+        "--memory-diagnostics-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSONL output path for memory diagnostics. Defaults under "
+            "the schur_summary study directory."
         ),
     )
     parser.add_argument(
@@ -5740,8 +6736,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         max_dense_dim=int(args.max_dense_dim),
         schur_curvature_method=str(args.schur_curvature_method),
         phi_ref=str(args.phi_ref),
+        variance_floor=args.variance_floor,
         summary_objective=str(args.summary_objective),
         validate_surrogate=bool(args.validate_surrogate),
+        validate_structured_against_dense=bool(
+            args.validate_structured_against_dense
+        ),
         validation_steps=int(args.validation_steps),
         trace_x0_as=args.trace_x0_as,
         trace_y0_as=args.trace_y0_as,
@@ -5750,12 +6750,28 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         trace_jitter_y_sigma_as=args.trace_jitter_y_sigma_as,
         trace_jitter_pa_sigma_deg=args.trace_jitter_pa_sigma_deg,
         trace_seed=args.trace_seed,
+        render_seed=args.render_seed,
         init_x_as=args.init_x_as,
         init_y_as=args.init_y_as,
         init_pa_deg=args.init_pa_deg,
+        reference_optimizer_kind=args.reference_optimizer_kind,
+        reference_base_lr=args.reference_base_lr,
+        reference_n_iter=args.reference_n_iter,
+        reference_optimizer_kwargs=parse_reference_optimizer_kwargs(
+            args.reference_optimizer_kwarg
+        ),
         reference_preconditioning_enabled=args.reference_preconditioning_enabled,
+        reference_preconditioning_method=args.reference_preconditioning_method,
         reference_preconditioning_reference=args.reference_preconditioning_reference,
+        reference_preconditioning_damping=args.reference_preconditioning_damping,
+        reference_preconditioning_eig_floor_rel=args.reference_preconditioning_eig_floor_rel,
+        reference_preconditioning_eig_floor_abs=args.reference_preconditioning_eig_floor_abs,
+        reference_preconditioning_lr_clip=parse_reference_preconditioning_lr_clip(
+            args.reference_preconditioning_lr_clip
+        ),
         reference_diagnostics_profile=args.reference_diagnostics_profile,
+        memory_diagnostics=bool(args.memory_diagnostics),
+        memory_diagnostics_file=args.memory_diagnostics_file,
         dry_run=bool(args.dry_run),
     )
     print(f"Study mode: {summary['mode']}")

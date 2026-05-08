@@ -350,7 +350,9 @@ def test_schur_workflow_policy_defaults_are_discoverable():
     assert defaults.trace_template == module.DEFAULT_SCHUR_TRACE_TEMPLATE
     assert defaults.theta_keys == module.DEFAULT_SCHUR_THETA_KEYS
     assert defaults.phi_ref == "truth_when_available"
+    assert module.DEFAULT_SCHUR_MAX_DENSE_DIM == 40
     assert defaults.max_dense_dim == module.DEFAULT_SCHUR_MAX_DENSE_DIM
+    assert defaults.validate_structured_against_dense is False
     assert reference_policy.preconditioning_enabled == module.TEMPLATE_OWNED_DEFAULT
 
 
@@ -757,6 +759,52 @@ def test_schur_curvature_method_selection_uses_structured_above_guard():
     )
 
     assert used == "structured_independent_frames"
+
+
+def test_schur_curvature_method_selection_uses_structured_for_20_frame_default_guard():
+    module = _load_script_module()
+
+    used = module._select_schur_curvature_method(
+        requested_method="auto",
+        combined_dim=64,
+        max_dense_dim=module.DEFAULT_SCHUR_MAX_DENSE_DIM,
+        structured_support={"supported": True, "unsupported_reasons": []},
+    )
+
+    assert used == "structured_independent_frames"
+
+
+def test_dense_vs_structured_comparison_state_is_opt_in_and_guarded():
+    module = _load_script_module()
+
+    default_state = module._dense_vs_structured_comparison_state(
+        requested=False,
+        curvature_method_used="structured_independent_frames",
+        combined_dim=34,
+        max_dense_dim=40,
+    )
+    assert default_state["dense_vs_structured_comparison_run"] is False
+    assert default_state["dense_vs_structured_comparison_skipped_reason"] == "not_requested"
+
+    run_state = module._dense_vs_structured_comparison_state(
+        requested=True,
+        curvature_method_used="structured_independent_frames",
+        combined_dim=34,
+        max_dense_dim=40,
+    )
+    assert run_state["dense_vs_structured_comparison_run"] is True
+
+    skipped_state = module._dense_vs_structured_comparison_state(
+        requested=True,
+        curvature_method_used="structured_independent_frames",
+        combined_dim=64,
+        max_dense_dim=40,
+    )
+    assert skipped_state["dense_vs_structured_comparison_run"] is False
+    assert (
+        skipped_state["dense_vs_structured_comparison_skipped_reason"]
+        == "combined_dim_exceeds_max_dense_dim"
+    )
 
 
 def test_schur_curvature_method_selection_rejects_unsupported_layout():
@@ -1176,6 +1224,12 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert plan["combined_dim"] == 11
     assert plan["max_dense_dim"] == module.DEFAULT_SCHUR_MAX_DENSE_DIM
     assert plan["dense_hessian_allowed"] is True
+    assert plan["dense_vs_structured_comparison_requested"] is False
+    assert plan["dense_vs_structured_comparison_run"] is False
+    assert (
+        plan["dense_vs_structured_comparison_skipped_reason"]
+        == "curvature_method_not_structured"
+    )
     assert plan["planned_artifacts"]["subblock_summary_json"].endswith(
         "subblock_summary.json"
     )
@@ -1323,6 +1377,171 @@ def test_schur_summary_recovered_plan_reports_preconditioning_enabled_cli_source
     ]
     assert preconditioning["enabled"] is True
     assert preconditioning["reference"] == "initial"
+
+
+def test_schur_summary_recovered_plan_records_reference_optimizer_overrides(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_recovered_optimizer"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="recovered",
+        reference_optimizer_kind="adam",
+        reference_base_lr=1.0e-3,
+        reference_n_iter=300,
+        reference_optimizer_kwargs={"b1": "0.8", "b2": "0.999", "eps": "1e-8"},
+        reference_preconditioning_enabled=True,
+        reference_preconditioning_method="dense",
+        reference_preconditioning_reference="truth_when_available",
+        reference_preconditioning_damping=1.0e-5,
+        reference_preconditioning_eig_floor_rel=1.0e-6,
+        reference_preconditioning_eig_floor_abs=1.0e-8,
+        reference_preconditioning_lr_clip=(0.1, 10.0),
+        dry_run=True,
+    )
+
+    generated_cfg = _read_json(Path(summary["schur_config_path"]))
+    optimizer = generated_cfg["experiment"]["inference"]["optimizer"]
+    assert optimizer["kind"] == "adam"
+    assert optimizer["base_lr"] == pytest.approx(1.0e-3)
+    assert optimizer["n_iter"] == 300
+    assert optimizer["kwargs"] == {"b1": 0.8, "b2": 0.999, "eps": 1.0e-8}
+    preconditioning = optimizer["preconditioning"]
+    assert preconditioning["enabled"] is True
+    assert preconditioning["method"] == "dense_full_theta"
+    assert preconditioning["reference"] == "truth_when_available"
+    assert preconditioning["damping"] == pytest.approx(1.0e-5)
+    assert preconditioning["eig_floor_rel"] == pytest.approx(1.0e-6)
+    assert preconditioning["eig_floor_abs"] == pytest.approx(1.0e-8)
+    assert preconditioning["lr_clip"] == [0.1, 10.0]
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    reference = plan["reference_inference_config_if_run"]
+    assert reference["optimizer_kind"] == "adam"
+    assert reference["base_lr"] == pytest.approx(1.0e-3)
+    assert reference["n_iter"] == 300
+    assert reference["optimizer_kwargs"] == {"b1": 0.8, "b2": 0.999, "eps": 1.0e-8}
+    assert reference["preconditioning_method"] == "dense_full_theta"
+    assert reference["sources"]["optimizer_kind"] == "cli_override"
+    assert reference["sources"]["base_lr"] == "cli_override"
+    assert reference["sources"]["n_iter"] == "cli_override"
+    assert reference["sources"]["optimizer_kwargs"] == "cli_override"
+    assert reference["sources"]["preconditioning_method"] == "cli_override"
+    assert reference["sources"]["preconditioning_lr_clip"] == "cli_override"
+
+
+def test_reference_optimizer_override_validation_errors():
+    module = _load_script_module()
+    cfg = {"optimizer": {"kind": "sgd", "base_lr": 0.5, "n_iter": 2}}
+    with pytest.raises(ValueError, match="reference_base_lr"):
+        module.apply_reference_optimizer_overrides(cfg, base_lr=0.0)
+    with pytest.raises(ValueError, match="reference_n_iter"):
+        module.apply_reference_optimizer_overrides(cfg, n_iter=0)
+    with pytest.raises(ValueError, match="not supported for optimizer kind"):
+        module.apply_reference_optimizer_overrides(
+            cfg,
+            optimizer_kind="adam",
+            optimizer_kwargs={"typo": "1.0"},
+        )
+
+
+def test_reference_optimizer_parser_accepts_recovered_controls():
+    module = _load_script_module()
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "schur_summary",
+            "--case-root",
+            "/tmp/case",
+            "--reference-optimizer-kind",
+            "adam",
+            "--reference-base-lr",
+            "1e-3",
+            "--reference-n-iter",
+            "300",
+            "--reference-optimizer-kwarg",
+            "b1=0.8",
+            "--reference-preconditioning-enabled",
+            "--reference-preconditioning-method",
+            "auto",
+            "--reference-preconditioning-reference",
+            "initial",
+            "--reference-preconditioning-damping",
+            "1e-6",
+            "--reference-preconditioning-eig-floor-rel",
+            "1e-6",
+            "--reference-preconditioning-eig-floor-abs",
+            "1e-8",
+            "--reference-preconditioning-lr-clip",
+            "0.1,10",
+            "--validate-structured-against-dense",
+        ]
+    )
+    assert args.reference_optimizer_kind == "adam"
+    assert args.reference_base_lr == pytest.approx(1.0e-3)
+    assert args.reference_n_iter == 300
+    assert args.reference_optimizer_kwarg == ["b1=0.8"]
+    assert args.reference_preconditioning_enabled is True
+    assert args.reference_preconditioning_method == "auto"
+    assert args.reference_preconditioning_reference == "initial"
+    assert args.validate_structured_against_dense is True
+    assert module.parse_reference_preconditioning_lr_clip(
+        args.reference_preconditioning_lr_clip
+    ) == (0.1, 10.0)
+
+
+def test_memory_snapshot_payload_is_json_serializable():
+    module = _load_script_module()
+    payload = module.capture_memory_snapshot("unit.stage", n_frames=5)
+    assert payload["stage"] == "unit.stage"
+    assert payload["pid"] > 0
+    json.dumps(payload)
+
+
+def test_memory_diagnostics_writer_appends_jsonl_records(tmp_path: Path):
+    module = _load_script_module()
+    path = tmp_path / "memory.jsonl"
+    recorder = module.MemoryDiagnosticsRecorder(path)
+    recorder.record("stage.one", arrays=module.named_array_memory_metadata(x=np.zeros((2, 3))))
+    recorder.record("stage.two", dtype="float64")
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["stage"] for record in records] == ["stage.one", "stage.two"]
+    assert records[0]["metadata"]["arrays"]["x"]["shape"] == [2, 3]
+    assert records[0]["metadata"]["arrays"]["x"]["dtype"] == "float64"
+    assert records[0]["metadata"]["arrays"]["x"]["nbytes"] == 48
+    audit = recorder.audit_payload(summary_json_written=False, matrix_npz_written=False)
+    assert audit["last_stage"] == "stage.two"
+
+
+def test_memory_diagnostics_cli_flags_parse():
+    module = _load_script_module()
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "schur_summary",
+            "--case-root",
+            "/tmp/case",
+            "--memory-diagnostics",
+            "--memory-diagnostics-file",
+            "/tmp/memory.jsonl",
+        ]
+    )
+    assert args.memory_diagnostics is True
+    assert args.memory_diagnostics_file == Path("/tmp/memory.jsonl")
 
 
 def test_schur_summary_recovered_plan_reports_preconditioning_disabled_template_source(
@@ -1896,10 +2115,34 @@ def test_evaluate_schur_summary_uses_structured_path_with_tiny_quadratic(
     assert summary["schur_curvature_method_used"] == "structured_independent_frames"
     assert summary["dense_global_hessian_materialized"] is False
     assert summary["structured_curvature_used"] is True
+    assert summary["dense_vs_structured_comparison_requested"] is False
+    assert summary["dense_vs_structured_comparison_run"] is False
+    assert summary["dense_vs_structured_comparison_skipped_reason"] == "not_requested"
     assert payload["metadata"]["curvature"]["structured_curvature_used"] is True
+    assert payload["metadata"]["curvature"]["dense_vs_structured_comparison_run"] is False
     assert diagnostics["structured_curvature_used"] is True
     loaded = module.load_subblock_summary(artifacts["subblock_summary_json"])
     assert loaded.theta_labels == (
         "source.separation_as",
         "optics.plate_scale_as_per_pix",
     )
+
+    comparison_summary = module._evaluate_schur_summary(
+        config_path=tmp_path / "inference_config.json",
+        output_dir=tmp_path / "study" / "schur_summary_compare",
+        case_root=tmp_path / "case",
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        enable_zernikes=False,
+        zernike_indices=(0, 1),
+        schur_damping=1.0e-8,
+        max_dense_dim=20,
+        schur_curvature_method="structured_independent_frames",
+        phi_ref="init",
+        summary_objective="data_only",
+        validate_surrogate=False,
+        validate_structured_against_dense=True,
+        validation_steps=5,
+    )
+    assert comparison_summary["dense_vs_structured_comparison_requested"] is True
+    assert comparison_summary["dense_vs_structured_comparison_run"] is True
+    assert comparison_summary["dense_vs_structured_comparison"] is not None

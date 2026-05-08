@@ -54,7 +54,7 @@ Use the smallest case that exercises the real image-backed path:
 - `phi_ref = truth_when_available`
 - Zernikes disabled
 - dense dimension `13`, from `n_theta = 4` and `n_phi = 3 frames * 3`
-- max dense dimension `80`
+- max dense dimension `40`
 - Schur damping `1e-8`
 
 This case is intentionally small. It isolates the Schur summary machinery from
@@ -79,7 +79,7 @@ python examples/scripts/run_obs_subblock_study.py \
   --noise disabled \
   --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
   --phi-ref truth_when_available \
-  --max-dense-dim 80 \
+  --max-dense-dim 40 \
   --schur-damping 1e-8 \
   --dry-run
 ```
@@ -157,7 +157,7 @@ python examples/scripts/run_obs_subblock_study.py \
   --init-x-as 0.0 \
   --init-y-as 0.0 \
   --init-pa-deg 14.508 \
-  --max-dense-dim 80 \
+  --max-dense-dim 40 \
   --schur-damping 1e-8 \
   --dry-run
 ```
@@ -215,7 +215,7 @@ python examples/scripts/run_obs_subblock_study.py \
   --noise disabled \
   --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
   --phi-ref truth_when_available \
-  --max-dense-dim 80 \
+  --max-dense-dim 40 \
   --schur-damping 1e-8
 ```
 

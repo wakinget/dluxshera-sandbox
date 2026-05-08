@@ -550,6 +550,7 @@ def build_render_case_config(
     trace_input: ResolvedInput,
     exposure_time_s: float | None,
     noise_mode: str,
+    render_seed: int | None = None,
 ) -> dict[str, Any]:
     """Build the case-local render config."""
 
@@ -557,6 +558,8 @@ def build_render_case_config(
     experiment_cfg = _ensure_mapping(cfg, "experiment", path="root")
     outputs_cfg = _ensure_mapping(experiment_cfg, "outputs", path="experiment")
     outputs_cfg["outdir"] = str(case_root)
+    if render_seed is not None:
+        experiment_cfg["seed"] = int(render_seed)
 
     subblock_cfg = _ensure_mapping(experiment_cfg, "subblock", path="experiment")
     trace_cfg = _ensure_mapping(subblock_cfg, "trace", path="experiment.subblock")
@@ -658,6 +661,7 @@ def run_case_workflow(
     dt_s: float | None = None,
     exposure_time_s: float | None = None,
     noise_mode: str = "inherit",
+    render_seed: int | None = None,
     trace_path_override: Path | None = None,
     cube_path_override: Path | None = None,
     truth_trace_path_override: Path | None = None,
@@ -708,6 +712,7 @@ def run_case_workflow(
             "dt_s": dt_s,
             "exposure_time_s": exposure_time_s,
             "noise_mode": noise_mode,
+            "render_seed": render_seed,
             "trace_path_override": None
             if trace_path_override is None
             else str(trace_path_override.resolve()),
@@ -756,6 +761,7 @@ def run_case_workflow(
         trace_input=trace_input,
         exposure_time_s=exposure_time_s,
         noise_mode=noise_mode,
+        render_seed=render_seed,
     )
     _write_json(layout.render_config_path, render_cfg)
     summary["generated_configs"]["render"] = str(layout.render_config_path)
@@ -916,6 +922,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional override for experiment.noise.enabled in the render config.",
     )
     parser.add_argument(
+        "--render-seed",
+        type=int,
+        default=None,
+        help="Optional override for experiment.seed in the render config.",
+    )
+    parser.add_argument(
         "--trace-path",
         type=Path,
         default=None,
@@ -964,6 +976,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         dt_s=args.dt_s,
         exposure_time_s=args.exposure_time_s,
         noise_mode=args.noise,
+        render_seed=args.render_seed,
         trace_path_override=args.trace_path,
         cube_path_override=args.cube_path,
         truth_trace_path_override=args.truth_trace_path,

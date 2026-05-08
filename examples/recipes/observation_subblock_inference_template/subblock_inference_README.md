@@ -176,7 +176,7 @@ PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
   --noise disabled \
   --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
   --phi-ref truth_when_available \
-  --max-dense-dim 80 \
+  --max-dense-dim 40 \
   --schur-damping 1e-8 \
   --dry-run
 ```
@@ -216,7 +216,7 @@ PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py \
   --noise disabled \
   --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
   --phi-ref truth_when_available \
-  --max-dense-dim 80 \
+  --max-dense-dim 40 \
   --schur-damping 1e-8
 ```
 

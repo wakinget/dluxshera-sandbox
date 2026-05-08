@@ -42,6 +42,54 @@ def test_plot_image_fit_writes_zscore_diagnostic(tmp_path):
     assert output_path.stat().st_size > 0
 
 
+def test_plot_image_fit_uses_narrowed_residual_and_fixed_zscore_limits(
+    tmp_path, monkeypatch
+):
+    recipe = _load_recipe_module()
+    data_cube = np.arange(3 * 2 * 2, dtype=float).reshape((3, 2, 2))
+    residual_cube = np.array(
+        [
+            [[1.0, -2.0], [0.5, 0.0]],
+            [[4.0, -1.0], [0.25, -0.5]],
+            [[0.0, 0.75], [-3.0, 2.0]],
+        ],
+        dtype=float,
+    )
+    model_cube = data_cube - residual_cube
+    variance_cube = np.full_like(data_cube, 0.01)
+    output_path = tmp_path / "image_fit_limits.png"
+
+    from matplotlib.axes import Axes
+
+    original_imshow = Axes.imshow
+    residual_clims = []
+
+    def recording_imshow(self, image, *args, **kwargs):
+        if kwargs.get("cmap") == "RdBu_r":
+            residual_clims.append((kwargs.get("vmin"), kwargs.get("vmax")))
+        return original_imshow(self, image, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "imshow", recording_imshow)
+
+    recipe._plot_image_fit(
+        data_cube=data_cube,
+        model_cube=model_cube,
+        variance_cube=variance_cube,
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+    zlim = recipe.DEFAULT_IMAGE_FIT_ZSCORE_LIMIT
+    assert residual_clims == [
+        (-2.0, 2.0),
+        (-zlim, zlim),
+        (-2.0, 2.0),
+        (-zlim, zlim),
+        (-2.0, 2.0),
+        (-zlim, zlim),
+    ]
+
+
 def test_plot_image_fit_handles_nonpositive_variance(tmp_path):
     recipe = _load_recipe_module()
     data_cube = np.ones((2, 4, 4), dtype=float)

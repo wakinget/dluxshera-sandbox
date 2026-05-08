@@ -122,6 +122,8 @@ GENERATOR_ID = "examples/recipes/observation_subblock_inference.py"
 JAX_ENABLE_X64 = True
 PARAMETER_RESIDUAL_LOG_FLOOR = 1.0e-18
 DEFAULT_DATA_VARIANCE_FLOOR = 1.0
+DEFAULT_IMAGE_FIT_RESIDUAL_LIMIT_SCALE = 0.5
+DEFAULT_IMAGE_FIT_ZSCORE_LIMIT = 3.0
 TRACE_VALIDATE_DEFAULTS = {
     "require_contiguous_frame_index": True,
     "require_monotonic_time": True,
@@ -2333,6 +2335,8 @@ def _plot_image_fit(
     model_cube: np.ndarray,
     variance_cube: np.ndarray,
     output_path: Path,
+    raw_residual_limit_scale: float = DEFAULT_IMAGE_FIT_RESIDUAL_LIMIT_SCALE,
+    z_score_limit: float = DEFAULT_IMAGE_FIT_ZSCORE_LIMIT,
 ) -> None:
     """Plot representative data/model/residual/Z-score image panels."""
 
@@ -2371,14 +2375,20 @@ def _plot_image_fit(
     with np.errstate(divide="ignore", invalid="ignore"):
         z_score_cube = residual_cube / np.sqrt(safe_variance)
 
+    if not np.isfinite(raw_residual_limit_scale) or raw_residual_limit_scale <= 0.0:
+        raise ValueError("raw_residual_limit_scale must be a positive finite value.")
+    if not np.isfinite(z_score_limit) or z_score_limit <= 0.0:
+        raise ValueError("z_score_limit must be a positive finite value.")
+
     residual_abs = np.abs(residual_cube[np.isfinite(residual_cube)])
-    rv = float(np.max(residual_abs)) if residual_abs.size else 1.0
+    rv = (
+        float(np.max(residual_abs)) * float(raw_residual_limit_scale)
+        if residual_abs.size
+        else 1.0
+    )
     if rv <= 0.0:
         rv = 1.0
-    zscore_abs = np.abs(z_score_cube[np.isfinite(z_score_cube)])
-    zv = float(np.max(zscore_abs)) if zscore_abs.size else 1.0
-    if zv <= 0.0:
-        zv = 1.0
+    zv = float(z_score_limit)
 
     fig, axes = plt.subplots(
         len(sample_indices),
