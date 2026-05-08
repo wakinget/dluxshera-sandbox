@@ -50,6 +50,7 @@ Disable optimizer progress for scripted runs:
 """
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -75,6 +76,7 @@ from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.losses import gaussian_image_nll
 from dluxshera.inference.optimization import (
     build_fim_diagonal_preconditioner,
+    build_schedule_factor_history,
     fim_theta,
     run_shera_gd,
 )
@@ -426,6 +428,9 @@ def _build_artifact_paths(
     artifacts: dict[str, Path] = {
         "recovered_trace_csv": outdir / f"{file_prefix}_{timestamp}_recovered_trace.csv",
         "manifest_json": outdir / "manifest.json",
+        "optimizer_schedule_csv": (
+            outdir / f"{file_prefix}_{timestamp}_optimizer_schedule.csv"
+        ),
     }
     if include_comparison:
         artifacts["truth_comparison_csv"] = (
@@ -1843,6 +1848,35 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2, default=str)
 
 
+def _write_optimizer_schedule_csv(
+    *,
+    output_path: Path,
+    factor_history: np.ndarray,
+    scalar_lr_history: np.ndarray,
+) -> None:
+    """Write per-step scalar LR schedule diagnostics as CSV."""
+
+    factors = np.asarray(factor_history, dtype=float).ravel()
+    scalar_lrs = np.asarray(scalar_lr_history, dtype=float).ravel()
+    if factors.shape != scalar_lrs.shape:
+        raise ValueError("factor_history and scalar_lr_history must have matching shape.")
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("step", "schedule_factor", "scalar_lr"),
+        )
+        writer.writeheader()
+        for step, (factor, scalar_lr) in enumerate(zip(factors, scalar_lrs)):
+            writer.writerow(
+                {
+                    "step": int(step),
+                    "schedule_factor": float(factor),
+                    "scalar_lr": float(scalar_lr),
+                }
+            )
+
+
 def _save_fim_debug_artifact(
     *,
     bundle: ThetaPreconditioningBundle,
@@ -2852,6 +2886,12 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         optimizer_kwargs,
         path="experiment.inference.optimizer.kwargs",
     )
+    schedule_cfg = optimizer_cfg.get("schedule")
+    _, schedule_meta = build_schedule_factor_history(
+        schedule_cfg,
+        n_iter=n_iter,
+        path="experiment.inference.optimizer.schedule",
+    )
     preconditioning_cfg = _optional_dict(
         optimizer_cfg,
         "preconditioning",
@@ -3027,6 +3067,11 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                 "base_lr": base_lr,
                 "n_iter": n_iter,
                 "kwargs": dict(optimizer_kwargs),
+                "schedule": (
+                    None
+                    if schedule_meta["normalized_config"] is None
+                    else dict(schedule_meta["normalized_config"])
+                ),
                 "preconditioning": {
                     "enabled": preconditioning_enabled,
                     "method": preconditioning_method,
@@ -3410,6 +3455,25 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     )
 
     optimizer_cfg = inference_cfg["optimizer"]
+    schedule_factor_history, schedule_meta_raw = build_schedule_factor_history(
+        optimizer_cfg.get("schedule"),
+        n_iter=int(optimizer_cfg["n_iter"]),
+        path="experiment.inference.optimizer.schedule",
+    )
+    schedule_factor_history = np.asarray(schedule_factor_history, dtype=float)
+    optimizer_base_lr = float(optimizer_cfg["base_lr"])
+    scalar_lr_history = optimizer_base_lr * schedule_factor_history
+    schedule_meta = {
+        **schedule_meta_raw,
+        "base_lr": optimizer_base_lr,
+        "first_scalar_lr": float(scalar_lr_history[0]),
+        "last_scalar_lr": float(scalar_lr_history[-1]),
+    }
+    _write_optimizer_schedule_csv(
+        output_path=artifacts["optimizer_schedule_csv"],
+        factor_history=schedule_factor_history,
+        scalar_lr_history=scalar_lr_history,
+    )
     preconditioning_cfg = optimizer_cfg["preconditioning"]
     preconditioning_bundle: ThetaPreconditioningBundle | None = None
     lr_vec: np.ndarray | None = None
@@ -3513,13 +3577,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     ):
         print("Running first-step optimizer diagnostics before main optimization...")
         base_lr = float(optimizer_cfg["base_lr"])
+        first_step_scalar_lr = float(scalar_lr_history[0])
         optimizer_kind = str(optimizer_cfg["kind"])
         optimizer_kwargs = dict(optimizer_cfg["kwargs"])
         top_k = int(inference_cfg["diagnostics"]["top_k"])
         configured_first_step = _optimizer_first_step(
             loss_fn=objective_bundle.total_loss_fn,
             theta0=jnp.asarray(theta0),
-            learning_rate=base_lr,
+            learning_rate=first_step_scalar_lr,
             lr_vec=lr_vec,
             optimizer_kind=optimizer_kind,
             optimizer_kwargs=optimizer_kwargs,
@@ -3533,13 +3598,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         no_lr_vec_step = _optimizer_first_step(
             loss_fn=objective_bundle.total_loss_fn,
             theta0=jnp.asarray(theta0),
-            learning_rate=base_lr,
+            learning_rate=first_step_scalar_lr,
             lr_vec=None,
             optimizer_kind=optimizer_kind,
             optimizer_kwargs=optimizer_kwargs,
         )
         no_lr_vec_summary = _summarize_first_step(
-            label="base_lr with lr_vec=None",
+            label="first-step scalar lr with lr_vec=None",
             step=no_lr_vec_step,
             theta_labels=theta_labels,
             top_k=top_k,
@@ -3547,7 +3612,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         tiny_step = _optimizer_first_step(
             loss_fn=objective_bundle.total_loss_fn,
             theta0=jnp.asarray(theta0),
-            learning_rate=base_lr * 1.0e-3,
+            learning_rate=first_step_scalar_lr * 1.0e-3,
             lr_vec=None,
             optimizer_kind=optimizer_kind,
             optimizer_kwargs=optimizer_kwargs,
@@ -3599,7 +3664,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     "optimizer": {
                         "kind": optimizer_kind,
                         "base_lr": base_lr,
+                        "first_step_scalar_lr": first_step_scalar_lr,
                         "kwargs": optimizer_kwargs,
+                        "schedule": to_jsonable_obs_subblock_payload(schedule_meta),
                         "run_shera_gd_lr_vec_semantics": (
                             "lr_vec is a preconditioning scale only; run_shera_gd "
                             "applies base_lr through learning_rate"
@@ -3636,16 +3703,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                                 preconditioning_bundle.lr_vec
                             ),
                             "effective_lr_before_clipping": _to_jsonable_float_list(
-                                base_lr * preconditioning_bundle.lr_vec_unclipped
+                                first_step_scalar_lr
+                                * preconditioning_bundle.lr_vec_unclipped
                             ),
                             "effective_lr_after_clipping": _to_jsonable_float_list(
-                                base_lr * preconditioning_bundle.lr_vec
+                                first_step_scalar_lr * preconditioning_bundle.lr_vec
                             ),
                         }
                     ),
                     "summaries": {
                         "configured": configured_summary,
-                        "base_lr_lr_vec_none": no_lr_vec_summary,
+                        "first_step_scalar_lr_lr_vec_none": no_lr_vec_summary,
                         "tiny_scalar_lr_lr_vec_none": tiny_summary,
                     },
                 },
@@ -3693,15 +3761,26 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "Running optimization: "
         f"kind={optimizer_cfg['kind']} n_iter={optimizer_cfg['n_iter']} "
         f"base_lr={optimizer_cfg['base_lr']} "
+        f"schedule={schedule_meta['kind']} "
+        f"first_scalar_lr={schedule_meta['first_scalar_lr']:.6g} "
         f"preconditioned={lr_vec is not None}"
     )
     # lr_vec is scale-only; run_shera_gd applies base_lr through learning_rate.
     theta_final, trace_history = run_shera_gd(
         loss_fn=objective_bundle.total_loss_fn,
         theta0=jnp.asarray(theta0),
-        learning_rate=float(optimizer_cfg["base_lr"]),
+        learning_rate=optimizer_base_lr,
         lr_vec=None if lr_vec is None else jnp.asarray(lr_vec),
         num_steps=int(optimizer_cfg["n_iter"]),
+        scalar_lr_history=(
+            None if not bool(schedule_meta["enabled"]) else scalar_lr_history
+        ),
+        schedule_factor_history=(
+            None if not bool(schedule_meta["enabled"]) else schedule_factor_history
+        ),
+        schedule_meta=(
+            None if not bool(schedule_meta["enabled"]) else schedule_meta
+        ),
         optimizer_kind=str(optimizer_cfg["kind"]),
         optimizer_kwargs=dict(optimizer_cfg["kwargs"]),
         return_artifacts=False,
@@ -3921,8 +4000,6 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         spec.canonical: float(final_shared_vector[idx])
         for idx, spec in enumerate(active_layout.shared_specs)
     }
-    optimizer_base_lr = float(optimizer_cfg["base_lr"])
-
     system_info = {
         "preset": system_cfg.get("preset"),
         "config_hash": _stable_hash_payload(system_cfg),
@@ -3971,9 +4048,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ),
         "optimizer": {
             "kind": optimizer_cfg["kind"],
-            "base_lr": float(optimizer_cfg["base_lr"]),
+            "base_lr": optimizer_base_lr,
             "n_iter": int(optimizer_cfg["n_iter"]),
             "kwargs": dict(optimizer_cfg["kwargs"]),
+            "schedule": to_jsonable_obs_subblock_payload(schedule_meta),
             "preconditioning": (
                 {"enabled": False}
                 if preconditioning_bundle is None
@@ -4122,6 +4200,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "trace_history": {
             name: np.asarray(values, dtype=float)
             for name, values in trace_history.items()
+        }
+        | {
+            "schedule_factor": np.asarray(schedule_factor_history, dtype=float),
+            "scalar_lr": np.asarray(scalar_lr_history, dtype=float),
         },
     }
 

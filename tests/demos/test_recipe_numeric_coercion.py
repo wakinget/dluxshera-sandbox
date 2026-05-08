@@ -56,6 +56,11 @@ def _subblock_experiment_cfg() -> dict:
                     "eps": "1e-8",
                     "eps_root": "1.0e-8",
                 },
+                "schedule": {
+                    "kind": "linear_warmup",
+                    "warmup_steps": "2",
+                    "start_factor": "0.25",
+                },
                 "preconditioning": {
                     "enabled": True,
                     "damping": "5e-4",
@@ -85,6 +90,9 @@ def test_subblock_validation_normalizes_scientific_optimizer_values():
     assert optimizer["kwargs"]["b1"] == pytest.approx(0.9)
     assert optimizer["kwargs"]["eps"] == pytest.approx(1e-8)
     assert optimizer["kwargs"]["eps_root"] == pytest.approx(1.0e-8)
+    assert optimizer["schedule"]["kind"] == "linear_warmup"
+    assert optimizer["schedule"]["warmup_steps"] == 2
+    assert optimizer["schedule"]["start_factor"] == pytest.approx(0.25)
     assert preconditioning["method"] == "auto"
     assert preconditioning["damping"] == pytest.approx(5e-4)
     assert preconditioning["eig_floor_rel"] == pytest.approx(1e-6)
@@ -114,6 +122,18 @@ def test_subblock_validation_rejects_unknown_preconditioning_method():
     cfg["inference"]["optimizer"]["preconditioning"]["method"] = "not_a_method"
 
     with pytest.raises(ValueError, match="preconditioning.method"):
+        recipe._validate_experiment_cfg(cfg)
+
+
+def test_subblock_validation_rejects_bad_schedule_kind():
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_bad_schedule_tests",
+    )
+    cfg = _subblock_experiment_cfg()
+    cfg["inference"]["optimizer"]["schedule"]["kind"] = "bad_schedule"
+
+    with pytest.raises(ValueError, match="optimizer.schedule.kind"):
         recipe._validate_experiment_cfg(cfg)
 
 

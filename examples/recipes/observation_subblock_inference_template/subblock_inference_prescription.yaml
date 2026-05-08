@@ -198,6 +198,11 @@ experiment:
       # kwargs:
       #   momentum: 0.0
       #   nesterov: false
+      # Optional. Omit this block to preserve the current constant-LR behavior.
+      # schedule:
+      #   kind: linear_warmup
+      #   warmup_steps: 8
+      #   start_factor: 0.25
       preconditioning:
         # Optional curvature-aware scaling. method: auto selects structured
         # frame blocks for independent-frame registration-only runs, avoiding
@@ -219,8 +224,6 @@ experiment:
 
       # Other optimizer options we are considering:
       # kind: adam
-      # schedule:
-      #   kind: constant
       #
       # Later possibilities:
       # - per-parameter learning rates

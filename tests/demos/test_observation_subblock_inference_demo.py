@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def _load_recipe(path: Path, module_name: str):
@@ -42,6 +43,7 @@ def _build_inference_config(
     write_plots: bool,
     enable_preconditioning: bool = False,
     active_frame_keys: list[str] | None = None,
+    optimizer_schedule: dict[str, object] | None = None,
 ) -> dict[str, object]:
     data: dict[str, object] = {"cube": str(cube_path)}
     if trace_path is not None:
@@ -95,6 +97,7 @@ def _build_inference_config(
                     "kind": "adam",
                     "base_lr": 0.01,
                     "n_iter": n_iter,
+                    "schedule": optimizer_schedule,
                     "preconditioning": {
                         "enabled": enable_preconditioning,
                         "damping": 1e-6,
@@ -236,6 +239,77 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert np.isfinite(float(result["final_loss"]))
     assert len(result["chi2"]["final_model"]["per_frame_chi2"]) == int(result["frame_count"])
     assert float(result["final_loss"]) <= float(result["initial_loss"])
+
+
+def test_observation_subblock_inference_recipe_writes_schedule_artifact_when_configured(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    render_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "observation_subblock.py",
+        "observation_subblock_recipe_for_schedule_smoke",
+    )
+    inference_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "observation_subblock_inference.py",
+        "observation_subblock_inference_recipe_schedule_smoke",
+    )
+
+    render_cfg_path = (
+        repo_root
+        / "examples"
+        / "recipes"
+        / "observation_subblock_template"
+        / "subblock_generation_prescription.yaml"
+    )
+    render_result = render_recipe.generate_obs_subblock(
+        config_path=render_cfg_path,
+        results_dir=tmp_path / "render_results_schedule",
+        run_name="render_for_schedule",
+        show_progress=False,
+    )
+
+    cfg = _build_inference_config(
+        cube_path=Path(render_result["artifacts"]["cube_fits"]),
+        trace_path=None,
+        manifest_path=None,
+        outputs_outdir=tmp_path / "inference_results_schedule",
+        n_iter=6,
+        write_plots=False,
+        enable_preconditioning=True,
+        optimizer_schedule={
+            "kind": "linear_warmup",
+            "warmup_steps": 2,
+            "start_factor": 0.25,
+        },
+    )
+    cfg_path = tmp_path / "inference_schedule_config.json"
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+    result = inference_recipe.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--run-name",
+            "inference_schedule",
+            "--no-progress",
+        ]
+    )
+
+    artifacts = {name: Path(path) for name, path in result["artifacts"].items()}
+    assert artifacts["optimizer_schedule_csv"].exists()
+
+    schedule_rows = _read_csv_rows(artifacts["optimizer_schedule_csv"])
+    assert len(schedule_rows) == 6
+    assert float(schedule_rows[0]["schedule_factor"]) == pytest.approx(0.25)
+    assert float(schedule_rows[0]["scalar_lr"]) == pytest.approx(0.0025)
+    assert float(schedule_rows[-1]["schedule_factor"]) == pytest.approx(1.0)
+
+    manifest = json.loads(artifacts["manifest_json"].read_text(encoding="utf-8"))
+    schedule_meta = manifest["optimizer"]["schedule"]
+    assert schedule_meta["enabled"] is True
+    assert schedule_meta["kind"] == "linear_warmup"
+    assert schedule_meta["first_factor"] == pytest.approx(0.25)
+    assert schedule_meta["last_factor"] == pytest.approx(1.0)
+    assert schedule_meta["first_scalar_lr"] == pytest.approx(0.0025)
+    assert schedule_meta["last_scalar_lr"] == pytest.approx(0.01)
 
 
 def test_observation_subblock_inference_accepts_partial_truth_trace(tmp_path):

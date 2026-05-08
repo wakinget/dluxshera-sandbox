@@ -16,6 +16,11 @@ from typing import TYPE_CHECKING
 from .losses import gaussian_image_nll
 from .run_artifacts import _now_iso_local_ms, save_run
 from .preconditioning import PreconditioningConfig, compute_precond_vectors
+from .schedules import (
+    build_scalar_lr_schedule,
+    build_schedule_factor_history,
+    validate_optimizer_schedule_config,
+)
 
 from ..systems.three_plane import SheraThreePlaneConfig
 from ..systems.two_plane import SheraTwoPlaneConfig
@@ -90,6 +95,9 @@ __all__ = [
     "generate_fim_labels",
     "map_labels_to_keys",
     "build_fim_diagonal_preconditioner",
+    "build_scalar_lr_schedule",
+    "build_schedule_factor_history",
+    "validate_optimizer_schedule_config",
 ]
 
 
@@ -669,6 +677,31 @@ def _resolve_run_dir(
     return resolved, resolved_run_id
 
 
+def _history_to_schedule(
+    values: Sequence[float],
+    *,
+    path: str,
+) -> tuple[onp.ndarray, Callable[[np.ndarray], np.ndarray]]:
+    """Convert a per-step scalar history into a clipped Optax schedule."""
+
+    history = onp.asarray(values, dtype=float).reshape(-1)
+    if history.size == 0:
+        raise ValueError(f"{path} must contain at least one value.")
+    if not onp.all(onp.isfinite(history)):
+        raise ValueError(f"{path} must contain only finite values.")
+    if onp.any(history < 0.0):
+        raise ValueError(f"{path} must contain only non-negative values.")
+
+    history_jax = np.asarray(history)
+    last_index = int(history.size - 1)
+
+    def schedule_fn(step: np.ndarray) -> np.ndarray:
+        clipped = np.clip(step, 0, last_index)
+        return history_jax[clipped]
+
+    return history, schedule_fn
+
+
 def _gd_loop(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
@@ -921,6 +954,9 @@ def run_gd_with_artifacts(
     learning_rate: float = 1e-2,
     num_steps: int = 100,
     optimizer: Optional[optax.GradientTransformation] = None,
+    scalar_lr_history: Optional[Sequence[float]] = None,
+    schedule_factor_history: Optional[Sequence[float]] = None,
+    schedule_meta: Optional[Mapping[str, Any]] = None,
     index_map: Optional[Mapping[str, Any]] = None,
     run_dir: Optional[str | Path] = None,
     runs_dir: Optional[str | Path] = None,
@@ -1045,6 +1081,22 @@ def run_gd_with_artifacts(
     if "step_norm" in full_trace:
         trace["step_norm"] = full_trace["step_norm"]
     trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
+    if scalar_lr_history is not None:
+        scalar_lr_trace = onp.asarray(scalar_lr_history, dtype=float).reshape(-1)
+        if scalar_lr_trace.shape != (history["loss"].shape[0],):
+            raise ValueError(
+                "scalar_lr_history length must match the number of optimizer steps."
+            )
+        trace["scalar_lr"] = scalar_lr_trace
+        history["scalar_lr"] = scalar_lr_trace
+    if schedule_factor_history is not None:
+        factor_trace = onp.asarray(schedule_factor_history, dtype=float).reshape(-1)
+        if factor_trace.shape != (history["loss"].shape[0],):
+            raise ValueError(
+                "schedule_factor_history length must match the number of optimizer steps."
+            )
+        trace["schedule_factor"] = factor_trace
+        history["schedule_factor"] = factor_trace
 
     artifacts_enabled = run_dir is not None or runs_dir is not None
     resolved_run_dir = None
@@ -1067,6 +1119,8 @@ def run_gd_with_artifacts(
             "num_steps": num_steps,
         },
     }
+    if schedule_meta is not None:
+        base_meta["optimizer"]["schedule"] = dict(schedule_meta)
     if index_map is not None:
         base_meta["theta"]["index_map"] = index_map
 
@@ -1154,6 +1208,9 @@ def run_shera_gd(
     learning_rate: float = 0.5,
     lr_vec: Optional[np.ndarray] = None,
     num_steps: int = 100,
+    scalar_lr_history: Optional[Sequence[float]] = None,
+    schedule_factor_history: Optional[Sequence[float]] = None,
+    schedule_meta: Optional[Mapping[str, Any]] = None,
     optimizer_kind: str = "sgd",
     optimizer_kwargs: Optional[Mapping[str, Any]] = None,
     run_dir: Optional[str | Path] = None,
@@ -1253,7 +1310,21 @@ def run_shera_gd(
     optimizer: optax.GradientTransformation | None = None
 
     if optimizer_kind == "sgd":
-        if lr_vec is not None:
+        if scalar_lr_history is not None:
+            _, scalar_lr_schedule = _history_to_schedule(
+                scalar_lr_history,
+                path="scalar_lr_history",
+            )
+            if lr_vec is not None:
+                lr_vec_jax = np.asarray(lr_vec)
+
+                def scheduled_lr(step: np.ndarray) -> np.ndarray:
+                    return scalar_lr_schedule(step) * lr_vec_jax
+
+                optimizer = optax.sgd(learning_rate=scheduled_lr, **opt_kwargs)
+            else:
+                optimizer = optax.sgd(learning_rate=scalar_lr_schedule, **opt_kwargs)
+        elif lr_vec is not None:
             scaled_lr_vec = learning_rate * np.asarray(lr_vec)
             optimizer = optax.sgd(learning_rate=scaled_lr_vec, **opt_kwargs)
         else:
@@ -1262,12 +1333,23 @@ def run_shera_gd(
         txs = [optax.scale_by_adam(**opt_kwargs)]
         if lr_vec is not None:
             txs.append(_scale_by_vector(lr_vec))
-        txs.append(optax.scale(-learning_rate))
+        if scalar_lr_history is not None:
+            _, scalar_lr_schedule = _history_to_schedule(
+                scalar_lr_history,
+                path="scalar_lr_history",
+            )
+            txs.append(optax.scale_by_learning_rate(scalar_lr_schedule))
+        else:
+            txs.append(optax.scale(-learning_rate))
         optimizer = optax.chain(*txs)
     else:
         raise ValueError(
             f"Unsupported optimizer_kind={optimizer_kind!r}; expected 'sgd' or 'adam'."
         )
+
+    if scalar_lr_history is not None and schedule_factor_history is None:
+        scalar_lr_array = onp.asarray(scalar_lr_history, dtype=float)
+        schedule_factor_history = scalar_lr_array / float(learning_rate)
 
     return run_gd_with_artifacts(
         loss_fn,
@@ -1275,6 +1357,9 @@ def run_shera_gd(
         learning_rate=learning_rate,
         num_steps=num_steps,
         optimizer=optimizer,
+        scalar_lr_history=scalar_lr_history,
+        schedule_factor_history=schedule_factor_history,
+        schedule_meta=schedule_meta,
         index_map=index_map,
         run_dir=run_dir,
         runs_dir=runs_dir,
