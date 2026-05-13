@@ -20,6 +20,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import math
 import os
 import platform
 import resource
@@ -54,6 +55,7 @@ from dluxshera.inference.structured_curvature import (
     materialize_structured_schur_sidecar_blocks,
     schur_reduce_independent_frame_blocks,
 )
+from dluxshera.inference.schedules import validate_optimizer_schedule_config
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
@@ -190,6 +192,50 @@ SUPPORTED_SMOKE_THETA_KEYS = frozenset(
 SCHUR_SUMMARY_PLAN_FILENAME = "schur_summary_plan.json"
 SCHUR_SUMMARY_AUDIT_FILENAME = "schur_summary_audit.json"
 FRAME_TRUTH_PREVIEW_FILENAME = "frame_truth_preview.json"
+SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES = ("warn", "mask", "reject")
+SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES = ("allow_all", "error")
+SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS = ("original", "kept")
+DEFAULT_SCHUR_FRAME_QUALITY_POLICY = "warn"
+DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD = 5.0
+DEFAULT_SCHUR_FRAME_QUALITY_MISSING = "allow_all"
+DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR = "original"
+DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES = 1
+
+
+@dataclass(frozen=True)
+class SchurFrameQualityReport:
+    threshold: float
+    total_frame_count: int
+    good_frame_indices: tuple[int, ...]
+    bad_frame_indices: tuple[int, ...]
+    good_frame_count: int
+    bad_frame_count: int
+    per_frame_reduced_chi2: tuple[float, ...]
+    max_frame_reduced_chi2: float | None
+    median_frame_reduced_chi2: float | None
+    block_reduced_chi2: float | None
+    source_manifest_json: str | None
+    source_status: str
+    warning: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "threshold": float(self.threshold),
+            "total_frame_count": int(self.total_frame_count),
+            "good_frame_indices": list(self.good_frame_indices),
+            "bad_frame_indices": list(self.bad_frame_indices),
+            "good_frame_count": int(self.good_frame_count),
+            "bad_frame_count": int(self.bad_frame_count),
+            "per_frame_reduced_chi2": [float(v) for v in self.per_frame_reduced_chi2],
+            "max_frame_reduced_chi2": self.max_frame_reduced_chi2,
+            "median_frame_reduced_chi2": self.median_frame_reduced_chi2,
+            "block_reduced_chi2": self.block_reduced_chi2,
+            "source_manifest_json": self.source_manifest_json,
+            "source_status": self.source_status,
+            "warning": self.warning,
+            "error": self.error,
+        }
 
 
 @dataclass(frozen=True)
@@ -218,6 +264,7 @@ class SchurReferenceInferencePolicy:
     optimizer_kind: str = TEMPLATE_OWNED_DEFAULT
     base_lr: str = TEMPLATE_OWNED_DEFAULT
     n_iter: str = TEMPLATE_OWNED_DEFAULT
+    schedule: str = TEMPLATE_OWNED_DEFAULT
     preconditioning_enabled: str = TEMPLATE_OWNED_DEFAULT
     preconditioning_method: str = TEMPLATE_OWNED_DEFAULT
     preconditioning_reference: str = TEMPLATE_OWNED_DEFAULT
@@ -1921,6 +1968,154 @@ def parse_reference_optimizer_kwargs(raw_values: Sequence[str] | None) -> dict[s
     return parsed
 
 
+def parse_csv_ints(raw: str | None, *, field_name: str) -> tuple[int, ...] | None:
+    """Parse a comma-separated integer list used by schedule CLI flags."""
+
+    if raw is None:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    if not parts or any(part == "" for part in parts):
+        raise ValueError(f"{field_name} must be a comma-separated list of integers.")
+    values: list[int] = []
+    for index, part in enumerate(parts):
+        numeric = coerce_numeric_value(
+            part,
+            path=f"{field_name}[{index}]",
+            finite_only=True,
+        )
+        integer = int(numeric)
+        if float(integer) != float(numeric):
+            raise ValueError(f"{field_name}[{index}] must be an integer.")
+        values.append(integer)
+    return tuple(values)
+
+
+def parse_csv_floats(raw: str | None, *, field_name: str) -> tuple[float, ...] | None:
+    """Parse a comma-separated float list used by schedule CLI flags."""
+
+    if raw is None:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    if not parts or any(part == "" for part in parts):
+        raise ValueError(f"{field_name} must be a comma-separated list of floats.")
+    return tuple(
+        float(
+            coerce_numeric_value(
+                part,
+                path=f"{field_name}[{index}]",
+                finite_only=True,
+            )
+        )
+        for index, part in enumerate(parts)
+    )
+
+
+def parse_reference_schedule_config(
+    *,
+    kind: str | None,
+    warmup_steps: int | None,
+    start_factor: float | None,
+    min_factor: float | None,
+    boundaries: str | None,
+    factors: str | None,
+    decay_rate: float | None,
+    transition_steps: int | None,
+    staircase: bool,
+) -> dict[str, Any] | None:
+    """Build an optional recovered-reference optimizer schedule override."""
+
+    provided_without_kind = {
+        "warmup_steps": warmup_steps,
+        "start_factor": start_factor,
+        "min_factor": min_factor,
+        "boundaries": boundaries,
+        "factors": factors,
+        "decay_rate": decay_rate,
+        "transition_steps": transition_steps,
+        "staircase": staircase,
+    }
+    if kind is None:
+        if any(value not in {None, False, ""} for value in provided_without_kind.values()):
+            raise ValueError(
+                "reference schedule fields require --reference-schedule-kind."
+            )
+        return None
+
+    schedule_kind = str(kind).strip().lower()
+    schedule: dict[str, Any] = {"kind": schedule_kind}
+
+    if schedule_kind == "constant":
+        return schedule
+    if schedule_kind == "linear_warmup":
+        if warmup_steps is None:
+            raise ValueError(
+                "linear_warmup requires --reference-schedule-warmup-steps."
+            )
+        if start_factor is None:
+            raise ValueError(
+                "linear_warmup requires --reference-schedule-start-factor."
+            )
+        schedule["warmup_steps"] = int(warmup_steps)
+        schedule["start_factor"] = float(start_factor)
+        return schedule
+    if schedule_kind == "piecewise_constant":
+        parsed_boundaries = parse_csv_ints(
+            boundaries,
+            field_name="--reference-schedule-boundaries",
+        )
+        parsed_factors = parse_csv_floats(
+            factors,
+            field_name="--reference-schedule-factors",
+        )
+        if parsed_boundaries is None or parsed_factors is None:
+            raise ValueError(
+                "piecewise_constant requires both --reference-schedule-boundaries "
+                "and --reference-schedule-factors."
+            )
+        schedule["boundaries"] = list(parsed_boundaries)
+        schedule["factors"] = list(parsed_factors)
+        return schedule
+    if schedule_kind == "exponential_decay":
+        if decay_rate is None or transition_steps is None:
+            raise ValueError(
+                "exponential_decay requires --reference-schedule-decay-rate and "
+                "--reference-schedule-transition-steps."
+            )
+        schedule["decay_rate"] = float(decay_rate)
+        schedule["transition_steps"] = int(transition_steps)
+        if staircase:
+            schedule["staircase"] = True
+        return schedule
+    if schedule_kind == "cosine_decay":
+        if min_factor is None:
+            raise ValueError("cosine_decay requires --reference-schedule-min-factor.")
+        schedule["min_factor"] = float(min_factor)
+        return schedule
+    if schedule_kind == "linear_warmup_cosine_decay":
+        if warmup_steps is None:
+            raise ValueError(
+                "linear_warmup_cosine_decay requires --reference-schedule-warmup-steps."
+            )
+        if start_factor is None:
+            raise ValueError(
+                "linear_warmup_cosine_decay requires --reference-schedule-start-factor."
+            )
+        if min_factor is None:
+            raise ValueError(
+                "linear_warmup_cosine_decay requires --reference-schedule-min-factor."
+            )
+        schedule["warmup_steps"] = int(warmup_steps)
+        schedule["start_factor"] = float(start_factor)
+        schedule["min_factor"] = float(min_factor)
+        return schedule
+
+    raise ValueError(
+        "reference_schedule_kind must be one of: constant, linear_warmup, "
+        "piecewise_constant, exponential_decay, cosine_decay, "
+        "linear_warmup_cosine_decay."
+    )
+
+
 def parse_reference_preconditioning_lr_clip(raw: str | None) -> tuple[float, float] | None:
     """Parse ``MIN,MAX`` learning-rate clip bounds for reference preconditioning."""
 
@@ -1955,6 +2150,7 @@ def apply_reference_optimizer_overrides(
     base_lr: float | None = None,
     n_iter: int | None = None,
     optimizer_kwargs: Mapping[str, Any] | None = None,
+    schedule: Mapping[str, Any] | None = None,
     preconditioning_enabled: bool | None = None,
     preconditioning_method: str | None = None,
     preconditioning_reference: str | None = None,
@@ -2010,6 +2206,15 @@ def apply_reference_optimizer_overrides(
             path="reference_optimizer_kwargs",
         )
         sources["optimizer_kwargs"] = SOURCE_CLI_OVERRIDE
+
+    if schedule is not None:
+        schedule_n_iter = int(optimizer_cfg.get("n_iter", 100))
+        optimizer_cfg["schedule"] = validate_optimizer_schedule_config(
+            dict(schedule),
+            n_iter=schedule_n_iter,
+            path="reference_schedule",
+        )
+        sources["schedule"] = SOURCE_CLI_OVERRIDE
 
     if (
         preconditioning_enabled is not None
@@ -2085,6 +2290,7 @@ def _reference_optimizer_override_sources(
     base_lr: float | None = None,
     n_iter: int | None = None,
     optimizer_kwargs: Mapping[str, Any] | None = None,
+    schedule: Mapping[str, Any] | None = None,
     preconditioning_enabled: bool | None = None,
     preconditioning_method: str | None = None,
     preconditioning_reference: str | None = None,
@@ -2100,6 +2306,7 @@ def _reference_optimizer_override_sources(
         "base_lr": base_lr,
         "n_iter": n_iter,
         "optimizer_kwargs": optimizer_kwargs if optimizer_kwargs else None,
+        "schedule": dict(schedule) if schedule is not None else None,
         "preconditioning_enabled": preconditioning_enabled,
         "preconditioning_method": preconditioning_method,
         "preconditioning_reference": preconditioning_reference,
@@ -2180,6 +2387,15 @@ def _build_schur_config_provenance(
                 f"{base}.optimizer.kwargs",
                 cli_override=optimizer_override_sources.get("optimizer_kwargs")
                 == SOURCE_CLI_OVERRIDE,
+            ),
+            "schedule": (
+                SOURCE_CLI_OVERRIDE
+                if optimizer_override_sources.get("schedule") == SOURCE_CLI_OVERRIDE
+                else (
+                    SOURCE_INFERENCE_TEMPLATE
+                    if _has_nested_key(schur_config, f"{base}.optimizer.schedule")
+                    else TEMPLATE_OWNED_DEFAULT
+                )
             ),
         },
         "preconditioning": {
@@ -3259,6 +3475,7 @@ def _build_study_inference_config(
     reference_base_lr: float | None = None,
     reference_n_iter: int | None = None,
     reference_optimizer_kwargs: Mapping[str, Any] | None = None,
+    reference_schedule: Mapping[str, Any] | None = None,
     reference_preconditioning_enabled: bool | None = None,
     reference_preconditioning_method: str | None = None,
     reference_preconditioning_reference: str | None = None,
@@ -3334,6 +3551,7 @@ def _build_study_inference_config(
         base_lr=reference_base_lr,
         n_iter=reference_n_iter,
         optimizer_kwargs=reference_optimizer_kwargs,
+        schedule=reference_schedule,
         preconditioning_enabled=reference_preconditioning_enabled,
         preconditioning_method=reference_preconditioning_method,
         preconditioning_reference=reference_preconditioning_reference,
@@ -4070,6 +4288,7 @@ def _extract_reference_inference_plan(
         "base_lr": optimizer_cfg.get("base_lr", 1e-2),
         "n_iter": optimizer_cfg.get("n_iter", 100),
         "optimizer_kwargs": dict(optimizer_cfg.get("kwargs", {})),
+        "schedule": optimizer_cfg.get("schedule"),
         "preconditioning_enabled": bool(preconditioning_cfg.get("enabled", False)),
         "preconditioning_method": str(preconditioning_cfg.get("method", "auto")),
         "preconditioning_reference": str(
@@ -4307,6 +4526,9 @@ def _build_schur_summary_audit(
             "max_dense_dim": plan.get("max_dense_dim"),
             "combined_dim": plan.get("combined_dim"),
         },
+        "frame_quality": None
+        if summary_payload is None
+        else summary_payload.get("frame_quality"),
         "local_surrogate_validation": local_validation,
         "observation_prior_recommendation": {
             "prior_mean_source": "summary_theta_ref",
@@ -4315,6 +4537,277 @@ def _build_schur_summary_audit(
                 "summary theta_ref context."
             ),
         },
+    }
+
+
+def _resolve_schur_frame_quality_manifest(
+    *,
+    recovered_reference_metadata: Mapping[str, Any],
+    summary_json_dir: Path,
+) -> Path | None:
+    manifest_value = recovered_reference_metadata.get("manifest_json")
+    candidates: list[Path] = []
+    if isinstance(manifest_value, str) and manifest_value.strip():
+        raw = Path(manifest_value).expanduser()
+        candidates.append(raw)
+        if not raw.is_absolute():
+            candidates.append(summary_json_dir / raw)
+            output_dir = recovered_reference_metadata.get("output_dir")
+            if isinstance(output_dir, str) and output_dir.strip():
+                candidates.append(Path(output_dir).expanduser() / raw)
+            run_root = recovered_reference_metadata.get("run_root")
+            if isinstance(run_root, str) and run_root.strip():
+                candidates.append(Path(run_root).expanduser() / raw)
+    output_dir_value = recovered_reference_metadata.get("output_dir")
+    if isinstance(output_dir_value, str) and output_dir_value.strip():
+        candidates.append(Path(output_dir_value).expanduser() / "manifest.json")
+    run_root_value = recovered_reference_metadata.get("run_root")
+    if isinstance(run_root_value, str) and run_root_value.strip():
+        candidates.append(Path(run_root_value).expanduser() / "inference" / "manifest.json")
+
+    for candidate in candidates:
+        path = candidate if candidate.is_absolute() else candidate.resolve()
+        if path.exists():
+            return path.resolve()
+    fallback_root = summary_json_dir / "reference_inference"
+    if fallback_root.exists():
+        matches = sorted(fallback_root.glob("**/manifest.json"))
+        if matches:
+            return matches[0].resolve()
+    return None
+
+
+def build_schur_frame_quality_report(
+    *,
+    recovered_reference_metadata: Mapping[str, Any],
+    summary_json_dir: Path,
+    n_frames: int,
+    chi2_threshold: float,
+) -> SchurFrameQualityReport:
+    if chi2_threshold <= 0.0 or not math.isfinite(float(chi2_threshold)):
+        raise ValueError("chi2_threshold must be a positive finite float.")
+    if int(n_frames) <= 0:
+        raise ValueError("n_frames must be positive.")
+    all_indices = tuple(range(int(n_frames)))
+    if not recovered_reference_metadata:
+        return SchurFrameQualityReport(
+            threshold=float(chi2_threshold),
+            total_frame_count=int(n_frames),
+            good_frame_indices=all_indices,
+            bad_frame_indices=(),
+            good_frame_count=int(n_frames),
+            bad_frame_count=0,
+            per_frame_reduced_chi2=(),
+            max_frame_reduced_chi2=None,
+            median_frame_reduced_chi2=None,
+            block_reduced_chi2=None,
+            source_manifest_json=None,
+            source_status="unavailable",
+            warning="Recovered-reference metadata is unavailable.",
+        )
+    manifest_path = _resolve_schur_frame_quality_manifest(
+        recovered_reference_metadata=recovered_reference_metadata,
+        summary_json_dir=summary_json_dir,
+    )
+    if manifest_path is None:
+        return SchurFrameQualityReport(
+            threshold=float(chi2_threshold),
+            total_frame_count=int(n_frames),
+            good_frame_indices=all_indices,
+            bad_frame_indices=(),
+            good_frame_count=int(n_frames),
+            bad_frame_count=0,
+            per_frame_reduced_chi2=(),
+            max_frame_reduced_chi2=None,
+            median_frame_reduced_chi2=None,
+            block_reduced_chi2=None,
+            source_manifest_json=None,
+            source_status="missing",
+            warning="Recovered-reference manifest was not found.",
+        )
+    try:
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        metrics = (
+            manifest_payload.get("metrics", {})
+            if isinstance(manifest_payload.get("metrics"), Mapping)
+            else {}
+        )
+        chi2 = manifest_payload.get("chi2") or metrics.get("chi2") or {}
+        final_model = chi2.get("final_model", {}) if isinstance(chi2, Mapping) else {}
+        raw_values = final_model.get("per_frame_reduced_chi2", [])
+        values = tuple(float(value) for value in raw_values)
+        if len(values) != int(n_frames):
+            raise ValueError(
+                f"Expected {n_frames} per-frame chi2 values, found {len(values)}."
+            )
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("per_frame_reduced_chi2 contains non-finite values.")
+        bad = tuple(
+            index for index, value in enumerate(values) if value > float(chi2_threshold)
+        )
+        good = tuple(index for index in all_indices if index not in set(bad))
+        block = final_model.get("block_reduced_chi2")
+        block_value = None if block is None else float(block)
+        arr = np.asarray(values, dtype=float)
+        return SchurFrameQualityReport(
+            threshold=float(chi2_threshold),
+            total_frame_count=int(n_frames),
+            good_frame_indices=good,
+            bad_frame_indices=bad,
+            good_frame_count=len(good),
+            bad_frame_count=len(bad),
+            per_frame_reduced_chi2=values,
+            max_frame_reduced_chi2=float(np.max(arr)),
+            median_frame_reduced_chi2=float(np.median(arr)),
+            block_reduced_chi2=block_value,
+            source_manifest_json=str(manifest_path),
+            source_status="found",
+            warning=None if not bad else "One or more frames exceed the chi2 threshold.",
+        )
+    except Exception as exc:
+        return SchurFrameQualityReport(
+            threshold=float(chi2_threshold),
+            total_frame_count=int(n_frames),
+            good_frame_indices=all_indices,
+            bad_frame_indices=(),
+            good_frame_count=int(n_frames),
+            bad_frame_count=0,
+            per_frame_reduced_chi2=(),
+            max_frame_reduced_chi2=None,
+            median_frame_reduced_chi2=None,
+            block_reduced_chi2=None,
+            source_manifest_json=str(manifest_path),
+            source_status="parse_error",
+            warning="Recovered-reference frame-quality manifest could not be parsed.",
+            error=str(exc),
+        )
+
+
+def _metadata_for_reused_reference_inference(
+    *,
+    value: str | Path,
+    study_root: Path,
+) -> dict[str, Any]:
+    raw_text = str(value)
+    root = study_root / "reference_inference" if raw_text == "auto" else Path(raw_text)
+    root = root.expanduser()
+    manifest_candidates: list[Path] = []
+    if root.is_file():
+        manifest_candidates.append(root)
+    else:
+        manifest_candidates.extend(
+            [
+                root / "manifest.json",
+                root / "inference" / "manifest.json",
+            ]
+        )
+        if root.exists():
+            manifest_candidates.extend(sorted(root.glob("**/manifest.json")))
+    manifest_path = next(
+        (candidate.resolve() for candidate in manifest_candidates if candidate.exists()),
+        None,
+    )
+    if manifest_path is None:
+        raise FileNotFoundError(f"Could not find reused reference manifest under {root}")
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = (
+        manifest_payload.get("artifacts", {})
+        if isinstance(manifest_payload.get("artifacts"), Mapping)
+        else {}
+    )
+    trace_value = artifacts.get("recovered_trace_csv")
+    trace_path: Path | None = None
+    if isinstance(trace_value, str) and trace_value.strip():
+        raw_trace = Path(trace_value).expanduser()
+        trace_path = raw_trace if raw_trace.is_absolute() else manifest_path.parent / raw_trace
+    if trace_path is None or not trace_path.exists():
+        matches = sorted(manifest_path.parent.glob("*recovered_trace.csv"))
+        if matches:
+            trace_path = matches[0]
+    if trace_path is None or not trace_path.exists():
+        raise FileNotFoundError(
+            f"Could not find recovered trace CSV next to reused manifest {manifest_path}"
+        )
+    return {
+        "run_root": str(manifest_path.parent.parent.resolve()),
+        "output_dir": str(manifest_path.parent.resolve()),
+        "manifest_json": str(manifest_path.resolve()),
+        "recovered_trace_csv": str(trace_path.resolve()),
+        "reuse_reference_inference": True,
+    }
+
+
+def _recovered_theta_from_trace_csv(
+    *,
+    context: Mapping[str, Any],
+    recovered_trace_csv: Path,
+) -> np.ndarray:
+    recipe = context["recipe"]
+    layout = context["layout"]
+    trace = load_obs_subblock_trace_csv(
+        recovered_trace_csv,
+        required_varying_keys=layout.frame_keys,
+        require_contiguous_frame_index=True,
+        require_monotonic_time=True,
+    )
+    if trace.frame_count != int(layout.n_frame):
+        raise ValueError(
+            f"Recovered trace frame count {trace.frame_count} does not match layout "
+            f"frame count {int(layout.n_frame)}."
+        )
+    frame = np.empty((int(layout.n_frame), int(layout.frame_width)), dtype=float)
+    for frame_index, row in enumerate(trace.rows):
+        for key_index, key in enumerate(layout.frame_keys):
+            frame[frame_index, key_index] = float(row[key])
+    state = recipe.ActiveState(
+        frame=recipe.jnp.asarray(frame),
+        shared=context["initial_state"].shared,
+    )
+    return np.asarray(recipe._pack_active_state(layout, state), dtype=float)
+
+
+def _schur_frame_quality_mask_state(
+    *,
+    report: SchurFrameQualityReport,
+    policy: str,
+    missing_policy: str,
+    mask_denominator: str,
+    min_good_frames: int,
+    subblock_reduce: str,
+) -> dict[str, Any]:
+    policy = str(policy)
+    missing_policy = str(missing_policy)
+    mask_denominator = str(mask_denominator)
+    if policy not in SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES:
+        raise ValueError(f"Unsupported schur frame-quality policy: {policy}")
+    if missing_policy not in SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES:
+        raise ValueError(f"Unsupported schur frame-quality missing policy: {missing_policy}")
+    if mask_denominator not in SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS:
+        raise ValueError(f"Unsupported schur frame mask denominator: {mask_denominator}")
+
+    quality_available = report.source_status == "found"
+    if policy == "reject":
+        pass
+    if policy == "mask" and not quality_available and missing_policy == "error":
+        raise RuntimeError("frame_quality_unavailable")
+
+    included = tuple(range(report.total_frame_count))
+    frame_scale = 1.0
+    included_weight_policy = "all_frames"
+    if policy == "mask" and quality_available and report.bad_frame_count:
+        if report.good_frame_count < int(min_good_frames):
+            raise RuntimeError("frame_quality_too_few_good_frames")
+        included = report.good_frame_indices
+        included_weight_policy = f"mask_denominator_{mask_denominator}"
+        if mask_denominator == "kept" and str(subblock_reduce) == "mean":
+            frame_scale = float(report.total_frame_count) / float(report.good_frame_count)
+    return {
+        "included_frame_indices": list(included),
+        "included_frame_count": len(included),
+        "frame_scale": float(frame_scale),
+        "included_frame_weight_policy": included_weight_policy,
+        "effective_frame_fraction": float(len(included)) / float(report.total_frame_count),
+        "quality_available": bool(quality_available),
     }
 
 
@@ -4345,6 +4838,11 @@ def _build_schur_summary_plan(
     validate_surrogate: bool,
     validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     validation_steps: int = 5,
+    schur_frame_quality_policy: str = DEFAULT_SCHUR_FRAME_QUALITY_POLICY,
+    schur_frame_chi2_threshold: float = DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD,
+    schur_frame_quality_missing: str = DEFAULT_SCHUR_FRAME_QUALITY_MISSING,
+    schur_frame_mask_denominator: str = DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
+    schur_frame_mask_min_good_frames: int = DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES,
     frame_truth_preview: Mapping[str, Any] | None,
     applied_trace_overrides: Mapping[str, Any],
     applied_inference_init_overrides: Mapping[str, Any],
@@ -4529,6 +5027,10 @@ def _build_schur_summary_plan(
             "schur_curvature_method": (
                 SCHUR_WORKFLOW_DEFAULTS.schur_curvature_method
             ),
+            "schur_frame_quality_policy": DEFAULT_SCHUR_FRAME_QUALITY_POLICY,
+            "schur_frame_chi2_threshold": DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD,
+            "schur_frame_quality_missing": DEFAULT_SCHUR_FRAME_QUALITY_MISSING,
+            "schur_frame_mask_denominator": DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
         },
         "reference_inference_policy": {
             "optimizer_kind": SCHUR_REFERENCE_INFERENCE_POLICY.optimizer_kind,
@@ -4560,6 +5062,13 @@ def _build_schur_summary_plan(
         "dense_hessian_allowed": bool(dense_hessian_allowed),
         "schur_curvature_method_requested": curvature_method_requested,
         "schur_curvature_method_planned": curvature_method_planned,
+        "schur_frame_quality": {
+            "policy": str(schur_frame_quality_policy),
+            "chi2_threshold": float(schur_frame_chi2_threshold),
+            "missing_policy": str(schur_frame_quality_missing),
+            "mask_denominator": str(schur_frame_mask_denominator),
+            "mask_min_good_frames": int(schur_frame_mask_min_good_frames),
+        },
         **dense_comparison_state,
         "structured_curvature_used": bool(
             curvature_method_planned == SCHUR_CURVATURE_METHOD_STRUCTURED
@@ -4883,6 +5392,11 @@ def _evaluate_schur_summary(
     validation_steps: int = 5,
     recovered_theta: np.ndarray | None = None,
     recovered_reference_metadata: Mapping[str, Any] | None = None,
+    schur_frame_quality_policy: str = DEFAULT_SCHUR_FRAME_QUALITY_POLICY,
+    schur_frame_chi2_threshold: float = DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD,
+    schur_frame_quality_missing: str = DEFAULT_SCHUR_FRAME_QUALITY_MISSING,
+    schur_frame_mask_denominator: str = DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
+    schur_frame_mask_min_good_frames: int = DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES,
     memory_recorder: MemoryDiagnosticsRecorder | None = None,
 ) -> dict[str, Any]:
     """Export one image-backed Schur-reduced summary from a prepared subblock.
@@ -4902,6 +5416,7 @@ def _evaluate_schur_summary(
             memory_recorder.record(stage, **metadata)
 
     record("theta_phi_layout.start", config_path=config_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
     context = _prepare_inference_context(config_path=config_path)
     theta_layout = _build_observation_theta_layout(
         theta_keys=theta_keys,
@@ -4912,6 +5427,15 @@ def _evaluate_schur_summary(
         theta_layout=theta_layout,
         base_store=context["base_store"],
     )
+    if recovered_theta is None and normalize_schur_phi_ref_mode(phi_ref) == "recovered":
+        recovered_trace_value = (recovered_reference_metadata or {}).get(
+            "recovered_trace_csv"
+        )
+        if isinstance(recovered_trace_value, str) and recovered_trace_value.strip():
+            recovered_theta = _recovered_theta_from_trace_csv(
+                context=context,
+                recovered_trace_csv=Path(recovered_trace_value),
+            )
     record("phi_ref.resolve.start", phi_ref_mode=phi_ref)
     fast_phi_ref_values, phi_ref_source = _resolve_phi_reference_for_summary(
         context=context,
@@ -4945,6 +5469,45 @@ def _evaluate_schur_summary(
             phi_ref=fast_phi_ref_values,
         ),
     )
+    frame_quality_report = build_schur_frame_quality_report(
+        recovered_reference_metadata=recovered_reference_metadata or {},
+        summary_json_dir=output_dir,
+        n_frames=int(context["layout"].n_frame),
+        chi2_threshold=float(schur_frame_chi2_threshold),
+    )
+    frame_quality_state = _schur_frame_quality_mask_state(
+        report=frame_quality_report,
+        policy=schur_frame_quality_policy,
+        missing_policy=schur_frame_quality_missing,
+        mask_denominator=schur_frame_mask_denominator,
+        min_good_frames=int(schur_frame_mask_min_good_frames),
+        subblock_reduce=str(context["inference_cfg"]["objective"].get("subblock_reduce")),
+    )
+    frame_quality_metadata = {
+        "policy": str(schur_frame_quality_policy),
+        "chi2_threshold": float(schur_frame_chi2_threshold),
+        "missing_policy": str(schur_frame_quality_missing),
+        "mask_denominator": str(schur_frame_mask_denominator),
+        **frame_quality_report.to_dict(),
+        **frame_quality_state,
+    }
+    if str(schur_frame_quality_policy) == "reject" and (
+        frame_quality_report.bad_frame_count
+        or frame_quality_report.source_status != "found"
+    ):
+        rejection = {
+            "reason": (
+                "frame_quality_failed"
+                if frame_quality_report.bad_frame_count
+                else "frame_quality_unavailable"
+            ),
+            "frame_quality": frame_quality_metadata,
+            "bad_frame_indices": list(frame_quality_report.bad_frame_indices),
+            "threshold": float(schur_frame_chi2_threshold),
+            "per_frame_reduced_chi2": list(frame_quality_report.per_frame_reduced_chi2),
+        }
+        _write_json(output_dir / "schur_summary_rejection.json", rejection)
+        raise RuntimeError(str(rejection["reason"]))
     curvature_method_requested = normalize_schur_curvature_method(
         schur_curvature_method
     )
@@ -4961,6 +5524,27 @@ def _evaluate_schur_summary(
         max_dense_dim=int(max_dense_dim),
         structured_support=structured_support,
     )
+    if (
+        curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE
+        and str(schur_frame_quality_policy) == "mask"
+        and frame_quality_report.bad_frame_count
+    ):
+        frame_quality_state = {
+            **frame_quality_state,
+            "included_frame_indices": list(range(frame_quality_report.total_frame_count)),
+            "included_frame_count": int(frame_quality_report.total_frame_count),
+            "frame_scale": 1.0,
+            "included_frame_weight_policy": "all_frames_dense_path_mask_not_applied",
+            "effective_frame_fraction": 1.0,
+        }
+        frame_quality_metadata = {
+            **frame_quality_metadata,
+            **frame_quality_state,
+            "warning": (
+                "Frame-quality mask was requested, but the dense Schur path "
+                "does not support frame masking; all frames were included."
+            ),
+        }
     record(
         "curvature_method.select.done",
         schur_curvature_method_requested=curvature_method_requested,
@@ -5117,6 +5701,8 @@ def _evaluate_schur_summary(
         structured_reduction = schur_reduce_independent_frame_blocks(
             structured_blocks,
             damping=float(schur_damping),
+            frame_indices=frame_quality_state["included_frame_indices"],
+            frame_scale=float(frame_quality_state["frame_scale"]),
         )
         record(
             "structured_schur_reduce.done",
@@ -5127,7 +5713,9 @@ def _evaluate_schur_summary(
         )
         record("materialize_sidecar_blocks.start")
         structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
-            structured_blocks
+            structured_blocks,
+            frame_indices=frame_quality_state["included_frame_indices"],
+            frame_scale=float(frame_quality_state["frame_scale"]),
         )
         record(
             "materialize_sidecar_blocks.done",
@@ -5214,6 +5802,19 @@ def _evaluate_schur_summary(
             "frame_phi_dim": int(context["layout"].frame_width),
             "shared_phi_dim": int(context["layout"].shared_width),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            "frame_quality_policy": str(schur_frame_quality_policy),
+            "frame_quality_total_frame_count": int(
+                frame_quality_report.total_frame_count
+            ),
+            "frame_quality_good_frame_count": int(frame_quality_report.good_frame_count),
+            "frame_quality_bad_frame_count": int(frame_quality_report.bad_frame_count),
+            "frame_quality_bad_frame_indices": list(
+                frame_quality_report.bad_frame_indices
+            ),
+            "frame_quality_chi2_threshold": float(schur_frame_chi2_threshold),
+            "frame_quality_effective_frame_fraction": float(
+                frame_quality_metadata["effective_frame_fraction"]
+            ),
             **dense_comparison_state,
         },
     )
@@ -5294,6 +5895,7 @@ def _evaluate_schur_summary(
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
             **dense_comparison_state,
         },
+        "frame_quality": frame_quality_metadata,
     }
     if curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE:
         if reduced is None or blocks is None:
@@ -5415,6 +6017,7 @@ def _evaluate_schur_summary(
             if structured_blocks is None
             else float(structured_blocks.reduce_weight),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            "frame_quality": frame_quality_metadata,
             **dense_comparison_state,
         }
     )
@@ -5474,6 +6077,11 @@ def _evaluate_schur_summary(
         "structured_reduce_weight": None
         if structured_blocks is None
         else float(structured_blocks.reduce_weight),
+        "frame_quality": frame_quality_metadata,
+        "frame_quality_bad_frame_count": int(frame_quality_report.bad_frame_count),
+        "frame_quality_effective_frame_fraction": float(
+            frame_quality_metadata["effective_frame_fraction"]
+        ),
         "frame_phi_dim": int(context["layout"].frame_width),
         "shared_phi_dim": int(context["layout"].shared_width),
         "dense_vs_structured_comparison": dense_vs_structured_comparison,
@@ -5742,6 +6350,11 @@ def run_obs_subblock_study(
     validate_surrogate: bool = True,
     validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     validation_steps: int = 5,
+    schur_frame_quality_policy: str = DEFAULT_SCHUR_FRAME_QUALITY_POLICY,
+    schur_frame_chi2_threshold: float = DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD,
+    schur_frame_quality_missing: str = DEFAULT_SCHUR_FRAME_QUALITY_MISSING,
+    schur_frame_mask_denominator: str = DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
+    schur_frame_mask_min_good_frames: int = DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES,
     trace_x0_as: float | None = None,
     trace_y0_as: float | None = None,
     trace_pa0_deg: float | None = None,
@@ -5758,6 +6371,7 @@ def run_obs_subblock_study(
     reference_base_lr: float | None = None,
     reference_n_iter: int | None = None,
     reference_optimizer_kwargs: Mapping[str, Any] | None = None,
+    reference_schedule: Mapping[str, Any] | None = None,
     reference_preconditioning_method: str | None = None,
     reference_preconditioning_reference: str | None = None,
     reference_preconditioning_damping: float | None = None,
@@ -5765,6 +6379,7 @@ def run_obs_subblock_study(
     reference_preconditioning_eig_floor_abs: float | None = None,
     reference_preconditioning_lr_clip: tuple[float, float] | None = None,
     reference_diagnostics_profile: str | None = None,
+    reuse_reference_inference: str | Path | None = None,
     memory_diagnostics: bool = False,
     memory_diagnostics_file: Path | None = None,
     dry_run: bool = False,
@@ -5778,6 +6393,16 @@ def run_obs_subblock_study(
     normalized_schur_curvature_method = normalize_schur_curvature_method(
         schur_curvature_method
     )
+    if schur_frame_quality_policy not in SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES:
+        raise ValueError("Unsupported --schur-frame-quality-policy.")
+    if schur_frame_quality_missing not in SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES:
+        raise ValueError("Unsupported --schur-frame-quality-missing.")
+    if schur_frame_mask_denominator not in SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS:
+        raise ValueError("Unsupported --schur-frame-mask-denominator.")
+    if float(schur_frame_chi2_threshold) <= 0.0 or not math.isfinite(float(schur_frame_chi2_threshold)):
+        raise ValueError("--schur-frame-chi2-threshold must be positive.")
+    if int(schur_frame_mask_min_good_frames) < 1:
+        raise ValueError("--schur-frame-mask-min-good-frames must be >= 1.")
     if study_mode in {
         MODE_FISHER_ONLY,
         MODE_PROFILE_OBJECTIVE,
@@ -5882,6 +6507,13 @@ def run_obs_subblock_study(
             "validate_surrogate": bool(validate_surrogate),
             "validate_structured_against_dense": bool(validate_structured_against_dense),
             "validation_steps": int(validation_steps),
+            "schur_frame_quality_policy": str(schur_frame_quality_policy),
+            "schur_frame_chi2_threshold": float(schur_frame_chi2_threshold),
+            "schur_frame_quality_missing": str(schur_frame_quality_missing),
+            "schur_frame_mask_denominator": str(schur_frame_mask_denominator),
+            "schur_frame_mask_min_good_frames": int(
+                schur_frame_mask_min_good_frames
+            ),
             "trace_truth_cli_overrides": {
                 "trace_x0_as": trace_x0_as,
                 "trace_y0_as": trace_y0_as,
@@ -5902,6 +6534,9 @@ def run_obs_subblock_study(
                 "reference_base_lr": reference_base_lr,
                 "reference_n_iter": reference_n_iter,
                 "reference_optimizer_kwargs": dict(reference_optimizer_kwargs or {}),
+                "reference_schedule": (
+                    None if reference_schedule is None else dict(reference_schedule)
+                ),
                 "reference_preconditioning_enabled": reference_preconditioning_enabled,
                 "reference_preconditioning_method": reference_preconditioning_method,
                 "reference_preconditioning_reference": reference_preconditioning_reference,
@@ -5914,6 +6549,9 @@ def run_obs_subblock_study(
                     else list(reference_preconditioning_lr_clip)
                 ),
             "reference_diagnostics_profile": reference_diagnostics_profile,
+            "reuse_reference_inference": None
+            if reuse_reference_inference is None
+            else str(reuse_reference_inference),
             "memory_diagnostics": bool(memory_diagnostics),
             "memory_diagnostics_file": None
             if memory_diagnostics_file is None
@@ -6091,6 +6729,7 @@ def run_obs_subblock_study(
             reference_base_lr=reference_base_lr,
             reference_n_iter=reference_n_iter,
             reference_optimizer_kwargs=reference_optimizer_kwargs,
+            reference_schedule=reference_schedule,
             reference_preconditioning_enabled=reference_preconditioning_enabled,
             reference_preconditioning_method=reference_preconditioning_method,
             reference_preconditioning_reference=reference_preconditioning_reference,
@@ -6110,6 +6749,7 @@ def run_obs_subblock_study(
                 base_lr=reference_base_lr,
                 n_iter=reference_n_iter,
                 optimizer_kwargs=reference_optimizer_kwargs,
+                schedule=reference_schedule,
                 preconditioning_enabled=reference_preconditioning_enabled,
                 preconditioning_method=reference_preconditioning_method,
                 preconditioning_reference=reference_preconditioning_reference,
@@ -6154,6 +6794,11 @@ def run_obs_subblock_study(
             validate_surrogate=bool(validate_surrogate),
             validate_structured_against_dense=bool(validate_structured_against_dense),
             validation_steps=int(validation_steps),
+            schur_frame_quality_policy=str(schur_frame_quality_policy),
+            schur_frame_chi2_threshold=float(schur_frame_chi2_threshold),
+            schur_frame_quality_missing=str(schur_frame_quality_missing),
+            schur_frame_mask_denominator=str(schur_frame_mask_denominator),
+            schur_frame_mask_min_good_frames=int(schur_frame_mask_min_good_frames),
             frame_truth_preview=frame_truth_preview,
             applied_trace_overrides=template_info["applied_overrides"]["trace"],
             applied_inference_init_overrides=template_info["applied_overrides"][
@@ -6217,40 +6862,48 @@ def run_obs_subblock_study(
         recovered_reference_metadata: dict[str, Any] = {}
         if normalized_phi_ref == "recovered":
             recovered_run_root = study_root / "reference_inference"
-            if memory_recorder is not None:
+            if reuse_reference_inference is not None:
+                recovered_reference_metadata = _metadata_for_reused_reference_inference(
+                    value=reuse_reference_inference,
+                    study_root=study_root,
+                )
+                summary["recovered_inference"] = recovered_reference_metadata
+                summary["reused_reference_inference"] = True
+            elif memory_recorder is not None:
                 memory_recorder.record(
                     "reference_inference.start",
                     run_root=recovered_run_root,
                     config_path=schur_config_path,
                 )
-            recovered_result = _default_inference_runner(
-                schur_config_path,
-                recovered_run_root,
-                False,
-            )
-            recovered_theta = np.asarray(recovered_result["theta_final"], dtype=float)
-            if memory_recorder is not None:
-                memory_recorder.record(
-                    "reference_inference.done",
-                    run_root=recovered_run_root,
-                    output_dir=Path(recovered_result["output_dir"]),
-                    arrays=named_array_memory_metadata(theta_final=recovered_theta),
+            if reuse_reference_inference is None:
+                recovered_result = _default_inference_runner(
+                    schur_config_path,
+                    recovered_run_root,
+                    False,
                 )
-            recovered_reference_metadata = {
-                "run_root": str(recovered_run_root.resolve()),
-                "output_dir": str(Path(recovered_result["output_dir"]).resolve()),
-                "manifest_json": recovered_result["artifacts"].get("manifest_json"),
-                "recovered_trace_csv": recovered_result["artifacts"].get("recovered_trace_csv"),
-            }
-            if memory_recorder is not None:
-                memory_recorder.record(
-                    "reference_inference.manifest_loaded",
-                    manifest_json=recovered_reference_metadata.get("manifest_json"),
-                    recovered_trace_csv=recovered_reference_metadata.get(
-                        "recovered_trace_csv"
-                    ),
-                )
-            summary["recovered_inference"] = recovered_reference_metadata
+                recovered_theta = np.asarray(recovered_result["theta_final"], dtype=float)
+                if memory_recorder is not None:
+                    memory_recorder.record(
+                        "reference_inference.done",
+                        run_root=recovered_run_root,
+                        output_dir=Path(recovered_result["output_dir"]),
+                        arrays=named_array_memory_metadata(theta_final=recovered_theta),
+                    )
+                recovered_reference_metadata = {
+                    "run_root": str(recovered_run_root.resolve()),
+                    "output_dir": str(Path(recovered_result["output_dir"]).resolve()),
+                    "manifest_json": recovered_result["artifacts"].get("manifest_json"),
+                    "recovered_trace_csv": recovered_result["artifacts"].get("recovered_trace_csv"),
+                }
+                if memory_recorder is not None:
+                    memory_recorder.record(
+                        "reference_inference.manifest_loaded",
+                        manifest_json=recovered_reference_metadata.get("manifest_json"),
+                        recovered_trace_csv=recovered_reference_metadata.get(
+                            "recovered_trace_csv"
+                        ),
+                    )
+                summary["recovered_inference"] = recovered_reference_metadata
 
         schur_summary = _evaluate_schur_summary(
             config_path=schur_config_path,
@@ -6269,6 +6922,11 @@ def run_obs_subblock_study(
             validation_steps=int(validation_steps),
             recovered_theta=recovered_theta,
             recovered_reference_metadata=recovered_reference_metadata,
+            schur_frame_quality_policy=str(schur_frame_quality_policy),
+            schur_frame_chi2_threshold=float(schur_frame_chi2_threshold),
+            schur_frame_quality_missing=str(schur_frame_quality_missing),
+            schur_frame_mask_denominator=str(schur_frame_mask_denominator),
+            schur_frame_mask_min_good_frames=int(schur_frame_mask_min_good_frames),
             memory_recorder=memory_recorder,
         )
         summary["schur_summary"] = schur_summary
@@ -6529,6 +7187,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of perturbation points per validated Theta label.",
     )
     parser.add_argument(
+        "--schur-frame-quality-policy",
+        choices=SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES,
+        default=DEFAULT_SCHUR_FRAME_QUALITY_POLICY,
+        help="Frame-quality policy for Schur summary export.",
+    )
+    parser.add_argument(
+        "--schur-frame-chi2-threshold",
+        type=float,
+        default=DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD,
+        help="Reduced chi-squared threshold used to flag bad frames.",
+    )
+    parser.add_argument(
+        "--schur-frame-quality-missing",
+        choices=SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES,
+        default=DEFAULT_SCHUR_FRAME_QUALITY_MISSING,
+        help="Behavior when recovered-reference frame-quality diagnostics are unavailable.",
+    )
+    parser.add_argument(
+        "--schur-frame-mask-denominator",
+        choices=SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS,
+        default=DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
+        help="Denominator convention for mask policy with mean-reduced subblocks.",
+    )
+    parser.add_argument(
+        "--schur-frame-mask-min-good-frames",
+        type=int,
+        default=DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES,
+        help="Minimum good-frame count required when applying mask policy.",
+    )
+    parser.add_argument(
         "--trace-x0-as",
         type=float,
         default=None,
@@ -6619,6 +7307,31 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE",
         help="Repeatable optimizer kwarg override, for example b1=0.8.",
     )
+    parser.add_argument(
+        "--reference-schedule-kind",
+        choices=(
+            "constant",
+            "linear_warmup",
+            "piecewise_constant",
+            "exponential_decay",
+            "cosine_decay",
+            "linear_warmup_cosine_decay",
+        ),
+        default=None,
+        help="Optional recovered-reference scalar LR schedule override.",
+    )
+    parser.add_argument("--reference-schedule-warmup-steps", type=int, default=None)
+    parser.add_argument("--reference-schedule-start-factor", type=float, default=None)
+    parser.add_argument("--reference-schedule-min-factor", type=float, default=None)
+    parser.add_argument("--reference-schedule-boundaries", default=None)
+    parser.add_argument("--reference-schedule-factors", default=None)
+    parser.add_argument("--reference-schedule-decay-rate", type=float, default=None)
+    parser.add_argument("--reference-schedule-transition-steps", type=int, default=None)
+    parser.add_argument(
+        "--reference-schedule-staircase",
+        action="store_true",
+        default=False,
+    )
     preconditioning_group = parser.add_mutually_exclusive_group()
     preconditioning_group.add_argument(
         "--reference-preconditioning-enabled",
@@ -6679,6 +7392,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional diagnostics patch for recovered-reference review. "
             "Template diagnostics are used when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--reuse-reference-inference",
+        default=None,
+        help=(
+            "Reuse an existing recovered-reference inference manifest/dir instead "
+            "of rerunning optimization. Use 'auto' for the case-local "
+            "study/schur_summary/reference_inference directory."
         ),
     )
     parser.add_argument(
@@ -6743,6 +7465,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             args.validate_structured_against_dense
         ),
         validation_steps=int(args.validation_steps),
+        schur_frame_quality_policy=str(args.schur_frame_quality_policy),
+        schur_frame_chi2_threshold=float(args.schur_frame_chi2_threshold),
+        schur_frame_quality_missing=str(args.schur_frame_quality_missing),
+        schur_frame_mask_denominator=str(args.schur_frame_mask_denominator),
+        schur_frame_mask_min_good_frames=int(args.schur_frame_mask_min_good_frames),
         trace_x0_as=args.trace_x0_as,
         trace_y0_as=args.trace_y0_as,
         trace_pa0_deg=args.trace_pa0_deg,
@@ -6760,6 +7487,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         reference_optimizer_kwargs=parse_reference_optimizer_kwargs(
             args.reference_optimizer_kwarg
         ),
+        reference_schedule=parse_reference_schedule_config(
+            kind=args.reference_schedule_kind,
+            warmup_steps=args.reference_schedule_warmup_steps,
+            start_factor=args.reference_schedule_start_factor,
+            min_factor=args.reference_schedule_min_factor,
+            boundaries=args.reference_schedule_boundaries,
+            factors=args.reference_schedule_factors,
+            decay_rate=args.reference_schedule_decay_rate,
+            transition_steps=args.reference_schedule_transition_steps,
+            staircase=bool(args.reference_schedule_staircase),
+        ),
         reference_preconditioning_enabled=args.reference_preconditioning_enabled,
         reference_preconditioning_method=args.reference_preconditioning_method,
         reference_preconditioning_reference=args.reference_preconditioning_reference,
@@ -6770,6 +7508,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             args.reference_preconditioning_lr_clip
         ),
         reference_diagnostics_profile=args.reference_diagnostics_profile,
+        reuse_reference_inference=args.reuse_reference_inference,
         memory_diagnostics=bool(args.memory_diagnostics),
         memory_diagnostics_file=args.memory_diagnostics_file,
         dry_run=bool(args.dry_run),

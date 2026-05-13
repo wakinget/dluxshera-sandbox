@@ -219,6 +219,27 @@ python examples/scripts/run_obs_subblock_study.py \
   --schur-damping 1e-8
 ```
 
+For production-style 20-frame recovered-reference summaries, keep
+``--max-dense-dim 40`` so ``auto`` selects the structured independent-frame path
+and add frame masking:
+
+```bash
+  --phi-ref recovered \
+  --schur-frame-quality-policy mask \
+  --schur-frame-chi2-threshold 5.0 \
+  --schur-frame-mask-denominator original
+```
+
+``warn`` is the backward-compatible default and records diagnostics while keeping
+all frames. ``mask`` excludes high-chi-squared frames from the structured Schur
+accumulation. ``reject`` fails the summary export when frame quality is
+unavailable or any frame exceeds the threshold.
+
+To repair an existing case without rerunning recovered-reference optimization,
+run the same Schur-summary command with ``--reuse-reference-inference auto`` and
+the desired frame-quality flags. This expects the case-local
+``study/schur_summary/reference_inference`` artifacts to still be present.
+
 Expected layout:
 
 ```text

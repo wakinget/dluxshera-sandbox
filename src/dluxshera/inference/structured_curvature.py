@@ -422,6 +422,8 @@ def schur_reduce_independent_frame_blocks(
     *,
     damping: float = 0.0,
     rcond: float | None = None,
+    frame_indices: Sequence[int] | None = None,
+    frame_scale: float = 1.0,
 ) -> StructuredSchurReductionResult:
     """Schur-reduce independent frame-local nuisance blocks.
 
@@ -453,6 +455,18 @@ def schur_reduce_independent_frame_blocks(
 
     if float(damping) < 0.0:
         raise ValueError("damping must be non-negative.")
+    if not np.isfinite(float(frame_scale)) or float(frame_scale) <= 0.0:
+        raise ValueError("frame_scale must be a positive finite float.")
+
+    selected_indices: set[int] | None = None
+    if frame_indices is not None:
+        selected_indices = {int(index) for index in frame_indices}
+        if not selected_indices:
+            raise ValueError("frame_indices must include at least one frame.")
+        valid_indices = {int(block.frame_index) for block in blocks.blocks}
+        missing = sorted(selected_indices - valid_indices)
+        if missing:
+            raise ValueError(f"frame_indices contains unavailable frames: {missing}")
 
     reduced_information = np.zeros(
         (blocks.theta_dim, blocks.theta_dim),
@@ -463,7 +477,11 @@ def schur_reduce_independent_frame_blocks(
     used_pinv = False
     solve_methods: list[str] = []
 
+    included_count = 0
     for block in blocks.blocks:
+        if selected_indices is not None and int(block.frame_index) not in selected_indices:
+            continue
+        included_count += 1
         solved_hpt, solve_method_a, used_pinv_a = _solve_frame_system(
             block.h_phiphi,
             block.h_tphi.T,
@@ -476,8 +494,12 @@ def schur_reduce_independent_frame_blocks(
             damping=float(damping),
             rcond=rcond,
         )
-        frame_reduced_info = block.h_tt - block.h_tphi @ solved_hpt
-        frame_reduced_score = block.g_theta - block.h_tphi @ solved_g
+        frame_reduced_info = (block.h_tt - block.h_tphi @ solved_hpt) * float(
+            frame_scale
+        )
+        frame_reduced_score = (block.g_theta - block.h_tphi @ solved_g) * float(
+            frame_scale
+        )
         reduced_information += frame_reduced_info
         reduced_score += frame_reduced_score
         used_frame_pinv = bool(used_pinv_a or used_pinv_b)
@@ -503,6 +525,8 @@ def schur_reduce_independent_frame_blocks(
         )
 
     reduced_information = 0.5 * (reduced_information + reduced_information.T)
+    if included_count == 0:
+        raise ValueError("No frame blocks were included in the Schur reduction.")
     solve_method = "pinv" if "pinv" in solve_methods else "solve"
     return StructuredSchurReductionResult(
         reduced_information=reduced_information,
@@ -517,6 +541,9 @@ def schur_reduce_independent_frame_blocks(
 
 def materialize_structured_schur_sidecar_blocks(
     blocks: IndependentFrameThetaPhiQuadraticBlocks,
+    *,
+    frame_indices: Sequence[int] | None = None,
+    frame_scale: float = 1.0,
 ) -> dict[str, np.ndarray]:
     """Materialize dense sidecar blocks for loader-compatible artifacts.
 
@@ -544,14 +571,24 @@ def materialize_structured_schur_sidecar_blocks(
     g_theta = np.zeros((blocks.theta_dim,), dtype=float)
     g_phi = np.zeros((blocks.phi_dim,), dtype=float)
 
+    if not np.isfinite(float(frame_scale)) or float(frame_scale) <= 0.0:
+        raise ValueError("frame_scale must be a positive finite float.")
+    selected_indices: set[int] | None = None
+    if frame_indices is not None:
+        selected_indices = {int(index) for index in frame_indices}
+        if not selected_indices:
+            raise ValueError("frame_indices must include at least one frame.")
+
     for block in blocks.blocks:
+        if selected_indices is not None and int(block.frame_index) not in selected_indices:
+            continue
         start = block.frame_index * blocks.frame_phi_dim
         stop = start + blocks.frame_phi_dim
-        h_tt += block.h_tt
-        h_tp[:, start:stop] = block.h_tphi
-        h_pp[start:stop, start:stop] = block.h_phiphi
-        g_theta += block.g_theta
-        g_phi[start:stop] = block.g_phi
+        h_tt += block.h_tt * float(frame_scale)
+        h_tp[:, start:stop] = block.h_tphi * float(frame_scale)
+        h_pp[start:stop, start:stop] = block.h_phiphi * float(frame_scale)
+        g_theta += block.g_theta * float(frame_scale)
+        g_phi[start:stop] = block.g_phi * float(frame_scale)
 
     return {
         "h_tt": 0.5 * (h_tt + h_tt.T),

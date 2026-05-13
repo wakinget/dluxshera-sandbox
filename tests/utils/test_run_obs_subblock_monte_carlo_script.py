@@ -56,7 +56,14 @@ def _config(module, tmp_path: Path, **overrides):
     return module.MonteCarloRunConfig(**payload)
 
 
-def _write_summary(path: Path, *, labels=("a", "b"), theta_ref=(0.0, 0.0), score=(0.0, 0.0)):
+def _write_summary(
+    path: Path,
+    *,
+    labels=("a", "b"),
+    theta_ref=(0.0, 0.0),
+    score=(0.0, 0.0),
+    metadata: dict | None = None,
+):
     info = np.asarray([[4.0, 1.0], [1.0, 9.0]], dtype=float)
     score_arr = np.asarray(score, dtype=float)
     theta_ref_arr = np.asarray(theta_ref, dtype=float)
@@ -81,7 +88,7 @@ def _write_summary(path: Path, *, labels=("a", "b"), theta_ref=(0.0, 0.0), score
         "dimensions": {"n_theta": len(labels), "n_phi": 0, "combined_dim": len(labels)},
         "summary_diagnostics": {"curvature_method_used": "synthetic"},
         "matrix_artifact_path": npz_path.name,
-        "metadata": {"structured_curvature_used": False},
+        "metadata": {"structured_curvature_used": False, **dict(metadata or {})},
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -163,6 +170,8 @@ def test_plan_generation_and_command_construction(tmp_path: Path):
     assert "--reference-optimizer-kind sgd" in joined
     assert "--reference-base-lr 0.7" in joined
     assert "--reference-n-iter 80" in joined
+    assert "--schur-frame-quality-policy warn" in joined
+    assert "--schur-frame-chi2-threshold 5.0" in joined
 
     module.write_command_file(plan[0], command)
     text = plan[0].command_path.read_text(encoding="utf-8")
@@ -170,6 +179,50 @@ def test_plan_generation_and_command_construction(tmp_path: Path):
     assert "run_obs_subblock_study.py" in text
     assert "--max-dense-dim 40" in text
     assert "--reference-base-lr 0.7" in text
+
+
+def test_frame_quality_cli_command_plan_and_manifest(tmp_path: Path):
+    module = _load_module()
+    parser = module._build_parser()
+    cfg = module.build_config_from_args(
+        parser.parse_args(
+            [
+                "--run-name",
+                "fq",
+                "--results-root",
+                str(tmp_path),
+                "--schur-frame-quality-policy",
+                "mask",
+                "--schur-frame-chi2-threshold",
+                "4.5",
+                "--schur-frame-quality-missing",
+                "error",
+                "--schur-frame-mask-denominator",
+                "kept",
+                "--schur-frame-mask-min-good-frames",
+                "2",
+            ]
+        )
+    )
+    plan = module.build_trial_plan(cfg)
+    command = " ".join(module.build_trial_command(plan[0], cfg))
+    assert "--schur-frame-quality-policy mask" in command
+    assert "--schur-frame-chi2-threshold 4.5" in command
+    assert "--schur-frame-quality-missing error" in command
+    assert "--schur-frame-mask-denominator kept" in command
+    assert "--schur-frame-mask-min-good-frames 2" in command
+
+    module.write_run_plan_csv(cfg.run_root / "run_plan.csv", plan)
+    row = _read_csv(cfg.run_root / "run_plan.csv")[0]
+    assert row["schur_frame_quality_policy"] == "mask"
+    assert row["schur_frame_chi2_threshold"] == "4.5"
+    assert row["schur_frame_quality_missing"] == "error"
+    assert row["schur_frame_mask_denominator"] == "kept"
+
+    module.write_manifest(cfg, plan)
+    manifest = json.loads((cfg.run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["study_defaults"]["schur_frame_quality_policy"] == "mask"
+    assert manifest["study_defaults"]["schur_frame_chi2_threshold"] == 4.5
 
 
 def test_memory_diagnostics_cli_is_forwarded_to_trial_command(tmp_path: Path):
@@ -218,6 +271,57 @@ def test_reference_diagnostics_profile_cli_config_and_manifest(tmp_path: Path):
     module.write_manifest(cfg, plan)
     manifest = json.loads((cfg.run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["study_defaults"]["reference_diagnostics_profile"] == "basic"
+
+
+def test_reference_frame_quality_extraction_resolves_relative_manifest(tmp_path: Path):
+    module = _load_module()
+    summary_path = tmp_path / "case" / "study" / "schur_summary" / "subblock_summary.json"
+    manifest_path = summary_path.parent / "reference_inference" / "inference" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "chi2": {
+                    "final_model": {
+                        "per_frame_reduced_chi2": [1.0, 6.5, 2.0],
+                        "block_reduced_chi2": 1.7,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "metadata": {
+            "recovered_reference": {
+                "manifest_json": "reference_inference/inference/manifest.json"
+            }
+        }
+    }
+    result = module.extract_reference_frame_quality_from_summary_payload(
+        payload,
+        summary_json_path=summary_path,
+        threshold=5.0,
+    )
+    assert result["reference_frame_quality_source"] == "found"
+    assert result["reference_final_max_frame_reduced_chi2"] == 6.5
+    assert result["reference_final_median_frame_reduced_chi2"] == 2.0
+    assert result["reference_final_block_reduced_chi2"] == 1.7
+    assert result["reference_failed_frame_count_chi2_gt_threshold"] == 1
+    assert result["reference_failed_frame_indices_chi2_gt_threshold"] == "1"
+    assert result["fit_warning"] == "reference_final_max_frame_reduced_chi2_high"
+
+
+def test_reference_frame_quality_extraction_missing_manifest_is_nonfatal(tmp_path: Path):
+    module = _load_module()
+    result = module.extract_reference_frame_quality_from_summary_payload(
+        {"metadata": {"recovered_reference": {"manifest_json": "missing.json"}}},
+        summary_json_path=tmp_path / "subblock_summary.json",
+        threshold=5.0,
+    )
+    assert result["reference_frame_quality_source"] == "missing_manifest"
+    assert result["reference_final_max_frame_reduced_chi2"] == ""
+    assert result["fit_warning"] == ""
 
 
 def test_reference_optimizer_overrides_appear_in_command_plan_and_manifest(tmp_path: Path):
@@ -275,6 +379,42 @@ def test_reference_optimizer_overrides_appear_in_command_plan_and_manifest(tmp_p
     assert payload["preconditioning"]["lr_clip"] == [0.1, 10.0]
 
 
+def test_reference_schedule_override_appears_in_command_plan_and_manifest(tmp_path: Path):
+    module = _load_module()
+    cfg = _config(
+        module,
+        tmp_path,
+        reference_schedule={
+            "kind": "linear_warmup",
+            "warmup_steps": 8,
+            "start_factor": 0.25,
+        },
+    )
+    plan = module.build_trial_plan(cfg)
+    command = " ".join(module.build_trial_command(plan[0], cfg))
+    assert "--reference-schedule-kind linear_warmup" in command
+    assert "--reference-schedule-warmup-steps 8" in command
+    assert "--reference-schedule-start-factor 0.25" in command
+
+    module.write_run_plan_csv(cfg.run_root / "run_plan.csv", plan)
+    row = _read_csv(cfg.run_root / "run_plan.csv")[0]
+    assert row["reference_schedule_kind"] == "linear_warmup"
+    assert json.loads(row["reference_schedule_json"]) == {
+        "kind": "linear_warmup",
+        "start_factor": 0.25,
+        "warmup_steps": 8,
+    }
+
+    module.write_manifest(cfg, plan)
+    manifest = json.loads((cfg.run_root / "manifest.json").read_text(encoding="utf-8"))
+    payload = manifest["reference_optimizer_overrides"]
+    assert payload["schedule"] == {
+        "kind": "linear_warmup",
+        "warmup_steps": 8,
+        "start_factor": 0.25,
+    }
+
+
 def test_default_mc_optimizer_and_dense_guard_are_recorded(tmp_path: Path):
     module = _load_module()
     cfg = _config(module, tmp_path, run_name="defaults")
@@ -291,6 +431,8 @@ def test_default_mc_optimizer_and_dense_guard_are_recorded(tmp_path: Path):
     assert row["reference_optimizer_kind"] == "sgd"
     assert row["reference_base_lr"] == "0.7"
     assert row["reference_n_iter"] == "80"
+    assert row["reference_schedule_kind"] == ""
+    assert row["reference_schedule_json"] == ""
 
     module.write_manifest(cfg, plan)
     manifest = json.loads((cfg.run_root / "manifest.json").read_text(encoding="utf-8"))
@@ -298,6 +440,7 @@ def test_default_mc_optimizer_and_dense_guard_are_recorded(tmp_path: Path):
     assert manifest["reference_optimizer_overrides"]["kind"] == "sgd"
     assert manifest["reference_optimizer_overrides"]["base_lr"] == pytest.approx(0.7)
     assert manifest["reference_optimizer_overrides"]["n_iter"] == 80
+    assert manifest["reference_optimizer_overrides"]["schedule"] is None
 
 
 def test_reference_optimizer_config_file_and_cli_precedence(tmp_path: Path):
@@ -314,6 +457,11 @@ def test_reference_optimizer_config_file_and_cli_precedence(tmp_path: Path):
                         "base_lr": 0.001,
                         "n_iter": 300,
                         "kwargs": {"b1": 0.8},
+                        "schedule": {
+                            "kind": "linear_warmup",
+                            "warmup_steps": 8,
+                            "start_factor": 0.25,
+                        },
                         "preconditioning": {
                             "enabled": True,
                             "method": "auto",
@@ -333,6 +481,11 @@ def test_reference_optimizer_config_file_and_cli_precedence(tmp_path: Path):
     assert cfg.reference_n_iter == 300
     assert cfg.max_dense_dim == 55
     assert cfg.reference_optimizer_kwargs == {"b1": 0.8}
+    assert cfg.reference_schedule == {
+        "kind": "linear_warmup",
+        "warmup_steps": 8,
+        "start_factor": 0.25,
+    }
     assert cfg.reference_preconditioning_enabled is True
     assert cfg.reference_preconditioning_reference == "initial"
     assert cfg.reference_preconditioning_lr_clip == (0.1, 10.0)
@@ -348,6 +501,12 @@ def test_reference_optimizer_config_file_and_cli_precedence(tmp_path: Path):
                 "0.3",
                 "--reference-n-iter",
                 "100",
+                "--reference-schedule-kind",
+                "linear_warmup",
+                "--reference-schedule-warmup-steps",
+                "5",
+                "--reference-schedule-start-factor",
+                "0.2",
                 "--max-dense-dim",
                 "44",
                 "--reference-preconditioning-reference",
@@ -358,8 +517,40 @@ def test_reference_optimizer_config_file_and_cli_precedence(tmp_path: Path):
     assert override.reference_optimizer_kind == "adam"
     assert override.reference_base_lr == pytest.approx(0.3)
     assert override.reference_n_iter == 100
+    assert override.reference_schedule == {
+        "kind": "linear_warmup",
+        "warmup_steps": 5,
+        "start_factor": 0.2,
+    }
     assert override.max_dense_dim == 44
     assert override.reference_preconditioning_reference == "truth_when_available"
+
+
+def test_reference_schedule_alias_config_shape_is_accepted(tmp_path: Path):
+    module = _load_module()
+    config_path = tmp_path / "schedule_alias_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "run": {"run_name": "schedule_alias", "results_root": str(tmp_path)},
+                "trial": {
+                    "reference_optimizer_schedule": {
+                        "kind": "piecewise_constant",
+                        "boundaries": [50, 150],
+                        "factors": [1.0, 0.3, 0.1],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    parser = module._build_parser()
+    cfg = module.build_config_from_args(parser.parse_args(["--config", str(config_path)]))
+    assert cfg.reference_schedule == {
+        "kind": "piecewise_constant",
+        "boundaries": [50, 150],
+        "factors": [1.0, 0.3, 0.1],
+    }
 
 
 def test_reference_diagnostics_profile_config_file_and_cli_precedence(tmp_path: Path):

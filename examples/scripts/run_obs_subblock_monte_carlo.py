@@ -46,6 +46,7 @@ from dluxshera.inference.observation_summary import (
     load_subblock_summary,
     load_subblock_summary_artifact_payload,
 )
+from dluxshera.inference.schedules import validate_optimizer_schedule_config
 from dluxshera.utils.noise import make_subseed
 
 
@@ -89,10 +90,17 @@ PLAN_COLUMNS = (
     "reference_optimizer_kind",
     "reference_base_lr",
     "reference_n_iter",
+    "reference_schedule_kind",
+    "reference_schedule_json",
     "reference_preconditioning_enabled",
     "reference_preconditioning_method",
     "reference_preconditioning_reference",
     "reference_preconditioning_lr_clip",
+    "schur_frame_quality_policy",
+    "schur_frame_chi2_threshold",
+    "schur_frame_quality_missing",
+    "schur_frame_mask_denominator",
+    "schur_frame_mask_min_good_frames",
     "results_root",
     "case_root",
     "command_path",
@@ -119,6 +127,9 @@ PLAN_COLUMNS = (
 STATUS_COLUMNS = PLAN_COLUMNS
 TINY = 1.0e-12
 FIT_WARNING_MAX_FRAME_REDUCED_CHI2 = 5.0
+SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES = ("warn", "mask", "reject")
+SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES = ("allow_all", "error")
+SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS = ("original", "kept")
 
 
 @dataclass(frozen=True)
@@ -155,6 +166,7 @@ class MonteCarloRunConfig:
     reference_base_lr: float | None = DEFAULT_MC_REFERENCE_BASE_LR
     reference_n_iter: int | None = DEFAULT_MC_REFERENCE_N_ITER
     reference_optimizer_kwargs: dict[str, Any] | None = None
+    reference_schedule: dict[str, Any] | None = None
     reference_preconditioning_enabled: bool | None = None
     reference_preconditioning_method: str | None = None
     reference_preconditioning_reference: str | None = None
@@ -163,6 +175,11 @@ class MonteCarloRunConfig:
     reference_preconditioning_eig_floor_abs: float | None = None
     reference_preconditioning_lr_clip: tuple[float, float] | None = None
     schur_damping: float | None = None
+    schur_frame_quality_policy: str = "warn"
+    schur_frame_chi2_threshold: float = FIT_WARNING_MAX_FRAME_REDUCED_CHI2
+    schur_frame_quality_missing: str = "allow_all"
+    schur_frame_mask_denominator: str = "original"
+    schur_frame_mask_min_good_frames: int = 1
     max_dense_dim: int | None = DEFAULT_MC_MAX_DENSE_DIM
     summary_objective: str | None = None
     validate_surrogate: bool | None = None
@@ -216,10 +233,16 @@ class MonteCarloTrialSpec:
     reference_optimizer_kind: str | None
     reference_base_lr: float | None
     reference_n_iter: int | None
+    reference_schedule: dict[str, Any] | None
     reference_preconditioning_enabled: bool | None
     reference_preconditioning_method: str | None
     reference_preconditioning_reference: str | None
     reference_preconditioning_lr_clip: tuple[float, float] | None
+    schur_frame_quality_policy: str
+    schur_frame_chi2_threshold: float
+    schur_frame_quality_missing: str
+    schur_frame_mask_denominator: str
+    schur_frame_mask_min_good_frames: int
     results_root: Path
     case_root: Path
     command_path: Path
@@ -415,6 +438,134 @@ def parse_reference_optimizer_kwargs(raw_values: Sequence[str] | Mapping[str, An
     return parsed
 
 
+def parse_csv_ints(raw: str | Sequence[int] | None, *, field_name: str) -> tuple[int, ...] | None:
+    if raw is None or raw == "":
+        return None
+    parts = [part.strip() for part in raw.split(",")] if isinstance(raw, str) else raw
+    if not parts:
+        raise ValueError(f"{field_name} must contain at least one integer.")
+    values: list[int] = []
+    for index, part in enumerate(parts):
+        integer = int(part)
+        if float(integer) != float(part):
+            raise ValueError(f"{field_name}[{index}] must be an integer.")
+        values.append(integer)
+    return tuple(values)
+
+
+def parse_csv_floats(
+    raw: str | Sequence[float] | None,
+    *,
+    field_name: str,
+) -> tuple[float, ...] | None:
+    if raw is None or raw == "":
+        return None
+    parts = [part.strip() for part in raw.split(",")] if isinstance(raw, str) else raw
+    if not parts:
+        raise ValueError(f"{field_name} must contain at least one float.")
+    return tuple(float(part) for part in parts)
+
+
+def parse_reference_schedule_config(
+    *,
+    kind: str | None,
+    warmup_steps: int | None,
+    start_factor: float | None,
+    min_factor: float | None,
+    boundaries: str | Sequence[int] | None,
+    factors: str | Sequence[float] | None,
+    decay_rate: float | None,
+    transition_steps: int | None,
+    staircase: bool,
+    n_iter: int | None,
+) -> dict[str, Any] | None:
+    """Normalize one optional recovered-reference scalar LR schedule config."""
+
+    if kind is None:
+        if any(
+            value not in {None, False, ""}
+            for value in (
+                warmup_steps,
+                start_factor,
+                min_factor,
+                boundaries,
+                factors,
+                decay_rate,
+                transition_steps,
+                staircase,
+            )
+        ):
+            raise ValueError(
+                "reference schedule fields require --reference-schedule-kind "
+                "or a config schedule.kind."
+            )
+        return None
+
+    schedule_kind = str(kind).strip().lower()
+    schedule: dict[str, Any] = {"kind": schedule_kind}
+    if schedule_kind == "linear_warmup":
+        if warmup_steps is None or start_factor is None:
+            raise ValueError(
+                "linear_warmup requires warmup_steps and start_factor."
+            )
+        schedule["warmup_steps"] = int(warmup_steps)
+        schedule["start_factor"] = float(start_factor)
+    elif schedule_kind == "piecewise_constant":
+        parsed_boundaries = parse_csv_ints(
+            boundaries,
+            field_name="reference_schedule_boundaries",
+        )
+        parsed_factors = parse_csv_floats(
+            factors,
+            field_name="reference_schedule_factors",
+        )
+        if parsed_boundaries is None or parsed_factors is None:
+            raise ValueError(
+                "piecewise_constant requires boundaries and factors."
+            )
+        schedule["boundaries"] = list(parsed_boundaries)
+        schedule["factors"] = list(parsed_factors)
+    elif schedule_kind == "exponential_decay":
+        if decay_rate is None or transition_steps is None:
+            raise ValueError(
+                "exponential_decay requires decay_rate and transition_steps."
+            )
+        schedule["decay_rate"] = float(decay_rate)
+        schedule["transition_steps"] = int(transition_steps)
+        if staircase:
+            schedule["staircase"] = True
+    elif schedule_kind == "cosine_decay":
+        if min_factor is None:
+            raise ValueError("cosine_decay requires min_factor.")
+        schedule["min_factor"] = float(min_factor)
+    elif schedule_kind == "linear_warmup_cosine_decay":
+        if warmup_steps is None or start_factor is None or min_factor is None:
+            raise ValueError(
+                "linear_warmup_cosine_decay requires warmup_steps, start_factor, and min_factor."
+            )
+        schedule["warmup_steps"] = int(warmup_steps)
+        schedule["start_factor"] = float(start_factor)
+        schedule["min_factor"] = float(min_factor)
+    elif schedule_kind == "constant":
+        pass
+    else:
+        raise ValueError(
+            "reference_schedule_kind must be one of: constant, linear_warmup, "
+            "piecewise_constant, exponential_decay, cosine_decay, "
+            "linear_warmup_cosine_decay."
+        )
+
+    return validate_optimizer_schedule_config(
+        schedule,
+        n_iter=int(n_iter if n_iter is not None else DEFAULT_MC_REFERENCE_N_ITER),
+        path="reference_schedule",
+    )
+
+
+def _format_schedule_json(value: Mapping[str, Any] | None) -> str:
+    return "" if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def parse_reference_lr_clip(raw: str | Sequence[float] | None) -> tuple[float, float] | None:
     """Parse recovered-reference preconditioning learning-rate clip bounds."""
 
@@ -526,6 +677,11 @@ def _trial_from_row(row: Mapping[str, Any], *, run_root: Path) -> MonteCarloTria
         reference_optimizer_kind=str(row["reference_optimizer_kind"]) if row.get("reference_optimizer_kind") else None,
         reference_base_lr=float(row["reference_base_lr"]) if row.get("reference_base_lr") else None,
         reference_n_iter=int(row["reference_n_iter"]) if row.get("reference_n_iter") else None,
+        reference_schedule=(
+            json.loads(str(row["reference_schedule_json"]))
+            if row.get("reference_schedule_json")
+            else None
+        ),
         reference_preconditioning_enabled=_parse_optional_bool(
             row.get("reference_preconditioning_enabled")
         ),
@@ -542,6 +698,13 @@ def _trial_from_row(row: Mapping[str, Any], *, run_root: Path) -> MonteCarloTria
         reference_preconditioning_lr_clip=parse_reference_lr_clip(
             row.get("reference_preconditioning_lr_clip")
         ),
+        schur_frame_quality_policy=str(row.get("schur_frame_quality_policy") or "warn"),
+        schur_frame_chi2_threshold=float(
+            row.get("schur_frame_chi2_threshold") or FIT_WARNING_MAX_FRAME_REDUCED_CHI2
+        ),
+        schur_frame_quality_missing=str(row.get("schur_frame_quality_missing") or "allow_all"),
+        schur_frame_mask_denominator=str(row.get("schur_frame_mask_denominator") or "original"),
+        schur_frame_mask_min_good_frames=int(row.get("schur_frame_mask_min_good_frames") or 1),
         results_root=Path(str(row["results_root"])).resolve(),
         case_root=case_root.resolve(),
         command_path=command_path if command_path.is_absolute() else (run_root / command_path).resolve(),
@@ -598,10 +761,20 @@ def build_trial_plan(config: MonteCarloRunConfig) -> list[MonteCarloTrialSpec]:
                 reference_optimizer_kind=config.reference_optimizer_kind,
                 reference_base_lr=config.reference_base_lr,
                 reference_n_iter=config.reference_n_iter,
+                reference_schedule=(
+                    None
+                    if config.reference_schedule is None
+                    else dict(config.reference_schedule)
+                ),
                 reference_preconditioning_enabled=config.reference_preconditioning_enabled,
                 reference_preconditioning_method=config.reference_preconditioning_method,
                 reference_preconditioning_reference=config.reference_preconditioning_reference,
                 reference_preconditioning_lr_clip=config.reference_preconditioning_lr_clip,
+                schur_frame_quality_policy=config.schur_frame_quality_policy,
+                schur_frame_chi2_threshold=float(config.schur_frame_chi2_threshold),
+                schur_frame_quality_missing=config.schur_frame_quality_missing,
+                schur_frame_mask_denominator=config.schur_frame_mask_denominator,
+                schur_frame_mask_min_good_frames=int(config.schur_frame_mask_min_good_frames),
                 results_root=run_root,
                 case_root=case_root.resolve(),
                 command_path=(run_root / "commands" / f"{trial_name}.sh").resolve(),
@@ -646,6 +819,16 @@ def build_trial_command(spec: MonteCarloTrialSpec, config: MonteCarloRunConfig) 
         str(spec.noise_seed),
         "--reference-diagnostics-profile",
         str(config.reference_diagnostics_profile),
+        "--schur-frame-quality-policy",
+        str(spec.schur_frame_quality_policy),
+        "--schur-frame-chi2-threshold",
+        str(spec.schur_frame_chi2_threshold),
+        "--schur-frame-quality-missing",
+        str(spec.schur_frame_quality_missing),
+        "--schur-frame-mask-denominator",
+        str(spec.schur_frame_mask_denominator),
+        "--schur-frame-mask-min-good-frames",
+        str(spec.schur_frame_mask_min_good_frames),
     ]
     if spec.variance_floor is not None:
         command.extend(["--variance-floor", str(spec.variance_floor)])
@@ -665,6 +848,48 @@ def build_trial_command(spec: MonteCarloTrialSpec, config: MonteCarloRunConfig) 
         command.extend(["--reference-n-iter", str(config.reference_n_iter)])
     for key, value in sorted((config.reference_optimizer_kwargs or {}).items()):
         command.extend(["--reference-optimizer-kwarg", f"{key}={value}"])
+    if spec.reference_schedule is not None:
+        schedule = dict(spec.reference_schedule)
+        command.extend(["--reference-schedule-kind", str(schedule["kind"])])
+        if "warmup_steps" in schedule:
+            command.extend(
+                ["--reference-schedule-warmup-steps", str(schedule["warmup_steps"])]
+            )
+        if "start_factor" in schedule:
+            command.extend(
+                ["--reference-schedule-start-factor", str(schedule["start_factor"])]
+            )
+        if "min_factor" in schedule:
+            command.extend(
+                ["--reference-schedule-min-factor", str(schedule["min_factor"])]
+            )
+        if "boundaries" in schedule:
+            command.extend(
+                [
+                    "--reference-schedule-boundaries",
+                    ",".join(str(int(value)) for value in schedule["boundaries"]),
+                ]
+            )
+        if "factors" in schedule:
+            command.extend(
+                [
+                    "--reference-schedule-factors",
+                    ",".join(str(float(value)) for value in schedule["factors"]),
+                ]
+            )
+        if "decay_rate" in schedule:
+            command.extend(
+                ["--reference-schedule-decay-rate", str(schedule["decay_rate"])]
+            )
+        if "transition_steps" in schedule:
+            command.extend(
+                [
+                    "--reference-schedule-transition-steps",
+                    str(schedule["transition_steps"]),
+                ]
+            )
+        if bool(schedule.get("staircase", False)):
+            command.append("--reference-schedule-staircase")
     if config.reference_preconditioning_enabled is True:
         command.append("--reference-preconditioning-enabled")
     elif config.reference_preconditioning_enabled is False:
@@ -744,6 +969,10 @@ def _plan_row(spec: MonteCarloTrialSpec, result: MonteCarloTrialResult | None = 
         "reference_optimizer_kind": spec.reference_optimizer_kind or "",
         "reference_base_lr": "" if spec.reference_base_lr is None else spec.reference_base_lr,
         "reference_n_iter": "" if spec.reference_n_iter is None else spec.reference_n_iter,
+        "reference_schedule_kind": (
+            "" if spec.reference_schedule is None else str(spec.reference_schedule.get("kind", ""))
+        ),
+        "reference_schedule_json": _format_schedule_json(spec.reference_schedule),
         "reference_preconditioning_enabled": (
             "" if spec.reference_preconditioning_enabled is None else spec.reference_preconditioning_enabled
         ),
@@ -752,6 +981,11 @@ def _plan_row(spec: MonteCarloTrialSpec, result: MonteCarloTrialResult | None = 
         "reference_preconditioning_lr_clip": _format_lr_clip(
             spec.reference_preconditioning_lr_clip
         ),
+        "schur_frame_quality_policy": spec.schur_frame_quality_policy,
+        "schur_frame_chi2_threshold": spec.schur_frame_chi2_threshold,
+        "schur_frame_quality_missing": spec.schur_frame_quality_missing,
+        "schur_frame_mask_denominator": spec.schur_frame_mask_denominator,
+        "schur_frame_mask_min_good_frames": spec.schur_frame_mask_min_good_frames,
         "results_root": str(spec.results_root),
         "case_root": str(spec.case_root),
         "command_path": str(spec.command_path),
@@ -920,6 +1154,11 @@ def write_manifest(config: MonteCarloRunConfig, plan: Sequence[MonteCarloTrialSp
             "theta_keys": list(config.theta_keys),
             "phi_ref": config.phi_ref,
             "schur_curvature_method": config.schur_curvature_method,
+            "schur_frame_quality_policy": config.schur_frame_quality_policy,
+            "schur_frame_chi2_threshold": config.schur_frame_chi2_threshold,
+            "schur_frame_quality_missing": config.schur_frame_quality_missing,
+            "schur_frame_mask_denominator": config.schur_frame_mask_denominator,
+            "schur_frame_mask_min_good_frames": config.schur_frame_mask_min_good_frames,
             "max_dense_dim": config.max_dense_dim,
             "variance_floor": config.variance_floor,
             "reference_diagnostics_profile": config.reference_diagnostics_profile,
@@ -952,6 +1191,7 @@ def _reference_optimizer_override_payload(config: MonteCarloRunConfig) -> dict[s
         "base_lr": config.reference_base_lr,
         "n_iter": config.reference_n_iter,
         "kwargs": dict(config.reference_optimizer_kwargs or {}),
+        "schedule": None if config.reference_schedule is None else dict(config.reference_schedule),
         "preconditioning": {
             "enabled": config.reference_preconditioning_enabled,
             "method": config.reference_preconditioning_method,
@@ -1021,7 +1261,17 @@ def run_trial_subprocess(
         )
     elapsed = time.monotonic() - t0
     finished = now_iso_utc()
-    if completed.returncode != 0:
+    rejection_path = spec.expected_summary_json.with_name("schur_summary_rejection.json")
+    if completed.returncode != 0 and rejection_path.exists():
+        status = "rejected"
+        reason = "schur_summary_rejection"
+        try:
+            rejection_payload = json.loads(rejection_path.read_text(encoding="utf-8"))
+            if isinstance(rejection_payload, Mapping) and rejection_payload.get("reason"):
+                reason = str(rejection_payload["reason"])
+        except Exception:
+            reason = "schur_summary_rejection"
+    elif completed.returncode != 0:
         status = "failed"
         reason = f"subprocess_return_code_{completed.returncode}"
     elif not spec.expected_summary_json.exists():
@@ -1481,7 +1731,11 @@ def aggregate_schur_summary_trials(
         diagnostics = dict(summary.diagnostics)
         dims = payload.get("dimensions") if isinstance(payload.get("dimensions"), Mapping) else {}
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
-        fit_warning = _fit_warning_from_recovered_manifest(payload)
+        fit_warning = extract_reference_frame_quality_from_summary_payload(
+            payload,
+            summary_json_path=summary_path,
+            threshold=float(config.schur_frame_chi2_threshold),
+        )
 
         accepted_rows.append(
             {
@@ -1511,6 +1765,27 @@ def aggregate_schur_summary_trials(
                 "noise_seed": spec.noise_seed,
                 "schur_curvature_method_used": _curvature_method_used(payload),
                 "structured_curvature_used": bool(metadata.get("structured_curvature_used", False)),
+                "frame_quality_policy": diagnostics.get("frame_quality_policy", ""),
+                "frame_quality_good_frame_count": diagnostics.get(
+                    "frame_quality_good_frame_count",
+                    "",
+                ),
+                "frame_quality_bad_frame_count": diagnostics.get(
+                    "frame_quality_bad_frame_count",
+                    "",
+                ),
+                "frame_quality_bad_frame_indices": "|".join(
+                    str(index)
+                    for index in diagnostics.get("frame_quality_bad_frame_indices", [])
+                )
+                if isinstance(
+                    diagnostics.get("frame_quality_bad_frame_indices"), list
+                )
+                else diagnostics.get("frame_quality_bad_frame_indices", ""),
+                "frame_quality_effective_frame_fraction": diagnostics.get(
+                    "frame_quality_effective_frame_fraction",
+                    "",
+                ),
                 "variance_floor": spec.variance_floor,
                 "reference_diagnostics_profile": spec.reference_diagnostics_profile,
                 "reference_optimizer_kind": spec.reference_optimizer_kind or "",
@@ -1670,24 +1945,92 @@ def _curvature_method_used(payload: Mapping[str, Any]) -> str:
     return ""
 
 
-def _fit_warning_from_recovered_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _candidate_recovered_manifest_paths(
+    payload: Mapping[str, Any],
+    *,
+    summary_json_path: Path,
+) -> list[Path]:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
     recovered = (
         metadata.get("recovered_reference")
         if isinstance(metadata.get("recovered_reference"), Mapping)
         else {}
     )
+    candidates: list[Path] = []
     manifest_value = recovered.get("manifest_json") if isinstance(recovered, Mapping) else None
-    if not isinstance(manifest_value, str) or not manifest_value.strip():
-        return {
-            "reference_final_max_frame_reduced_chi2": "",
-            "reference_final_block_reduced_chi2": "",
-            "fit_warning": "",
-        }
-    manifest_path = Path(manifest_value)
+    summary_dir = summary_json_path.parent
+    case_value = metadata.get("case_root") or payload.get("case_root")
+    case_root = Path(case_value).expanduser() if isinstance(case_value, str) and case_value.strip() else None
+    output_value = recovered.get("output_dir") if isinstance(recovered, Mapping) else None
+    output_dir = Path(output_value).expanduser() if isinstance(output_value, str) and output_value.strip() else None
+    if isinstance(manifest_value, str) and manifest_value.strip():
+        raw = Path(manifest_value).expanduser()
+        candidates.append(raw)
+        if not raw.is_absolute():
+            candidates.append(summary_dir / raw)
+            if case_root is not None:
+                candidates.append(case_root / raw)
+            if output_dir is not None:
+                candidates.append(output_dir / raw)
+    if output_dir is not None:
+        candidates.append(output_dir / "manifest.json")
+    if case_root is not None:
+        candidates.extend(
+            sorted(
+                (case_root / "study" / "schur_summary" / "reference_inference").glob(
+                    "**/manifest.json"
+                )
+            )
+        )
+    return candidates
+
+
+def _resolve_recovered_manifest_path(
+    payload: Mapping[str, Any],
+    *,
+    summary_json_path: Path,
+) -> Path | None:
+    for candidate in _candidate_recovered_manifest_paths(
+        payload,
+        summary_json_path=summary_json_path,
+    ):
+        path = candidate if candidate.is_absolute() else candidate.resolve()
+        if path.exists():
+            return path.resolve()
+    return None
+
+
+def extract_reference_frame_quality_from_summary_payload(
+    payload: Mapping[str, Any],
+    *,
+    summary_json_path: Path,
+    threshold: float,
+) -> dict[str, Any]:
+    base = {
+        "reference_final_max_frame_reduced_chi2": "",
+        "reference_final_median_frame_reduced_chi2": "",
+        "reference_final_block_reduced_chi2": "",
+        "reference_failed_frame_count_chi2_gt_threshold": "",
+        "reference_failed_frame_indices_chi2_gt_threshold": "",
+        "reference_frame_chi2_threshold": float(threshold),
+        "reference_frame_quality_source": "",
+        "reference_frame_quality_error": "",
+        "fit_warning": "",
+    }
+    manifest_path = _resolve_recovered_manifest_path(
+        payload,
+        summary_json_path=summary_json_path,
+    )
+    if manifest_path is None:
+        return {**base, "reference_frame_quality_source": "missing_manifest"}
     try:
-        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        chi2 = manifest_payload.get("chi2", {})
+        manifest_payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        metrics = (
+            manifest_payload.get("metrics", {})
+            if isinstance(manifest_payload.get("metrics"), Mapping)
+            else {}
+        )
+        chi2 = manifest_payload.get("chi2") or metrics.get("chi2") or {}
         final_model = chi2.get("final_model", {}) if isinstance(chi2, Mapping) else {}
         per_frame = final_model.get("per_frame_reduced_chi2", [])
         values = []
@@ -1696,26 +2039,45 @@ def _fit_warning_from_recovered_manifest(payload: Mapping[str, Any]) -> dict[str
             if math.isfinite(numeric):
                 values.append(numeric)
         max_frame = max(values) if values else None
+        median_frame = float(np.median(np.asarray(values, dtype=float))) if values else None
+        failed = [index for index, value in enumerate(values) if value > float(threshold)]
         block = final_model.get("block_reduced_chi2")
         block_value = None if block is None else float(block)
-    except Exception:
+    except Exception as exc:
         return {
-            "reference_final_max_frame_reduced_chi2": "",
-            "reference_final_block_reduced_chi2": "",
-            "fit_warning": "",
+            **base,
+            "reference_frame_quality_source": "manifest_parse_error",
+            "reference_frame_quality_error": str(exc),
         }
     warning = ""
-    if max_frame is not None and max_frame > FIT_WARNING_MAX_FRAME_REDUCED_CHI2:
+    if max_frame is not None and max_frame > float(threshold):
         warning = "reference_final_max_frame_reduced_chi2_high"
     return {
+        **base,
         "reference_final_max_frame_reduced_chi2": ""
         if max_frame is None
         else max_frame,
+        "reference_final_median_frame_reduced_chi2": ""
+        if median_frame is None
+        else median_frame,
         "reference_final_block_reduced_chi2": ""
         if block_value is None
         else block_value,
+        "reference_failed_frame_count_chi2_gt_threshold": len(failed),
+        "reference_failed_frame_indices_chi2_gt_threshold": "|".join(
+            str(index) for index in failed
+        ),
+        "reference_frame_quality_source": "found",
         "fit_warning": warning,
     }
+
+
+def _fit_warning_from_recovered_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return extract_reference_frame_quality_from_summary_payload(
+        payload,
+        summary_json_path=Path("."),
+        threshold=FIT_WARNING_MAX_FRAME_REDUCED_CHI2,
+    )
 
 
 def _failed_row(
@@ -1893,6 +2255,11 @@ def _build_aggregate_summary(
             "noise": config.noise,
             "phi_ref": config.phi_ref,
             "schur_curvature_method": config.schur_curvature_method,
+            "schur_frame_quality_policy": config.schur_frame_quality_policy,
+            "schur_frame_chi2_threshold": config.schur_frame_chi2_threshold,
+            "schur_frame_quality_missing": config.schur_frame_quality_missing,
+            "schur_frame_mask_denominator": config.schur_frame_mask_denominator,
+            "schur_frame_mask_min_good_frames": config.schur_frame_mask_min_good_frames,
             "max_dense_dim": config.max_dense_dim,
             "variance_floor": config.variance_floor,
             "reference_diagnostics_profile": config.reference_diagnostics_profile,
@@ -2024,9 +2391,18 @@ def _config_from_file(path: Path | None) -> dict[str, Any]:
     reference_optimizer = trial.get("reference_optimizer", {})
     if not isinstance(reference_optimizer, Mapping):
         reference_optimizer = {}
+    reference_optimizer_schedule = raw.get("trial", {}).get("reference_optimizer_schedule")
+    if (
+        not isinstance(reference_optimizer_schedule, Mapping)
+        and reference_optimizer_schedule is not None
+    ):
+        reference_optimizer_schedule = {}
     preconditioning = reference_optimizer.get("preconditioning", {})
     if not isinstance(preconditioning, Mapping):
         preconditioning = {}
+    schedule = reference_optimizer.get("schedule")
+    if not isinstance(schedule, Mapping):
+        schedule = reference_optimizer_schedule if isinstance(reference_optimizer_schedule, Mapping) else {}
     return {
         "run_name": raw.get("run", {}).get("run_name"),
         "results_root": raw.get("run", {}).get("results_root"),
@@ -2042,6 +2418,11 @@ def _config_from_file(path: Path | None) -> dict[str, Any]:
         "theta_keys": trial.get("theta_keys"),
         "phi_ref": trial.get("phi_ref"),
         "schur_curvature_method": trial.get("schur_curvature_method"),
+        "schur_frame_quality_policy": trial.get("schur_frame_quality_policy"),
+        "schur_frame_chi2_threshold": trial.get("schur_frame_chi2_threshold"),
+        "schur_frame_quality_missing": trial.get("schur_frame_quality_missing"),
+        "schur_frame_mask_denominator": trial.get("schur_frame_mask_denominator"),
+        "schur_frame_mask_min_good_frames": trial.get("schur_frame_mask_min_good_frames"),
         "max_dense_dim": trial.get("max_dense_dim"),
         "variance_floor": trial.get("variance_floor"),
         "reference_diagnostics_profile": trial.get("reference_diagnostics_profile"),
@@ -2049,6 +2430,7 @@ def _config_from_file(path: Path | None) -> dict[str, Any]:
         "reference_base_lr": reference_optimizer.get("base_lr"),
         "reference_n_iter": reference_optimizer.get("n_iter"),
         "reference_optimizer_kwargs": reference_optimizer.get("kwargs"),
+        "reference_schedule": schedule,
         "reference_preconditioning_enabled": preconditioning.get("enabled"),
         "reference_preconditioning_method": preconditioning.get("method"),
         "reference_preconditioning_reference": preconditioning.get("reference"),
@@ -2092,6 +2474,11 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
             "theta_keys": args.theta_keys,
             "phi_ref": args.phi_ref,
             "schur_curvature_method": args.schur_curvature_method,
+            "schur_frame_quality_policy": args.schur_frame_quality_policy,
+            "schur_frame_chi2_threshold": args.schur_frame_chi2_threshold,
+            "schur_frame_quality_missing": args.schur_frame_quality_missing,
+            "schur_frame_mask_denominator": args.schur_frame_mask_denominator,
+            "schur_frame_mask_min_good_frames": args.schur_frame_mask_min_good_frames,
             "variance_floor": args.variance_floor,
             "reference_diagnostics_profile": args.reference_diagnostics_profile,
             "reference_optimizer_kind": args.reference_optimizer_kind,
@@ -2101,6 +2488,18 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
                 parse_reference_optimizer_kwargs(args.reference_optimizer_kwarg)
                 if args.reference_optimizer_kwarg
                 else None
+            ),
+            "reference_schedule": parse_reference_schedule_config(
+                kind=args.reference_schedule_kind,
+                warmup_steps=args.reference_schedule_warmup_steps,
+                start_factor=args.reference_schedule_start_factor,
+                min_factor=args.reference_schedule_min_factor,
+                boundaries=args.reference_schedule_boundaries,
+                factors=args.reference_schedule_factors,
+                decay_rate=args.reference_schedule_decay_rate,
+                transition_steps=args.reference_schedule_transition_steps,
+                staircase=bool(args.reference_schedule_staircase),
+                n_iter=args.reference_n_iter,
             ),
             "reference_preconditioning_enabled": args.reference_preconditioning_enabled,
             "reference_preconditioning_method": args.reference_preconditioning_method,
@@ -2139,6 +2538,54 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
     merged["theta_keys"] = parse_theta_keys(merged["theta_keys"])
     merged["reference_optimizer_kwargs"] = parse_reference_optimizer_kwargs(
         merged.get("reference_optimizer_kwargs")
+    )
+    merged["reference_schedule"] = parse_reference_schedule_config(
+        kind=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("kind")
+        ),
+        warmup_steps=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("warmup_steps")
+        ),
+        start_factor=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("start_factor")
+        ),
+        min_factor=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("min_factor")
+        ),
+        boundaries=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("boundaries")
+        ),
+        factors=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("factors")
+        ),
+        decay_rate=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("decay_rate")
+        ),
+        transition_steps=(
+            None
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("transition_steps")
+        ),
+        staircase=bool(
+            False
+            if merged.get("reference_schedule") is None
+            else dict(merged["reference_schedule"]).get("staircase", False)
+        ),
+        n_iter=merged.get("reference_n_iter"),
     )
     merged["reference_preconditioning_lr_clip"] = parse_reference_lr_clip(
         merged.get("reference_preconditioning_lr_clip")
@@ -2189,6 +2636,23 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
             f"{merged['reference_diagnostics_profile']}. Expected one of: "
             f"{', '.join(SUPPORTED_REFERENCE_DIAGNOSTICS_PROFILES)}."
         )
+    if merged["schur_frame_quality_policy"] not in SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES:
+        raise ValueError("Unsupported --schur-frame-quality-policy.")
+    if merged["schur_frame_quality_missing"] not in SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES:
+        raise ValueError("Unsupported --schur-frame-quality-missing.")
+    if merged["schur_frame_mask_denominator"] not in SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS:
+        raise ValueError("Unsupported --schur-frame-mask-denominator.")
+    merged["schur_frame_chi2_threshold"] = float(merged["schur_frame_chi2_threshold"])
+    if (
+        merged["schur_frame_chi2_threshold"] <= 0.0
+        or not math.isfinite(merged["schur_frame_chi2_threshold"])
+    ):
+        raise ValueError("--schur-frame-chi2-threshold must be positive.")
+    merged["schur_frame_mask_min_good_frames"] = int(
+        merged["schur_frame_mask_min_good_frames"]
+    )
+    if merged["schur_frame_mask_min_good_frames"] < 1:
+        raise ValueError("--schur-frame-mask-min-good-frames must be >= 1.")
     if int(merged["max_workers"]) < 1:
         raise ValueError("--max-workers must be >= 1.")
     if merged.get("max_dense_dim") is not None:
@@ -2220,6 +2684,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--theta-keys", default=None)
     parser.add_argument("--phi-ref", choices=("recovered", "truth_when_available", "truth", "init"), default=None)
     parser.add_argument("--schur-curvature-method", choices=("auto", "dense", "structured_independent_frames"), default=None)
+    parser.add_argument("--schur-frame-quality-policy", choices=SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES, default=None)
+    parser.add_argument("--schur-frame-chi2-threshold", type=float, default=None)
+    parser.add_argument("--schur-frame-quality-missing", choices=SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES, default=None)
+    parser.add_argument("--schur-frame-mask-denominator", choices=SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS, default=None)
+    parser.add_argument("--schur-frame-mask-min-good-frames", type=int, default=None)
     parser.add_argument("--variance-floor", type=float, default=None)
     parser.add_argument(
         "--reference-diagnostics-profile",
@@ -2239,6 +2708,30 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         metavar="KEY=VALUE",
+    )
+    parser.add_argument(
+        "--reference-schedule-kind",
+        choices=(
+            "constant",
+            "linear_warmup",
+            "piecewise_constant",
+            "exponential_decay",
+            "cosine_decay",
+            "linear_warmup_cosine_decay",
+        ),
+        default=None,
+    )
+    parser.add_argument("--reference-schedule-warmup-steps", type=int, default=None)
+    parser.add_argument("--reference-schedule-start-factor", type=float, default=None)
+    parser.add_argument("--reference-schedule-min-factor", type=float, default=None)
+    parser.add_argument("--reference-schedule-boundaries", default=None)
+    parser.add_argument("--reference-schedule-factors", default=None)
+    parser.add_argument("--reference-schedule-decay-rate", type=float, default=None)
+    parser.add_argument("--reference-schedule-transition-steps", type=int, default=None)
+    parser.add_argument(
+        "--reference-schedule-staircase",
+        action="store_true",
+        default=False,
     )
     preconditioning_group = parser.add_mutually_exclusive_group()
     preconditioning_group.add_argument(

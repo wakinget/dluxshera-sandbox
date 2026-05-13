@@ -198,8 +198,9 @@ Where to change defaults:
 - Registration initialization defaults live in this inference template or
   narrow `--init-*` CLI overrides.
 - Recovered-reference optimizer and preconditioning defaults live in this
-  inference template unless a `--reference-preconditioning-*` CLI override is
-  passed.
+  inference template unless targeted `--reference-optimizer-*`,
+  `--reference-schedule-*`, or `--reference-preconditioning-*` CLI overrides
+  are passed.
 - Detailed diagnostics and plot settings live in this inference template unless
   `--reference-diagnostics-profile` is selected.
 - Generated case-local configs are the durable record; `schur_summary_plan.json`

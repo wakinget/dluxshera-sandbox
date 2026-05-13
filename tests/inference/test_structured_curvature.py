@@ -139,3 +139,45 @@ def test_structured_schur_reduction_matches_dense_assembled_reduction(
     )
     assert structured.solve_method == "solve"
     assert structured.used_pseudoinverse is False
+
+
+def test_structured_schur_reduction_supports_frame_mask_and_scale():
+    theta_ref = np.array([0.0], dtype=float)
+    frame_phi_ref = np.zeros((4, 1), dtype=float)
+
+    def frame_loss(theta_values, frame_phi_values, frame_index):
+        delta = jnp.concatenate((theta_values, frame_phi_values), axis=0)
+        hessian = jnp.asarray([[2.0, 0.0], [0.0, 1.0]])
+        return 0.5 * delta @ hessian @ delta
+
+    blocks = build_independent_frame_theta_phi_quadratic_blocks(
+        frame_loss_fn=frame_loss,
+        theta_ref=theta_ref,
+        frame_phi_ref=frame_phi_ref,
+        subblock_reduce="mean",
+    )
+    full = schur_reduce_independent_frame_blocks(blocks)
+    masked_original = schur_reduce_independent_frame_blocks(
+        blocks,
+        frame_indices=[0, 2],
+    )
+    masked_kept = schur_reduce_independent_frame_blocks(
+        blocks,
+        frame_indices=[0, 2],
+        frame_scale=2.0,
+    )
+
+    np.testing.assert_allclose(
+        masked_original.reduced_information,
+        0.5 * full.reduced_information,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        masked_kept.reduced_information,
+        full.reduced_information,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    with pytest.raises(ValueError, match="at least one frame"):
+        schur_reduce_independent_frame_blocks(blocks, frame_indices=[])

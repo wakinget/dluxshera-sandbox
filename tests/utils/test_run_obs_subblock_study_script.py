@@ -1438,6 +1438,76 @@ def test_schur_summary_recovered_plan_records_reference_optimizer_overrides(
     assert reference["sources"]["preconditioning_lr_clip"] == "cli_override"
 
 
+def test_schur_summary_reference_schedule_override_is_patched_and_recorded(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_schedule"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="recovered",
+        reference_n_iter=80,
+        reference_schedule={
+            "kind": "linear_warmup",
+            "warmup_steps": 8,
+            "start_factor": 0.25,
+        },
+        dry_run=True,
+    )
+
+    generated_cfg = _read_json(Path(summary["schur_config_path"]))
+    optimizer = generated_cfg["experiment"]["inference"]["optimizer"]
+    assert optimizer["schedule"] == {
+        "kind": "linear_warmup",
+        "warmup_steps": 8,
+        "start_factor": 0.25,
+    }
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    reference = plan["reference_inference_config_if_run"]
+    assert reference["schedule"] == {
+        "kind": "linear_warmup",
+        "warmup_steps": 8,
+        "start_factor": 0.25,
+    }
+    assert reference["sources"]["schedule"] == "cli_override"
+
+
+def test_schur_summary_without_reference_schedule_does_not_patch_schedule(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_no_schedule"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as",),
+        phi_ref="recovered",
+        dry_run=True,
+    )
+
+    generated_cfg = _read_json(Path(summary["schur_config_path"]))
+    optimizer = generated_cfg["experiment"]["inference"]["optimizer"]
+    assert "schedule" not in optimizer
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    reference = plan["reference_inference_config_if_run"]
+    assert reference["schedule"] is None
+    assert reference["sources"]["schedule"] == "template_owned"
+
+
 def test_reference_optimizer_override_validation_errors():
     module = _load_script_module()
     cfg = {"optimizer": {"kind": "sgd", "base_lr": 0.5, "n_iter": 2}}
@@ -1450,6 +1520,15 @@ def test_reference_optimizer_override_validation_errors():
             cfg,
             optimizer_kind="adam",
             optimizer_kwargs={"typo": "1.0"},
+        )
+    with pytest.raises(ValueError, match="reference_schedule"):
+        module.apply_reference_optimizer_overrides(
+            cfg,
+            schedule={
+                "kind": "linear_warmup",
+                "warmup_steps": 0,
+                "start_factor": 0.25,
+            },
         )
 
 
@@ -1470,6 +1549,12 @@ def test_reference_optimizer_parser_accepts_recovered_controls():
             "300",
             "--reference-optimizer-kwarg",
             "b1=0.8",
+            "--reference-schedule-kind",
+            "linear_warmup",
+            "--reference-schedule-warmup-steps",
+            "8",
+            "--reference-schedule-start-factor",
+            "0.25",
             "--reference-preconditioning-enabled",
             "--reference-preconditioning-method",
             "auto",
@@ -1490,6 +1575,9 @@ def test_reference_optimizer_parser_accepts_recovered_controls():
     assert args.reference_base_lr == pytest.approx(1.0e-3)
     assert args.reference_n_iter == 300
     assert args.reference_optimizer_kwarg == ["b1=0.8"]
+    assert args.reference_schedule_kind == "linear_warmup"
+    assert args.reference_schedule_warmup_steps == 8
+    assert args.reference_schedule_start_factor == pytest.approx(0.25)
     assert args.reference_preconditioning_enabled is True
     assert args.reference_preconditioning_method == "auto"
     assert args.reference_preconditioning_reference == "initial"
@@ -1497,6 +1585,134 @@ def test_reference_optimizer_parser_accepts_recovered_controls():
     assert module.parse_reference_preconditioning_lr_clip(
         args.reference_preconditioning_lr_clip
     ) == (0.1, 10.0)
+    assert module.parse_reference_schedule_config(
+        kind=args.reference_schedule_kind,
+        warmup_steps=args.reference_schedule_warmup_steps,
+        start_factor=args.reference_schedule_start_factor,
+        min_factor=args.reference_schedule_min_factor,
+        boundaries=args.reference_schedule_boundaries,
+        factors=args.reference_schedule_factors,
+        decay_rate=args.reference_schedule_decay_rate,
+        transition_steps=args.reference_schedule_transition_steps,
+        staircase=bool(args.reference_schedule_staircase),
+    ) == {
+        "kind": "linear_warmup",
+        "warmup_steps": 8,
+        "start_factor": 0.25,
+    }
+
+
+def test_schur_frame_quality_parser_accepts_policy_controls():
+    module = _load_script_module()
+    parser = module._build_parser()
+    args = parser.parse_args(
+        [
+            "--mode",
+            "schur_summary",
+            "--case-root",
+            "case",
+            "--schur-frame-quality-policy",
+            "mask",
+            "--schur-frame-chi2-threshold",
+            "5.0",
+            "--schur-frame-quality-missing",
+            "error",
+            "--schur-frame-mask-denominator",
+            "kept",
+            "--schur-frame-mask-min-good-frames",
+            "2",
+        ]
+    )
+    assert args.schur_frame_quality_policy == "mask"
+    assert args.schur_frame_chi2_threshold == 5.0
+    assert args.schur_frame_quality_missing == "error"
+    assert args.schur_frame_mask_denominator == "kept"
+    assert args.schur_frame_mask_min_good_frames == 2
+
+
+def test_schur_frame_quality_report_reads_manifest_and_builds_mask(tmp_path: Path):
+    module = _load_script_module()
+    output_dir = tmp_path / "study" / "schur_summary"
+    manifest = output_dir / "reference_inference" / "inference" / "manifest.json"
+    _write_json(
+        manifest,
+        {
+            "chi2": {
+                "final_model": {
+                    "per_frame_reduced_chi2": [1.0, 6.0, 2.0, 8.0],
+                    "block_reduced_chi2": 2.5,
+                }
+            }
+        },
+    )
+
+    report = module.build_schur_frame_quality_report(
+        recovered_reference_metadata={"manifest_json": str(manifest)},
+        summary_json_dir=output_dir,
+        n_frames=4,
+        chi2_threshold=5.0,
+    )
+    assert report.source_status == "found"
+    assert report.bad_frame_indices == (1, 3)
+    assert report.good_frame_indices == (0, 2)
+    assert report.max_frame_reduced_chi2 == 8.0
+    assert report.median_frame_reduced_chi2 == pytest.approx(4.0)
+
+    state = module._schur_frame_quality_mask_state(
+        report=report,
+        policy="mask",
+        missing_policy="allow_all",
+        mask_denominator="kept",
+        min_good_frames=1,
+        subblock_reduce="mean",
+    )
+    assert state["included_frame_indices"] == [0, 2]
+    assert state["frame_scale"] == pytest.approx(2.0)
+    assert state["effective_frame_fraction"] == pytest.approx(0.5)
+
+
+def test_schur_frame_quality_missing_policy_can_error(tmp_path: Path):
+    module = _load_script_module()
+    report = module.build_schur_frame_quality_report(
+        recovered_reference_metadata={"manifest_json": "missing.json"},
+        summary_json_dir=tmp_path,
+        n_frames=3,
+        chi2_threshold=5.0,
+    )
+    assert report.source_status == "missing"
+    with pytest.raises(RuntimeError, match="frame_quality_unavailable"):
+        module._schur_frame_quality_mask_state(
+            report=report,
+            policy="mask",
+            missing_policy="error",
+            mask_denominator="original",
+            min_good_frames=1,
+            subblock_reduce="mean",
+        )
+
+
+def test_reuse_reference_inference_metadata_resolves_auto_layout(tmp_path: Path):
+    module = _load_script_module()
+    study_root = tmp_path / "case" / "study" / "schur_summary"
+    output_dir = study_root / "reference_inference" / "inference"
+    trace = output_dir / "subblock_inference_20260101_recovered_trace.csv"
+    _write_json(
+        output_dir / "manifest.json",
+        {"artifacts": {"recovered_trace_csv": trace.name}},
+    )
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_text(
+        "frame_index,time_s,source.x_position_as\n0,0.0,1.0\n",
+        encoding="utf-8",
+    )
+
+    metadata = module._metadata_for_reused_reference_inference(
+        value="auto",
+        study_root=study_root,
+    )
+    assert metadata["reuse_reference_inference"] is True
+    assert metadata["manifest_json"].endswith("manifest.json")
+    assert metadata["recovered_trace_csv"].endswith("recovered_trace.csv")
 
 
 def test_memory_snapshot_payload_is_json_serializable():
