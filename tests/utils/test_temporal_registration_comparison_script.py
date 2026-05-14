@@ -24,6 +24,41 @@ def _load_module():
     return module
 
 
+def test_parser_default_max_dense_dim():
+    module = _load_module()
+    result = module.main(
+        [
+            "--results-root",
+            "/tmp/unused",
+            "--run-name",
+            "noop",
+            "--dry-run",
+            "--case-filter",
+            "drift_truth__independent_fit",
+        ]
+    )
+    manifest = json.loads((Path(result["run_root"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["n_frames"] == 20
+    plan = json.loads((Path(result["run_root"]) / "comparison_plan.json").read_text(encoding="utf-8"))
+    assert len(plan) == 1
+
+
+def test_schur_settings_per_case_routing():
+    module = _load_module()
+    independent = module.CaseSpec(case_name="a", truth_model="linear_drift", fit_model="independent")
+    linear = module.CaseSpec(case_name="b", truth_model="linear_drift", fit_model="linear_drift")
+    residual = module.CaseSpec(case_name="c", truth_model="linear_drift_residual_jitter", fit_model="linear_drift_residual_jitter_prior")
+    ind = module._schur_settings_for_case(independent, requested_max_dense_dim=80)
+    lin = module._schur_settings_for_case(linear, requested_max_dense_dim=80)
+    res = module._schur_settings_for_case(residual, requested_max_dense_dim=40)
+    assert ind["schur_curvature_method"] == "auto"
+    assert ind["max_dense_dim"] == 40
+    assert lin["schur_curvature_method"] == "dense"
+    assert lin["max_dense_dim"] == 80
+    assert res["schur_curvature_method"] == "dense"
+    assert res["max_dense_dim"] >= 80
+
+
 def test_iid_trace_has_expected_columns_and_shape(tmp_path: Path):
     module = _load_module()
     rows, manifest = module.build_iid_registration_trace(
@@ -281,6 +316,37 @@ def test_full_plan_includes_residual_prior_and_config(tmp_path: Path):
     assert frame_model["kind"] == "linear_drift_residual_jitter_prior"
     assert frame_model["residual_prior"]["source.x_position_as"]["sigma"] == pytest.approx(0.01)
     assert frame_model["reduce"] == "match_subblock_reduce"
+    assert cfg["experiment"]["inference"]["optimizer"]["n_iter"] == 50
+    assert cfg["experiment"]["inference"]["init"]["frame"]["mode"] == "from_truth_trace"
+
+
+def test_truth_plus_offset_init_config_written(tmp_path: Path):
+    module = _load_module()
+    case = module.CaseSpec(
+        case_name="offset",
+        truth_model="linear_drift",
+        fit_model="independent",
+        init_mode="truth_plus_offset",
+    )
+    trace = tmp_path / "trace.csv"
+    trace.write_text(
+        "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg\n",
+        encoding="utf-8",
+    )
+    _, inference_path = module._case_configs(
+        case=case,
+        case_root=tmp_path,
+        trace_csv=trace,
+        n_frames=3,
+        exposure_time_s=0.05,
+        system_preset="SHERA_TESTBED_3P",
+    )
+    cfg = json.loads(inference_path.read_text(encoding="utf-8"))
+    frame_init = cfg["experiment"]["inference"]["init"]["frame"]
+    assert frame_init["mode"] == "from_truth_trace"
+    assert frame_init["offsets"]["source.x_position_as"] == pytest.approx(1.0e-3)
+    assert frame_init["offsets"]["source.y_position_as"] == pytest.approx(1.0e-3)
+    assert frame_init["offsets"]["source.position_angle_deg"] == pytest.approx(1.0e-5)
 
 
 def test_noise_enabled_prefers_render_variance(tmp_path: Path):
@@ -320,6 +386,30 @@ def test_noise_enabled_prefers_render_variance(tmp_path: Path):
     cfg = json.loads(inference_path.read_text(encoding="utf-8"))
     assert status["variance_model_used"] == "provided_cube"
     assert cfg["experiment"]["inference"]["objective"]["noise_model"]["variance_model"] == "provided_cube"
+
+
+def test_dry_run_rows_include_schur_routing_fields(tmp_path: Path):
+    module = _load_module()
+    result = module.main(
+        [
+            "--results-root",
+            str(tmp_path),
+            "--run-name",
+            "routing_dry",
+            "--n-frames",
+            "20",
+            "--full-default-matrix",
+            "--dry-run",
+        ]
+    )
+    run_root = Path(result["run_root"])
+    rows = list(csv.DictReader((run_root / "aggregate" / "case_metrics.csv").open("r", encoding="utf-8", newline="")))
+    assert rows
+    by_name = {row["case_name"]: row for row in rows}
+    assert by_name["iid50_truth__independent_fit"]["schur_curvature_method_requested"] == "auto"
+    assert by_name["iid50_truth__independent_fit"]["schur_max_dense_dim_effective"] == "40"
+    assert by_name["iid50_truth__residual_prior_fit"]["schur_curvature_method_requested"] == "dense"
+    assert int(by_name["iid50_truth__residual_prior_fit"]["schur_max_dense_dim_effective"]) >= 80
 
 
 def test_linear_drift_rejects_unsupported_compact_shape():

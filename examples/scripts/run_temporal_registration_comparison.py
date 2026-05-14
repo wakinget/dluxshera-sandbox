@@ -70,9 +70,18 @@ PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
   --noise enabled \
   --init-mode truth \
   --full-default-matrix \
-  --reference-diagnostics-profile basic \
-  --max-dense-dim 80
+  --reference-diagnostics-profile basic
 ```
+
+Routing note:
+- `independent` cases use `schur_curvature_method=auto` with effective
+  `max_dense_dim=40`, so 20-frame four-scalar runs stay on the structured
+  independent-frame Schur path.
+- `linear_drift` cases use dense Schur (compact nuisance state).
+- `linear_drift_residual_jitter_prior` cases use dense Schur with effective
+  dense guard at least `80` because the profiled temporal prior couples frames.
+- All cases initialize from the generated truth trace unless
+  `--init-mode truth_plus_offset` is selected.
 """
 
 from __future__ import annotations
@@ -524,6 +533,34 @@ def _patch_inference_variance_config(
     return status
 
 
+def _schur_settings_for_case(
+    case: CaseSpec,
+    *,
+    requested_max_dense_dim: int,
+) -> dict[str, Any]:
+    """Return per-case Schur routing settings and rationale."""
+
+    if case.fit_model == "independent":
+        return {
+            "schur_curvature_method": "auto",
+            "max_dense_dim": min(int(requested_max_dense_dim), 40),
+            "reason": "independent frame layout should prefer structured Schur at 20 frames",
+        }
+    if case.fit_model == "linear_drift":
+        return {
+            "schur_curvature_method": "dense",
+            "max_dense_dim": int(requested_max_dense_dim),
+            "reason": "hard linear drift uses compact nuisance dimension; dense Schur is explicit",
+        }
+    if case.fit_model == "linear_drift_residual_jitter_prior":
+        return {
+            "schur_curvature_method": "dense",
+            "max_dense_dim": max(int(requested_max_dense_dim), 80),
+            "reason": "profiled residual prior couples frames and requires dense Schur",
+        }
+    raise ValueError(f"Unsupported fit model for Schur routing: {case.fit_model!r}.")
+
+
 def _case_configs(
     *,
     case: CaseSpec,
@@ -572,7 +609,7 @@ def _case_configs(
     optimizer_n_iter = 40 if n_frames <= 3 else 100
     if case.fit_model == "linear_drift_residual_jitter_prior":
         optimizer_base_lr = 0.05
-        optimizer_n_iter = 1 if n_frames <= 3 else 50
+        optimizer_n_iter = 50
     inference_cfg = {
         "system": {"preset": system_preset, "source": {"target": "ALPHA_CEN", "exposure_time_s": exposure_time_s}},
         "experiment": {
@@ -718,10 +755,18 @@ def _run_case(
         "truth_trace_csv": str(trace_csv.resolve()),
         "temporal_prior_kind": case.fit_model if case.fit_model == "linear_drift_residual_jitter_prior" else "",
         "temporal_prior_reduce": "match_subblock_reduce" if case.fit_model == "linear_drift_residual_jitter_prior" else "",
-        "schur_curvature_method_requested": "dense" if case.fit_model == "linear_drift_residual_jitter_prior" else "auto",
-        "schur_max_dense_dim": int(max_dense_dim),
+        "schur_curvature_method_requested": "",
+        "schur_max_dense_dim_effective": "",
+        "schur_routing_reason": "",
         "status": "planned" if dry_run else "started",
     }
+    schur_settings = _schur_settings_for_case(
+        case,
+        requested_max_dense_dim=max_dense_dim,
+    )
+    row["schur_curvature_method_requested"] = str(schur_settings["schur_curvature_method"])
+    row["schur_max_dense_dim_effective"] = int(schur_settings["max_dense_dim"])
+    row["schur_routing_reason"] = str(schur_settings["reason"])
     if manifest.get("drift_rates") is not None:
         row.update(
             {
@@ -791,11 +836,6 @@ def _run_case(
         summary_json = case_root / "study" / "schur_summary" / "subblock_summary.json"
         summary_npz = case_root / "study" / "schur_summary" / "subblock_summary_matrices.npz"
         if not (resume and summary_json.exists() and summary_npz.exists()):
-            schur_method = (
-                "dense"
-                if case.fit_model == "linear_drift_residual_jitter_prior"
-                else "auto"
-            )
             schur = run_obs_subblock_study.run_obs_subblock_study(
                 mode="schur_summary",
                 case_root=case_root,
@@ -803,8 +843,8 @@ def _run_case(
                 inference_template=inference_cfg,
                 theta_keys=theta_keys,
                 phi_ref="recovered",
-                schur_curvature_method=schur_method,
-                max_dense_dim=max_dense_dim,
+                schur_curvature_method=str(schur_settings["schur_curvature_method"]),
+                max_dense_dim=int(schur_settings["max_dense_dim"]),
                 schur_damping=1.0e-8,
                 schur_frame_quality_policy="mask",
                 schur_frame_chi2_threshold=5.0,
@@ -941,7 +981,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--case-filter", action="append", default=[])
     parser.add_argument("--full-default-matrix", action="store_true")
     parser.add_argument("--residual-prior-sweep", action="store_true")
-    parser.add_argument("--max-dense-dim", type=int, default=80)
+    parser.add_argument("--max-dense-dim", type=int, default=40)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
