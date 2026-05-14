@@ -7,6 +7,7 @@ import numpy as np
 
 __all__ = [
     "accumulate_summary_information",
+    "build_system_observation_theta_layout",
     "build_prior_whitened_information_gain_matrix",
     "MatrixDiagnostics",
     "ObservationBeliefState",
@@ -17,6 +18,8 @@ __all__ = [
     "SchurReductionResult",
     "SubblockSummary",
     "build_observation_eigenbasis",
+    "infer_indexed_parameter_indices",
+    "infer_system_zernike_indices",
     "schur_reduce_information",
     "update_observation_belief",
 ]
@@ -62,6 +65,240 @@ def _as_positive_vector(
     if np.any(vector <= 0.0):
         raise ValueError(f"{name} values must be strictly positive.")
     return vector
+
+
+def _normalize_index_selection(
+    available: Sequence[int],
+    *,
+    include: Sequence[int] | None = None,
+    exclude: Sequence[int] | None = None,
+    name: str,
+) -> tuple[int, ...]:
+    available_tuple = tuple(int(index) for index in available)
+    if len(set(available_tuple)) != len(available_tuple):
+        raise ValueError(f"{name} available indices contain duplicates.")
+    available_set = set(available_tuple)
+
+    if include is None:
+        selected = list(available_tuple)
+    else:
+        include_tuple = tuple(int(index) for index in include)
+        if len(set(include_tuple)) != len(include_tuple):
+            raise ValueError(f"{name}.include contains duplicates.")
+        invalid = sorted(set(include_tuple) - available_set)
+        if invalid:
+            raise ValueError(
+                f"{name}.include contains indices outside the resolved system: "
+                + ", ".join(str(index) for index in invalid)
+            )
+        selected = [index for index in available_tuple if index in set(include_tuple)]
+
+    exclude_tuple = tuple(int(index) for index in (exclude or ()))
+    if len(set(exclude_tuple)) != len(exclude_tuple):
+        raise ValueError(f"{name}.exclude contains duplicates.")
+    invalid_exclude = sorted(set(exclude_tuple) - available_set)
+    if invalid_exclude:
+        raise ValueError(
+            f"{name}.exclude contains indices outside the resolved system: "
+            + ", ".join(str(index) for index in invalid_exclude)
+        )
+    exclude_set = set(exclude_tuple)
+    return tuple(index for index in selected if index not in exclude_set)
+
+
+def _store_get_optional(store: Any, key: str) -> Any:
+    try:
+        return store.get(key)
+    except (AttributeError, KeyError):
+        return None
+
+
+def infer_indexed_parameter_indices(store: Any, key: str) -> tuple[int, ...]:
+    """Infer valid zero-based indices for a vector-valued store parameter.
+
+    Parameters
+    ----------
+    store :
+        Resolved parameter store or store-like object exposing ``get(key)``.
+    key :
+        Vector-valued parameter key.
+
+    Returns
+    -------
+    tuple of int
+        ``range(len(store[key]))`` for a one-dimensional resolved value.
+    """
+
+    value = _store_get_optional(store, str(key))
+    if value is None:
+        return ()
+    array = np.asarray(value)
+    if array.ndim != 1:
+        raise ValueError(f"Store key {key!r} must resolve to a 1D vector.")
+    return tuple(range(int(array.shape[0])))
+
+
+def infer_system_zernike_indices(store: Any, *, optic: str) -> tuple[int, ...]:
+    """Infer the coefficient indices for one system-defined Zernike family."""
+
+    if optic not in {"primary", "secondary"}:
+        raise ValueError("optic must be either 'primary' or 'secondary'.")
+    return infer_indexed_parameter_indices(
+        store,
+        f"optics.{optic}.zernike_coeffs_nm",
+    )
+
+
+def _infer_system_zernike_noll_indices(store: Any, *, optic: str) -> tuple[int, ...] | None:
+    value = _store_get_optional(store, f"optics.{optic}_noll_indices")
+    if value is None:
+        return None
+    array = np.asarray(value)
+    if array.ndim != 1:
+        return None
+    return tuple(int(item) for item in array.tolist())
+
+
+def _zernike_group_indices_from_config(
+    store: Any,
+    *,
+    optic: str,
+    group_config: Mapping[str, Any],
+) -> tuple[int, ...]:
+    enabled = bool(group_config.get("enabled", False))
+    if not enabled:
+        return ()
+
+    raw_policy = group_config.get("indices", "from_system")
+    system_available = infer_system_zernike_indices(store, optic=optic)
+    if raw_policy is None or raw_policy == "from_system":
+        available = system_available
+    elif isinstance(raw_policy, str):
+        tokens = [token.strip() for token in raw_policy.split(",") if token.strip()]
+        available = tuple(int(token) for token in tokens)
+    else:
+        available = tuple(int(index) for index in raw_policy)
+    if system_available:
+        invalid_available = sorted(set(available) - set(system_available))
+        if invalid_available:
+            raise ValueError(
+                f"observation_theta.optics.{optic}_zernikes.indices contains "
+                "indices outside the resolved system: "
+                + ", ".join(str(index) for index in invalid_available)
+            )
+
+    include_raw = group_config.get("include")
+    include = None if include_raw is None else tuple(int(index) for index in include_raw)
+    exclude = tuple(int(index) for index in group_config.get("exclude", ()) or ())
+    return _normalize_index_selection(
+        available,
+        include=include,
+        exclude=exclude,
+        name=f"observation_theta.optics.{optic}_zernikes",
+    )
+
+
+def build_system_observation_theta_layout(
+    store: Any,
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> tuple[ObservationThetaLayout, dict[str, Any]]:
+    """Build an observation layout from a resolved system/store.
+
+    The default layout includes the canonical source scalars, plate scale, and
+    every primary/secondary Zernike coefficient present in the resolved store.
+    Optional config masks can include/exclude source groups, plate scale, and
+    individual Zernike coefficient indices while keeping the native basis in
+    physical parameter labels.
+
+    Parameters
+    ----------
+    store :
+        Resolved parameter store or store-like object.
+    config :
+        Optional ``observation_theta`` mapping.
+
+    Returns
+    -------
+    layout, metadata :
+        The physical-basis layout plus JSON-friendly Zernike provenance.
+    """
+
+    theta_cfg = dict(config or {})
+    source_cfg = theta_cfg.get("source", {})
+    optics_cfg = theta_cfg.get("optics", {})
+    if source_cfg is None:
+        source_cfg = {}
+    if optics_cfg is None:
+        optics_cfg = {}
+    if not isinstance(source_cfg, Mapping):
+        raise ValueError("observation_theta.source must be a mapping.")
+    if not isinstance(optics_cfg, Mapping):
+        raise ValueError("observation_theta.optics must be a mapping.")
+
+    primary_cfg = optics_cfg.get(
+        "primary_zernikes",
+        {"enabled": True, "indices": "from_system", "include": None, "exclude": []},
+    )
+    secondary_cfg = optics_cfg.get(
+        "secondary_zernikes",
+        {"enabled": True, "indices": "from_system", "include": None, "exclude": []},
+    )
+    if not isinstance(primary_cfg, Mapping):
+        raise ValueError("observation_theta.optics.primary_zernikes must be a mapping.")
+    if not isinstance(secondary_cfg, Mapping):
+        raise ValueError(
+            "observation_theta.optics.secondary_zernikes must be a mapping."
+        )
+
+    primary_indices = _zernike_group_indices_from_config(
+        store,
+        optic="primary",
+        group_config=primary_cfg,
+    )
+    secondary_indices = _zernike_group_indices_from_config(
+        store,
+        optic="secondary",
+        group_config=secondary_cfg,
+    )
+
+    layout = ObservationThetaLayout.from_config(
+        {
+            "theta_layout": {
+                "source": {
+                    "separation_as": bool(source_cfg.get("separation_as", True)),
+                    "log_flux_total": bool(source_cfg.get("log_flux_total", True)),
+                    "contrast": bool(source_cfg.get("contrast", True)),
+                },
+                "optics": {
+                    "plate_scale_as_per_pix": bool(
+                        optics_cfg.get("plate_scale_as_per_pix", True)
+                    ),
+                    "primary_zernikes": {
+                        "enabled": bool(primary_indices),
+                        "indices": list(primary_indices),
+                    },
+                    "secondary_zernikes": {
+                        "enabled": bool(secondary_indices),
+                        "indices": list(secondary_indices),
+                    },
+                },
+            }
+        }
+    )
+    primary_noll = _infer_system_zernike_noll_indices(store, optic="primary")
+    secondary_noll = _infer_system_zernike_noll_indices(store, optic="secondary")
+    metadata: dict[str, Any] = {
+        "zernike_index_source": "resolved_store",
+        "primary_zernike_indices": list(primary_indices),
+        "secondary_zernike_indices": list(secondary_indices),
+        "theta_layout": layout.to_dict(),
+    }
+    if primary_noll is not None:
+        metadata["primary_zernike_noll_indices"] = list(primary_noll)
+    if secondary_noll is not None:
+        metadata["secondary_zernike_noll_indices"] = list(secondary_noll)
+    return layout, metadata
 
 
 def _matrix_rank_tolerance(matrix: np.ndarray, *, rcond: float | None) -> float:

@@ -9,6 +9,8 @@ from dluxshera.inference.observation_belief import (
     SubblockSummary,
     build_observation_eigenbasis,
     build_prior_whitened_information_gain_matrix,
+    build_system_observation_theta_layout,
+    infer_indexed_parameter_indices,
     schur_reduce_information,
     update_observation_belief,
 )
@@ -93,6 +95,92 @@ def test_observation_theta_layout_expands_expected_labels(config, expected_label
     assert layout.size == len(expected_labels)
     np.testing.assert_allclose(layout.validate_vector(np.zeros(layout.size)), 0.0)
     np.testing.assert_allclose(layout.validate_matrix(np.eye(layout.size)), np.eye(layout.size))
+
+
+def test_system_observation_theta_layout_uses_store_vector_lengths_and_masks():
+    store = {
+        "optics.primary.zernike_coeffs_nm": np.zeros(4),
+        "optics.secondary.zernike_coeffs_nm": np.zeros(3),
+        "optics.primary_noll_indices": np.array([4, 5, 6, 7]),
+        "optics.secondary_noll_indices": np.array([4, 5, 6]),
+    }
+
+    assert infer_indexed_parameter_indices(
+        store,
+        "optics.primary.zernike_coeffs_nm",
+    ) == (0, 1, 2, 3)
+
+    layout, metadata = build_system_observation_theta_layout(
+        store,
+        config={
+            "source": {
+                "separation_as": True,
+                "log_flux_total": False,
+                "contrast": True,
+            },
+            "optics": {
+                "plate_scale_as_per_pix": False,
+                "primary_zernikes": {
+                    "enabled": True,
+                    "indices": "from_system",
+                    "include": [0, 2, 3],
+                    "exclude": [2],
+                },
+                "secondary_zernikes": {
+                    "enabled": True,
+                    "indices": "from_system",
+                    "include": None,
+                    "exclude": [1],
+                },
+            },
+        },
+    )
+
+    assert layout.labels == (
+        "source.separation_as",
+        "source.contrast",
+        "optics.primary.zernike_coeffs_nm[0]",
+        "optics.primary.zernike_coeffs_nm[3]",
+        "optics.secondary.zernike_coeffs_nm[0]",
+        "optics.secondary.zernike_coeffs_nm[2]",
+    )
+    assert metadata["primary_zernike_indices"] == [0, 3]
+    assert metadata["secondary_zernike_indices"] == [0, 2]
+    assert metadata["primary_zernike_noll_indices"] == [4, 5, 6, 7]
+
+
+def test_system_observation_theta_layout_rejects_bad_masks():
+    store = {"optics.primary.zernike_coeffs_nm": np.zeros(2)}
+
+    with pytest.raises(ValueError, match="duplicates"):
+        build_system_observation_theta_layout(
+            store,
+            config={
+                "optics": {
+                    "primary_zernikes": {
+                        "enabled": True,
+                        "indices": "from_system",
+                        "include": [0, 0],
+                    },
+                    "secondary_zernikes": {"enabled": False},
+                }
+            },
+        )
+
+    with pytest.raises(ValueError, match="outside the resolved system"):
+        build_system_observation_theta_layout(
+            store,
+            config={
+                "optics": {
+                    "primary_zernikes": {
+                        "enabled": True,
+                        "indices": "from_system",
+                        "include": [5],
+                    },
+                    "secondary_zernikes": {"enabled": False},
+                }
+            },
+        )
 
 
 def test_schur_reduce_information_matches_dense_reference():

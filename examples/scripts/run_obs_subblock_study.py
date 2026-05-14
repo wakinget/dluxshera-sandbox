@@ -41,7 +41,11 @@ from astropy.io import fits
 from dluxshera.config.io import load_config_file, load_user_config
 from dluxshera.config.numeric import coerce_numeric_value, normalize_optimizer_kwargs
 from dluxshera.config.resolver import resolve_config
-from dluxshera.inference.observation_belief import ObservationThetaLayout, SubblockSummary
+from dluxshera.inference.observation_belief import (
+    ObservationThetaLayout,
+    SubblockSummary,
+    infer_system_zernike_indices,
+)
 from dluxshera.inference.observation_summary import (
     ImageBackedSubblockSummaryArtifact,
     build_combined_local_parameter_layout,
@@ -168,6 +172,7 @@ DEFAULT_SCHUR_THETA_KEYS = (
 # ``--enable-zernikes`` is requested. They are irrelevant to the first scalar
 # smoke test but provide a stable default family for later validation runs.
 DEFAULT_SCHUR_ZERNIKE_INDICES = (0, 1, 2, 3, 4, 5)
+SCHUR_ZERNIKE_INDEX_POLICY_FROM_SYSTEM = "from_system"
 DEFAULT_SCHUR_DAMPING = 1.0e-8
 # Safety guard for the v0 dense Hessian path over the packed ``[Theta, phi]``
 # local vector. This should prevent accidental large-frame or full-Zernike runs
@@ -754,15 +759,19 @@ def validate_schur_summary_theta_keys(
     return classification
 
 
-def parse_zernike_indices(raw: str | Sequence[int] | None) -> tuple[int, ...]:
+def parse_zernike_indices(raw: str | Sequence[int] | None) -> tuple[int | str, ...]:
     """Parse one comma-separated Zernike index list."""
 
     if raw is None:
         return DEFAULT_SCHUR_ZERNIKE_INDICES
     if isinstance(raw, str):
+        if raw.strip() == SCHUR_ZERNIKE_INDEX_POLICY_FROM_SYSTEM:
+            return (SCHUR_ZERNIKE_INDEX_POLICY_FROM_SYSTEM,)
         tokens = [part.strip() for part in raw.split(",")]
     else:
         tokens = [str(value).strip() for value in raw]
+        if tokens == [SCHUR_ZERNIKE_INDEX_POLICY_FROM_SYSTEM]:
+            return (SCHUR_ZERNIKE_INDEX_POLICY_FROM_SYSTEM,)
 
     values: list[int] = []
     seen: set[int] = set()
@@ -779,11 +788,40 @@ def parse_zernike_indices(raw: str | Sequence[int] | None) -> tuple[int, ...]:
     return tuple(values)
 
 
+def _zernike_indices_from_system_requested(raw: Sequence[int | str]) -> bool:
+    return tuple(raw) == (SCHUR_ZERNIKE_INDEX_POLICY_FROM_SYSTEM,)
+
+
+def resolve_schur_zernike_indices(
+    raw: str | Sequence[int | str] | None,
+    *,
+    reference_store: ParameterStore | None,
+    optic: str,
+) -> tuple[int, ...]:
+    """Resolve explicit or system-derived Schur-summary Zernike indices."""
+
+    parsed = parse_zernike_indices(raw)
+    if not _zernike_indices_from_system_requested(parsed):
+        return tuple(int(index) for index in parsed)
+    if reference_store is None:
+        raise ValueError(
+            "--zernike-indices from_system requires a resolved reference store."
+        )
+    indices = infer_system_zernike_indices(reference_store, optic=optic)
+    if not indices:
+        raise ValueError(
+            f"--zernike-indices from_system found no {optic} Zernike coefficients "
+            "in the resolved store."
+        )
+    return indices
+
+
 def _build_observation_theta_layout(
     *,
     theta_keys: Sequence[str],
     enable_zernikes: bool,
-    zernike_indices: Sequence[int],
+    zernike_indices: Sequence[int | str],
+    reference_store: ParameterStore | None = None,
 ) -> ObservationThetaLayout:
     """Build the observation-level Theta layout for Schur-summary export."""
 
@@ -804,9 +842,34 @@ def _build_observation_theta_layout(
         if address.base_key == "optics.secondary.zernike_coeffs_nm"
         and address.index is not None
     )
-    configured_indices = list(parse_zernike_indices(zernike_indices))
-    primary_indices = requested_primary or (configured_indices if enable_zernikes else [])
-    secondary_indices = requested_secondary or (configured_indices if enable_zernikes else [])
+    primary_configured_indices = (
+        list(
+            resolve_schur_zernike_indices(
+                zernike_indices,
+                reference_store=reference_store,
+                optic="primary",
+            )
+        )
+        if enable_zernikes and not requested_primary
+        else []
+    )
+    secondary_configured_indices = (
+        list(
+            resolve_schur_zernike_indices(
+                zernike_indices,
+                reference_store=reference_store,
+                optic="secondary",
+            )
+        )
+        if enable_zernikes and not requested_secondary
+        else []
+    )
+    primary_indices = requested_primary or (
+        primary_configured_indices if enable_zernikes else []
+    )
+    secondary_indices = requested_secondary or (
+        secondary_configured_indices if enable_zernikes else []
+    )
 
     source_cfg = {
         "separation_as": "source.separation_as" in requested,
@@ -5197,7 +5260,7 @@ def _build_schur_summary_plan(
     noise_mode: str,
     theta_keys: Sequence[str],
     enable_zernikes: bool,
-    zernike_indices: Sequence[int],
+    zernike_indices: Sequence[int | str],
     schur_damping: float,
     max_dense_dim: int,
     schur_curvature_method: str,
@@ -5231,10 +5294,12 @@ def _build_schur_summary_plan(
     """
 
     theta_classification = validate_schur_summary_theta_keys(theta_keys)
+    reference_store = _reference_store_from_resolved_schur_config(schur_config)
     theta_layout = _build_observation_theta_layout(
         theta_keys=theta_keys,
         enable_zernikes=enable_zernikes,
         zernike_indices=zernike_indices,
+        reference_store=reference_store,
     )
     experiment_cfg = schur_config.get("experiment", {})
     inference_cfg = experiment_cfg.get("inference", {})
@@ -5746,6 +5811,19 @@ def _plot_local_surrogate_validation(
     plt.close(fig)
 
 
+def _reference_store_from_resolved_schur_config(
+    schur_config: Mapping[str, Any],
+) -> ParameterStore | None:
+    system_cfg = schur_config.get("system")
+    if not isinstance(system_cfg, Mapping):
+        return None
+    try:
+        forward_spec = compose_forward_spec(system_cfg)
+    except ValueError:
+        return None
+    return ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+
+
 def _evaluate_schur_summary(
     *,
     config_path: Path,
@@ -5753,7 +5831,7 @@ def _evaluate_schur_summary(
     case_root: Path,
     theta_keys: Sequence[str],
     enable_zernikes: bool,
-    zernike_indices: Sequence[int],
+    zernike_indices: Sequence[int | str],
     schur_damping: float,
     max_dense_dim: int,
     schur_curvature_method: str,
@@ -5798,6 +5876,7 @@ def _evaluate_schur_summary(
         theta_keys=theta_keys,
         enable_zernikes=enable_zernikes,
         zernike_indices=zernike_indices,
+        reference_store=context["base_store"],
     )
     observation_theta_ref_values = _observation_theta_ref_from_store(
         theta_layout=theta_layout,
@@ -6732,7 +6811,7 @@ def run_obs_subblock_study(
     use_render_variance: bool = False,
     theta_keys: Sequence[str] = DEFAULT_SCHUR_THETA_KEYS,
     enable_zernikes: bool = False,
-    zernike_indices: Sequence[int] = DEFAULT_SCHUR_ZERNIKE_INDICES,
+    zernike_indices: Sequence[int | str] = DEFAULT_SCHUR_ZERNIKE_INDICES,
     schur_damping: float = DEFAULT_SCHUR_DAMPING,
     max_dense_dim: int = DEFAULT_SCHUR_MAX_DENSE_DIM,
     schur_curvature_method: str = SCHUR_CURVATURE_METHOD_AUTO,

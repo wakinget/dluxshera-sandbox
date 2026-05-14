@@ -1,0 +1,58 @@
+# Observation Bias Campaign Template
+
+This recipe runs a small observation-level bias campaign, not a mission-scale
+simulation. It derives the full primary and secondary Zernike coefficient
+layout from the resolved system store by default, launches image-backed
+`schur_summary` sub-block exports, then accumulates those summaries into one
+physical-basis observation update per bias case.
+
+Run a dry plan first:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/prescription.yaml \
+  --results-root Results/observation_bias_campaign \
+  --run-name full_zernike_bias_smoke_dryrun \
+  --dry-run
+```
+
+Then run the smoke campaign:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/prescription.yaml \
+  --results-root Results/observation_bias_campaign \
+  --run-name full_zernike_bias_smoke
+```
+
+The observation state is stored in physical labels such as
+`source.separation_as` and `optics.primary.zernike_coeffs_nm[0]`. Eigenmodes
+are diagnostic transforms of the accumulated or posterior precision matrix;
+they are not the native storage basis.
+
+Seeding is explicit and deterministic. The template uses
+`different_jitter_different_noise` with `base_seed: 42`, and each subblock plan
+records `subblock_seed`, `trace_seed`, and `noise_seed`. Those seeds are passed
+to the subblock runner as `--trace-seed` and `--render-seed`.
+
+`prior_draws` is available for canonical-style prior-sampled reference states.
+When enabled, the campaign expands wildcard sigma rules (for example
+`optics.primary.zernike_coeffs_nm[*]`) onto resolved layout labels, draws
+`theta_reference_offsets` from the configured normal priors, and writes
+`prior_draws.csv` plus per-case prior draw metadata.
+
+The `forecast` block extrapolates the measured image-backed summaries to a
+30-minute observation target without running 1,800 Schur solves. `replicate`
+tiles the actual summaries deterministically as an information accumulation
+check. `fixed_information_score_noise` keeps template information fixed and
+draws Fisher-style score noise for stochastic forecast rows.
+
+The Zernike mask controls can narrow the system-derived coefficient list:
+`include` selects a subset and `exclude` removes entries after selection. This
+is useful for smoke tests without changing the layout machinery used by full
+system runs.
+
+Success is not recovering every M1/M2 coefficient independently. The useful
+signal is whether the campaign identifies constrained and weak optical
+combinations and whether the `source.separation_as` posterior moves as
+expected.
