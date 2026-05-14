@@ -230,6 +230,27 @@ and add frame masking:
   --schur-frame-mask-denominator original
 ```
 
+For biased-reference correction experiments, keep render truth nominal and bias
+only the inference/reference `Theta` value with a repeatable reference override.
+The biased value becomes the exported `theta_ref`; the plan, audit, and summary
+metadata record that it was applied to inference/reference only. A first small
+plate-scale smoke command is:
+
+```bash
+python examples/scripts/run_obs_subblock_study.py \
+  --results-root Results/obs_subblock_biased_reference \
+  --case-name plate_scale_bias_3f_noiseless_dryrun \
+  --mode schur_summary \
+  --n-frames 3 \
+  --noise disabled \
+  --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix \
+  --phi-ref recovered \
+  --theta-reference-offset optics.plate_scale_as_per_pix=1e-5 \
+  --max-dense-dim 40 \
+  --schur-damping 1e-8 \
+  --dry-run
+```
+
 ``warn`` is the backward-compatible default and records diagnostics while keeping
 all frames. ``mask`` excludes high-chi-squared frames from the structured Schur
 accumulation. ``reject`` fails the summary export when frame quality is

@@ -57,7 +57,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, Mapping, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -102,10 +102,14 @@ from dluxshera.utils.obs_subblock_io import (
     write_obs_subblock_truth_csv,
 )
 from dluxshera.utils.obs_subblock_keys import (
+    OBS_SUBBLOCK_SUPPORTED_INDEXED_KEYS,
+    OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS,
     ObsSubblockKeyAddress,
     apply_obs_subblock_runtime_overrides_without_refresh,
     canonical_obs_subblock_varying_keys,
+    get_obs_subblock_mapping_value,
     get_obs_subblock_store_value,
+    parse_obs_subblock_key_address,
     parse_obs_subblock_varying_keys,
     validate_supported_obs_subblock_key_addresses,
 )
@@ -799,6 +803,82 @@ def _apply_runtime_active_values(
     return apply_obs_subblock_runtime_overrides_without_refresh(
         reference_store,
         overrides_flat={**primitive_overrides, **derived_overrides},
+        forward_spec=forward_spec,
+    )
+
+
+def _system_config_reference_addresses(
+    *,
+    system_cfg: Mapping[str, Any],
+    reference_store: ParameterStore,
+) -> tuple[ObsSubblockKeyAddress, ...]:
+    """Return supported observation-level keys explicitly present in config."""
+
+    addresses: list[ObsSubblockKeyAddress] = []
+    for key in OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS:
+        address = parse_obs_subblock_key_address(key)
+        if get_obs_subblock_mapping_value(system_cfg, address=address) is not None:
+            addresses.append(address)
+    for base_key in OBS_SUBBLOCK_SUPPORTED_INDEXED_KEYS:
+        vector_value = reference_store.get(base_key, None)
+        if vector_value is None:
+            continue
+        array_value = np.asarray(vector_value)
+        if array_value.ndim != 1:
+            continue
+        for index in range(int(array_value.shape[0])):
+            address = ObsSubblockKeyAddress(base_key=base_key, index=index)
+            if get_obs_subblock_mapping_value(system_cfg, address=address) is not None:
+                addresses.append(address)
+    return tuple(addresses)
+
+
+def _apply_resolved_system_observation_values_to_store(
+    *,
+    store: ParameterStore,
+    forward_spec,
+    system_cfg: Mapping[str, Any],
+) -> ParameterStore:
+    """Make explicit resolved-system observation keys authoritative post-refresh.
+
+    Some observation-level knobs, notably three-plane plate scale, are derived
+    store keys. ``refresh_derived(...)`` is still required for the rest of the
+    model, but it can overwrite a deliberate config-level reference value. This
+    recipe treats the resolved system block as the fixed shared state, so these
+    explicit config values are overlaid after the refresh and before binder and
+    objective construction.
+    """
+
+    addresses = _system_config_reference_addresses(
+        system_cfg=system_cfg,
+        reference_store=store,
+    )
+    if not addresses:
+        return store
+    validate_supported_obs_subblock_key_addresses(
+        addresses,
+        forward_spec=forward_spec,
+        reference_store=store,
+    )
+    overrides: dict[str, Any] = {}
+    for address in addresses:
+        config_value = get_obs_subblock_mapping_value(system_cfg, address=address)
+        if config_value is None:
+            continue
+        if address.index is None:
+            overrides[address.base_key] = float(config_value)
+            continue
+        vector_value = jnp.asarray(
+            overrides.get(address.base_key, store.get(address.base_key))
+        )
+        overrides[address.base_key] = vector_value.at[address.index].set(
+            float(config_value)
+        )
+    if not overrides:
+        return store
+    return apply_obs_subblock_runtime_overrides_without_refresh(
+        store,
+        overrides_flat=overrides,
         forward_spec=forward_spec,
     )
 
@@ -3243,6 +3323,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     print("Building fixed shared forward state...")
     forward_spec = compose_forward_spec(system_cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    base_store = _apply_resolved_system_observation_values_to_store(
+        store=base_store,
+        forward_spec=forward_spec,
+        system_cfg=system_cfg,
+    )
     active_layout = _build_active_state_layout(
         active_cfg=inference_cfg["active"],
         forward_spec=forward_spec,

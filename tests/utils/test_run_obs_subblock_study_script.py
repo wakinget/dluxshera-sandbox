@@ -310,6 +310,171 @@ def test_parse_helpers_validate_mode_candidate_and_grid():
         module.parse_scalar_grid("")
 
 
+def test_parse_theta_reference_override_helpers():
+    module = _load_script_module()
+
+    assert module.parse_key_value_float_overrides(
+        ["optics.plate_scale_as_per_pix=1e-5"],
+        option_name="--theta-reference-offset",
+    ) == {"optics.plate_scale_as_per_pix": pytest.approx(1.0e-5)}
+    assert module.parse_key_value_float_overrides(
+        [
+            "source.separation_as=1e-4",
+            "optics.primary.zernike_coeffs_nm[2]=0.5",
+        ],
+        option_name="--theta-reference-value",
+    ) == {
+        "source.separation_as": pytest.approx(1.0e-4),
+        "optics.primary.zernike_coeffs_nm[2]": pytest.approx(0.5),
+    }
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        module.parse_key_value_float_overrides(
+            [
+                "source.separation_as=1e-4",
+                "source.separation_as=2e-4",
+            ],
+            option_name="--theta-reference-offset",
+        )
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        module.parse_key_value_float_overrides(
+            ["source.separation_as"],
+            option_name="--theta-reference-offset",
+        )
+    with pytest.raises(ValueError, match="Unsupported observation-subblock"):
+        module.parse_key_value_float_overrides(
+            ["detector.read_noise_e=1.0"],
+            option_name="--theta-reference-offset",
+        )
+
+
+def test_theta_reference_value_offset_conflict_is_rejected(tmp_path: Path):
+    module = _load_script_module()
+
+    with pytest.raises(ValueError, match="both theta reference value and offset"):
+        module.run_obs_subblock_study(
+            mode="schur_summary",
+            case_root=tmp_path / "case",
+            theta_reference_offsets={"optics.plate_scale_as_per_pix": 1.0e-5},
+            theta_reference_values={"optics.plate_scale_as_per_pix": 0.02},
+            dry_run=True,
+        )
+
+
+def test_resolve_theta_reference_overrides_patches_inference_config_only(tmp_path: Path):
+    module = _load_script_module()
+    inference_cfg = _inference_template()
+    _, _, _, manifest_path = _write_case_render_artifacts(
+        tmp_path / "case",
+        truth_value=0.011,
+    )
+
+    metadata = module.resolve_theta_reference_overrides(
+        inference_config=inference_cfg,
+        theta_reference_offsets={"optics.plate_scale_as_per_pix": 1.0e-5},
+        render_manifest_path=manifest_path,
+    )
+
+    assert inference_cfg["system"]["optics"]["plate_scale_as_per_pix"] == pytest.approx(
+        0.01001
+    )
+    assert metadata["enabled"] is True
+    assert metadata["items"][0]["key"] == "optics.plate_scale_as_per_pix"
+    assert metadata["items"][0]["truth_value"] == pytest.approx(0.011)
+    assert metadata["items"][0]["reference_base_value"] == pytest.approx(0.01)
+    assert metadata["items"][0]["reference_value"] == pytest.approx(0.01001)
+    assert metadata["items"][0]["applied_to"] == "inference_reference_only"
+
+
+def test_resolved_theta_reference_offset_uses_expected_base_value(tmp_path: Path):
+    module = _load_script_module()
+    inference_cfg = _inference_template()
+    inference_cfg["system"]["optics"]["plate_scale_as_per_pix"] = 0.12320690002795907
+
+    metadata = module.resolve_theta_reference_overrides(
+        inference_config=inference_cfg,
+        theta_reference_offsets={"optics.plate_scale_as_per_pix": 1.23e-6},
+    )
+
+    item = metadata["items"][0]
+    assert item["reference_base_value"] == pytest.approx(0.12320690002795907)
+    assert item["offset"] == pytest.approx(1.23e-6)
+    assert item["reference_value"] == pytest.approx(0.12320813002795908)
+    assert inference_cfg["system"]["optics"]["plate_scale_as_per_pix"] == pytest.approx(
+        0.12320813002795908
+    )
+
+
+def test_resolved_system_overlay_drives_observation_theta_ref(tmp_path: Path):
+    module = _load_script_module()
+    _, _, inference_template = _write_templates(tmp_path)
+    context = module._resolve_template_system_context(inference_template)
+    theta_layout = module._build_observation_theta_layout(
+        theta_keys=("optics.plate_scale_as_per_pix",),
+        enable_zernikes=False,
+        zernike_indices=(0,),
+    )
+
+    theta_ref = module._observation_theta_ref_from_store(
+        theta_layout=theta_layout,
+        base_store=context["store"],
+    )
+
+    assert theta_ref.tolist() == pytest.approx([0.01])
+    assert context["system_store_overlay"]["applied"] is True
+
+
+def test_theta_reference_consistency_accepts_biased_theta_ref():
+    module = _load_script_module()
+    expected = 0.12320813002795908
+
+    consistency = module.validate_theta_reference_override_consistency(
+        theta_reference_overrides={
+            "enabled": True,
+            "items": [
+                {
+                    "key": "optics.plate_scale_as_per_pix",
+                    "reference_value": expected,
+                }
+            ],
+        },
+        theta_labels=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        theta_ref=np.asarray([0.5, expected], dtype=float),
+        resolved_config={"optics": {"plate_scale_as_per_pix": expected}},
+        prior_context={
+            "theta_ref_by_label": {"optics.plate_scale_as_per_pix": expected}
+        },
+    )
+
+    assert consistency["passed"] is True
+    assert consistency["items"][0]["theta_ref_value"] == pytest.approx(expected)
+
+
+def test_theta_reference_consistency_rejects_observed_theta_ref_regression():
+    module = _load_script_module()
+    expected = 0.12320813002795908
+    nominal = 0.12320690002795907
+
+    with pytest.raises(ValueError, match="Theta reference override consistency failed"):
+        module.validate_theta_reference_override_consistency(
+            theta_reference_overrides={
+                "enabled": True,
+                "items": [
+                    {
+                        "key": "optics.plate_scale_as_per_pix",
+                        "reference_value": expected,
+                    }
+                ],
+            },
+            theta_labels=("source.separation_as", "optics.plate_scale_as_per_pix"),
+            theta_ref=np.asarray([0.5, nominal], dtype=float),
+            resolved_config={"optics": {"plate_scale_as_per_pix": expected}},
+            prior_context={
+                "theta_ref_by_label": {"optics.plate_scale_as_per_pix": nominal}
+            },
+        )
+
+
 def test_trace_template_resolution_uses_schur_specific_default(tmp_path: Path):
     module = _load_script_module()
 
@@ -1204,6 +1369,7 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
         inference_template=inference_template,
         theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
         phi_ref="truth_when_available",
+        theta_reference_offsets={"optics.plate_scale_as_per_pix": 1.0e-5},
         dry_run=True,
     )
 
@@ -1221,6 +1387,19 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
         "optics.plate_scale_as_per_pix",
     ]
     assert plan["phi_ref_mode"] == "truth_when_available"
+    overrides = plan["theta_reference_overrides"]
+    assert overrides["enabled"] is True
+    assert overrides["items"] == [
+        {
+            "key": "optics.plate_scale_as_per_pix",
+            "mode": "offset",
+            "truth_value": 0.011,
+            "reference_base_value": 0.01,
+            "offset": 1.0e-5,
+            "reference_value": pytest.approx(0.01001),
+            "applied_to": "inference_reference_only",
+        }
+    ]
     assert plan["combined_dim"] == 11
     assert plan["max_dense_dim"] == module.DEFAULT_SCHUR_MAX_DENSE_DIM
     assert plan["dense_hessian_allowed"] is True
@@ -1245,6 +1424,9 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert plan["preconditioning"]["sources"]["preconditioning_enabled"] == "inference_template"
     assert "diagnostics" in plan["reference_inference_config_if_run"]
     summary_export_cfg = _read_json(Path(plan["summary_export_inference_config_path"]))
+    assert summary_export_cfg["system"]["optics"]["plate_scale_as_per_pix"] == pytest.approx(
+        0.01001
+    )
     summary_noise_model = summary_export_cfg["experiment"]["inference"]["objective"][
         "noise_model"
     ]
@@ -1256,6 +1438,10 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert plan["planned_artifacts"]["schur_summary_audit_json"].endswith(
         "schur_summary_audit.json"
     )
+    audit_path = Path(plan["planned_artifacts"]["schur_summary_audit_json"])
+    assert audit_path.exists()
+    audit = _read_json(audit_path)
+    assert audit["theta_reference_overrides"] == overrides
     assert (case_root / "study" / "schur_summary" / "summary.json").exists()
 
 

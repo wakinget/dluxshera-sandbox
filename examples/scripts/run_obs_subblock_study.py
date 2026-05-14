@@ -61,6 +61,8 @@ from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
 from dluxshera.utils.obs_subblock_keys import (
+    OBS_SUBBLOCK_SUPPORTED_INDEXED_KEYS,
+    OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS,
     ObsSubblockKeyAddress,
     apply_obs_subblock_runtime_overrides_without_refresh,
     get_obs_subblock_mapping_value,
@@ -490,6 +492,40 @@ def parse_theta_keys(raw: str | Sequence[str] | None) -> tuple[str, ...]:
     if not values:
         raise ValueError("--theta-keys must contain at least one key.")
     return tuple(values)
+
+
+def parse_key_value_float_overrides(
+    raw_items: Sequence[str] | None,
+    *,
+    option_name: str,
+) -> dict[str, float]:
+    """Parse repeatable ``KEY=VALUE`` numeric observation-key overrides."""
+
+    if raw_items is None:
+        return {}
+
+    parsed: dict[str, float] = {}
+    for raw_item in raw_items:
+        text = str(raw_item).strip()
+        if not text or "=" not in text:
+            raise ValueError(f"{option_name} entries must use KEY=VALUE syntax.")
+        raw_key, raw_value = text.split("=", 1)
+        raw_key = raw_key.strip()
+        if not raw_key:
+            raise ValueError(f"{option_name} entries must include a non-empty KEY.")
+        address = parse_obs_subblock_key_address(raw_key)
+        validate_supported_obs_subblock_key_addresses((address,))
+        canonical = address.canonical
+        if canonical in parsed:
+            raise ValueError(f"Duplicate {option_name} override for {canonical}.")
+        parsed[canonical] = float(
+            coerce_numeric_value(
+                raw_value,
+                path=f"{option_name}.{canonical}",
+                allow_str=True,
+            )
+        )
+    return parsed
 
 
 def normalize_schur_phi_ref_mode(raw_mode: str) -> str:
@@ -2471,11 +2507,17 @@ def _resolve_template_system_context(template_path: Path) -> dict[str, Any]:
         raise ValueError(f"Template {template_path} must resolve a system mapping.")
     forward_spec = compose_forward_spec(system_cfg)
     store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    store, system_store_overlay = _apply_resolved_system_observation_values_to_store(
+        store=store,
+        forward_spec=forward_spec,
+        system_cfg=system_cfg,
+    )
     return {
         "resolved_cfg": resolved_cfg,
         "system_cfg": system_cfg,
         "forward_spec": forward_spec,
         "store": store,
+        "system_store_overlay": system_store_overlay,
     }
 
 
@@ -2490,6 +2532,101 @@ def _resolve_candidate_mapping_value(
         mapping,
         address=parse_obs_subblock_key_address(candidate_key),
     )
+
+
+def _system_config_reference_addresses(
+    *,
+    system_cfg: Mapping[str, Any],
+    reference_store: ParameterStore,
+) -> tuple[ObsSubblockKeyAddress, ...]:
+    """Return observation-level resolved-system keys explicitly present in config."""
+
+    addresses: list[ObsSubblockKeyAddress] = []
+    for key in OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS:
+        address = parse_obs_subblock_key_address(key)
+        if get_obs_subblock_mapping_value(system_cfg, address=address) is not None:
+            addresses.append(address)
+    for base_key in OBS_SUBBLOCK_SUPPORTED_INDEXED_KEYS:
+        vector_value = reference_store.get(base_key, None)
+        if vector_value is None:
+            continue
+        array_value = np.asarray(vector_value)
+        if array_value.ndim != 1:
+            continue
+        for index in range(int(array_value.shape[0])):
+            address = ObsSubblockKeyAddress(base_key=base_key, index=index)
+            if get_obs_subblock_mapping_value(system_cfg, address=address) is not None:
+                addresses.append(address)
+    return tuple(addresses)
+
+
+def _apply_resolved_system_observation_values_to_store(
+    *,
+    store: ParameterStore,
+    forward_spec: Any,
+    system_cfg: Mapping[str, Any],
+) -> tuple[ParameterStore, dict[str, Any]]:
+    """Overlay explicit resolved-config observation values after derived refresh.
+
+    Three-plane plate scale is represented as a derived store key, so a plain
+    ``refresh_derived(...)`` recomputes it from geometry and can erase a
+    deliberate inference/reference override even though the resolved config
+    contains the biased value. Observation-subblock workflows treat explicit
+    resolved config values for supported observation-level keys as the fixed
+    runtime reference state; this overlay is therefore applied after refresh.
+    """
+
+    addresses = _system_config_reference_addresses(
+        system_cfg=system_cfg,
+        reference_store=store,
+    )
+    if not addresses:
+        return store, {"applied": False, "items": []}
+
+    validate_supported_obs_subblock_key_addresses(
+        addresses,
+        forward_spec=forward_spec,
+        reference_store=store,
+    )
+    overrides: dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    for address in addresses:
+        config_value = get_obs_subblock_mapping_value(system_cfg, address=address)
+        if config_value is None:
+            continue
+        store_value_before = get_obs_subblock_store_value(store, address=address)
+        if address.index is None:
+            overrides[address.base_key] = float(config_value)
+        else:
+            vector_value = jnp.asarray(
+                overrides.get(address.base_key, store.get(address.base_key))
+            )
+            overrides[address.base_key] = vector_value.at[address.index].set(
+                float(config_value)
+            )
+        items.append(
+            {
+                "key": address.canonical,
+                "config_value": float(config_value),
+                "store_value_before_overlay": float(store_value_before),
+                "absolute_delta": float(config_value - store_value_before),
+            }
+        )
+
+    if not overrides:
+        return store, {"applied": False, "items": []}
+    updated = apply_obs_subblock_runtime_overrides_without_refresh(
+        store,
+        overrides_flat=overrides,
+        forward_spec=forward_spec,
+    )
+    for item in items:
+        address = parse_obs_subblock_key_address(str(item["key"]))
+        item["store_value_after_overlay"] = get_obs_subblock_store_value(
+            updated,
+            address=address,
+        )
+    return updated, {"applied": True, "items": items}
 
 
 def _set_candidate_mapping_value(
@@ -2511,6 +2648,93 @@ def _set_candidate_mapping_value(
         value=value,
         reference_vector=reference_vector,
     )
+
+
+def _disabled_theta_reference_overrides_payload() -> dict[str, Any]:
+    return {"enabled": False, "items": []}
+
+
+def resolve_theta_reference_overrides(
+    *,
+    inference_config: dict[str, Any],
+    theta_reference_offsets: Mapping[str, float] | None = None,
+    theta_reference_values: Mapping[str, float] | None = None,
+    render_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    """Patch biased Theta values into the inference/reference config only."""
+
+    offsets = dict(theta_reference_offsets or {})
+    values = dict(theta_reference_values or {})
+    if not offsets and not values:
+        return _disabled_theta_reference_overrides_payload()
+
+    offset_addresses = parse_obs_subblock_varying_keys(tuple(offsets))
+    value_addresses = parse_obs_subblock_varying_keys(tuple(values))
+    by_key_offset = {address.canonical: address for address in offset_addresses}
+    by_key_value = {address.canonical: address for address in value_addresses}
+    conflicts = sorted(set(by_key_offset) & set(by_key_value))
+    if conflicts:
+        raise ValueError(
+            "Cannot specify both --theta-reference-offset and "
+            "--theta-reference-value for: "
+            + ", ".join(conflicts)
+            + "."
+        )
+
+    resolved_cfg = resolve_config(inference_config)
+    system_cfg = resolved_cfg.get("system")
+    if not isinstance(system_cfg, dict):
+        raise ValueError("Theta reference overrides require a resolved system block.")
+    forward_spec = compose_forward_spec(system_cfg)
+    reference_store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(
+        forward_spec
+    )
+    reference_store, _ = _apply_resolved_system_observation_values_to_store(
+        store=reference_store,
+        forward_spec=forward_spec,
+        system_cfg=system_cfg,
+    )
+    all_addresses = tuple(by_key_offset.values()) + tuple(by_key_value.values())
+    validate_supported_obs_subblock_key_addresses(
+        all_addresses,
+        forward_spec=forward_spec,
+        reference_store=reference_store,
+    )
+
+    config_system_cfg = _ensure_mapping(inference_config, "system", path="root")
+    items: list[dict[str, Any]] = []
+    for canonical in [*by_key_offset, *by_key_value]:
+        address = by_key_offset.get(canonical) or by_key_value[canonical]
+        base_value = get_obs_subblock_store_value(reference_store, address=address)
+        truth_value = _truth_value_from_render_manifest(render_manifest_path, canonical)
+        if canonical in by_key_offset:
+            offset = float(offsets[canonical])
+            reference_value = float(base_value + offset)
+            mode = "offset"
+        else:
+            offset = None
+            reference_value = float(values[canonical])
+            mode = "value"
+
+        _set_candidate_mapping_value(
+            config_system_cfg,
+            candidate_key=canonical,
+            value=reference_value,
+            reference_store=reference_store,
+        )
+        items.append(
+            {
+                "key": canonical,
+                "mode": mode,
+                "truth_value": None if truth_value is None else float(truth_value),
+                "reference_base_value": float(base_value),
+                "offset": None if offset is None else float(offset),
+                "reference_value": float(reference_value),
+                "applied_to": "inference_reference_only",
+            }
+        )
+
+    return {"enabled": True, "items": items}
 
 
 def _resolve_target_name(cfg: dict[str, Any] | None) -> str | None:
@@ -3023,6 +3247,11 @@ def _prepare_inference_context(
     )
     forward_spec = compose_forward_spec(system_cfg)
     base_store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    base_store, system_store_overlay = _apply_resolved_system_observation_values_to_store(
+        store=base_store,
+        forward_spec=forward_spec,
+        system_cfg=system_cfg,
+    )
     active_layout = recipe._build_active_state_layout(
         active_cfg=inference_cfg["active"],
         forward_spec=forward_spec,
@@ -3126,6 +3355,7 @@ def _prepare_inference_context(
         "forward_spec": forward_spec,
         "layout": active_layout,
         "base_store": base_store,
+        "system_store_overlay": system_store_overlay,
         "binder": binder,
         "cube": cube,
         "variance_cube": variance_cube,
@@ -3630,6 +3860,137 @@ def _observation_theta_ref_from_store(
         ],
         dtype=float,
     )
+
+
+def validate_theta_reference_override_consistency(
+    *,
+    theta_reference_overrides: Mapping[str, Any] | None,
+    theta_labels: Sequence[str],
+    theta_ref: Sequence[float] | np.ndarray,
+    resolved_config: Mapping[str, Any] | None = None,
+    store: ParameterStore | None = None,
+    prior_context: Mapping[str, Any] | None = None,
+    rtol: float = 1.0e-10,
+    atol: float = 1.0e-12,
+    raise_on_mismatch: bool = True,
+) -> dict[str, Any]:
+    """Validate that biased reference overrides reached all summary handoffs."""
+
+    payload = dict(theta_reference_overrides or _disabled_theta_reference_overrides_payload())
+    items = payload.get("items")
+    if not payload.get("enabled") or not isinstance(items, Sequence):
+        return {"passed": True, "items": []}
+
+    labels = tuple(theta_labels)
+    theta_array = np.asarray(theta_ref, dtype=float)
+    if theta_array.shape != (len(labels),):
+        raise ValueError(
+            "theta_ref shape does not match theta_labels for override consistency "
+            f"validation: theta_ref_shape={theta_array.shape}, n_labels={len(labels)}."
+        )
+
+    system_mapping: Mapping[str, Any] | None = resolved_config
+    if isinstance(resolved_config, Mapping) and isinstance(resolved_config.get("system"), Mapping):
+        system_mapping = resolved_config["system"]
+    prior_by_label = {}
+    if isinstance(prior_context, Mapping):
+        raw_prior = prior_context.get("theta_ref_by_label")
+        if isinstance(raw_prior, Mapping):
+            prior_by_label = dict(raw_prior)
+
+    diagnostics: list[dict[str, Any]] = []
+    mismatches: list[str] = []
+    for raw_item in items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        key = str(raw_item.get("key", "")).strip()
+        if not key:
+            continue
+        expected = float(raw_item["reference_value"])
+        address = parse_obs_subblock_key_address(key)
+        resolved_value = (
+            None
+            if system_mapping is None
+            else get_obs_subblock_mapping_value(system_mapping, address=address)
+        )
+        store_value = (
+            None
+            if store is None
+            else get_obs_subblock_store_value(store, address=address)
+        )
+        theta_ref_value = None
+        if key in labels:
+            theta_ref_value = float(theta_array[labels.index(key)])
+        prior_value = None
+        if key in prior_by_label:
+            prior_value = float(prior_by_label[key])
+
+        compared_values = [
+            value
+            for value in (resolved_value, store_value, theta_ref_value, prior_value)
+            if value is not None
+        ]
+        absolute_error = (
+            None
+            if not compared_values
+            else float(max(abs(float(value) - expected) for value in compared_values))
+        )
+        relative_error = (
+            None
+            if absolute_error is None
+            else float(absolute_error / max(abs(expected), np.finfo(float).tiny))
+        )
+        item_mismatches: list[str] = []
+        for label, value in (
+            ("resolved_config_value", resolved_value),
+            ("store_value", store_value),
+            ("theta_ref_value", theta_ref_value),
+            ("prior_context_value", prior_value),
+        ):
+            if value is None:
+                continue
+            if not math.isclose(float(value), expected, rel_tol=rtol, abs_tol=atol):
+                item_mismatches.append(
+                    f"{key} {label}={float(value)!r} expected={expected!r}"
+                )
+        if key in labels and theta_ref_value is None:
+            item_mismatches.append(f"{key} missing from theta_ref despite label match")
+        if item_mismatches:
+            mismatches.extend(item_mismatches)
+
+        diagnostics.append(
+            {
+                "key": key,
+                "expected_reference_value": expected,
+                "resolved_config_value": None
+                if resolved_value is None
+                else float(resolved_value),
+                "store_value": None if store_value is None else float(store_value),
+                "theta_ref_value": None
+                if theta_ref_value is None
+                else float(theta_ref_value),
+                "prior_context_value": None
+                if prior_value is None
+                else float(prior_value),
+                "absolute_error": absolute_error,
+                "relative_error": relative_error,
+                "passed": not item_mismatches,
+                "mismatches": item_mismatches,
+            }
+        )
+
+    consistency = {
+        "passed": not mismatches,
+        "items": diagnostics,
+        "rtol": float(rtol),
+        "atol": float(atol),
+    }
+    if mismatches and raise_on_mismatch:
+        raise ValueError(
+            "Theta reference override consistency failed: "
+            + "; ".join(mismatches)
+        )
+    return consistency
 
 
 def _apply_theta_overrides(
@@ -4486,7 +4847,14 @@ def _build_schur_summary_audit(
         "theta_reference": {
             "theta_ref": None if summary_payload is None else summary_payload.get("theta_ref"),
             "theta_labels": plan.get("theta_labels"),
+            "theta_reference_consistency": None
+            if summary_payload is None
+            else summary_payload.get("theta_reference_consistency"),
         },
+        "theta_reference_overrides": plan.get(
+            "theta_reference_overrides",
+            _disabled_theta_reference_overrides_payload(),
+        ),
         "schur_summary_diagnostics_path": summary_artifacts.get("schur_diagnostics_json")
         or planned_artifacts.get("schur_diagnostics_json"),
         "curvature": {
@@ -4846,6 +5214,7 @@ def _build_schur_summary_plan(
     frame_truth_preview: Mapping[str, Any] | None,
     applied_trace_overrides: Mapping[str, Any],
     applied_inference_init_overrides: Mapping[str, Any],
+    theta_reference_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a review-friendly plan for the Schur-summary smoke path.
 
@@ -5053,6 +5422,9 @@ def _build_schur_summary_plan(
             else str((study_root / "reference_inference" / "inference").resolve())
         ),
         "theta_labels": list(theta_layout.labels),
+        "theta_reference_overrides": dict(
+            theta_reference_overrides or _disabled_theta_reference_overrides_payload()
+        ),
         "theta_key_support": theta_classification,
         "phi_labels": list(phi_labels),
         "n_theta": int(theta_layout.size),
@@ -5397,6 +5769,7 @@ def _evaluate_schur_summary(
     schur_frame_quality_missing: str = DEFAULT_SCHUR_FRAME_QUALITY_MISSING,
     schur_frame_mask_denominator: str = DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
     schur_frame_mask_min_good_frames: int = DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES,
+    theta_reference_overrides: Mapping[str, Any] | None = None,
     memory_recorder: MemoryDiagnosticsRecorder | None = None,
 ) -> dict[str, Any]:
     """Export one image-backed Schur-reduced summary from a prepared subblock.
@@ -5417,6 +5790,9 @@ def _evaluate_schur_summary(
 
     record("theta_phi_layout.start", config_path=config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
+    theta_reference_override_payload = dict(
+        theta_reference_overrides or _disabled_theta_reference_overrides_payload()
+    )
     context = _prepare_inference_context(config_path=config_path)
     theta_layout = _build_observation_theta_layout(
         theta_keys=theta_keys,
@@ -5426,6 +5802,18 @@ def _evaluate_schur_summary(
     observation_theta_ref_values = _observation_theta_ref_from_store(
         theta_layout=theta_layout,
         base_store=context["base_store"],
+    )
+    prior_theta_ref_by_label = {
+        label: float(observation_theta_ref_values[index])
+        for index, label in enumerate(theta_layout.labels)
+    }
+    theta_reference_consistency = validate_theta_reference_override_consistency(
+        theta_reference_overrides=theta_reference_override_payload,
+        theta_labels=theta_layout.labels,
+        theta_ref=observation_theta_ref_values,
+        resolved_config=context["system_cfg"],
+        store=context["base_store"],
+        prior_context={"theta_ref_by_label": prior_theta_ref_by_label},
     )
     if recovered_theta is None and normalize_schur_phi_ref_mode(phi_ref) == "recovered":
         recovered_trace_value = (recovered_reference_metadata or {}).get(
@@ -5815,6 +6203,8 @@ def _evaluate_schur_summary(
             "frame_quality_effective_frame_fraction": float(
                 frame_quality_metadata["effective_frame_fraction"]
             ),
+            "theta_reference_overrides": theta_reference_override_payload,
+            "theta_reference_consistency": theta_reference_consistency,
             **dense_comparison_state,
         },
     )
@@ -5846,14 +6236,13 @@ def _evaluate_schur_summary(
         if context["trace_path"] is None
         else str(Path(context["trace_path"]).resolve()),
         "theta_layout": theta_layout.to_dict(),
+        "theta_reference_overrides": theta_reference_override_payload,
+        "theta_reference_consistency": theta_reference_consistency,
         "phi_ref_source": phi_ref_source,
         "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
         "prior_context": {
             "recommended_prior_mean_source": "summary_theta_ref",
-            "theta_ref_by_label": {
-                label: float(observation_theta_ref_values[index])
-                for index, label in enumerate(theta_layout.labels)
-            },
+            "theta_ref_by_label": prior_theta_ref_by_label,
             "effective_store_values": {
                 "source.exposure_time_s": (
                     float(np.asarray(context["base_store"].get("source.exposure_time_s")))
@@ -5879,6 +6268,7 @@ def _evaluate_schur_summary(
         "system": {
             "preset": context["system_cfg"].get("preset"),
             "resolved_config": context["system_cfg"],
+            "store_overlay": context.get("system_store_overlay"),
         },
         "curvature": {
             "schur_curvature_method_requested": curvature_method_requested,
@@ -6064,6 +6454,8 @@ def _evaluate_schur_summary(
         "theta_labels": list(theta_layout.labels),
         "phi_labels": list(phi_labels),
         "theta_ref": observation_theta_ref_values.tolist(),
+        "theta_reference_overrides": theta_reference_override_payload,
+        "theta_reference_consistency": theta_reference_consistency,
         "phi_ref_source": phi_ref_source,
         "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
         "combined_dim": combined_dim,
@@ -6380,6 +6772,8 @@ def run_obs_subblock_study(
     reference_preconditioning_lr_clip: tuple[float, float] | None = None,
     reference_diagnostics_profile: str | None = None,
     reuse_reference_inference: str | Path | None = None,
+    theta_reference_offsets: Mapping[str, float] | None = None,
+    theta_reference_values: Mapping[str, float] | None = None,
     memory_diagnostics: bool = False,
     memory_diagnostics_file: Path | None = None,
     dry_run: bool = False,
@@ -6393,6 +6787,17 @@ def run_obs_subblock_study(
     normalized_schur_curvature_method = normalize_schur_curvature_method(
         schur_curvature_method
     )
+    theta_reference_offset_overrides = dict(theta_reference_offsets or {})
+    theta_reference_value_overrides = dict(theta_reference_values or {})
+    theta_reference_conflicts = sorted(
+        set(theta_reference_offset_overrides) & set(theta_reference_value_overrides)
+    )
+    if theta_reference_conflicts:
+        raise ValueError(
+            "Cannot specify both theta reference value and offset for: "
+            + ", ".join(theta_reference_conflicts)
+            + "."
+        )
     if schur_frame_quality_policy not in SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES:
         raise ValueError("Unsupported --schur-frame-quality-policy.")
     if schur_frame_quality_missing not in SUPPORTED_SCHUR_FRAME_QUALITY_MISSING_POLICIES:
@@ -6548,6 +6953,7 @@ def run_obs_subblock_study(
                     if reference_preconditioning_lr_clip is None
                     else list(reference_preconditioning_lr_clip)
                 ),
+            },
             "reference_diagnostics_profile": reference_diagnostics_profile,
             "reuse_reference_inference": None
             if reuse_reference_inference is None
@@ -6556,7 +6962,10 @@ def run_obs_subblock_study(
             "memory_diagnostics_file": None
             if memory_diagnostics_file is None
             else str(memory_diagnostics_file),
-        },
+            "theta_reference_cli_overrides": {
+                "offsets": dict(theta_reference_offset_overrides),
+                "values": dict(theta_reference_value_overrides),
+            },
         },
         "templates": {
             "trace": str(template_paths["trace"]),
@@ -6739,9 +7148,16 @@ def run_obs_subblock_study(
             reference_preconditioning_lr_clip=reference_preconditioning_lr_clip,
             reference_diagnostics_profile=reference_diagnostics_profile,
         )
+        theta_reference_override_metadata = resolve_theta_reference_overrides(
+            inference_config=schur_config,
+            theta_reference_offsets=theta_reference_offset_overrides,
+            theta_reference_values=theta_reference_value_overrides,
+            render_manifest_path=render_inputs.manifest.path,
+        )
         schur_config_path = summary_run_root / "inference_config.json"
         _write_json(schur_config_path, schur_config)
         summary["schur_config_path"] = str(schur_config_path.resolve())
+        summary["theta_reference_overrides"] = theta_reference_override_metadata
         schur_config_provenance = _build_schur_config_provenance(
             schur_config=schur_config,
             reference_optimizer_sources=_reference_optimizer_override_sources(
@@ -6804,6 +7220,7 @@ def run_obs_subblock_study(
             applied_inference_init_overrides=template_info["applied_overrides"][
                 "inference_init"
             ],
+            theta_reference_overrides=theta_reference_override_metadata,
         )
         schur_plan_path = study_root / SCHUR_SUMMARY_PLAN_FILENAME
         _write_json(schur_plan_path, schur_plan)
@@ -6838,6 +7255,17 @@ def run_obs_subblock_study(
         for warning in schur_plan["known_limitations_or_warnings"]:
             _study_log("schur_summary.warning", detail=warning)
         if dry_run:
+            audit = _build_schur_summary_audit(
+                plan=schur_plan,
+                plan_path=schur_plan_path,
+                summary_payload=None,
+                recovered_reference_metadata={},
+                frame_truth_preview=frame_truth_preview,
+            )
+            audit_path = study_root / SCHUR_SUMMARY_AUDIT_FILENAME
+            _write_json(audit_path, audit)
+            summary["schur_summary_audit_path"] = str(audit_path.resolve())
+            summary["schur_summary_audit"] = audit
             if memory_recorder is not None:
                 memory_recorder.record(
                     "schur_summary.done",
@@ -6927,6 +7355,7 @@ def run_obs_subblock_study(
             schur_frame_quality_missing=str(schur_frame_quality_missing),
             schur_frame_mask_denominator=str(schur_frame_mask_denominator),
             schur_frame_mask_min_good_frames=int(schur_frame_mask_min_good_frames),
+            theta_reference_overrides=theta_reference_override_metadata,
             memory_recorder=memory_recorder,
         )
         summary["schur_summary"] = schur_summary
@@ -7109,6 +7538,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "Defaults to the four-scalar smoke-test set: "
             "source.separation_as,source.log_flux_total,"
             "source.contrast,optics.plate_scale_as_per_pix."
+        ),
+    )
+    parser.add_argument(
+        "--theta-reference-offset",
+        action="append",
+        default=None,
+        metavar="KEY=DELTA",
+        help=(
+            "Repeatable schur_summary inference/reference-only Theta offset. "
+            "The render truth context is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--theta-reference-value",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "Repeatable schur_summary inference/reference-only Theta value. "
+            "Cannot be combined with an offset for the same key."
         ),
     )
     parser.add_argument(
@@ -7509,6 +7958,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ),
         reference_diagnostics_profile=args.reference_diagnostics_profile,
         reuse_reference_inference=args.reuse_reference_inference,
+        theta_reference_offsets=parse_key_value_float_overrides(
+            args.theta_reference_offset,
+            option_name="--theta-reference-offset",
+        ),
+        theta_reference_values=parse_key_value_float_overrides(
+            args.theta_reference_value,
+            option_name="--theta-reference-value",
+        ),
         memory_diagnostics=bool(args.memory_diagnostics),
         memory_diagnostics_file=args.memory_diagnostics_file,
         dry_run=bool(args.dry_run),
