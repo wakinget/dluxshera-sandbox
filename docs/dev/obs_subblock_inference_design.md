@@ -558,17 +558,20 @@ This is a natural next step because plate scale is a shared quantity that may
 not be perfectly known, and small errors in plate scale can couple directly into
 registration recovery.
 
-### After that: temporal structure for frame state
+### Temporal structure for frame state
 
-A later phase should introduce an explicit temporal model for frame-varying
-registration, for example:
+The first temporal models are now implemented for the canonical registration
+keys:
 
-- independent frame parameters (first assumption)
-- shared anchor plus residuals
-- linear drift plus jitter
-- random walk
+- `independent`: per-frame registration parameters, the operational baseline.
+- `linear_drift`: a hard compact anchor/rate model.
+- `linear_drift_residual_jitter_prior`: per-frame registration parameters with
+  a profiled best-fit-linear residual penalty.
 
-This would move the block estimator closer to a mission-like smoothing problem.
+More generic temporal models, such as shared anchor plus residuals for arbitrary
+active keys or random walks, remain future work. Structured Schur extraction is
+still restricted to independent-frame layouts; coupled temporal models should
+use dense Schur until a temporal structured-curvature path exists.
 
 ### Later still: recursive block-to-block state update
 

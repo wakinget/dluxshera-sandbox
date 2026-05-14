@@ -14,7 +14,12 @@ Current implemented behavior
 - The objective is assembled as ``data_term + prior_term + temporal_term``.
 - The current data term is Gaussian image NLL with variance from either the
   observed cube or a scalar debug value.
-- The current temporal model implementation is ``frame_model.kind: independent``.
+- The operational temporal baseline is ``frame_model.kind: independent``.
+- ``frame_model.kind: linear_drift`` is implemented for the canonical
+  registration keys as a compact hard anchor/rate model.
+- ``frame_model.kind: linear_drift_residual_jitter_prior`` is implemented for
+  the same registration keys as per-frame registration values with a profiled
+  best-fit-linear residual penalty.
 - Priors are part of the operational objective structure, but non-empty prior
   configs are not implemented yet.
 
@@ -26,8 +31,9 @@ Tested now vs scaffolded
 - Implemented but lightly exercised: generic frame/shared active-state packing,
   shared initialization, generic recovered-state tables, and mapped JAX block
   prediction/loss helpers.
-- Scaffolded only: non-empty priors, non-``independent`` temporal models,
-  frame init modes beyond ``shared_guess``/``from_system``, and objective kinds
+- Scaffolded only: non-empty priors, temporal models outside the three
+  registration layouts above, frame init modes beyond
+  ``shared_guess``/``from_system``/``from_truth_trace``, and objective kinds
   beyond Gaussian image NLL.
 
 Examples
@@ -55,7 +61,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple
 
@@ -163,6 +169,8 @@ class ActiveStateLayout:
     frame_specs: tuple[ActiveKeySpec, ...]
     shared_specs: tuple[ActiveKeySpec, ...]
     n_frame: int
+    temporal_kind: str = "independent"
+    frame_times_s: tuple[float, ...] | None = None
 
     @property
     def frame_keys(self) -> tuple[str, ...]:
@@ -186,7 +194,15 @@ class ActiveStateLayout:
 
     @property
     def theta_size(self) -> int:
+        if self.temporal_kind == "linear_drift":
+            return 2 * self.frame_width + self.shared_width
         return self.n_frame * self.frame_width + self.shared_width
+
+    @property
+    def frame_times_array(self) -> jnp.ndarray:
+        if self.frame_times_s is None:
+            return jnp.arange(self.n_frame, dtype=float)
+        return jnp.asarray(self.frame_times_s, dtype=float)
 
 
 @dataclass(frozen=True)
@@ -483,20 +499,139 @@ def _theta_labels_for_layout(layout: ActiveStateLayout) -> list[str]:
     """Return readable labels in the exact packed-theta order."""
 
     labels: list[str] = []
-    for frame_index in range(layout.n_frame):
-        labels.extend(
-            f"frame[{frame_index}].{spec.canonical}" for spec in layout.frame_specs
-        )
+    if layout.temporal_kind in {"independent", "linear_drift_residual_jitter_prior"}:
+        for frame_index in range(layout.n_frame):
+            labels.extend(
+                f"frame[{frame_index}].{spec.canonical}" for spec in layout.frame_specs
+            )
+    elif layout.temporal_kind == "linear_drift":
+        _validate_linear_drift_layout(layout)
+        for spec in layout.frame_specs:
+            labels.append(f"drift_anchor.{spec.canonical}")
+            labels.append(f"drift_rate_per_s.{spec.canonical}")
+    else:
+        raise ValueError(f"Unsupported temporal frame_model kind: {layout.temporal_kind!r}.")
     labels.extend(f"shared.{spec.canonical}" for spec in layout.shared_specs)
     if len(labels) != layout.theta_size:
         raise ValueError("Theta label count does not match active-state layout.")
     return labels
 
 
+LINEAR_DRIFT_REGISTRATION_KEYS = (
+    "source.x_position_as",
+    "source.y_position_as",
+    "source.position_angle_deg",
+)
+
+
+def _validate_linear_drift_layout(layout: ActiveStateLayout) -> None:
+    """Validate the first hard linear-drift registration layout."""
+
+    if tuple(layout.frame_keys) != LINEAR_DRIFT_REGISTRATION_KEYS:
+        expected = ", ".join(LINEAR_DRIFT_REGISTRATION_KEYS)
+        got = ", ".join(layout.frame_keys)
+        raise ValueError(
+            f"temporal.frame_model.kind={layout.temporal_kind!r} currently supports only "
+            f"the canonical registration frame_keys [{expected}], got [{got}]."
+        )
+    if layout.n_frame <= 0:
+        raise ValueError("linear_drift temporal model requires at least one frame.")
+    if layout.frame_times_s is not None and len(layout.frame_times_s) != layout.n_frame:
+        raise ValueError("linear_drift frame time count must match n_frame.")
+
+
+def _linear_drift_centered_times(layout: ActiveStateLayout) -> jnp.ndarray:
+    times = layout.frame_times_array
+    return times - jnp.mean(times)
+
+
+def _linear_fit_residuals(
+    frame_values: jnp.ndarray,
+    frame_times: jnp.ndarray,
+) -> jnp.ndarray:
+    """Return column-wise residuals after profiling out a best-fit line."""
+
+    values = jnp.asarray(frame_values, dtype=float)
+    times = jnp.asarray(frame_times, dtype=float)
+    centered = times - jnp.mean(times)
+    intercept = jnp.mean(values, axis=0)
+    denom = jnp.sum(centered * centered)
+    slope = jnp.where(
+        denom > 0.0,
+        jnp.sum((values - intercept[None, :]) * centered[:, None], axis=0) / denom,
+        jnp.zeros((values.shape[1],), dtype=float),
+    )
+    fit = intercept[None, :] + centered[:, None] * slope[None, :]
+    return values - fit
+
+
+def _linear_fit_diagnostics(
+    *,
+    layout: ActiveStateLayout,
+    frame_values: np.ndarray,
+) -> dict[str, Any]:
+    """Return best-fit line and residual RMS diagnostics for frame values."""
+
+    _validate_linear_drift_layout(layout)
+    values = np.asarray(frame_values, dtype=float)
+    times = np.asarray(layout.frame_times_s, dtype=float) if layout.frame_times_s is not None else np.arange(layout.n_frame, dtype=float)
+    centered = times - float(np.mean(times))
+    denom = float(np.sum(centered * centered))
+    diagnostics: dict[str, Any] = {
+        "best_fit_line": {},
+        "residual_rms": {},
+    }
+    for idx, key in enumerate(layout.frame_keys):
+        series = values[:, idx]
+        intercept = float(np.mean(series))
+        slope = 0.0 if denom <= 0.0 else float(np.sum((series - intercept) * centered) / denom)
+        residual = series - (intercept + slope * centered)
+        diagnostics["best_fit_line"][key] = {"intercept": intercept, "slope_per_s": slope}
+        diagnostics["residual_rms"][key] = float(np.sqrt(np.mean(residual * residual)))
+    return diagnostics
+
+
+def _fit_linear_drift_compact(layout: ActiveStateLayout, frame: jnp.ndarray) -> jnp.ndarray:
+    """Fit anchor/rate pairs to expanded per-frame values."""
+
+    _validate_linear_drift_layout(layout)
+    frame_arr = jnp.asarray(frame, dtype=float)
+    centered = _linear_drift_centered_times(layout)
+    denom = jnp.sum(centered * centered)
+    anchors = jnp.mean(frame_arr, axis=0)
+    rates = jnp.where(
+        denom > 0.0,
+        jnp.sum((frame_arr - anchors[None, :]) * centered[:, None], axis=0) / denom,
+        jnp.zeros((layout.frame_width,), dtype=float),
+    )
+    return jnp.reshape(jnp.stack((anchors, rates), axis=1), (2 * layout.frame_width,))
+
+
+def expand_linear_drift_frame_values(
+    *,
+    frame_times_s: np.ndarray | list[float] | tuple[float, ...],
+    compact: np.ndarray | list[float] | tuple[float, ...],
+) -> np.ndarray:
+    """Expand registration anchor/rate compact drift values to frame X/Y/PA rows."""
+
+    times = np.asarray(frame_times_s, dtype=float)
+    compact_arr = np.asarray(compact, dtype=float)
+    if compact_arr.shape != (6,):
+        raise ValueError("linear_drift compact vector must have shape (6,).")
+    pairs = compact_arr.reshape(3, 2)
+    centered = times - float(np.mean(times))
+    return pairs[:, 0][None, :] + centered[:, None] * pairs[:, 1][None, :]
+
+
 def _pack_active_state(layout: ActiveStateLayout, state: ActiveState) -> jnp.ndarray:
     """Pack frame and shared state blocks into one optimizer theta vector."""
 
-    frame_flat = jnp.reshape(state.frame, (layout.n_frame * layout.frame_width,))
+    if layout.temporal_kind in {"independent", "linear_drift_residual_jitter_prior"}:
+        frame_flat = jnp.reshape(state.frame, (layout.n_frame * layout.frame_width,))
+    elif layout.temporal_kind == "linear_drift":
+        frame_flat = _fit_linear_drift_compact(layout, state.frame)
+    else:
+        raise ValueError(f"Unsupported temporal frame_model kind: {layout.temporal_kind!r}.")
     if layout.shared_width == 0:
         return frame_flat
     return jnp.concatenate((frame_flat, state.shared), axis=0)
@@ -506,10 +641,22 @@ def _unpack_active_state(layout: ActiveStateLayout, theta_flat: jnp.ndarray) -> 
     """Unpack one optimizer theta vector into frame and shared state blocks."""
 
     theta_arr = jnp.asarray(theta_flat)
-    frame_size = layout.n_frame * layout.frame_width
+    frame_size = (
+        layout.n_frame * layout.frame_width
+        if layout.temporal_kind in {"independent", "linear_drift_residual_jitter_prior"}
+        else 2 * layout.frame_width
+    )
     frame_flat = theta_arr[:frame_size]
     shared = theta_arr[frame_size:]
-    frame = jnp.reshape(frame_flat, (layout.n_frame, layout.frame_width))
+    if layout.temporal_kind in {"independent", "linear_drift_residual_jitter_prior"}:
+        frame = jnp.reshape(frame_flat, (layout.n_frame, layout.frame_width))
+    elif layout.temporal_kind == "linear_drift":
+        _validate_linear_drift_layout(layout)
+        pairs = jnp.reshape(frame_flat, (layout.frame_width, 2))
+        centered = _linear_drift_centered_times(layout)
+        frame = pairs[:, 0][None, :] + centered[:, None] * pairs[:, 1][None, :]
+    else:
+        raise ValueError(f"Unsupported temporal frame_model kind: {layout.temporal_kind!r}.")
     return ActiveState(frame=frame, shared=shared)
 
 
@@ -675,6 +822,7 @@ def _resolve_initial_active_state(
     layout: ActiveStateLayout,
     base_store: ParameterStore,
     init_cfg: dict[str, Any],
+    truth_trace: ObsSubblockTrace | None = None,
 ) -> ActiveState:
     """Resolve the initial optimizer state from config and the assumed system.
 
@@ -706,7 +854,40 @@ def _resolve_initial_active_state(
             dtype=float,
         )
         frame_matrix = np.repeat(frame_seed[None, :], repeats=layout.n_frame, axis=0)
-    elif frame_mode in {"explicit_table", "from_truth_trace", "previous_block"}:
+    elif frame_mode == "from_truth_trace":
+        if truth_trace is None:
+            raise ValueError(
+                "experiment.inference.init.frame.mode='from_truth_trace' requires "
+                "experiment.inference.data.truth_trace with matching frame count."
+            )
+        if truth_trace.frame_count != layout.n_frame:
+            raise ValueError(
+                "from_truth_trace initialization requires trace frame count to match cube."
+            )
+        rows: list[list[float]] = []
+        offsets = _coerce_numeric_mapping(
+            frame_init_cfg.get("offsets"),
+            path="experiment.inference.init.frame.offsets",
+        )
+        unknown_offsets = sorted(set(offsets) - set(layout.frame_keys))
+        if unknown_offsets:
+            raise ValueError(
+                "experiment.inference.init.frame.offsets contains keys not present "
+                "in active.frame_keys: " + ", ".join(unknown_offsets)
+            )
+        for row_index, row in enumerate(truth_trace.rows):
+            values: list[float] = []
+            for spec in layout.frame_specs:
+                raw_value = row.get(spec.canonical)
+                if raw_value is None:
+                    raise ValueError(
+                        "from_truth_trace initialization requires truth trace column "
+                        f"{spec.canonical!r}; missing at row {row_index}."
+                    )
+                values.append(float(raw_value) + float(offsets.get(spec.canonical, 0.0)))
+            rows.append(values)
+        frame_matrix = np.asarray(rows, dtype=float)
+    elif frame_mode in {"explicit_table", "previous_block"}:
         raise ValueError(
             "experiment.inference.init.frame.mode "
             f"{frame_mode!r} is not implemented yet."
@@ -1140,6 +1321,9 @@ def _build_prior_term_fn(
 
 def _build_temporal_term_fn(
     temporal_cfg: dict[str, Any],
+    *,
+    layout: ActiveStateLayout,
+    objective_cfg: Mapping[str, Any],
 ) -> Callable[[ActiveState], jnp.ndarray]:
     """Build the temporal contribution to the block objective."""
 
@@ -1153,18 +1337,124 @@ def _build_temporal_term_fn(
         "kind",
         path="experiment.inference.temporal.frame_model",
     )
-    if frame_model_kind != "independent":
+    if frame_model_kind not in {
+        "independent",
+        "linear_drift",
+        "linear_drift_residual_jitter_prior",
+    }:
         raise ValueError(
             "experiment.inference.temporal.frame_model.kind "
             f"{frame_model_kind!r} is not implemented yet."
         )
-    if set(frame_model_cfg) != {"kind"}:
+    if frame_model_kind in {"independent", "linear_drift"} and set(frame_model_cfg) != {"kind"}:
         raise ValueError(
-            "Independent frame_model currently supports only the 'kind' field."
+            f"{frame_model_kind} frame_model currently supports only the 'kind' field."
+        )
+    if frame_model_kind == "linear_drift_residual_jitter_prior":
+        return _build_linear_drift_residual_prior_term(
+            layout=layout,
+            frame_model_cfg=frame_model_cfg,
+            objective_cfg=objective_cfg,
         )
 
     def _temporal_term(_state: ActiveState) -> jnp.ndarray:
         return jnp.array(0.0, dtype=float)
+
+    return _temporal_term
+
+
+def _parse_residual_prior_sigmas(
+    *,
+    frame_model_cfg: Mapping[str, Any],
+    layout: ActiveStateLayout,
+) -> dict[str, float]:
+    """Validate residual-prior sigmas for the canonical registration keys."""
+
+    _validate_linear_drift_layout(layout)
+    allowed_keys = {"kind", "residual_prior", "reduce"}
+    unknown = sorted(set(frame_model_cfg) - allowed_keys)
+    if unknown:
+        raise ValueError(
+            "linear_drift_residual_jitter_prior frame_model contains unsupported "
+            "field(s): " + ", ".join(unknown)
+        )
+    residual_prior = frame_model_cfg.get("residual_prior")
+    if not isinstance(residual_prior, Mapping):
+        raise ValueError(
+            "experiment.inference.temporal.frame_model.residual_prior must be a mapping."
+        )
+    sigmas: dict[str, float] = {}
+    for key in LINEAR_DRIFT_REGISTRATION_KEYS:
+        if key not in residual_prior:
+            raise ValueError(
+                "Missing residual prior sigma for "
+                f"experiment.inference.temporal.frame_model.residual_prior.{key}."
+            )
+        raw = residual_prior[key]
+        if isinstance(raw, Mapping):
+            if "sigma" not in raw:
+                raise ValueError(
+                    "Missing sigma field for "
+                    f"experiment.inference.temporal.frame_model.residual_prior.{key}."
+                )
+            raw = raw["sigma"]
+        sigma = float(
+            coerce_numeric_value(
+                raw,
+                path=(
+                    "experiment.inference.temporal.frame_model."
+                    f"residual_prior.{key}.sigma"
+                ),
+                must_be_positive=True,
+            )
+        )
+        if not np.isfinite(sigma):
+            raise ValueError(f"Residual prior sigma for {key} must be finite.")
+        sigmas[key] = sigma
+    return sigmas
+
+
+def _normalize_temporal_reduce(
+    *,
+    frame_model_cfg: Mapping[str, Any],
+    objective_cfg: Mapping[str, Any],
+) -> str:
+    raw = str(frame_model_cfg.get("reduce", "match_subblock_reduce"))
+    if raw == "match_subblock_reduce":
+        raw = str(objective_cfg["subblock_reduce"])
+    if raw not in {"sum", "mean"}:
+        raise ValueError(
+            "experiment.inference.temporal.frame_model.reduce must be "
+            "'match_subblock_reduce', 'sum', or 'mean'."
+        )
+    return raw
+
+
+def _build_linear_drift_residual_prior_term(
+    *,
+    layout: ActiveStateLayout,
+    frame_model_cfg: Mapping[str, Any],
+    objective_cfg: Mapping[str, Any],
+) -> Callable[[ActiveState], jnp.ndarray]:
+    """Build profiled linear-drift residual-jitter temporal penalty."""
+
+    sigmas = _parse_residual_prior_sigmas(
+        frame_model_cfg=frame_model_cfg,
+        layout=layout,
+    )
+    reduce = _normalize_temporal_reduce(
+        frame_model_cfg=frame_model_cfg,
+        objective_cfg=objective_cfg,
+    )
+    sigma_vec = jnp.asarray([sigmas[key] for key in layout.frame_keys], dtype=float)
+    frame_times = layout.frame_times_array
+
+    def _temporal_term(state: ActiveState) -> jnp.ndarray:
+        residuals = _linear_fit_residuals(state.frame, frame_times)
+        per_frame = 0.5 * jnp.sum((residuals / sigma_vec[None, :]) ** 2, axis=1)
+        if reduce == "mean":
+            return jnp.mean(per_frame)
+        return jnp.sum(per_frame)
 
     return _temporal_term
 
@@ -1207,7 +1497,11 @@ def _build_objective_bundle(
     data_cube = jnp.asarray(cube_data)
     var_cube = jnp.asarray(variance_cube)
     prior_term_fn = _build_prior_term_fn(priors_cfg)
-    temporal_term_fn = _build_temporal_term_fn(temporal_cfg)
+    temporal_term_fn = _build_temporal_term_fn(
+        temporal_cfg,
+        layout=layout,
+        objective_cfg=objective_cfg,
+    )
 
     def _shared_store(shared_values: jnp.ndarray) -> ParameterStore:
         return _apply_runtime_active_values(
@@ -3376,6 +3670,25 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         and active_layout.frame_width > 0
         and truth_frame_matrix.has_available
     )
+    frame_model_kind = _frame_model_kind(inference_cfg["temporal"])
+    if frame_model_kind in {"linear_drift", "linear_drift_residual_jitter_prior"}:
+        if time_trace is not None:
+            frame_times = tuple(float(row["time_s"]) for row in time_trace.rows)
+        else:
+            frame_times = tuple(float(index) for index in range(n_frame))
+        active_layout = replace(
+            active_layout,
+            temporal_kind=frame_model_kind,
+            frame_times_s=frame_times,
+        )
+        _validate_linear_drift_layout(active_layout)
+    elif frame_model_kind == "independent":
+        active_layout = replace(active_layout, temporal_kind="independent")
+    else:
+        raise ValueError(
+            "Unsupported experiment.inference.temporal.frame_model.kind "
+            f"{frame_model_kind!r}."
+        )
 
     configured_outdir = experiment["outputs"]["outdir"]
     if args.results_dir is not None:
@@ -3461,6 +3774,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         layout=active_layout,
         base_store=base_store,
         init_cfg=inference_cfg["init"],
+        truth_trace=truth_trace_for_values,
     )
     theta0 = _pack_active_state(active_layout, initial_state)
     theta_labels = _theta_labels_for_layout(active_layout)
@@ -3894,6 +4208,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     final_data_term, final_prior_term, final_temporal_term = objective_bundle.objective_terms_fn(
         theta_final
     )
+    initial_data_term, initial_prior_term, initial_temporal_term = objective_bundle.objective_terms_fn(
+        theta0
+    )
 
     if time_trace is not None:
         times = np.asarray([float(row["time_s"]) for row in time_trace.rows], dtype=float)
@@ -4073,6 +4390,42 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         )
 
     initial_state_np = _unpack_active_state(active_layout, theta0)
+    compact_drift_parameters: dict[str, Any] | None = None
+    if active_layout.temporal_kind == "linear_drift":
+        theta_final_frame = theta_final_np[: 2 * active_layout.frame_width].reshape(
+            active_layout.frame_width,
+            2,
+        )
+        compact_drift_parameters = {
+            spec.canonical: {
+                "anchor": float(theta_final_frame[idx, 0]),
+                "rate_per_s": float(theta_final_frame[idx, 1]),
+            }
+            for idx, spec in enumerate(active_layout.frame_specs)
+        }
+    temporal_diagnostics: dict[str, Any] = {"kind": active_layout.temporal_kind}
+    if active_layout.temporal_kind == "linear_drift_residual_jitter_prior":
+        frame_model_cfg = inference_cfg["temporal"]["frame_model"]
+        sigmas = _parse_residual_prior_sigmas(
+            frame_model_cfg=frame_model_cfg,
+            layout=active_layout,
+        )
+        temporal_reduce = _normalize_temporal_reduce(
+            frame_model_cfg=frame_model_cfg,
+            objective_cfg=inference_cfg["objective"],
+        )
+        temporal_diagnostics.update(
+            {
+                "residual_prior_sigma": sigmas,
+                "reduce": temporal_reduce,
+                "initial_temporal_penalty": float(np.asarray(initial_temporal_term)),
+                "final_temporal_penalty": float(np.asarray(final_temporal_term)),
+                **_linear_fit_diagnostics(
+                    layout=active_layout,
+                    frame_values=final_frame_matrix,
+                ),
+            }
+        )
     initial_frame_values = {
         spec.canonical: float(np.asarray(initial_state_np.frame[0, idx]))
         for idx, spec in enumerate(active_layout.frame_specs)
@@ -4106,6 +4459,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "active": {
             "frame_keys": list(active_layout.frame_keys),
             "shared_keys": list(active_layout.shared_keys),
+            "temporal_theta_labels": theta_labels,
         },
         "truth": {
             "trace_path": truth_frame_matrix.trace_path,
@@ -4123,6 +4477,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "shared": initial_shared_values,
         },
         "recovered_shared": recovered_shared_values,
+        "recovered_temporal_compact": compact_drift_parameters,
+        "temporal_diagnostics": temporal_diagnostics,
         "priors": to_jsonable_obs_subblock_payload(inference_cfg["priors"]),
         "temporal": to_jsonable_obs_subblock_payload(inference_cfg["temporal"]),
         "objective": to_jsonable_obs_subblock_payload(inference_cfg["objective"]),
@@ -4212,6 +4568,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "final_data_term": float(np.asarray(final_data_term)),
             "final_prior_term": float(np.asarray(final_prior_term)),
             "final_temporal_term": float(np.asarray(final_temporal_term)),
+            "initial_data_term": float(np.asarray(initial_data_term)),
+            "initial_prior_term": float(np.asarray(initial_prior_term)),
+            "initial_temporal_term": float(np.asarray(initial_temporal_term)),
             "mean_frame_nll": float(np.mean(frame_data_terms)),
             "chi2": {
                 "metric_notes": CHI2_METRIC_NOTES,

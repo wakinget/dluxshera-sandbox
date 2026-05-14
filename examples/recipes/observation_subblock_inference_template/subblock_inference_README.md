@@ -512,7 +512,11 @@ The current tested workflow is:
 - `active.frame_keys` must be exactly `source.x_position_as`, `source.y_position_as`, `source.position_angle_deg`
 - `active.shared_keys` must be `[]`
 - `init.frame.mode` should be `shared_guess` with values under `init.frame.values`
-- `temporal.frame_model.kind` must be `independent`
+- `temporal.frame_model.kind` may be `independent`, `linear_drift`, or
+  `linear_drift_residual_jitter_prior` for the canonical registration keys.
+  `independent` is the operational per-frame baseline. `linear_drift` uses a
+  hard compact anchor/rate fit. `linear_drift_residual_jitter_prior` keeps
+  per-frame values but penalizes deviations from their profiled best-fit line.
 - `objective.kind` must be `nll`
 - `objective.noise_model.kind` must be `gaussian`
 - `objective.noise_model.variance_model` is typically `data`, optional debug `scalar`,
@@ -537,8 +541,11 @@ vector. Internally it packs:
 Current limitations remain explicit:
 
 - non-empty `priors.frame` / `priors.shared` are not implemented yet
-- temporal behavior beyond `frame_model.kind: independent` is not implemented yet
-- frame init modes beyond `shared_guess` / `from_system` are not implemented yet
+- temporal behavior beyond `independent`, canonical-registration `linear_drift`,
+  and canonical-registration `linear_drift_residual_jitter_prior` is not
+  implemented yet
+- frame init modes beyond `shared_guess` / `from_system` / `from_truth_trace`
+  are not implemented yet
 
 ## Output artifacts
 

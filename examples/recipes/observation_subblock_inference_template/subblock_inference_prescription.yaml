@@ -126,32 +126,22 @@ experiment:
 
     temporal:
       # The within-block evolution model for the frame-varying state.
-      # First milestone: independent per-frame registration terms.
+      # independent is the operational per-frame baseline. The recipe also
+      # supports canonical-registration linear_drift and
+      # linear_drift_residual_jitter_prior temporal models.
       frame_model:
         kind: independent
 
-        # Future temporal models we are considering:
-        # kind: shared_anchor_plus_residual
-        # kind: drift_plus_jitter
-        # kind: random_walk
-        #
-        # Possible future parameters:
-        # anchor_keys:
-        #   - source.x_position_as
-        #   - source.y_position_as
-        # drift_keys:
-        #   - source.x_position_as
-        #   - source.y_position_as
-        # residual_sigma:
-        #   source.x_position_as: 0.002
-        #   source.y_position_as: 0.002
-        #   source.position_angle_deg: 0.01
-        #
-        # random-walk example:
-        # step_sigma:
-        #   source.x_position_as: 0.001
-        #   source.y_position_as: 0.001
-        #   source.position_angle_deg: 0.005
+        # Residual-prior example:
+        # kind: linear_drift_residual_jitter_prior
+        # residual_prior:
+        #   source.x_position_as:
+        #     sigma: 0.010
+        #   source.y_position_as:
+        #     sigma: 0.010
+        #   source.position_angle_deg:
+        #     sigma: 1.0e-4
+        # reduce: match_subblock_reduce
 
     objective:
       # First milestone: NLL-style image-domain block objective.

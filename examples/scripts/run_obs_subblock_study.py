@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 import tracemalloc
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -669,10 +669,19 @@ def _select_schur_curvature_method(
     if structured_supported:
         return SCHUR_CURVATURE_METHOD_STRUCTURED
     detail = f" Failed assumption(s): {unsupported_reasons}." if unsupported_reasons else ""
+    residual_prior_hint = (
+        " linear_drift_residual_jitter_prior couples frames through a profiled "
+        "line fit and currently requires dense Schur; for the 20-frame four-scalar "
+        "comparison use --max-dense-dim 80."
+        if str(structured_support.get("frame_model_kind"))
+        == "linear_drift_residual_jitter_prior"
+        else ""
+    )
     raise ValueError(
         f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}, "
         "and structured Schur export is not available. "
         + structured_message
+        + residual_prior_hint
         + detail
     )
 
@@ -3352,6 +3361,27 @@ def _prepare_inference_context(
         if trace.frame_count != n_frame:
             trace = None
 
+    frame_model_kind = recipe._frame_model_kind(inference_cfg["temporal"])
+    if frame_model_kind in {"linear_drift", "linear_drift_residual_jitter_prior"}:
+        frame_times = (
+            tuple(float(row["time_s"]) for row in trace.rows)
+            if trace is not None
+            else tuple(float(index) for index in range(n_frame))
+        )
+        active_layout = replace(
+            active_layout,
+            temporal_kind=frame_model_kind,
+            frame_times_s=frame_times,
+        )
+        recipe._validate_linear_drift_layout(active_layout)
+    elif frame_model_kind == "independent":
+        active_layout = replace(active_layout, temporal_kind="independent")
+    else:
+        raise ValueError(
+            "Unsupported experiment.inference.temporal.frame_model.kind "
+            f"{frame_model_kind!r}."
+        )
+
     truth_frame_matrix = recipe._build_truth_frame_matrix(
         trace,
         layout=active_layout,
@@ -3362,6 +3392,7 @@ def _prepare_inference_context(
         layout=active_layout,
         base_store=base_store,
         init_cfg=inference_cfg["init"],
+        truth_trace=trace,
     )
     theta0 = recipe._pack_active_state(active_layout, initial_state)
     variance_cube = recipe._build_variance_cube(
@@ -4127,18 +4158,25 @@ def _build_combined_local_objective(
     frame_reduce = str(inference_cfg["objective"]["frame_reduce"])
     subblock_reduce = str(inference_cfg["objective"]["subblock_reduce"])
     prior_term_fn = recipe._build_prior_term_fn(inference_cfg["priors"])
-    temporal_term_fn = recipe._build_temporal_term_fn(inference_cfg["temporal"])
+    temporal_term_fn = recipe._build_temporal_term_fn(
+        inference_cfg["temporal"],
+        layout=active_layout,
+        objective_cfg=inference_cfg["objective"],
+    )
 
     priors_nonempty = bool(inference_cfg["priors"]["frame"] or inference_cfg["priors"]["shared"])
     temporal_kind = str(inference_cfg["temporal"]["frame_model"]["kind"])
     if objective_kind not in {"data_only", "full_objective"}:
         raise ValueError("summary objective must be 'data_only' or 'full_objective'.")
     if objective_kind == "full_objective" and (
-        priors_nonempty or temporal_kind != "independent"
+        priors_nonempty
+        or temporal_kind
+        not in {"independent", "linear_drift", "linear_drift_residual_jitter_prior"}
     ):
         raise ValueError(
             "v0 schur_summary only supports full_objective when priors are empty "
-            "and temporal.frame_model.kind='independent'."
+            "and temporal.frame_model.kind is 'independent', 'linear_drift', "
+            "or 'linear_drift_residual_jitter_prior'."
         )
 
     def _shared_store_from_local(
@@ -4368,8 +4406,15 @@ def _estimate_phi_labels_from_inference_cfg(
     active_cfg = inference_cfg.get("active", {})
     frame_keys = tuple(str(key) for key in active_cfg.get("frame_keys", ()))
     shared_keys = tuple(str(key) for key in active_cfg.get("shared_keys", ()))
+    temporal_cfg = inference_cfg.get("temporal", {})
+    frame_model_cfg = temporal_cfg.get("frame_model", {}) if isinstance(temporal_cfg, Mapping) else {}
+    temporal_kind = str(frame_model_cfg.get("kind", "independent"))
     labels: list[str] = []
-    if n_frames is not None:
+    if temporal_kind == "linear_drift":
+        for key in frame_keys:
+            labels.append(f"phi.drift_anchor.{key}")
+            labels.append(f"phi.drift_rate_per_s.{key}")
+    elif n_frames is not None:
         for frame_index in range(int(n_frames)):
             labels.extend(f"phi.frame[{frame_index}].{key}" for key in frame_keys)
     labels.extend(f"phi.shared.{key}" for key in shared_keys)
