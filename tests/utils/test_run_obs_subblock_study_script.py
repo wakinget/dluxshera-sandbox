@@ -900,17 +900,17 @@ def test_fisher_only_auto_switches_to_structured_arrowhead_for_large_theta(
     assert summary["noise_audit"]["variance_source"] == "provided_cube"
 
 
-def test_schur_curvature_method_selection_prefers_dense_below_guard():
+def test_schur_curvature_method_selection_prefers_structured_when_supported():
     module = _load_script_module()
 
     used = module._select_schur_curvature_method(
         requested_method="auto",
         combined_dim=12,
         max_dense_dim=20,
-        structured_support={"supported": True, "unsupported_reasons": []},
+        structured_support={"supported": True, "unsupported_reasons": [], "frame_model_kind": "independent"},
     )
 
-    assert used == "dense"
+    assert used == "structured_independent_frames"
 
 
 def test_schur_curvature_method_selection_uses_structured_above_guard():
@@ -920,7 +920,7 @@ def test_schur_curvature_method_selection_uses_structured_above_guard():
         requested_method="auto",
         combined_dim=64,
         max_dense_dim=60,
-        structured_support={"supported": True, "unsupported_reasons": []},
+        structured_support={"supported": True, "unsupported_reasons": [], "frame_model_kind": "independent"},
     )
 
     assert used == "structured_independent_frames"
@@ -933,7 +933,7 @@ def test_schur_curvature_method_selection_uses_structured_for_20_frame_default_g
         requested_method="auto",
         combined_dim=64,
         max_dense_dim=module.DEFAULT_SCHUR_MAX_DENSE_DIM,
-        structured_support={"supported": True, "unsupported_reasons": []},
+        structured_support={"supported": True, "unsupported_reasons": [], "frame_model_kind": "independent"},
     )
 
     assert used == "structured_independent_frames"
@@ -971,6 +971,18 @@ def test_dense_vs_structured_comparison_state_is_opt_in_and_guarded():
         == "combined_dim_exceeds_max_dense_dim"
     )
 
+    linear_drift_state = module._dense_vs_structured_comparison_state(
+        requested=True,
+        curvature_method_used="structured_linear_drift",
+        combined_dim=10,
+        max_dense_dim=40,
+    )
+    assert linear_drift_state["dense_vs_structured_comparison_run"] is False
+    assert (
+        linear_drift_state["dense_vs_structured_comparison_skipped_reason"]
+        == "unsupported_for_structured_linear_drift"
+    )
+
 
 def test_schur_curvature_method_selection_rejects_unsupported_layout():
     module = _load_script_module()
@@ -983,8 +995,60 @@ def test_schur_curvature_method_selection_rejects_unsupported_layout():
             structured_support={
                 "supported": False,
                 "unsupported_reasons": ["shared active subblock state is configured"],
+                "frame_model_kind": "independent",
             },
         )
+
+
+def test_schur_curvature_method_selection_linear_drift_prefers_structured_projection():
+    module = _load_script_module()
+    used = module._select_schur_curvature_method(
+        requested_method="auto",
+        combined_dim=64,
+        max_dense_dim=40,
+        structured_support={"supported": True, "unsupported_reasons": [], "frame_model_kind": "linear_drift"},
+    )
+    assert used == "structured_linear_drift"
+
+
+def test_schur_curvature_method_selection_residual_prior_prefers_structured():
+    module = _load_script_module()
+    used = module._select_schur_curvature_method(
+        requested_method="auto",
+        combined_dim=64,
+        max_dense_dim=80,
+        structured_support={
+            "supported": True,
+            "unsupported_reasons": [],
+            "frame_model_kind": "linear_drift_residual_jitter_prior",
+        },
+    )
+    assert used == "structured_residual_prior"
+
+
+def test_linear_drift_design_matrix_projects_compact_state():
+    module = _load_script_module()
+    times = [0.05, 0.15, 0.25]
+    design = module._linear_drift_design_matrix(
+        frame_times_s=times,
+        frame_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ),
+    )
+    q = np.asarray([1.0, 2.0, -1.0, 4.0, 90.0, 0.5], dtype=float)
+    expanded = design @ q
+    centered = np.asarray(times, dtype=float) - np.mean(times)
+    expected = np.stack(
+        (
+            1.0 + 2.0 * centered,
+            -1.0 + 4.0 * centered,
+            90.0 + 0.5 * centered,
+        ),
+        axis=1,
+    ).reshape(-1)
+    np.testing.assert_allclose(expanded, expected)
 
 
 def test_fisher_only_dry_run_writes_shared_candidate_config(tmp_path: Path):
@@ -1405,10 +1469,7 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert plan["dense_hessian_allowed"] is True
     assert plan["dense_vs_structured_comparison_requested"] is False
     assert plan["dense_vs_structured_comparison_run"] is False
-    assert (
-        plan["dense_vs_structured_comparison_skipped_reason"]
-        == "curvature_method_not_structured"
-    )
+    assert plan["dense_vs_structured_comparison_skipped_reason"] == "not_requested"
     assert plan["planned_artifacts"]["subblock_summary_json"].endswith(
         "subblock_summary.json"
     )

@@ -11,9 +11,15 @@ from typing import TYPE_CHECKING, Any
 
 import jax.numpy as jnp
 import numpy as np
+import dLux as dl
 from dLuxToliman import AlphaCen
 
-from ..components.sources import TargetSpec, get_target_spec
+from ..components.sources import (
+    TargetSpec,
+    binary_mean_flux_from_total_and_contrast,
+    get_target_spec,
+    linear_total_flux_from_log10,
+)
 from ..utils.source_photometry import (
     build_wavelength_grid_m,
     derive_source_photometry,
@@ -29,6 +35,48 @@ from ..params.store import ParameterStore
 
 
 SOURCE_RUNTIME_BINDINGS: tuple[tuple[str, str], ...] = ()
+ARCSEC_TO_RAD = np.pi / (180.0 * 3600.0)
+
+
+class _TracerSafePointSource(dl.sources.Source):
+    """Point-source variant that keeps flux traceable for local autodiff."""
+
+    position: Any
+    flux: Any
+
+    def __init__(
+        self,
+        wavelengths: Any = None,
+        *,
+        position: Any = None,
+        flux: Any = 1.0,
+        weights: Any = None,
+        spectrum: Any = None,
+    ) -> None:
+        self.position = jnp.asarray(
+            jnp.zeros(2) if position is None else position,
+            dtype=float,
+        )
+        self.flux = jnp.asarray(flux, dtype=float)
+        if self.position.shape != (2,):
+            raise ValueError("position must be a 1d array of shape (2,).")
+        super().__init__(wavelengths=wavelengths, weights=weights, spectrum=spectrum)
+
+    def model(
+        self,
+        optics: Any,
+        return_wf: bool = False,
+        return_psf: bool = False,
+    ) -> Any:
+        source = self.normalise()
+        weights = source.weights * source.flux
+        return optics.propagate(
+            source.wavelengths,
+            source.position,
+            weights,
+            return_wf,
+            return_psf,
+        )
 
 
 def _target_sed_root() -> resources.abc.Traversable:
@@ -114,6 +162,126 @@ def _resolve_target_spec(target_key: Any) -> TargetSpec | None:
     return get_target_spec(str(target_key))
 
 
+def arcsec_pair_to_radians(x_as: Any, y_as: Any) -> jnp.ndarray:
+    """Return a two-vector sky position in radians from arcseconds.
+
+    Parameters
+    ----------
+    x_as, y_as:
+        Store-facing source position components in arcseconds.
+
+    Returns
+    -------
+    jax.Array
+        Position vector ``[x, y]`` in radians for native dLux sources.
+    """
+
+    return jnp.asarray([x_as, y_as], dtype=float) * jnp.asarray(ARCSEC_TO_RAD, dtype=float)
+
+
+def deg_to_rad(position_angle_deg: Any) -> jnp.ndarray:
+    """Return an angle in radians from a store-facing degree value.
+
+    Parameters
+    ----------
+    position_angle_deg:
+        Position angle in degrees.
+
+    Returns
+    -------
+    jax.Array
+        Position angle in radians.
+    """
+
+    return jnp.deg2rad(jnp.asarray(position_angle_deg, dtype=float))
+
+
+def _build_flat_spectrum(
+    store: ParameterStore,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+    source_cfg: Mapping[str, Any],
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return wavelength grid and unit-normalized flat weights."""
+
+    wavelength_m = _store_or_cfg(
+        store,
+        "source.wavelength_m",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    bandwidth_m = _store_or_cfg(
+        store,
+        "source.bandwidth_m",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    n_lambda = _store_or_cfg(
+        store,
+        "source.n_lambda",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    if wavelength_m is None or bandwidth_m is None or n_lambda is None:
+        raise ValueError(
+            "Missing required source values. Expected source.wavelength_m, "
+            "source.bandwidth_m, and source.n_lambda (in store or config)."
+        )
+
+    wavelengths = build_wavelength_grid_m(
+        wavelength_m=float(wavelength_m),
+        bandwidth_m=float(bandwidth_m),
+        n_lambda=int(n_lambda),
+    )
+    weights = np.full((int(n_lambda),), 1.0 / float(n_lambda), dtype=float)
+    return jnp.asarray(wavelengths), jnp.asarray(weights)
+
+
+def _source_position_from_store_or_cfg(
+    store: ParameterStore,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+    source_cfg: Mapping[str, Any],
+) -> jnp.ndarray:
+    """Return native dLux source position in radians."""
+
+    x_position = _store_or_cfg(
+        store,
+        "source.x_position_as",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=0.0,
+    )
+    y_position = _store_or_cfg(
+        store,
+        "source.y_position_as",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=0.0,
+    )
+    return arcsec_pair_to_radians(x_position, y_position)
+
+
+def _log_flux_total_from_store_or_cfg(
+    store: ParameterStore,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+    source_cfg: Mapping[str, Any],
+) -> Any:
+    """Return public source.log_flux_total from store or config."""
+
+    log_flux_total = _store_or_cfg(
+        store,
+        "source.log_flux_total",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    if log_flux_total is None:
+        raise ValueError("Missing required source.log_flux_total for source construction.")
+    return log_flux_total
+
+
 def load_normalized_sed_weights(
     sed_path: Path,
     wavelength_grid_m: np.ndarray,
@@ -181,6 +349,84 @@ def _derive_nominal_target_photometry(
         sed_b_path=None,
         vmag_a=vmag_a,
         vmag_b=vmag_b,
+    )
+
+
+def build_single_star_source(
+    store: ParameterStore,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+) -> dl.PointSource:
+    """Construct a native dLux point source from public dLuxShera keys.
+
+    The store-facing flux parameter is ``source.log_flux_total``. This builder
+    converts it to linear photons only when instantiating ``dLux.PointSource``.
+    """
+
+    source_cfg = _extract_source_cfg(cfg)
+    wavelengths, weights = _build_flat_spectrum(store, cfg, source_cfg)
+    position = _source_position_from_store_or_cfg(store, cfg, source_cfg)
+    log_flux_total = _log_flux_total_from_store_or_cfg(store, cfg, source_cfg)
+    flux = linear_total_flux_from_log10(log_flux_total)
+
+    return _TracerSafePointSource(
+        wavelengths,
+        position=position,
+        flux=flux,
+        weights=weights,
+    )
+
+
+def build_binary_source(
+    store: ParameterStore,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+) -> dl.BinarySource:
+    """Construct a generic native dLux binary source.
+
+    The public ``source.log_flux_total`` parameter is interpreted as total
+    binary photons. dLux ``BinarySource.mean_flux`` is the average component
+    flux, so this builder passes ``total_flux / 2``.
+    """
+
+    source_cfg = _extract_source_cfg(cfg)
+    wavelengths, flat_weights = _build_flat_spectrum(store, cfg, source_cfg)
+    position = _source_position_from_store_or_cfg(store, cfg, source_cfg)
+    log_flux_total = _log_flux_total_from_store_or_cfg(store, cfg, source_cfg)
+    total_flux = linear_total_flux_from_log10(log_flux_total)
+    contrast = _store_or_cfg(
+        store,
+        "source.contrast",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=1.0,
+    )
+    separation_as = _store_or_cfg(
+        store,
+        "source.separation_as",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    if separation_as is None:
+        raise ValueError("Missing required source.separation_as for generic binary source.")
+    position_angle_deg = _store_or_cfg(
+        store,
+        "source.position_angle_deg",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=0.0,
+    )
+
+    weights = jnp.stack((flat_weights, flat_weights), axis=0)
+    mean_flux = binary_mean_flux_from_total_and_contrast(total_flux, contrast)
+
+    return dl.BinarySource(
+        wavelengths,
+        position=position,
+        separation=jnp.asarray(separation_as, dtype=float) * jnp.asarray(ARCSEC_TO_RAD, dtype=float),
+        position_angle=deg_to_rad(position_angle_deg),
+        mean_flux=mean_flux,
+        contrast=contrast,
+        weights=weights,
     )
 
 
@@ -394,23 +640,54 @@ def build_alpha_cen_source(
 
 
 def apply_runtime_bindings(
-    source: AlphaCen,
+    source: object,
     store: ParameterStore | None,
     *,
     cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
     bindings: tuple[tuple[str, str], ...] = SOURCE_RUNTIME_BINDINGS,
-) -> AlphaCen:
+) -> object:
     """Apply runtime ``source.*`` store overrides onto a cached source."""
 
     if store is None:
         return source
+
+    source_kind = str(_extract_source_cfg(cfg).get("kind", "binary_target")).lower()
+    if source_kind == "single_star":
+        return build_single_star_source(store, cfg=cfg)
+    if source_kind == "binary":
+        return build_binary_source(store, cfg=cfg)
 
     if bindings:
         for store_key, set_path in bindings:
             val = store.get(store_key, default=None)
             if val is None:
                 continue
-            source = source.set(set_path, val)
+            if hasattr(source, "mean_flux") and set_path == "separation":
+                source = source.set("separation", jnp.asarray(val, dtype=float) * ARCSEC_TO_RAD)
+                continue
+            if hasattr(source, "mean_flux") and set_path == "position_angle":
+                source = source.set("position_angle", jnp.deg2rad(jnp.asarray(val, dtype=float)))
+                continue
+            if hasattr(source, set_path):
+                source = source.set(set_path, val)
+                continue
+            if set_path in {"x_position", "y_position"} and hasattr(source, "position"):
+                axis = 0 if set_path == "x_position" else 1
+                position_value = jnp.asarray(val, dtype=float)
+                if hasattr(source, "mean_flux"):
+                    position_value = position_value * ARCSEC_TO_RAD
+                position = jnp.asarray(getattr(source, "position")).at[axis].set(position_value)
+                source = source.set("position", position)
+                continue
+            if set_path == "log_flux" and hasattr(source, "mean_flux"):
+                contrast = store.get("source.contrast", default=getattr(source, "contrast", 1.0))
+                mean_flux = binary_mean_flux_from_total_and_contrast(
+                    linear_total_flux_from_log10(val),
+                    contrast,
+                )
+                source = source.set("mean_flux", mean_flux)
+                continue
+            return build_binary_target_source(store, cfg=cfg)
         return source
 
     return build_binary_target_source(store, cfg=cfg)
@@ -420,6 +697,10 @@ __all__ = [
     "SOURCE_RUNTIME_BINDINGS",
     "apply_runtime_bindings",
     "build_alpha_cen_source",
+    "build_binary_source",
     "build_binary_target_source",
+    "build_single_star_source",
+    "arcsec_pair_to_radians",
+    "deg_to_rad",
     "load_normalized_sed_weights",
 ]

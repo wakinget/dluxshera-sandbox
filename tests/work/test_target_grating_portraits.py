@@ -116,3 +116,53 @@ def test_cli_dry_run_writes_plan(tmp_path: Path) -> None:
     assert plan["optics_overrides"]["pupil_npix"] == 512
     assert plan["source_overrides"]["exposure_time_s"] == pytest.approx(0.05)
     assert plan["source_overrides"]["n_lambda"] == 11
+
+
+def test_cli_dry_run_with_alpha_cen_a_single_star_writes_plan(tmp_path: Path) -> None:
+    module = _load_module()
+    config_path = _write_config(tmp_path / "cfg.json", _config_payload())
+    results_dir = tmp_path / "results"
+
+    module.main(
+        [
+            "--config",
+            str(config_path),
+            "--targets",
+            "ALPHA_CEN",
+            "--include-alpha-cen-a-single-star",
+            "--results-dir",
+            str(results_dir),
+            "--run-name",
+            "single_star_dry_run_case",
+            "--psf-npix",
+            "32",
+            "--pupil-npix",
+            "512",
+            "--dry-run",
+        ]
+    )
+
+    plan_path = results_dir / "single_star_dry_run_case" / "dry_run_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["targets"] == ["ALPHA_CEN"]
+    assert plan["single_star_placeholders_requested"] == [module.ALPHA_CEN_A_SINGLE_KEY]
+    assert "Alpha Cen A" in plan["single_star_placeholder_note"]
+
+
+def test_single_star_panel_title_omits_binary_fields() -> None:
+    module = _load_module()
+
+    title = module._format_panel_title(
+        display_name=module.ALPHA_CEN_A_SINGLE_DISPLAY_NAME,
+        entry_key=module.ALPHA_CEN_A_SINGLE_KEY,
+        summary={
+            "source_kind": "single_star",
+            "x_position_as": 0.0,
+            "y_position_as": 0.0,
+            "log_flux_total": 6.0,
+        },
+    )
+
+    assert "single_star" in title
+    assert "sep=" not in title
+    assert "contrast=" not in title

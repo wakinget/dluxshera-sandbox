@@ -1,0 +1,113 @@
+experiment:
+  kind: single_star_calibration_demo
+  seed: 42
+  run_name: single_star_calibration_smoke
+
+  calibration_source:
+    mode: alpha_cen_a_placeholder
+    source_kind: single_star
+    x_position_as: 0.0
+    y_position_as: 0.0
+    position_angle_deg: 0.0
+    n_lambda: 3
+    photometry_note: Alpha Cen A component placeholder until calibration-star registry exists.
+
+  subblocks:
+    n_subblocks: 20
+    n_frames: 20
+    noise: enabled
+    phi_ref: recovered
+    schur_curvature_method: auto
+    max_dense_dim: 40
+    schur_damping: 1.0e-8
+    exposure_time_s: 0.05
+    reference_diagnostics_profile: basic
+    reference_optimizer_kind: sgd
+    reference_base_lr: 0.9
+    reference_n_iter: 80
+    reference_schedule_kind: linear_warmup
+    reference_schedule_warmup_steps: 10
+    reference_schedule_start_factor: 0.125
+    trace_jitter:
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+      pa_mode: omitted
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 42
+
+  local_eliminated_keys:
+    - source.x_position_as
+    - source.y_position_as
+
+  observation_theta:
+    source:
+      log_flux_total: true
+    optics:
+      plate_scale_as_per_pix: true
+      primary_zernikes:
+        enabled: true
+        indices: from_system
+        include: null
+        exclude: []
+      secondary_zernikes:
+        enabled: true
+        indices: from_system
+        include: null
+        exclude: []
+
+  prior:
+    sigma:
+      source.log_flux_total:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: log_flux
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 1.0
+        unit: nm
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 1.0
+        unit: nm
+
+  case_generation:
+    mode: prior_draw
+    n_cases: 1
+    seed: 123
+    draw_scale: 0.5
+    include_zero_bias_case: true
+
+  history_prefixes: [1, 2, 3, 5, 10, 30, 100, 300, 1000, 1800]
+
+  eigenbasis:
+    enabled: true
+    sources:
+      - accumulated_information
+      - posterior_precision
+    whiten: true
+    eig_floor_abs: 0.0
+    eig_floor_rel: 1.0e-12
+    top_k_contributors: 8
+
+  forecast:
+    enabled: true
+    modes:
+      - replicate
+      - fixed_information_score_noise
+    n_subblocks_grid: [1, 3, 5, 10, 30, 100, 300, 1000, 1800]
+    subblock_duration_s: 1.0
+    single_observation_n_subblocks: 1800
+    fixed_information_score_noise:
+      enabled: true
+      n_trials: 100
+      seed: 2026
+      score_noise_alpha: 1.0
+      score_noise_eig_floor_rel: 1.0e-12
+      truth_mode: campaign_truth
+    plots: true

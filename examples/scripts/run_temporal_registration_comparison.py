@@ -77,11 +77,21 @@ Routing note:
 - `independent` cases use `schur_curvature_method=auto` with effective
   `max_dense_dim=40`, so 20-frame four-scalar runs stay on the structured
   independent-frame Schur path.
-- `linear_drift` cases use dense Schur (compact nuisance state).
-- `linear_drift_residual_jitter_prior` cases use dense Schur with effective
-  dense guard at least `80` because the profiled temporal prior couples frames.
+- `linear_drift` cases use `structured_linear_drift` projected Schur curvature.
+- `linear_drift_residual_jitter_prior` cases use
+  `structured_residual_prior` (structured frame data curvature plus analytic
+  temporal-prior curvature).
+- Dense Schur is validation-only for small explicit cases.
 - All cases initialize from the generated truth trace unless
   `--init-mode truth_plus_offset` is selected.
+
+Default comparison optimizer policy:
+- `sgd` with preconditioning (`enabled=true`, `method=auto`, `reference=initial`)
+- `base_lr=0.9`
+- schedule enabled by default:
+  `linear_warmup`, `warmup_steps=10`, `start_factor=0.125`
+- `n_iter=200` for noiseless runs
+- `n_iter=100` for shot-noise runs
 """
 
 from __future__ import annotations
@@ -153,6 +163,15 @@ class CaseSpec:
     fit_residual_pa_sigma_deg: float | None = None
     trace_seed: int = 0
     render_seed: int = 0
+
+
+@dataclass(frozen=True)
+class OptimizerSettings:
+    kind: str
+    base_lr: float
+    n_iter: int
+    schedule: dict[str, Any] | None
+    preconditioning: dict[str, Any]
 
 
 def _stable_seed(seed: int, *parts: object) -> int:
@@ -548,17 +567,65 @@ def _schur_settings_for_case(
         }
     if case.fit_model == "linear_drift":
         return {
-            "schur_curvature_method": "dense",
+            "schur_curvature_method": "structured_linear_drift",
             "max_dense_dim": int(requested_max_dense_dim),
-            "reason": "hard linear drift uses compact nuisance dimension; dense Schur is explicit",
+            "reason": "hard linear drift uses projected structured temporal curvature",
         }
     if case.fit_model == "linear_drift_residual_jitter_prior":
         return {
-            "schur_curvature_method": "dense",
-            "max_dense_dim": max(int(requested_max_dense_dim), 80),
-            "reason": "profiled residual prior couples frames and requires dense Schur",
+            "schur_curvature_method": "structured_residual_prior",
+            "max_dense_dim": min(int(requested_max_dense_dim), 40),
+            "reason": (
+                "residual-prior fit uses structured frame data curvature plus "
+                "analytic temporal-prior curvature"
+            ),
         }
     raise ValueError(f"Unsupported fit model for Schur routing: {case.fit_model!r}.")
+
+
+def _optimizer_settings_for_case(
+    case: CaseSpec,
+    *,
+    n_frames: int,
+    noise_mode: str,
+    args: argparse.Namespace,
+) -> OptimizerSettings:
+    _ = case
+    _ = n_frames
+    kind = str(args.optimizer_kind)
+    base_lr = float(args.optimizer_base_lr)
+    if args.optimizer_n_iter is not None:
+        n_iter = int(args.optimizer_n_iter)
+    else:
+        n_iter = (
+            int(args.shotnoise_optimizer_n_iter)
+            if noise_mode == "enabled"
+            else int(args.noiseless_optimizer_n_iter)
+        )
+    schedule: dict[str, Any] | None = None
+    if not bool(args.disable_schedule):
+        schedule = {
+            "kind": str(args.schedule_kind),
+            "warmup_steps": int(args.schedule_warmup_steps),
+            "start_factor": float(args.schedule_start_factor),
+        }
+    return OptimizerSettings(
+        kind=kind,
+        base_lr=base_lr,
+        n_iter=n_iter,
+        schedule=schedule,
+        preconditioning={
+            "enabled": True,
+            "method": (
+                "structured_residual_prior_diag"
+                if case.fit_model == "linear_drift_residual_jitter_prior"
+                else "auto"
+            ),
+            "reference": "initial",
+            "max_dense_dim": 20,
+            "allow_dense_image_hessian": False,
+        },
+    )
 
 
 def _case_configs(
@@ -569,7 +636,11 @@ def _case_configs(
     n_frames: int,
     exposure_time_s: float,
     system_preset: str,
+    optimizer: OptimizerSettings,
 ) -> tuple[Path, Path]:
+    case_root_abs = case_root.resolve()
+    trace_csv_abs = trace_csv.resolve()
+    render_dir_abs = (case_root_abs / "render").resolve()
     render_cfg = {
         "system": {"preset": system_preset, "source": {"target": "ALPHA_CEN", "exposure_time_s": exposure_time_s}},
         "experiment": {
@@ -577,11 +648,11 @@ def _case_configs(
             "seed": int(case.render_seed),
             "subblock": {
                 "varying_keys": list(TRACE_KEYS),
-                "trace": {"format": "csv", "path": str(trace_csv)},
+                "trace": {"format": "csv", "path": str(trace_csv_abs)},
                 "validate": {"require_contiguous_frame_index": True, "require_monotonic_time": True},
             },
             "noise": {"enabled": case.noise_mode == "enabled", "photon_noise": True, "read_noise": False, "dark_current": False},
-            "outputs": {"outdir": str(case_root), "file_prefix": "obs_subblock", "frame_truth_format": "csv"},
+            "outputs": {"outdir": str(case_root_abs), "file_prefix": "obs_subblock", "frame_truth_format": "csv"},
         },
     }
     offsets = {}
@@ -605,20 +676,23 @@ def _case_configs(
             },
             "reduce": "match_subblock_reduce",
         }
-    optimizer_base_lr = 0.9
-    optimizer_n_iter = 40 if n_frames <= 3 else 100
-    if case.fit_model == "linear_drift_residual_jitter_prior":
-        optimizer_base_lr = 0.05
-        optimizer_n_iter = 50
+    optimizer_cfg: dict[str, Any] = {
+        "kind": optimizer.kind,
+        "base_lr": optimizer.base_lr,
+        "n_iter": optimizer.n_iter,
+        "preconditioning": dict(optimizer.preconditioning),
+    }
+    if optimizer.schedule is not None:
+        optimizer_cfg["schedule"] = dict(optimizer.schedule)
     inference_cfg = {
         "system": {"preset": system_preset, "source": {"target": "ALPHA_CEN", "exposure_time_s": exposure_time_s}},
         "experiment": {
             "kind": "subblock_inference",
             "inference": {
                 "data": {
-                    "cube": str(case_root / "render" / "obs_subblock_cube.fits"),
-                    "truth_trace": str(trace_csv),
-                    "manifest": str(case_root / "render" / "manifest.json"),
+                    "cube": str(render_dir_abs / "obs_subblock_cube.fits"),
+                    "truth_trace": str(trace_csv_abs),
+                    "manifest": str(render_dir_abs / "manifest.json"),
                 },
                 "validate": {"require_contiguous_frame_index": True, "require_monotonic_time": True},
                 "active": {"frame_keys": list(TRACE_KEYS), "shared_keys": []},
@@ -631,15 +705,10 @@ def _case_configs(
                     "subblock_reduce": "mean",
                     "noise_model": {"kind": "gaussian", "variance_model": "data", "variance_floor": 1.0},
                 },
-                "optimizer": {
-                    "kind": "sgd",
-                    "base_lr": optimizer_base_lr,
-                    "n_iter": optimizer_n_iter,
-                    "preconditioning": {"enabled": True, "method": "auto", "reference": "initial"},
-                },
+                "optimizer": optimizer_cfg,
                 "diagnostics": {"plots": False, "compare_to_truth_when_available": True},
             },
-            "outputs": {"outdir": str(case_root), "file_prefix": "obs_subblock_inference"},
+            "outputs": {"outdir": str(case_root_abs), "file_prefix": "obs_subblock_inference"},
         },
     }
     render_path = case_root / "render_config.json"
@@ -728,6 +797,7 @@ def _run_case(
     theta_keys: Sequence[str],
     reference_diagnostics_profile: str,
     max_dense_dim: int,
+    args: argparse.Namespace,
 ) -> dict[str, Any]:
     case_root = run_root / "cases" / case.case_name
     trace_dir = case_root / "trace"
@@ -740,6 +810,12 @@ def _run_case(
         trace_dir.mkdir(parents=True, exist_ok=True)
         write_temporal_trace_csv(trace_csv, rows)
         write_temporal_trace_manifest(trace_manifest, manifest, trace_csv)
+    optimizer_settings = _optimizer_settings_for_case(
+        case,
+        n_frames=n_frames,
+        noise_mode=case.noise_mode,
+        args=args,
+    )
     render_cfg, inference_cfg = _case_configs(
         case=case,
         case_root=case_root,
@@ -747,6 +823,7 @@ def _run_case(
         n_frames=n_frames,
         exposure_time_s=exposure_time_s,
         system_preset=system_preset,
+        optimizer=optimizer_settings,
     )
     row = {
         **asdict(case),
@@ -758,6 +835,20 @@ def _run_case(
         "schur_curvature_method_requested": "",
         "schur_max_dense_dim_effective": "",
         "schur_routing_reason": "",
+        "optimizer_kind": optimizer_settings.kind,
+        "optimizer_base_lr": optimizer_settings.base_lr,
+        "optimizer_n_iter": optimizer_settings.n_iter,
+        "schedule_enabled": optimizer_settings.schedule is not None,
+        "schedule_kind": None if optimizer_settings.schedule is None else optimizer_settings.schedule.get("kind"),
+        "schedule_warmup_steps": None if optimizer_settings.schedule is None else optimizer_settings.schedule.get("warmup_steps"),
+        "schedule_start_factor": None if optimizer_settings.schedule is None else optimizer_settings.schedule.get("start_factor"),
+        "preconditioning_enabled": optimizer_settings.preconditioning.get("enabled"),
+        "preconditioning_requested_method": optimizer_settings.preconditioning.get("method"),
+        "preconditioning_reference": optimizer_settings.preconditioning.get("reference"),
+        "preconditioning_effective_method": "",
+        "preconditioning_dense_global_fim_materialized": "",
+        "preconditioning_fallback_used": "",
+        "preconditioning_plan_reason": "",
         "status": "planned" if dry_run else "started",
     }
     schur_settings = _schur_settings_for_case(
@@ -817,6 +908,26 @@ def _run_case(
     if inference_result.get("final_loss") is not None:
         row["final_loss"] = float(inference_result["final_loss"])
     metrics = inference_manifest_payload.get("metrics", {})
+    optimizer_manifest = (
+        inference_manifest_payload.get("optimizer", {})
+        if isinstance(inference_manifest_payload, Mapping)
+        else {}
+    )
+    precond_manifest = (
+        optimizer_manifest.get("preconditioning", {})
+        if isinstance(optimizer_manifest, Mapping)
+        else {}
+    )
+    if isinstance(precond_manifest, Mapping):
+        row["preconditioning_effective_method"] = precond_manifest.get(
+            "effective_method",
+            precond_manifest.get("method"),
+        )
+        row["preconditioning_dense_global_fim_materialized"] = precond_manifest.get(
+            "dense_global_fim_materialized"
+        )
+        row["preconditioning_fallback_used"] = precond_manifest.get("fallback_used")
+        row["preconditioning_plan_reason"] = precond_manifest.get("plan_reason")
     row["initial_temporal_term"] = metrics.get("initial_temporal_term")
     row["final_temporal_term"] = metrics.get("final_temporal_term")
     initial_chi2 = inference_result.get("chi2", {}).get("initial_model", {})
@@ -841,6 +952,8 @@ def _run_case(
                 case_root=case_root,
                 case_stages=(),
                 inference_template=inference_cfg,
+                n_frames=n_frames,
+                exposure_time_s=exposure_time_s,
                 theta_keys=theta_keys,
                 phi_ref="recovered",
                 schur_curvature_method=str(schur_settings["schur_curvature_method"]),
@@ -855,6 +968,19 @@ def _run_case(
             )
             summary_json = Path(schur.get("schur_summary", {}).get("summary_json_path", ""))
         row["summary_json"] = str(summary_json.resolve()) if summary_json.exists() else ""
+        if summary_json.exists():
+            schur_payload = _read_json(summary_json)
+            summary_diag = (
+                schur_payload.get("summary_diagnostics", {})
+                if isinstance(schur_payload, Mapping)
+                else {}
+            )
+            row["schur_curvature_method_effective"] = summary_diag.get(
+                "schur_curvature_method_used"
+            )
+            row["schur_dense_global_hessian_materialized"] = summary_diag.get(
+                "dense_global_hessian_materialized"
+            )
         row.update(_schur_metrics(summary_json, theta_keys))
     except Exception as exc:  # Schur export is expensive; preserve case diagnostics.
         row["schur_error"] = str(exc)
@@ -926,14 +1052,42 @@ def _aggregate_existing_cases(run_root: Path) -> list[dict[str, Any]]:
                 row.update(_read_recovered_errors(trace_csv, recovered_csv))
         manifest = _read_json(inference_manifest)
         metrics = manifest.get("metrics", {}) if isinstance(manifest, Mapping) else {}
+        optimizer_manifest = manifest.get("optimizer", {}) if isinstance(manifest, Mapping) else {}
+        precond_manifest = (
+            optimizer_manifest.get("preconditioning", {})
+            if isinstance(optimizer_manifest, Mapping)
+            else {}
+        )
         row["final_loss"] = metrics.get("final_loss")
         row["initial_temporal_term"] = metrics.get("initial_temporal_term")
         row["final_temporal_term"] = metrics.get("final_temporal_term")
+        if isinstance(precond_manifest, Mapping):
+            row["preconditioning_effective_method"] = precond_manifest.get(
+                "effective_method",
+                precond_manifest.get("method"),
+            )
+            row["preconditioning_dense_global_fim_materialized"] = precond_manifest.get(
+                "dense_global_fim_materialized"
+            )
+            row["preconditioning_fallback_used"] = precond_manifest.get("fallback_used")
+            row["preconditioning_plan_reason"] = precond_manifest.get("plan_reason")
         chi2 = metrics.get("chi2", {}) if isinstance(metrics.get("chi2"), Mapping) else {}
         row["initial_block_reduced_chi2"] = (chi2.get("initial_model") or {}).get("block_reduced_chi2") if isinstance(chi2.get("initial_model"), Mapping) else None
         row["final_block_reduced_chi2"] = (chi2.get("final_model") or {}).get("block_reduced_chi2") if isinstance(chi2.get("final_model"), Mapping) else None
         if summary_json.exists():
             row["summary_json"] = str(summary_json.resolve())
+            schur_payload = _read_json(summary_json)
+            summary_diag = (
+                schur_payload.get("summary_diagnostics", {})
+                if isinstance(schur_payload, Mapping)
+                else {}
+            )
+            row["schur_curvature_method_effective"] = summary_diag.get(
+                "schur_curvature_method_used"
+            )
+            row["schur_dense_global_hessian_materialized"] = summary_diag.get(
+                "dense_global_hessian_materialized"
+            )
             row.update(_schur_metrics(summary_json, THETA_KEYS_DEFAULT))
         row["status"] = "completed" if recovered_csv is not None and recovered_csv.exists() else "incomplete"
         rows.append(row)
@@ -986,6 +1140,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
     parser.add_argument("--reference-diagnostics-profile", default="basic")
+    parser.add_argument("--optimizer-kind", default="sgd")
+    parser.add_argument("--optimizer-base-lr", type=float, default=0.9)
+    parser.add_argument("--optimizer-n-iter", type=int, default=None)
+    parser.add_argument("--noiseless-optimizer-n-iter", type=int, default=200)
+    parser.add_argument("--shotnoise-optimizer-n-iter", type=int, default=100)
+    parser.add_argument("--schedule-kind", default="linear_warmup")
+    parser.add_argument("--schedule-warmup-steps", type=int, default=10)
+    parser.add_argument("--schedule-start-factor", type=float, default=0.125)
+    parser.add_argument("--disable-schedule", action="store_true")
     args = parser.parse_args(argv)
 
     cfg = _load_config(args.config)
@@ -1032,6 +1195,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             theta_keys=THETA_KEYS_DEFAULT,
             reference_diagnostics_profile=str(args.reference_diagnostics_profile),
             max_dense_dim=int(args.max_dense_dim),
+            args=args,
         )
         for case in cases
     ]

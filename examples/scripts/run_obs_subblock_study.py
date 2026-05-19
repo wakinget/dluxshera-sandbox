@@ -48,6 +48,7 @@ from dluxshera.inference.observation_belief import (
 )
 from dluxshera.inference.observation_summary import (
     ImageBackedSubblockSummaryArtifact,
+    LocalQuadraticBlocks,
     build_combined_local_parameter_layout,
     load_subblock_summary,
     partition_local_curvature,
@@ -55,6 +56,7 @@ from dluxshera.inference.observation_summary import (
 )
 from dluxshera.inference.structured_curvature import (
     build_independent_frame_theta_phi_quadratic_blocks,
+    build_residual_prior_temporal_curvature,
     compare_structured_and_dense_schur_outputs,
     materialize_structured_schur_sidecar_blocks,
     schur_reduce_independent_frame_blocks,
@@ -183,10 +185,14 @@ DEFAULT_SCHUR_PHI_REF = "truth_when_available"
 SCHUR_CURVATURE_METHOD_AUTO = "auto"
 SCHUR_CURVATURE_METHOD_DENSE = "dense"
 SCHUR_CURVATURE_METHOD_STRUCTURED = "structured_independent_frames"
+SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT = "structured_linear_drift"
+SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR = "structured_residual_prior"
 SUPPORTED_SCHUR_CURVATURE_METHODS = (
     SCHUR_CURVATURE_METHOD_AUTO,
     SCHUR_CURVATURE_METHOD_DENSE,
     SCHUR_CURVATURE_METHOD_STRUCTURED,
+    SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT,
+    SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
 )
 SUPPORTED_SMOKE_THETA_KEYS = frozenset(
     {
@@ -582,12 +588,52 @@ def _structured_schur_support_from_inference_cfg(
     reasons: list[str] = []
     if n_frames is None or int(n_frames) <= 0:
         reasons.append("n_frames is unknown or non-positive")
-    if frame_model_kind != "independent":
-        reasons.append("temporal.frame_model.kind is not independent")
+    if frame_model_kind not in {
+        "independent",
+        "linear_drift",
+        "linear_drift_residual_jitter_prior",
+    }:
+        reasons.append(
+            "temporal.frame_model.kind is not one of: independent, linear_drift, linear_drift_residual_jitter_prior"
+        )
     if not frame_keys:
         reasons.append("no frame-local active keys are configured")
     if shared_keys:
         reasons.append("shared active subblock state is configured")
+    if frame_model_kind in {"linear_drift", "linear_drift_residual_jitter_prior"}:
+        expected_keys = (
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        )
+        if frame_keys != expected_keys:
+            reasons.append(
+                f"{frame_model_kind} structured Schur requires canonical frame_keys "
+                "[source.x_position_as, source.y_position_as, source.position_angle_deg]"
+            )
+    if frame_model_kind == "linear_drift_residual_jitter_prior":
+        residual_prior_cfg = (
+            frame_model_cfg.get("residual_prior", {})
+            if isinstance(frame_model_cfg, Mapping)
+            else {}
+        )
+        if not isinstance(residual_prior_cfg, Mapping):
+            reasons.append("residual_prior must be a mapping")
+        else:
+            for key in frame_keys:
+                raw = residual_prior_cfg.get(key)
+                if isinstance(raw, Mapping):
+                    raw = raw.get("sigma")
+                if raw is None:
+                    reasons.append(f"missing residual_prior sigma for {key}")
+                    continue
+                try:
+                    sigma = float(raw)
+                except (TypeError, ValueError):
+                    reasons.append(f"non-numeric residual_prior sigma for {key}")
+                    continue
+                if not np.isfinite(sigma) or sigma <= 0.0:
+                    reasons.append(f"non-positive residual_prior sigma for {key}")
     supported = not reasons
     return {
         "supported": bool(supported),
@@ -597,9 +643,11 @@ def _structured_schur_support_from_inference_cfg(
         "frame_phi_dim": int(len(frame_keys)),
         "shared_phi_dim": int(len(shared_keys)),
         "required_assumptions": (
-            "structured_independent_frames currently requires independent "
-            "frame model, frame-local active state, no active shared subblock "
-            "state, and per-frame objective access through "
+            "structured_independent_frames requires independent frame model; "
+            "structured_linear_drift requires linear_drift with canonical registration "
+            "frame keys; structured_residual_prior requires residual-prior model with "
+            "canonical keys and positive sigmas. All require frame-local active state, no active shared "
+            "subblock state, and per-frame objective access through "
             "ObjectiveBundle.frame_data_term_fn."
         ),
     }
@@ -646,10 +694,15 @@ def _select_schur_curvature_method(
     unsupported_reasons = ", ".join(
         str(reason) for reason in structured_support.get("unsupported_reasons", ())
     )
+    frame_model_kind = str(structured_support.get("frame_model_kind"))
     structured_message = (
-        "structured_independent_frames currently requires independent frame "
-        "model, frame-local active state, no active shared subblock state, and "
-        "per-frame objective access through ObjectiveBundle.frame_data_term_fn."
+        "structured_independent_frames requires independent frame model; "
+        "structured_linear_drift requires temporal.frame_model.kind=linear_drift "
+        "with canonical registration frame keys; structured_residual_prior requires "
+        "temporal.frame_model.kind=linear_drift_residual_jitter_prior with canonical "
+        "registration frame keys and residual sigmas; all require frame-local active "
+        "state, no active shared subblock state, and per-frame objective access "
+        "through ObjectiveBundle.frame_data_term_fn."
     )
 
     if requested == SCHUR_CURVATURE_METHOD_DENSE:
@@ -658,30 +711,47 @@ def _select_schur_curvature_method(
             max_dense_dim=int(max_dense_dim),
         )
         return SCHUR_CURVATURE_METHOD_DENSE
-    if requested == SCHUR_CURVATURE_METHOD_STRUCTURED:
+    if requested in {
+        SCHUR_CURVATURE_METHOD_STRUCTURED,
+        SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT,
+        SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
+    }:
         if not structured_supported:
             detail = f" Failed assumption(s): {unsupported_reasons}." if unsupported_reasons else ""
             raise ValueError(structured_message + detail)
-        return SCHUR_CURVATURE_METHOD_STRUCTURED
+        if requested == SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT and frame_model_kind != "linear_drift":
+            raise ValueError(
+                "structured_linear_drift requires temporal.frame_model.kind=linear_drift."
+            )
+        if (
+            requested == SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR
+            and frame_model_kind != "linear_drift_residual_jitter_prior"
+        ):
+            raise ValueError(
+                "structured_residual_prior requires temporal.frame_model.kind=linear_drift_residual_jitter_prior."
+            )
+        if requested == SCHUR_CURVATURE_METHOD_STRUCTURED and frame_model_kind == "linear_drift":
+            return SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT
+        if (
+            requested == SCHUR_CURVATURE_METHOD_STRUCTURED
+            and frame_model_kind == "linear_drift_residual_jitter_prior"
+        ):
+            return SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR
+        return requested
 
+    if structured_supported:
+        if frame_model_kind == "linear_drift":
+            return SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT
+        if frame_model_kind == "linear_drift_residual_jitter_prior":
+            return SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR
+        return SCHUR_CURVATURE_METHOD_STRUCTURED
     if dense_allowed:
         return SCHUR_CURVATURE_METHOD_DENSE
-    if structured_supported:
-        return SCHUR_CURVATURE_METHOD_STRUCTURED
     detail = f" Failed assumption(s): {unsupported_reasons}." if unsupported_reasons else ""
-    residual_prior_hint = (
-        " linear_drift_residual_jitter_prior couples frames through a profiled "
-        "line fit and currently requires dense Schur; for the 20-frame four-scalar "
-        "comparison use --max-dense-dim 80."
-        if str(structured_support.get("frame_model_kind"))
-        == "linear_drift_residual_jitter_prior"
-        else ""
-    )
     raise ValueError(
         f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}, "
         "and structured Schur export is not available. "
         + structured_message
-        + residual_prior_hint
         + detail
     )
 
@@ -700,7 +770,18 @@ def _dense_vs_structured_comparison_state(
         if curvature_method_used is None
         else normalize_schur_curvature_method(curvature_method_used)
     )
-    if method != SCHUR_CURVATURE_METHOD_STRUCTURED:
+    if method == SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT:
+        return {
+            "dense_vs_structured_comparison_requested": bool(requested),
+            "dense_vs_structured_comparison_run": False,
+            "dense_vs_structured_comparison_skipped_reason": "unsupported_for_structured_linear_drift",
+            "max_dense_dim": int(max_dense_dim),
+            "combined_dim": int(combined_dim),
+        }
+    if method not in {
+        SCHUR_CURVATURE_METHOD_STRUCTURED,
+        SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
+    }:
         return {
             "dense_vs_structured_comparison_requested": bool(requested),
             "dense_vs_structured_comparison_run": False,
@@ -4295,12 +4376,19 @@ def _build_structured_schur_frame_objective(
     temporal_kind = str(inference_cfg["temporal"]["frame_model"]["kind"])
     if objective_kind not in {"data_only", "full_objective"}:
         raise ValueError("summary objective must be 'data_only' or 'full_objective'.")
-    if objective_kind == "full_objective" and (
-        priors_nonempty or temporal_kind != "independent"
-    ):
+    if objective_kind == "full_objective" and priors_nonempty:
         raise ValueError(
             "structured schur_summary only supports full_objective when priors "
-            "are empty and temporal.frame_model.kind='independent'."
+            "are empty."
+        )
+    if temporal_kind not in {
+        "independent",
+        "linear_drift",
+        "linear_drift_residual_jitter_prior",
+    }:
+        raise ValueError(
+            "structured schur_summary does not support temporal.frame_model.kind="
+            f"{temporal_kind!r}."
         )
 
     def _theta_store(observation_theta_values: jnp.ndarray) -> ParameterStore:
@@ -4340,7 +4428,11 @@ def _build_structured_schur_frame_objective(
         "objective_kind_used": (
             "data_only"
             if objective_kind == "data_only"
-            else "full_objective_equivalent_to_data_only_current_template"
+            else (
+                "full_objective_equivalent_to_data_only_current_template"
+                if temporal_kind == "independent"
+                else "full_objective_data_term_with_temporal_added_in_structured_backend"
+            )
         ),
         "priors_nonempty": bool(priors_nonempty),
         "temporal_kind": temporal_kind,
@@ -4394,6 +4486,89 @@ def _validate_schur_dense_dimension(*, combined_dim: int, max_dense_dim: int) ->
             f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}. "
             "Reduce n_frames or Theta size, or wait for a structured-curvature path."
         )
+
+
+def _linear_drift_design_matrix(
+    *,
+    frame_times_s: Sequence[float],
+    frame_keys: Sequence[str],
+) -> np.ndarray:
+    """Build the expanded-to-compact linear-drift map ``phi = A q``."""
+
+    expected = (
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.position_angle_deg",
+    )
+    keys = tuple(str(key) for key in frame_keys)
+    if keys != expected:
+        raise ValueError(
+            "structured_linear_drift requires canonical registration frame_keys "
+            "[source.x_position_as, source.y_position_as, source.position_angle_deg]."
+        )
+    times = np.asarray(frame_times_s, dtype=float)
+    if times.ndim != 1 or times.size <= 0:
+        raise ValueError("frame_times_s must be a non-empty 1D sequence.")
+    centered = times - float(np.mean(times))
+    n_frame = int(times.size)
+    frame_width = len(expected)
+    phi_dim = n_frame * frame_width
+    q_dim = frame_width * 2
+    design = np.zeros((phi_dim, q_dim), dtype=float)
+    for frame_index in range(n_frame):
+        dt = float(centered[frame_index])
+        row0 = frame_index * frame_width
+        # x anchor/rate
+        design[row0 + 0, 0] = 1.0
+        design[row0 + 0, 1] = dt
+        # y anchor/rate
+        design[row0 + 1, 2] = 1.0
+        design[row0 + 1, 3] = dt
+        # pa anchor/rate
+        design[row0 + 2, 4] = 1.0
+        design[row0 + 2, 5] = dt
+    return design
+
+
+def _residual_prior_sigmas_and_reduce(
+    *,
+    inference_cfg: Mapping[str, Any],
+    frame_keys: Sequence[str],
+) -> tuple[dict[str, float], str]:
+    """Parse residual-prior sigma config and effective reduction mode."""
+
+    temporal_cfg = inference_cfg.get("temporal", {})
+    frame_model_cfg = (
+        temporal_cfg.get("frame_model", {})
+        if isinstance(temporal_cfg, Mapping)
+        else {}
+    )
+    residual_prior = (
+        frame_model_cfg.get("residual_prior", {})
+        if isinstance(frame_model_cfg, Mapping)
+        else {}
+    )
+    if not isinstance(residual_prior, Mapping):
+        raise ValueError("temporal.frame_model.residual_prior must be a mapping.")
+    sigmas: dict[str, float] = {}
+    for key in frame_keys:
+        raw = residual_prior.get(str(key))
+        if isinstance(raw, Mapping):
+            raw = raw.get("sigma")
+        if raw is None:
+            raise ValueError(f"Missing temporal residual_prior sigma for {key}.")
+        sigma = float(raw)
+        if not np.isfinite(sigma) or sigma <= 0.0:
+            raise ValueError(f"Residual-prior sigma for {key} must be positive and finite.")
+        sigmas[str(key)] = sigma
+    reduce = str(frame_model_cfg.get("reduce", "match_subblock_reduce"))
+    if reduce == "match_subblock_reduce":
+        reduce = str(inference_cfg.get("objective", {}).get("subblock_reduce", "sum"))
+    if reduce not in {"sum", "mean"}:
+        raise ValueError(
+            "temporal.frame_model.reduce must be one of: sum, mean, match_subblock_reduce."
+        )
+    return sigmas, reduce
 
 
 def _estimate_phi_labels_from_inference_cfg(
@@ -5433,10 +5608,14 @@ def _build_schur_summary_plan(
             + "."
         )
     if not dense_hessian_allowed:
-        if curvature_method_planned == SCHUR_CURVATURE_METHOD_STRUCTURED:
+        if curvature_method_planned in {
+            SCHUR_CURVATURE_METHOD_STRUCTURED,
+            SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT,
+            SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
+        }:
             warnings.append(
                 f"Combined dense dimension {combined_dim} exceeds max_dense_dim={max_dense_dim}; "
-                "auto will use structured_independent_frames."
+                f"auto will use {curvature_method_planned}."
             )
         else:
             warnings.append(
@@ -5453,9 +5632,9 @@ def _build_schur_summary_plan(
             "prefer phi_ref=truth_when_available for the first smoke test."
         )
     warnings.append(
-        "Dense image-backed Schur export remains the small-case validation path; "
-        "structured_independent_frames is the first operational independent-frame "
-        "registration-only exporter."
+        "Dense image-backed Schur export remains the small-case validation path. "
+        "Campaign workflows should use structured_independent_frames, "
+        "structured_linear_drift, or structured_residual_prior when supported."
     )
     planned_stages = list(case_prep_stages)
     if phi_ref_mode == "recovered":
@@ -5553,7 +5732,12 @@ def _build_schur_summary_plan(
         },
         **dense_comparison_state,
         "structured_curvature_used": bool(
-            curvature_method_planned == SCHUR_CURVATURE_METHOD_STRUCTURED
+            curvature_method_planned
+            in {
+                SCHUR_CURVATURE_METHOD_STRUCTURED,
+                SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT,
+                SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
+            }
         ),
         "dense_global_hessian_materialized": bool(
             curvature_method_planned == SCHUR_CURVATURE_METHOD_DENSE
@@ -5893,6 +6077,7 @@ def _evaluate_schur_summary(
     schur_frame_mask_denominator: str = DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR,
     schur_frame_mask_min_good_frames: int = DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES,
     theta_reference_overrides: Mapping[str, Any] | None = None,
+    allow_dense_image_hessian: bool = False,
     memory_recorder: MemoryDiagnosticsRecorder | None = None,
 ) -> dict[str, Any]:
     """Export one image-backed Schur-reduced summary from a prepared subblock.
@@ -6049,6 +6234,18 @@ def _evaluate_schur_summary(
             "included_frame_weight_policy": "all_frames_dense_path_mask_not_applied",
             "effective_frame_fraction": 1.0,
         }
+    if (
+        curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE
+        and not bool(allow_dense_image_hessian)
+        and int(context["layout"].n_frame) > 3
+    ):
+        raise RuntimeError(
+            "Dense image-backed Schur was requested for "
+            f"combined_dim={combined_dim}, n_frames={int(context['layout'].n_frame)}, "
+            f"frame_shape={tuple(int(v) for v in context['cube_data'].shape[1:])}. "
+            "This path is validation-only and disabled by default for campaign-scale runs. "
+            "Use a structured Schur method or pass allow_dense_image_hessian for a small validation case."
+        )
         frame_quality_metadata = {
             **frame_quality_metadata,
             **frame_quality_state,
@@ -6065,7 +6262,12 @@ def _evaluate_schur_summary(
             curvature_method_used == SCHUR_CURVATURE_METHOD_DENSE
         ),
         structured_curvature_used=(
-            curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED
+            curvature_method_used
+            in {
+                SCHUR_CURVATURE_METHOD_STRUCTURED,
+                SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT,
+                SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
+            }
         ),
     )
 
@@ -6086,7 +6288,12 @@ def _evaluate_schur_summary(
     )
     dense_global_hessian_materialized = False
     structured_curvature_used = (
-        curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED
+        curvature_method_used
+        in {
+            SCHUR_CURVATURE_METHOD_STRUCTURED,
+            SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT,
+            SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR,
+        }
     )
     dense_vs_structured_comparison: dict[str, Any] | None = None
     dense_comparison_state = _dense_vs_structured_comparison_state(
@@ -6210,24 +6417,165 @@ def _evaluate_schur_summary(
             ),
             reduce_weight=float(structured_blocks.reduce_weight),
         )
-        structured_reduction = schur_reduce_independent_frame_blocks(
-            structured_blocks,
-            damping=float(schur_damping),
-            frame_indices=frame_quality_state["included_frame_indices"],
-            frame_scale=float(frame_quality_state["frame_scale"]),
-        )
+        if curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED:
+            structured_reduction = schur_reduce_independent_frame_blocks(
+                structured_blocks,
+                damping=float(schur_damping),
+                frame_indices=frame_quality_state["included_frame_indices"],
+                frame_scale=float(frame_quality_state["frame_scale"]),
+            )
+            record("materialize_sidecar_blocks.start")
+            structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
+                structured_blocks,
+                frame_indices=frame_quality_state["included_frame_indices"],
+                frame_scale=float(frame_quality_state["frame_scale"]),
+            )
+        elif curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT:
+            if context["layout"].frame_times_s is None:
+                raise RuntimeError(
+                    "structured_linear_drift requires frame_times_s in active layout."
+                )
+            design = _linear_drift_design_matrix(
+                frame_times_s=context["layout"].frame_times_s,
+                frame_keys=context["layout"].frame_keys,
+            )
+            sidecar_expanded = materialize_structured_schur_sidecar_blocks(
+                structured_blocks,
+                frame_indices=frame_quality_state["included_frame_indices"],
+                frame_scale=float(frame_quality_state["frame_scale"]),
+            )
+            h_tt = np.asarray(sidecar_expanded["h_tt"], dtype=float)
+            h_tphi = np.asarray(sidecar_expanded["h_tp"], dtype=float)
+            h_phiphi = np.asarray(sidecar_expanded["h_pp"], dtype=float)
+            g_theta = np.asarray(sidecar_expanded["g_theta"], dtype=float)
+            g_phi = np.asarray(sidecar_expanded["g_phi"], dtype=float)
+            h_tq = h_tphi @ design
+            h_qq = design.T @ h_phiphi @ design
+            g_q = design.T @ g_phi
+            compact_layout = build_combined_local_parameter_layout(
+                _theta_labels_for_observation_layout(theta_layout),
+                phi_labels,
+            )
+            projected_blocks = LocalQuadraticBlocks(
+                layout=compact_layout,
+                combined_gradient=np.concatenate((g_theta, g_q), axis=0),
+                combined_curvature=np.block([[h_tt, h_tq], [h_tq.T, h_qq]]),
+                g_theta=g_theta,
+                g_phi=g_q,
+                h_tt=h_tt,
+                h_tp=h_tq,
+                h_pp=h_qq,
+            )
+            structured_reduction = schur_reduce_local_quadratic(
+                blocks=projected_blocks,
+                damping=float(schur_damping),
+            )
+            structured_sidecar_blocks = {
+                "h_tt": h_tt,
+                "h_tp": h_tq,
+                "h_pp": 0.5 * (h_qq + h_qq.T),
+                "g_theta": g_theta,
+                "g_phi": g_q,
+            }
+            record(
+                "structured_linear_drift.projection.done",
+                arrays=named_array_memory_metadata(
+                    drift_design=design,
+                    h_tt=h_tt,
+                    h_tq=h_tq,
+                    h_qq=h_qq,
+                    g_theta=g_theta,
+                    g_q=g_q,
+                ),
+            )
+        elif curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED_RESIDUAL_PRIOR:
+            if context["layout"].frame_times_s is None:
+                raise RuntimeError(
+                    "structured_residual_prior requires frame_times_s in active layout."
+                )
+            sigmas, temporal_reduce = _residual_prior_sigmas_and_reduce(
+                inference_cfg=context["inference_cfg"],
+                frame_keys=context["layout"].frame_keys,
+            )
+            sidecar_data = materialize_structured_schur_sidecar_blocks(
+                structured_blocks,
+                frame_indices=frame_quality_state["included_frame_indices"],
+                frame_scale=float(frame_quality_state["frame_scale"]),
+            )
+            h_tt = np.asarray(sidecar_data["h_tt"], dtype=float)
+            h_tphi = np.asarray(sidecar_data["h_tp"], dtype=float)
+            h_phiphi_data = np.asarray(sidecar_data["h_pp"], dtype=float)
+            g_theta = np.asarray(sidecar_data["g_theta"], dtype=float)
+            g_phi_data = np.asarray(sidecar_data["g_phi"], dtype=float)
+            h_phiphi_prior = build_residual_prior_temporal_curvature(
+                frame_times_s=np.asarray(context["layout"].frame_times_s, dtype=float),
+                frame_keys=context["layout"].frame_keys,
+                residual_sigmas_by_key=sigmas,
+                reduce=temporal_reduce,
+                subblock_reduce=str(context["inference_cfg"]["objective"]["subblock_reduce"]),
+            )
+            phi_ref_vec = np.asarray(fast_phi_ref_values, dtype=float)
+            g_phi_prior = h_phiphi_prior @ phi_ref_vec
+            h_phiphi_total = 0.5 * (h_phiphi_data + h_phiphi_data.T) + h_phiphi_prior
+            g_phi_total = g_phi_data + g_phi_prior
+            projected_blocks = LocalQuadraticBlocks(
+                layout=combined_layout,
+                combined_gradient=np.concatenate((g_theta, g_phi_total), axis=0),
+                combined_curvature=np.block(
+                    [
+                        [h_tt, h_tphi],
+                        [h_tphi.T, h_phiphi_total],
+                    ]
+                ),
+                g_theta=g_theta,
+                g_phi=g_phi_total,
+                h_tt=h_tt,
+                h_tp=h_tphi,
+                h_pp=h_phiphi_total,
+            )
+            structured_reduction = schur_reduce_local_quadratic(
+                blocks=projected_blocks,
+                damping=float(schur_damping),
+            )
+            structured_sidecar_blocks = {
+                "h_tt": h_tt,
+                "h_tp": h_tphi,
+                "h_pp": h_phiphi_total,
+                "g_theta": g_theta,
+                "g_phi": g_phi_total,
+            }
+            objective_metadata["structured_residual_prior"] = {
+                "temporal_prior_sigmas": dict(sigmas),
+                "temporal_prior_reduce": temporal_reduce,
+                "analytic_temporal_prior_added": True,
+                "h_pp_data_shape": list(h_phiphi_data.shape),
+                "h_pp_prior_shape": list(h_phiphi_prior.shape),
+                "h_pp_total_shape": list(h_phiphi_total.shape),
+            }
+            record(
+                "structured_residual_prior.combine.done",
+                arrays=named_array_memory_metadata(
+                    h_tt=h_tt,
+                    h_tphi=h_tphi,
+                    h_phiphi_data=h_phiphi_data,
+                    h_phiphi_prior=h_phiphi_prior,
+                    h_phiphi_total=h_phiphi_total,
+                    g_theta=g_theta,
+                    g_phi_data=g_phi_data,
+                    g_phi_prior=g_phi_prior,
+                    g_phi_total=g_phi_total,
+                ),
+            )
+        else:
+            raise RuntimeError(
+                f"Unsupported structured Schur method: {curvature_method_used!r}."
+            )
         record(
             "structured_schur_reduce.done",
             arrays=named_array_memory_metadata(
                 reduced_information=structured_reduction.reduced_information,
                 reduced_score=structured_reduction.reduced_score,
             ),
-        )
-        record("materialize_sidecar_blocks.start")
-        structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
-            structured_blocks,
-            frame_indices=frame_quality_state["included_frame_indices"],
-            frame_scale=float(frame_quality_state["frame_scale"]),
         )
         record(
             "materialize_sidecar_blocks.done",
@@ -6314,6 +6662,12 @@ def _evaluate_schur_summary(
             "frame_phi_dim": int(context["layout"].frame_width),
             "shared_phi_dim": int(context["layout"].shared_width),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            "analytic_temporal_prior_added": bool(
+                objective_metadata.get("structured_residual_prior", {}).get(
+                    "analytic_temporal_prior_added",
+                    False,
+                )
+            ),
             "frame_quality_policy": str(schur_frame_quality_policy),
             "frame_quality_total_frame_count": int(
                 frame_quality_report.total_frame_count
@@ -6345,6 +6699,7 @@ def _evaluate_schur_summary(
     summary_npz_path = output_dir / "subblock_summary_matrices.npz"
     schur_diag_path = output_dir / "schur_diagnostics.json"
     curvature_diag_path = output_dir / "combined_curvature_diagnostics.json"
+    active_key_sensitivity_path = output_dir / "active_key_sensitivity.json"
     surrogate_csv_path = output_dir / "local_surrogate_validation.csv"
     surrogate_png_path = output_dir / "local_surrogate_validation.png"
 
@@ -6407,6 +6762,12 @@ def _evaluate_schur_summary(
             if structured_blocks is None
             else float(structured_blocks.reduce_weight),
             "dense_vs_structured_comparison": dense_vs_structured_comparison,
+            "analytic_temporal_prior_added": bool(
+                objective_metadata.get("structured_residual_prior", {}).get(
+                    "analytic_temporal_prior_added",
+                    False,
+                )
+            ),
             **dense_comparison_state,
         },
         "frame_quality": frame_quality_metadata,
@@ -6537,6 +6898,26 @@ def _evaluate_schur_summary(
     )
     _write_json(schur_diag_path, schur_diagnostics)
     _write_json(curvature_diag_path, curvature_diagnostics)
+    active_key_sensitivity = _active_key_sensitivity_diagnostics(
+        combined_loss_fn=combined_loss_fn,
+        combined_reference_vector=combined_reference_vector,
+        theta_dim=int(theta_layout.size),
+        phi_labels=phi_labels,
+    )
+    _write_json(active_key_sensitivity_path, active_key_sensitivity)
+    null_keys = [
+        str(item["key"])
+        for item in active_key_sensitivity.get("items", [])
+        if str(item.get("status")) == "null"
+    ]
+    if null_keys:
+        _study_log(
+            "schur_summary.warning",
+            detail=(
+                "Inactive active-key sensitivity detected for: "
+                + ", ".join(null_keys)
+            ),
+        )
 
     validation_rows: list[dict[str, Any]] = []
     if validate_surrogate:
@@ -6610,6 +6991,7 @@ def _evaluate_schur_summary(
             "subblock_summary_matrices_npz": str(summary_npz_path.resolve()),
             "schur_diagnostics_json": str(schur_diag_path.resolve()),
             "combined_curvature_diagnostics_json": str(curvature_diag_path.resolve()),
+            "active_key_sensitivity_json": str(active_key_sensitivity_path.resolve()),
             "local_surrogate_validation_csv": str(surrogate_csv_path.resolve()),
             "local_surrogate_validation_png": (
                 None
@@ -6617,6 +6999,7 @@ def _evaluate_schur_summary(
                 else str(surrogate_png_path.resolve())
             ),
         },
+        "active_key_sensitivity": active_key_sensitivity,
     }
     return summary_payload
 
@@ -6768,6 +7151,66 @@ def _run_profile_objective(
     return summary
 
 
+def _active_key_sensitivity_diagnostics(
+    *,
+    combined_loss_fn: Any,
+    combined_reference_vector: np.ndarray,
+    theta_dim: int,
+    phi_labels: Sequence[str],
+) -> dict[str, Any]:
+    """Return finite-difference/gradient sensitivity diagnostics for active keys."""
+
+    reference = jnp.asarray(combined_reference_vector, dtype=float)
+    loss_ref = float(combined_loss_fn(reference))
+    grad_ref = np.asarray(jax.grad(combined_loss_fn)(reference), dtype=float)
+    rows: list[dict[str, Any]] = []
+    status_counts = {"active": 0, "weak": 0, "null": 0}
+    for local_index, key in enumerate(phi_labels):
+        combined_index = int(theta_dim + local_index)
+        key_lower = str(key).lower()
+        if "position_angle_deg" in key_lower:
+            step = 1.0e-3
+        elif "x_position_as" in key_lower or "y_position_as" in key_lower:
+            step = 1.0e-6
+        else:
+            step = 1.0e-6
+        plus = reference.at[combined_index].add(step)
+        minus = reference.at[combined_index].add(-step)
+        loss_plus = float(combined_loss_fn(plus))
+        loss_minus = float(combined_loss_fn(minus))
+        loss_delta = float(0.5 * (loss_plus - loss_minus))
+        grad_value = float(grad_ref[combined_index])
+        score = max(abs(loss_delta), abs(grad_value))
+        if score <= 1.0e-12:
+            status = "null"
+        elif score <= 1.0e-9:
+            status = "weak"
+        else:
+            status = "active"
+        status_counts[status] += 1
+        rows.append(
+            {
+                "key": str(key),
+                "combined_index": combined_index,
+                "finite_difference_step": float(step),
+                "loss_ref": loss_ref,
+                "loss_plus": float(loss_plus),
+                "loss_minus": float(loss_minus),
+                "loss_delta": loss_delta,
+                "gradient_value": grad_value,
+                "gradient_norm_if_available": abs(grad_value),
+                "image_delta_norm": None,
+                "status": status,
+            }
+        )
+    return {
+        "schema_version": "obs_subblock_active_key_sensitivity.v1",
+        "n_active_keys": len(rows),
+        "status_counts": status_counts,
+        "items": rows,
+    }
+
+
 def _run_nuisance_absorption(
     *,
     case_root: Path,
@@ -6898,6 +7341,7 @@ def run_obs_subblock_study(
     reuse_reference_inference: str | Path | None = None,
     theta_reference_offsets: Mapping[str, float] | None = None,
     theta_reference_values: Mapping[str, float] | None = None,
+    allow_dense_image_hessian: bool = False,
     memory_diagnostics: bool = False,
     memory_diagnostics_file: Path | None = None,
     dry_run: bool = False,
@@ -7036,6 +7480,7 @@ def run_obs_subblock_study(
             "validate_surrogate": bool(validate_surrogate),
             "validate_structured_against_dense": bool(validate_structured_against_dense),
             "validation_steps": int(validation_steps),
+            "allow_dense_image_hessian": bool(allow_dense_image_hessian),
             "schur_frame_quality_policy": str(schur_frame_quality_policy),
             "schur_frame_chi2_threshold": float(schur_frame_chi2_threshold),
             "schur_frame_quality_missing": str(schur_frame_quality_missing),
@@ -7480,6 +7925,7 @@ def run_obs_subblock_study(
             schur_frame_mask_denominator=str(schur_frame_mask_denominator),
             schur_frame_mask_min_good_frames=int(schur_frame_mask_min_good_frames),
             theta_reference_overrides=theta_reference_override_metadata,
+            allow_dense_image_hessian=bool(allow_dense_image_hessian),
             memory_recorder=memory_recorder,
         )
         summary["schur_summary"] = schur_summary
@@ -7712,9 +8158,18 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=SUPPORTED_SCHUR_CURVATURE_METHODS,
         default=SCHUR_CURVATURE_METHOD_AUTO,
         help=(
-            "Curvature path for schur_summary export. auto uses dense below "
-            "the max-dense-dim guard and structured_independent_frames for "
-            "supported independent-frame layouts above the guard."
+            "Curvature path for schur_summary export. auto prefers supported "
+            "structured methods (independent, linear drift, residual-prior) "
+            "and falls back to dense only when structured support is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--allow-dense-image-hessian",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow dense image-backed Hessian evaluation in schur_summary mode. "
+            "Disabled by default for campaign safety."
         ),
     )
     parser.add_argument(
@@ -8037,6 +8492,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         validate_structured_against_dense=bool(
             args.validate_structured_against_dense
         ),
+        allow_dense_image_hessian=bool(args.allow_dense_image_hessian),
         validation_steps=int(args.validation_steps),
         schur_frame_quality_policy=str(args.schur_frame_quality_policy),
         schur_frame_chi2_threshold=float(args.schur_frame_chi2_threshold),

@@ -1,4 +1,4 @@
-"""Source component contracts and target metadata for binary sources."""
+"""Source component contracts, diagnostics, and target metadata."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, dataclass, is_dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..params.spec import ParamField, ParamSpec
 from ..utils.source_photometry import (
@@ -15,6 +15,11 @@ from ..utils.source_photometry import (
     derive_source_photometry,
     target_sed_root,
 )
+
+if TYPE_CHECKING:
+    import jax.numpy as jnp
+
+    from ..params.store import ParameterStore
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,141 @@ def _extract_source_mapping(source_cfg: Mapping[str, Any] | Any) -> Mapping[str,
     return source_cfg
 
 
+def linear_total_flux_from_log10(log_flux_total: Any) -> jnp.ndarray:
+    """Return linear total photons from a public log10-flux parameter.
+
+    Parameters
+    ----------
+    log_flux_total:
+        dLuxShera public total-flux parameter, expressed as
+        ``log10(total photons)``.
+
+    Returns
+    -------
+    jax.Array
+        Linear total photon count.
+    """
+
+    import jax.numpy as jnp
+
+    return jnp.power(jnp.asarray(10.0, dtype=float), jnp.asarray(log_flux_total, dtype=float))
+
+
+def binary_component_fluxes_from_total_and_contrast(
+    total_flux: Any,
+    contrast: Any,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return primary/secondary fluxes from total flux and A/B contrast.
+
+    Parameters
+    ----------
+    total_flux:
+        Total binary flux in photons.
+    contrast:
+        Primary-to-secondary flux ratio.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array]
+        ``(primary_flux, secondary_flux)`` using the AlphaCen convention where
+        ``primary / secondary == contrast`` and the components sum to
+        ``total_flux``.
+    """
+
+    import jax.numpy as jnp
+
+    total = jnp.asarray(total_flux, dtype=float)
+    ratio = jnp.asarray(contrast, dtype=float)
+    secondary = total / (jnp.asarray(1.0, dtype=float) + ratio)
+    primary = ratio * secondary
+    return primary, secondary
+
+
+def binary_mean_flux_from_total_and_contrast(
+    total_flux: Any,
+    contrast: Any,
+) -> jnp.ndarray:
+    """Return dLux ``BinarySource.mean_flux`` from dLuxShera total flux.
+
+    Parameters
+    ----------
+    total_flux:
+        Public dLuxShera total binary flux in photons.
+    contrast:
+        Primary-to-secondary flux ratio. Present for convention clarity; the
+        current dLux ``BinarySource`` convention uses the average component
+        flux, so the result is independent of contrast.
+
+    Returns
+    -------
+    jax.Array
+        Mean component flux, equal to ``total_flux / 2``.
+    """
+
+    import jax.numpy as jnp
+
+    del contrast
+    return jnp.asarray(total_flux, dtype=float) / jnp.asarray(2.0, dtype=float)
+
+
+def compute_source_flux_diagnostics(
+    source_kind: str,
+    store: ParameterStore,
+) -> dict[str, Any]:
+    """Return source-aware flux diagnostics from a parameter store.
+
+    Parameters
+    ----------
+    source_kind:
+        Source kind, for example ``"single_star"``, ``"binary"``, or
+        ``"binary_target"``.
+    store:
+        Store containing the public dLuxShera source parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Mapping with ``total_flux`` and ``component_fluxes``. Binary sources
+        also include ``contrast``.
+
+    Raises
+    ------
+    ValueError
+        If the source kind is unknown.
+    KeyError
+        If required store keys are missing.
+    """
+
+    kind = str(source_kind).lower()
+    total_flux = linear_total_flux_from_log10(store.get("source.log_flux_total"))
+
+    if kind == "single_star":
+        return {
+            "total_flux": total_flux,
+            "component_fluxes": {"star": total_flux},
+        }
+
+    if kind in {"binary", "binary_target", "alpha_cen"}:
+        contrast = store.get("source.contrast")
+        primary, secondary = binary_component_fluxes_from_total_and_contrast(
+            total_flux,
+            contrast,
+        )
+        return {
+            "total_flux": total_flux,
+            "contrast": contrast,
+            "component_fluxes": {
+                "primary": primary,
+                "secondary": secondary,
+            },
+        }
+
+    raise ValueError(
+        "Unknown source kind for flux diagnostics: "
+        f"{source_kind!r}. Supported kinds: binary_target, binary, single_star."
+    )
+
+
 def _derive_nominal_contrast(
     *,
     target_spec: TargetSpec | None,
@@ -255,6 +395,198 @@ def _derive_nominal_contrast(
         return 3.0
 
     return float(photometry.contrast)
+
+
+def _base_spectral_fields(
+    source_cfg: Mapping[str, Any],
+    *,
+    log_flux_kind: str = "primitive",
+) -> list[ParamField]:
+    """Return common wavelength/exposure/log-flux source fields."""
+
+    log_flux_default = source_cfg.get("log_flux_total", 6.0)
+    log_flux_kwargs: dict[str, Any] = {}
+    if log_flux_kind == "derived":
+        log_flux_kwargs = {
+            "default": None,
+            "transform": "source.log_flux_total",
+            "depends_on": (
+                "source.target",
+                "source.vmag_a",
+                "source.vmag_b",
+                "source.wavelength_m",
+                "optics.m1_diameter_m",
+                "source.bandwidth_m",
+                "source.n_lambda",
+                "source.exposure_time_s",
+                "optics.throughput",
+            ),
+        }
+    else:
+        log_flux_kwargs = {"default": log_flux_default}
+
+    return [
+        ParamField(
+            "source.wavelength_m",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=source_cfg.get("wavelength_m"),
+            structural=True,
+        ),
+        ParamField(
+            "source.bandwidth_m",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=source_cfg.get("bandwidth_m"),
+            structural=True,
+        ),
+        ParamField(
+            "source.n_lambda",
+            group="source",
+            kind="primitive",
+            dtype=int,
+            shape=(),
+            default=source_cfg.get("n_lambda"),
+            structural=True,
+        ),
+        ParamField(
+            "source.exposure_time_s",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=source_cfg.get("exposure_time_s", 1.0),
+            structural=False,
+        ),
+        ParamField(
+            "source.log_flux_total",
+            group="source",
+            kind=log_flux_kind,
+            dtype=float,
+            shape=(),
+            structural=False,
+            binding="log_flux",
+            **log_flux_kwargs,
+        ),
+    ]
+
+
+def _position_fields(
+    source_cfg: Mapping[str, Any],
+    *,
+    include_separation: bool,
+    include_contrast: bool,
+) -> list[ParamField]:
+    """Return common source astrometry fields."""
+
+    fields = [
+        ParamField(
+            "source.x_position_as",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=source_cfg.get("x_position_as", 0.0),
+            structural=False,
+            binding="x_position",
+        ),
+        ParamField(
+            "source.y_position_as",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=source_cfg.get("y_position_as", 0.0),
+            structural=False,
+            binding="y_position",
+        ),
+        ParamField(
+            "source.position_angle_deg",
+            group="source",
+            kind="primitive",
+            dtype=float,
+            shape=(),
+            default=source_cfg.get("position_angle_deg", 0.0),
+            structural=False,
+            binding="position_angle",
+        ),
+    ]
+
+    if include_separation:
+        fields.insert(
+            0,
+            ParamField(
+                "source.separation_as",
+                group="source",
+                kind="primitive",
+                dtype=float,
+                shape=(),
+                default=source_cfg.get("separation_as", 10.0),
+                structural=False,
+                binding="separation",
+            ),
+        )
+
+    if include_contrast:
+        fields.append(
+            ParamField(
+                "source.contrast",
+                group="source",
+                kind="primitive",
+                dtype=float,
+                shape=(),
+                default=source_cfg.get("contrast", 1.0),
+                structural=False,
+                binding="contrast",
+            )
+        )
+
+    return fields
+
+
+def build_single_star_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
+    """Return the calibration-friendly single-star source contract.
+
+    The public flux parameter is ``source.log_flux_total``. No binary-only
+    separation, contrast, or target photometry keys are required.
+    """
+
+    source_cfg = _extract_source_mapping(source_cfg)
+    return ParamSpec(
+        [
+            *_base_spectral_fields(source_cfg, log_flux_kind="primitive"),
+            *_position_fields(
+                source_cfg,
+                include_separation=False,
+                include_contrast=False,
+            ),
+        ]
+    )
+
+
+def build_binary_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
+    """Return the generic dLux ``BinarySource`` contract.
+
+    This path is independent of the curated target registry. The public flux
+    parameter remains ``source.log_flux_total`` and is converted to dLux
+    ``mean_flux`` only inside the source builder.
+    """
+
+    source_cfg = _extract_source_mapping(source_cfg)
+    return ParamSpec(
+        [
+            *_base_spectral_fields(source_cfg, log_flux_kind="primitive"),
+            *_position_fields(
+                source_cfg,
+                include_separation=True,
+                include_contrast=True,
+            ),
+        ]
+    )
 
 
 def build_binary_target_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
@@ -474,7 +806,13 @@ def build_alpha_cen_contract(source_cfg: Mapping[str, Any]) -> ParamSpec:
 __all__ = [
     "TargetSpec",
     "TARGET_SPECS",
+    "binary_component_fluxes_from_total_and_contrast",
+    "binary_mean_flux_from_total_and_contrast",
     "build_alpha_cen_contract",
+    "build_binary_contract",
     "build_binary_target_contract",
+    "build_single_star_contract",
+    "compute_source_flux_diagnostics",
     "get_target_spec",
+    "linear_total_flux_from_log10",
 ]

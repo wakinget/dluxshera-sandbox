@@ -4,6 +4,7 @@ Usage
 -----
     python work/scratch/source_target_montage.py
     python work/scratch/source_target_montage.py --normalize-total-flux
+    python work/scratch/source_target_montage.py --targets ALPHA_CEN --include-alpha-cen-a-single-star
 
 Output
 ------
@@ -32,7 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
 
-from dluxshera.components.sources import TARGET_SPECS
+from dluxshera.components.sources import TARGET_SPECS, TargetSpec, compute_source_flux_diagnostics
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
 from dluxshera.params.store import ParameterStore
@@ -57,6 +58,27 @@ TARGET_AUTHORITY_OVERRIDE_KEYS = (
     "vmag_a",
     "vmag_b",
 )
+ALPHA_CEN_A_SINGLE_KEY = "ALPHA_CEN_A_SINGLE"
+ALPHA_CEN_A_SINGLE_SPEC = TargetSpec(
+    key=ALPHA_CEN_A_SINGLE_KEY,
+    display_name="Alpha Cen A (single star placeholder)",
+    component_labels=("A", "single"),
+    notes="Placeholder centered single_star source seeded from Alpha Cen A component flux.",
+)
+
+
+def _parse_targets(raw_targets: str) -> list[str]:
+    token = raw_targets.strip()
+    if token.lower() == "all":
+        return sorted(TARGET_SPECS)
+    keys = [part.strip().upper() for part in token.split(",") if part.strip()]
+    if not keys:
+        raise ValueError("No target keys were provided.")
+    unknown = [key for key in keys if key not in TARGET_SPECS]
+    if unknown:
+        known = ", ".join(sorted(TARGET_SPECS))
+        raise ValueError(f"Unknown target key(s): {', '.join(unknown)}. Available: {known}.")
+    return keys
 
 
 def _resolve_display_limits(
@@ -86,6 +108,16 @@ def _parse_args() -> argparse.Namespace:
         "--system-preset",
         default=SYSTEM_PRESET,
         help="System preset to load before per-target source overrides are applied.",
+    )
+    parser.add_argument(
+        "--targets",
+        default="all",
+        help="Comma-separated target keys, or 'all'.",
+    )
+    parser.add_argument(
+        "--include-alpha-cen-a-single-star",
+        action="store_true",
+        help="Append the centered Alpha Cen A-like single_star placeholder.",
     )
     parser.add_argument(
         "--normalize-total-flux",
@@ -132,6 +164,10 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    try:
+        args.target_keys = _parse_targets(args.targets)
+    except ValueError as exc:
+        parser.error(str(exc))
     args.vmin, args.vmax = _resolve_display_limits(
         normalize_total_flux=args.normalize_total_flux,
         vmin=args.vmin,
@@ -182,6 +218,71 @@ def _build_target_image(
     return image, store
 
 
+def _build_alpha_cen_a_single_star_image(
+    base_system_cfg: dict,
+    *,
+    normalize_total_flux: bool,
+    psf_npix: int | None,
+) -> tuple[np.ndarray, ParameterStore]:
+    """Build the centered Alpha Cen A-like single-star placeholder image."""
+
+    _, alpha_store = _build_target_image(
+        base_system_cfg,
+        target_key="ALPHA_CEN",
+        normalize_total_flux=False,
+        psf_npix=psf_npix,
+    )
+    alpha_flux_diag = compute_source_flux_diagnostics("binary_target", alpha_store)
+    alpha_a_flux = float(np.asarray(alpha_flux_diag["component_fluxes"]["primary"]))
+    if not np.isfinite(alpha_a_flux) or alpha_a_flux <= 0.0:
+        raise ValueError("Alpha Cen A component flux must be positive and finite.")
+
+    system_cfg = deepcopy(base_system_cfg)
+    source_cfg = system_cfg.setdefault("source", {})
+    optics_cfg = system_cfg.setdefault("optics", {})
+    if not isinstance(source_cfg, dict) or not isinstance(optics_cfg, dict):
+        raise ValueError("Expected system.source and system.optics mappings.")
+    system_cfg["source"] = {
+        "kind": "single_star",
+        "wavelength_m": float(np.asarray(alpha_store.get("source.wavelength_m"))),
+        "bandwidth_m": float(np.asarray(alpha_store.get("source.bandwidth_m"))),
+        "n_lambda": int(np.asarray(alpha_store.get("source.n_lambda"))),
+        "exposure_time_s": float(np.asarray(alpha_store.get("source.exposure_time_s"))),
+        "x_position_as": 0.0,
+        "y_position_as": 0.0,
+        "position_angle_deg": 0.0,
+        "log_flux_total": float(np.log10(alpha_a_flux)),
+    }
+    if psf_npix is not None:
+        optics_cfg["psf_npix"] = int(psf_npix)
+
+    forward_spec = compose_forward_spec({"system": system_cfg})
+    store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    if normalize_total_flux:
+        store = store.replace({"source.log_flux_total": 0.0})
+    binder = SheraBinder(system_cfg, forward_spec, store)
+    image = np.asarray(binder.model(binder.strip_structural(store)))
+    return image, store
+
+
+def _panel_title(spec: TargetSpec, store: ParameterStore) -> str:
+    source_kind = "single_star" if spec.key == ALPHA_CEN_A_SINGLE_KEY else "binary_target"
+    if source_kind == "single_star":
+        return (
+            f"{spec.display_name}\n"
+            f"single_star, x={float(store.get('source.x_position_as')):.1f} as, "
+            f"y={float(store.get('source.y_position_as')):.1f} as\n"
+            f"logF={float(store.get('source.log_flux_total')):.2f}"
+        )
+    return (
+        f"{spec.display_name}\n"
+        f"sep={float(store.get('source.separation_as')):.1f} as, "
+        f"PA={float(store.get('source.position_angle_deg')):.1f} deg\n"
+        f"contrast={float(store.get('source.contrast')):.2f}, "
+        f"logF={float(store.get('source.log_flux_total')):.2f}"
+    )
+
+
 def main() -> None:
     args = _parse_args()
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,7 +295,7 @@ def main() -> None:
     resolved = resolve_config(user_cfg)
     system_cfg = resolved["system"]
 
-    target_keys = sorted(TARGET_SPECS.keys())
+    target_keys = list(args.target_keys)
     images: list[np.ndarray] = []
     stores: list[ParameterStore] = []
     specs = [TARGET_SPECS[key] for key in target_keys]
@@ -208,6 +309,16 @@ def main() -> None:
         )
         images.append(image)
         stores.append(store)
+
+    if args.include_alpha_cen_a_single_star:
+        image, store = _build_alpha_cen_a_single_star_image(
+            system_cfg,
+            normalize_total_flux=args.normalize_total_flux,
+            psf_npix=args.psf_npix,
+        )
+        images.append(image)
+        stores.append(store)
+        specs.append(ALPHA_CEN_A_SINGLE_SPEC)
 
     n_panels = len(images)
     ncols = 3
@@ -245,15 +356,7 @@ def main() -> None:
         ax.set_xlabel("X [arcsec]", fontsize=8)
         ax.set_ylabel("Y [arcsec]", fontsize=8)
         ax.tick_params(axis="both", labelsize=7)
-        title = (
-            f"{spec.display_name}\n"
-            f"sep={float(store.get('source.separation_as')):.1f} as, "
-            f"PA={float(store.get('source.position_angle_deg')):.1f} deg\n"
-            f"contrast={float(store.get('source.contrast')):.2f}, "
-            f"logF={float(store.get('source.log_flux_total')):.2f}"
-            # f"{spec.spectral_type_a or '?'} + {spec.spectral_type_b or '?'}"
-        )
-        ax.set_title(title, fontsize=9)
+        ax.set_title(_panel_title(spec, store), fontsize=9)
         cbar = fig.colorbar(im, cax=merge_cbar(ax))
         cbar.ax.tick_params(labelsize=7)
 

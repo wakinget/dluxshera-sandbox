@@ -28,6 +28,7 @@ __all__ = [
     "StructuredSchurReductionResult",
     "build_independent_frame_theta_phi_quadratic_blocks",
     "compare_structured_and_dense_schur_outputs",
+    "build_residual_prior_temporal_curvature",
     "materialize_structured_schur_sidecar_blocks",
     "schur_reduce_independent_frame_blocks",
 ]
@@ -242,6 +243,67 @@ def _as_square_matrix(values: np.ndarray, *, name: str) -> np.ndarray:
     if matrix.shape[0] != matrix.shape[1]:
         raise ValueError(f"{name} must be a square matrix.")
     return 0.5 * (matrix + matrix.T)
+
+
+def _ols_projection_matrix(centered_time: np.ndarray) -> np.ndarray:
+    """Return projection onto span([1, centered_time])."""
+
+    t = np.asarray(centered_time, dtype=float)
+    if t.ndim != 1 or t.size <= 0:
+        raise ValueError("centered_time must be a non-empty 1D vector.")
+    design = np.stack((np.ones_like(t), t), axis=1)
+    gram = design.T @ design
+    gram_inv = np.linalg.pinv(gram)
+    proj = design @ gram_inv @ design.T
+    return 0.5 * (proj + proj.T)
+
+
+def build_residual_prior_temporal_curvature(
+    *,
+    frame_times_s: np.ndarray,
+    frame_keys: Sequence[str],
+    residual_sigmas_by_key: dict[str, float],
+    reduce: str,
+    subblock_reduce: str,
+) -> np.ndarray:
+    """Build expanded fast-state temporal-prior curvature for residual-prior model.
+
+    The penalty per key is ``0.5 / sigma^2 * ||(I - P) phi||^2`` with ``P`` as
+    the OLS projection onto intercept+slope in centered time.
+    """
+
+    times = np.asarray(frame_times_s, dtype=float)
+    if times.ndim != 1 or times.size <= 0:
+        raise ValueError("frame_times_s must be a non-empty 1D vector.")
+    keys = tuple(str(key) for key in frame_keys)
+    if not keys:
+        raise ValueError("frame_keys must be non-empty.")
+    for key in keys:
+        if key not in residual_sigmas_by_key:
+            raise ValueError(f"Missing residual-prior sigma for frame key {key!r}.")
+        sigma = float(residual_sigmas_by_key[key])
+        if not np.isfinite(sigma) or sigma <= 0.0:
+            raise ValueError(f"Residual-prior sigma for {key!r} must be positive and finite.")
+    resolved_reduce = str(reduce)
+    if resolved_reduce == "match_subblock_reduce":
+        resolved_reduce = str(subblock_reduce)
+    if resolved_reduce not in {"sum", "mean"}:
+        raise ValueError("reduce must be one of: sum, mean, match_subblock_reduce.")
+
+    n_frame = int(times.size)
+    frame_width = int(len(keys))
+    centered = times - float(np.mean(times))
+    proj = _ols_projection_matrix(centered)
+    residual_op = np.eye(n_frame, dtype=float) - proj
+    residual_op = 0.5 * (residual_op + residual_op.T)
+    scale = 1.0 if resolved_reduce == "sum" else 1.0 / float(n_frame)
+    h_pp = np.zeros((n_frame * frame_width, n_frame * frame_width), dtype=float)
+    for key_index, key in enumerate(keys):
+        sigma = float(residual_sigmas_by_key[key])
+        block = scale * residual_op / (sigma * sigma)
+        index = np.arange(n_frame, dtype=int) * frame_width + int(key_index)
+        h_pp[np.ix_(index, index)] = block
+    return 0.5 * (h_pp + h_pp.T)
 
 
 def _matrix_diagnostics(matrix: np.ndarray) -> MatrixDiagnostics:

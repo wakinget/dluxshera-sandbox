@@ -237,6 +237,20 @@ class ThetaPreconditioningBundle:
 
 
 @dataclass(frozen=True)
+class PreconditioningPlan:
+    """Route optimizer preconditioning to a safe effective method."""
+
+    requested_method: str
+    effective_method: str
+    temporal_kind: str
+    selected_by: str
+    fallback_used: bool
+    reason: str
+    dense_global_fim_allowed: bool
+    dense_global_fim_materialized: bool
+
+
+@dataclass(frozen=True)
 class TruthFrameMatrix:
     """Completed truth values and provenance for active frame keys."""
 
@@ -1624,8 +1638,10 @@ _PRECONDITIONING_METHOD_ALIASES = {
     "dense": "dense_full_theta",
     "dense_fim_diag": "dense_full_theta",
     "dense_full_theta": "dense_full_theta",
+    "diagonal_hvp": "diagonal_hvp",
     "frame_block": "frame_block",
     "frame_shared_structured": "frame_shared_structured",
+    "structured_residual_prior_diag": "structured_residual_prior_diag",
 }
 
 
@@ -1671,21 +1687,73 @@ def _select_preconditioning_method(
 ) -> str:
     """Select the effective preconditioning method for this active layout."""
 
+    return _plan_preconditioning_method(
+        requested_method=requested_method,
+        layout=layout,
+        temporal_cfg=temporal_cfg,
+    ).effective_method
+
+
+def _plan_preconditioning_method(
+    *,
+    requested_method: str,
+    layout: ActiveStateLayout,
+    temporal_cfg: Mapping[str, Any],
+) -> PreconditioningPlan:
+    """Model-aware preconditioning route planner."""
+
     requested = _normalize_preconditioning_method(requested_method)
-    frame_kind = _frame_model_kind(temporal_cfg)
+    temporal_kind = _frame_model_kind(dict(temporal_cfg))
     if requested == "auto":
-        if frame_kind == "independent":
-            return (
-                "frame_block"
-                if layout.shared_width == 0
-                else "frame_shared_structured"
+        if temporal_kind == "independent":
+            effective = "frame_block" if layout.shared_width == 0 else "frame_shared_structured"
+            return PreconditioningPlan(
+                requested_method=requested,
+                effective_method=effective,
+                temporal_kind=temporal_kind,
+                selected_by="auto",
+                fallback_used=False,
+                reason="independent temporal model uses structured frame-local curvature",
+                dense_global_fim_allowed=False,
+                dense_global_fim_materialized=False,
             )
-        return "dense_full_theta"
+        if temporal_kind == "linear_drift_residual_jitter_prior":
+            return PreconditioningPlan(
+                requested_method=requested,
+                effective_method="structured_residual_prior_diag",
+                temporal_kind=temporal_kind,
+                selected_by="auto",
+                fallback_used=False,
+                reason="residual-prior temporal model uses structured data curvature plus analytic temporal-prior diagonal",
+                dense_global_fim_allowed=False,
+                dense_global_fim_materialized=False,
+            )
+        if temporal_kind == "linear_drift":
+            return PreconditioningPlan(
+                requested_method=requested,
+                effective_method="dense_full_theta",
+                temporal_kind=temporal_kind,
+                selected_by="auto",
+                fallback_used=False,
+                reason="hard linear-drift compact state currently uses dense preconditioning path",
+                dense_global_fim_allowed=True,
+                dense_global_fim_materialized=True,
+            )
+        return PreconditioningPlan(
+            requested_method=requested,
+            effective_method="diagonal_hvp",
+            temporal_kind=temporal_kind,
+            selected_by="auto",
+            fallback_used=True,
+            reason="unknown temporal model fell back to diagonal-only HVP preconditioning",
+            dense_global_fim_allowed=False,
+            dense_global_fim_materialized=False,
+        )
 
     if requested in {"frame_block", "frame_shared_structured"}:
-        if frame_kind != "independent":
+        if temporal_kind != "independent":
             raise ValueError(
-                "Structured sub-block preconditioning currently requires "
+                "Structured frame-block preconditioning requires "
                 "experiment.inference.temporal.frame_model.kind='independent'."
             )
         if requested == "frame_block" and layout.shared_width != 0:
@@ -1693,7 +1761,77 @@ def _select_preconditioning_method(
                 "preconditioning.method='frame_block' requires no shared active "
                 "parameters. Use 'frame_shared_structured' or 'auto' instead."
             )
-    return requested
+        return PreconditioningPlan(
+            requested_method=requested,
+            effective_method=requested,
+            temporal_kind=temporal_kind,
+            selected_by="explicit",
+            fallback_used=False,
+            reason="explicit structured independent-frame preconditioning request",
+            dense_global_fim_allowed=False,
+            dense_global_fim_materialized=False,
+        )
+    if requested == "structured_residual_prior_diag":
+        if temporal_kind != "linear_drift_residual_jitter_prior":
+            raise ValueError(
+                "preconditioning.method='structured_residual_prior_diag' requires "
+                "temporal.frame_model.kind='linear_drift_residual_jitter_prior'."
+            )
+        return PreconditioningPlan(
+            requested_method=requested,
+            effective_method=requested,
+            temporal_kind=temporal_kind,
+            selected_by="explicit",
+            fallback_used=False,
+            reason="explicit structured residual-prior preconditioning request",
+            dense_global_fim_allowed=False,
+            dense_global_fim_materialized=False,
+        )
+    if requested == "diagonal_hvp":
+        return PreconditioningPlan(
+            requested_method=requested,
+            effective_method=requested,
+            temporal_kind=temporal_kind,
+            selected_by="explicit",
+            fallback_used=False,
+            reason="explicit diagonal-only HVP preconditioning request",
+            dense_global_fim_allowed=False,
+            dense_global_fim_materialized=False,
+        )
+    return PreconditioningPlan(
+        requested_method=requested,
+        effective_method=requested,
+        temporal_kind=temporal_kind,
+        selected_by="explicit",
+        fallback_used=False,
+        reason="explicit dense preconditioning request",
+        dense_global_fim_allowed=True,
+        dense_global_fim_materialized=True,
+    )
+
+
+def _validate_dense_preconditioning_guard(
+    *,
+    effective_method: str,
+    theta_dim: int,
+    max_dense_dim: int,
+    allow_dense_image_hessian: bool,
+) -> None:
+    """Fail fast when dense preconditioning is unsafe for campaign runs."""
+
+    if (
+        effective_method == "dense_full_theta"
+        and int(theta_dim) > int(max_dense_dim)
+        and not bool(allow_dense_image_hessian)
+    ):
+        raise ValueError(
+            "Dense optimizer preconditioning was selected for "
+            f"theta_dim={theta_dim}. This is disabled by default "
+            "for image-backed campaign runs because it can trigger large JAX Hessian/FIM "
+            "compilation. Use a structured preconditioner, diagonal_hvp, disable "
+            "preconditioning, or explicitly set "
+            "allow_dense_image_hessian=true for validation-only runs."
+        )
 
 
 def _build_theta_preconditioning_bundle(
@@ -1918,6 +2056,180 @@ def _build_structured_preconditioning_bundle(
             "lr_clip_applied_count": precond_config["lr_clip_applied_count"],
             "reference": reference,
             "reference_source": reference_source,
+        },
+    )
+
+
+def _temporal_prior_diagonal_for_residual_prior(
+    *,
+    layout: ActiveStateLayout,
+    temporal_cfg: Mapping[str, Any],
+    objective_cfg: Mapping[str, Any],
+) -> np.ndarray:
+    """Return packed diagonal temporal-prior curvature for residual-prior model."""
+
+    frame_model_cfg = _required_dict(
+        dict(temporal_cfg),
+        "frame_model",
+        path="experiment.inference.temporal",
+    )
+    sigmas = _parse_residual_prior_sigmas(
+        frame_model_cfg=frame_model_cfg,
+        layout=layout,
+    )
+    reduce = _normalize_temporal_reduce(
+        frame_model_cfg=frame_model_cfg,
+        objective_cfg=objective_cfg,
+    )
+    times = np.asarray(layout.frame_times_s, dtype=float)
+    if times.ndim != 1 or times.size != int(layout.n_frame):
+        raise ValueError("Active frame times are required for residual-prior temporal curvature.")
+    centered = times - float(np.mean(times))
+    design = np.stack((np.ones_like(centered), centered), axis=1)
+    gram_inv = np.linalg.pinv(design.T @ design)
+    projector = design @ gram_inv @ design.T
+    residual_projector = np.eye(int(layout.n_frame), dtype=float) - projector
+    residual_diag = np.diag(residual_projector)
+    reduce_weight = 1.0 / float(layout.n_frame) if reduce == "mean" else 1.0
+    frame_diag = np.zeros((layout.n_frame, layout.frame_width), dtype=float)
+    for key_index, key in enumerate(layout.frame_keys):
+        sigma = float(sigmas[key])
+        frame_diag[:, key_index] = reduce_weight * residual_diag / (sigma * sigma)
+    packed = frame_diag.reshape((layout.n_frame * layout.frame_width,))
+    if layout.shared_width:
+        packed = np.concatenate((packed, np.zeros((layout.shared_width,), dtype=float)), axis=0)
+    return packed
+
+
+def _hessian_diagonal_hvp(
+    *,
+    loss_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    theta_ref: jnp.ndarray,
+) -> np.ndarray:
+    """Compute Hessian diagonal via HVPs without materializing dense Hessian."""
+
+    theta = jnp.asarray(theta_ref, dtype=float)
+    grad_fn = jax.grad(loss_fn)
+    n = int(theta.size)
+    eye = np.eye(n, dtype=float)
+    diag = np.zeros((n,), dtype=float)
+    for i in range(n):
+        tangent = jnp.asarray(eye[i], dtype=float)
+        hvp = jax.jvp(grad_fn, (theta,), (tangent,))[1]
+        diag[i] = float(np.asarray(hvp, dtype=float)[i])
+    return diag
+
+
+def _build_diagonal_hvp_preconditioning_bundle(
+    *,
+    loss_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    theta_ref: jnp.ndarray,
+    cfg: Mapping[str, Any],
+    reference_source: str | None = None,
+) -> ThetaPreconditioningBundle:
+    """Build diagonal-only HVP preconditioner."""
+
+    lr_clip = _coerce_lr_clip(
+        cfg.get("lr_clip"),
+        path="experiment.inference.optimizer.preconditioning.lr_clip",
+    )
+    fim_diag = _hessian_diagonal_hvp(loss_fn=loss_fn, theta_ref=theta_ref)
+    precond = build_diagonal_preconditioner_from_curvature_diag(
+        fim_diag,
+        curvature_floor=1e-8,
+        eps=1e-12,
+        lr_clip=lr_clip,
+    )
+    return ThetaPreconditioningBundle(
+        fim=None,
+        eigvals=None,
+        eigvals_stable=None,
+        fim_diag=np.asarray(precond["fim_diag"], dtype=float),
+        curvature_vec=np.asarray(precond["curvature_vec"], dtype=float),
+        preconditioner_diag=np.asarray(precond["curvature_vec"], dtype=float),
+        lr_vec_unclipped=np.asarray(precond["lr_vec_unclipped"], dtype=float),
+        lr_vec=np.asarray(precond["lr_vec"], dtype=float),
+        config={
+            "enabled": True,
+            "method": "diagonal_hvp",
+            "curvature_source": "theta_hessian_diagonal_hvp",
+            "dense_global_fim_materialized": False,
+            "reference": str(cfg.get("reference", "truth_when_available")),
+            "reference_source": reference_source,
+            **dict(precond["config"]),
+        },
+    )
+
+
+def _build_structured_residual_prior_preconditioning_bundle(
+    *,
+    layout: ActiveStateLayout,
+    objective_bundle: ObjectiveBundle,
+    theta_ref: jnp.ndarray,
+    cfg: Mapping[str, Any],
+    temporal_cfg: Mapping[str, Any],
+    objective_cfg: Mapping[str, Any],
+    subblock_reduce: str,
+    reference_source: str | None = None,
+) -> ThetaPreconditioningBundle:
+    """Build residual-prior structured preconditioning (data diag + prior diag)."""
+
+    if layout.shared_width != 0:
+        raise ValueError(
+            "structured_residual_prior_diag currently requires no active shared parameters."
+        )
+    state_ref = _unpack_active_state(layout, jnp.asarray(theta_ref))
+    blocks = build_independent_frame_curvature_blocks(
+        frame_loss_fn=objective_bundle.frame_data_term_fn,
+        frame_theta_ref=state_ref.frame,
+        shared_theta_ref=state_ref.shared,
+        subblock_reduce=subblock_reduce,  # type: ignore[arg-type]
+        kind="structured_residual_prior_diag",
+    )
+    data_diag = blocks.curvature_diag()
+    temporal_diag = _temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg=temporal_cfg,
+        objective_cfg=objective_cfg,
+    )
+    curvature_diag = np.asarray(data_diag, dtype=float) + np.asarray(temporal_diag, dtype=float)
+    lr_clip = _coerce_lr_clip(
+        cfg.get("lr_clip"),
+        path="experiment.inference.optimizer.preconditioning.lr_clip",
+    )
+    precond = build_diagonal_preconditioner_from_curvature_diag(
+        curvature_diag,
+        curvature_floor=1e-8,
+        eps=1e-12,
+        lr_clip=lr_clip,
+    )
+    return ThetaPreconditioningBundle(
+        fim=None,
+        eigvals=None,
+        eigvals_stable=None,
+        fim_diag=np.asarray(precond["fim_diag"], dtype=float),
+        curvature_vec=np.asarray(precond["curvature_vec"], dtype=float),
+        preconditioner_diag=np.asarray(precond["curvature_vec"], dtype=float),
+        lr_vec_unclipped=np.asarray(precond["lr_vec_unclipped"], dtype=float),
+        lr_vec=np.asarray(precond["lr_vec"], dtype=float),
+        structured_blocks=blocks,
+        config={
+            "enabled": True,
+            "method": "structured_residual_prior_diag",
+            "requested_method": str(cfg.get("method", "auto")),
+            "curvature_source": "independent_frame_structured_blocks_plus_temporal_prior_diag",
+            "dense_global_fim_materialized": False,
+            "frame_count": int(layout.n_frame),
+            "frame_dim": int(layout.frame_width),
+            "shared_dim": int(layout.shared_width),
+            "subblock_reduce": str(subblock_reduce),
+            "reduce_weight": float(blocks.reduce_weight),
+            "temporal_prior_diag_min": float(np.min(temporal_diag)),
+            "temporal_prior_diag_max": float(np.max(temporal_diag)),
+            "temporal_prior_diag_sum": float(np.sum(temporal_diag)),
+            "reference": str(cfg.get("reference", "truth_when_available")),
+            "reference_source": reference_source,
+            **dict(precond["config"]),
         },
     )
 
@@ -3308,6 +3620,16 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
             "experiment.inference.optimizer.preconditioning.reference must be "
             "'truth_when_available' or 'initial'."
         )
+    preconditioning_max_dense_dim = int(
+        preconditioning_cfg.get("max_dense_dim", 20)
+    )
+    if preconditioning_max_dense_dim <= 0:
+        raise ValueError(
+            "experiment.inference.optimizer.preconditioning.max_dense_dim must be > 0."
+        )
+    preconditioning_allow_dense_image_hessian = bool(
+        preconditioning_cfg.get("allow_dense_image_hessian", False)
+    )
 
     diagnostics_cfg = _optional_dict(
         inference_cfg,
@@ -3452,6 +3774,8 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                     "damping": preconditioning_damping,
                     "eig_floor_rel": preconditioning_eig_floor_rel,
                     "eig_floor_abs": preconditioning_eig_floor_abs,
+                    "max_dense_dim": preconditioning_max_dense_dim,
+                    "allow_dense_image_hessian": preconditioning_allow_dense_image_hessian,
                     "lr_clip": (
                         None
                         if preconditioning_lr_clip is None
@@ -3876,11 +4200,21 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     preconditioning_cfg = optimizer_cfg["preconditioning"]
     preconditioning_bundle: ThetaPreconditioningBundle | None = None
     lr_vec: np.ndarray | None = None
+    preconditioning_plan: PreconditioningPlan | None = None
     if bool(preconditioning_cfg["enabled"]):
-        effective_preconditioning_method = _select_preconditioning_method(
+        preconditioning_plan = _plan_preconditioning_method(
             requested_method=str(preconditioning_cfg["method"]),
             layout=active_layout,
             temporal_cfg=inference_cfg["temporal"],
+        )
+        effective_preconditioning_method = preconditioning_plan.effective_method
+        _validate_dense_preconditioning_guard(
+            effective_method=effective_preconditioning_method,
+            theta_dim=int(active_layout.theta_size),
+            max_dense_dim=int(preconditioning_cfg.get("max_dense_dim", 20)),
+            allow_dense_image_hessian=bool(
+                preconditioning_cfg.get("allow_dense_image_hessian", False)
+            ),
         )
         preconditioning_theta_ref, preconditioning_reference_source = (
             _resolve_theta_preconditioning_reference(
@@ -3913,6 +4247,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 cfg=dense_cfg,
                 reference_source=preconditioning_reference_source,
             )
+        elif effective_preconditioning_method == "structured_residual_prior_diag":
+            preconditioning_bundle = _build_structured_residual_prior_preconditioning_bundle(
+                layout=active_layout,
+                objective_bundle=objective_bundle,
+                theta_ref=preconditioning_theta_ref,
+                cfg=preconditioning_cfg,
+                temporal_cfg=inference_cfg["temporal"],
+                objective_cfg=inference_cfg["objective"],
+                subblock_reduce=str(inference_cfg["objective"]["subblock_reduce"]),
+                reference_source=preconditioning_reference_source,
+            )
+        elif effective_preconditioning_method == "diagonal_hvp":
+            preconditioning_bundle = _build_diagonal_hvp_preconditioning_bundle(
+                loss_fn=objective_bundle.total_loss_fn,
+                theta_ref=preconditioning_theta_ref,
+                cfg=preconditioning_cfg,
+                reference_source=preconditioning_reference_source,
+            )
         else:
             preconditioning_bundle = _build_structured_preconditioning_bundle(
                 layout=active_layout,
@@ -3923,6 +4275,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 method=effective_preconditioning_method,
                 subblock_reduce=str(inference_cfg["objective"]["subblock_reduce"]),
                 reference_source=preconditioning_reference_source,
+            )
+        if preconditioning_plan is not None:
+            preconditioning_bundle.config.update(
+                {
+                    "requested_method": preconditioning_plan.requested_method,
+                    "effective_method": preconditioning_plan.effective_method,
+                    "temporal_kind": preconditioning_plan.temporal_kind,
+                    "selection_source": preconditioning_plan.selected_by,
+                    "fallback_used": bool(preconditioning_plan.fallback_used),
+                    "plan_reason": preconditioning_plan.reason,
+                    "dense_global_fim_allowed": bool(
+                        preconditioning_plan.dense_global_fim_allowed
+                    ),
+                }
             )
         lr_vec = np.asarray(preconditioning_bundle.lr_vec, dtype=float)
         _print_preconditioning_summary(

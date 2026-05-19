@@ -139,6 +139,55 @@ def test_compose_forward_spec_raises_on_key_collisions(monkeypatch):
         compose_forward_spec(system_cfg)
 
 
+def test_compose_forward_spec_accepts_minimal_single_star_source():
+    system_cfg = _system_cfg("two_plane")
+    system_cfg["system"]["source"] = {
+        "kind": "single_star",
+        "wavelength_m": 650e-9,
+        "bandwidth_m": 100e-9,
+        "n_lambda": 11,
+        "exposure_time_s": 0.05,
+        "x_position_as": 0.0,
+        "y_position_as": 0.0,
+        "position_angle_deg": 0.0,
+        "log_flux_total": 6.0,
+    }
+
+    spec = compose_forward_spec(system_cfg)
+
+    assert "source.log_flux_total" in spec
+    assert "source.x_position_as" in spec
+    assert "source.y_position_as" in spec
+    assert "source.position_angle_deg" in spec
+    assert "source.separation_as" not in spec
+    assert "source.contrast" not in spec
+
+
+def test_compose_forward_spec_accepts_generic_binary_source():
+    system_cfg = _system_cfg("two_plane")
+    system_cfg["system"]["source"] = {
+        "kind": "binary",
+        "wavelength_m": 650e-9,
+        "bandwidth_m": 100e-9,
+        "n_lambda": 11,
+        "exposure_time_s": 0.05,
+        "x_position_as": 0.0,
+        "y_position_as": 0.0,
+        "separation_as": 4.0,
+        "position_angle_deg": 90.0,
+        "log_flux_total": 6.0,
+        "contrast": 1.5,
+    }
+
+    spec = compose_forward_spec(system_cfg)
+
+    assert "source.log_flux_total" in spec
+    assert "source.separation_as" in spec
+    assert "source.contrast" in spec
+    assert "source.target" not in spec
+    assert "source.raw_fluxes" not in spec
+
+
 def test_legacy_wrapper_delegates_to_composed_forward_spec_three_plane():
     cfg = SheraThreePlaneConfig()
     system_cfg = _system_cfg("three_plane")["system"]

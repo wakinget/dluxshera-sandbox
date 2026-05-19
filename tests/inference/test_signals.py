@@ -130,3 +130,32 @@ def test_build_signals_computes_flux_from_store_without_refresh_derived():
 
     expected_flux_error = 1e6 * (theta[:, 0][:, None] / np.array([10.0, 5.0]))
     np.testing.assert_allclose(signals["source.raw_flux_error_ppm"], expected_flux_error)
+
+
+def test_build_signals_single_star_does_not_require_binary_flux_keys():
+    theta = np.array([[0.0], [1.0]])
+    trace = {"theta": theta, "loss": np.zeros(theta.shape[0])}
+
+    def decoder(theta_row: np.ndarray):
+        return {
+            "source.x_position_as": theta_row[0],
+            "source.y_position_as": 0.0,
+            "source.position_angle_deg": 0.0,
+            "optics.plate_scale_as_per_pix": 0.1,
+            "optics.primary.zernike_coeffs_nm": np.zeros(1),
+            "source.log_flux_total": 6.0 + theta_row[0],
+        }
+
+    signals = build_signals(
+        trace,
+        meta={"source_kind": "single_star"},
+        decoder=decoder,
+        truth={"source.log_flux_total": 6.0},
+    )
+
+    assert signals["source.raw_flux_error_ppm"].shape == (2, 1)
+    assert np.isnan(signals["source.separation_error_uas"]).all()
+    np.testing.assert_allclose(
+        signals["source.raw_flux_error_ppm"][:, 0],
+        np.array([0.0, 9.0e6]),
+    )

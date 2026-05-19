@@ -9,7 +9,11 @@ from typing import Any, Mapping
 import jax.numpy as jnp
 import numpy as np
 
-from ..components.sources import get_target_spec
+from ..components.sources import (
+    binary_component_fluxes_from_total_and_contrast,
+    get_target_spec,
+    linear_total_flux_from_log10,
+)
 from ..utils.source_photometry import (
     build_wavelength_grid_m,
     derive_source_photometry,
@@ -211,11 +215,11 @@ def compute_source_raw_fluxes_from_log_flux_total_and_contrast(
     can be reused inside traced local inference objectives.
     """
 
-    log_flux = jnp.asarray(log_flux_total, dtype=float)
-    contrast_value = jnp.asarray(contrast, dtype=float)
-    total_flux = jnp.power(jnp.asarray(10.0, dtype=float), log_flux)
-    flux_b = total_flux / (jnp.asarray(1.0, dtype=float) + contrast_value)
-    flux_a = contrast_value * flux_b
+    total_flux = linear_total_flux_from_log10(log_flux_total)
+    flux_a, flux_b = binary_component_fluxes_from_total_and_contrast(
+        total_flux,
+        contrast,
+    )
     return jnp.stack((flux_a, flux_b), axis=0)
 
 

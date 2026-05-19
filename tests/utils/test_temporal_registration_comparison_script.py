@@ -43,6 +43,52 @@ def test_parser_default_max_dense_dim():
     assert len(plan) == 1
 
 
+def _args_for_optimizer(**overrides):
+    module = _load_module()
+    parser = module.argparse.ArgumentParser()
+    parser.add_argument("--optimizer-kind", default="sgd")
+    parser.add_argument("--optimizer-base-lr", type=float, default=0.9)
+    parser.add_argument("--optimizer-n-iter", type=int, default=None)
+    parser.add_argument("--noiseless-optimizer-n-iter", type=int, default=200)
+    parser.add_argument("--shotnoise-optimizer-n-iter", type=int, default=100)
+    parser.add_argument("--schedule-kind", default="linear_warmup")
+    parser.add_argument("--schedule-warmup-steps", type=int, default=10)
+    parser.add_argument("--schedule-start-factor", type=float, default=0.125)
+    parser.add_argument("--disable-schedule", action="store_true")
+    args = parser.parse_args([])
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return module, args
+
+
+def test_optimizer_defaults_noiseless_and_shotnoise():
+    module, args = _args_for_optimizer()
+    case = module.CaseSpec(case_name="c", truth_model="linear_drift", fit_model="independent")
+    noiseless = module._optimizer_settings_for_case(case, n_frames=3, noise_mode="disabled", args=args)
+    shot = module._optimizer_settings_for_case(case, n_frames=20, noise_mode="enabled", args=args)
+    assert noiseless.kind == "sgd"
+    assert noiseless.base_lr == pytest.approx(0.9)
+    assert noiseless.n_iter == 200
+    assert shot.n_iter == 100
+    assert noiseless.schedule == {"kind": "linear_warmup", "warmup_steps": 10, "start_factor": 0.125}
+
+
+def test_optimizer_disable_schedule_and_overrides():
+    module, args = _args_for_optimizer(
+        disable_schedule=True,
+        optimizer_n_iter=77,
+        optimizer_base_lr=0.3,
+        schedule_kind="linear_warmup",
+        schedule_warmup_steps=3,
+        schedule_start_factor=0.5,
+    )
+    case = module.CaseSpec(case_name="c", truth_model="linear_drift", fit_model="linear_drift_residual_jitter_prior")
+    settings = module._optimizer_settings_for_case(case, n_frames=3, noise_mode="enabled", args=args)
+    assert settings.base_lr == pytest.approx(0.3)
+    assert settings.n_iter == 77
+    assert settings.schedule is None
+
+
 def test_schur_settings_per_case_routing():
     module = _load_module()
     independent = module.CaseSpec(case_name="a", truth_model="linear_drift", fit_model="independent")
@@ -53,10 +99,10 @@ def test_schur_settings_per_case_routing():
     res = module._schur_settings_for_case(residual, requested_max_dense_dim=40)
     assert ind["schur_curvature_method"] == "auto"
     assert ind["max_dense_dim"] == 40
-    assert lin["schur_curvature_method"] == "dense"
+    assert lin["schur_curvature_method"] == "structured_linear_drift"
     assert lin["max_dense_dim"] == 80
-    assert res["schur_curvature_method"] == "dense"
-    assert res["max_dense_dim"] >= 80
+    assert res["schur_curvature_method"] == "structured_residual_prior"
+    assert res["max_dense_dim"] == 40
 
 
 def test_iid_trace_has_expected_columns_and_shape(tmp_path: Path):
@@ -303,6 +349,13 @@ def test_full_plan_includes_residual_prior_and_config(tmp_path: Path):
         "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg\n",
         encoding="utf-8",
     )
+    _, args = _args_for_optimizer()
+    optimizer = module._optimizer_settings_for_case(
+        case,
+        n_frames=3,
+        noise_mode="disabled",
+        args=args,
+    )
     _, inference_path = module._case_configs(
         case=case,
         case_root=tmp_path,
@@ -310,13 +363,23 @@ def test_full_plan_includes_residual_prior_and_config(tmp_path: Path):
         n_frames=3,
         exposure_time_s=0.05,
         system_preset="SHERA_TESTBED_3P",
+        optimizer=optimizer,
     )
     cfg = json.loads(inference_path.read_text(encoding="utf-8"))
     frame_model = cfg["experiment"]["inference"]["temporal"]["frame_model"]
     assert frame_model["kind"] == "linear_drift_residual_jitter_prior"
     assert frame_model["residual_prior"]["source.x_position_as"]["sigma"] == pytest.approx(0.01)
     assert frame_model["reduce"] == "match_subblock_reduce"
-    assert cfg["experiment"]["inference"]["optimizer"]["n_iter"] == 50
+    assert cfg["experiment"]["inference"]["optimizer"]["n_iter"] == 200
+    assert cfg["experiment"]["inference"]["optimizer"]["base_lr"] == pytest.approx(0.9)
+    schedule = cfg["experiment"]["inference"]["optimizer"]["schedule"]
+    assert schedule["kind"] == "linear_warmup"
+    assert schedule["warmup_steps"] == 10
+    assert schedule["start_factor"] == pytest.approx(0.125)
+    preconditioning = cfg["experiment"]["inference"]["optimizer"]["preconditioning"]
+    assert preconditioning["method"] == "structured_residual_prior_diag"
+    assert preconditioning["max_dense_dim"] == 20
+    assert preconditioning["allow_dense_image_hessian"] is False
     assert cfg["experiment"]["inference"]["init"]["frame"]["mode"] == "from_truth_trace"
 
 
@@ -333,6 +396,13 @@ def test_truth_plus_offset_init_config_written(tmp_path: Path):
         "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg\n",
         encoding="utf-8",
     )
+    _, args = _args_for_optimizer()
+    optimizer = module._optimizer_settings_for_case(
+        case,
+        n_frames=3,
+        noise_mode="disabled",
+        args=args,
+    )
     _, inference_path = module._case_configs(
         case=case,
         case_root=tmp_path,
@@ -340,6 +410,7 @@ def test_truth_plus_offset_init_config_written(tmp_path: Path):
         n_frames=3,
         exposure_time_s=0.05,
         system_preset="SHERA_TESTBED_3P",
+        optimizer=optimizer,
     )
     cfg = json.loads(inference_path.read_text(encoding="utf-8"))
     frame_init = cfg["experiment"]["inference"]["init"]["frame"]
@@ -362,6 +433,13 @@ def test_noise_enabled_prefers_render_variance(tmp_path: Path):
         "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg\n",
         encoding="utf-8",
     )
+    _, args = _args_for_optimizer()
+    optimizer = module._optimizer_settings_for_case(
+        case,
+        n_frames=3,
+        noise_mode="enabled",
+        args=args,
+    )
     _, inference_path = module._case_configs(
         case=case,
         case_root=tmp_path,
@@ -369,6 +447,7 @@ def test_noise_enabled_prefers_render_variance(tmp_path: Path):
         n_frames=3,
         exposure_time_s=0.05,
         system_preset="SHERA_TESTBED_3P",
+        optimizer=optimizer,
     )
     render_dir = tmp_path / "render"
     render_dir.mkdir()
@@ -408,8 +487,124 @@ def test_dry_run_rows_include_schur_routing_fields(tmp_path: Path):
     by_name = {row["case_name"]: row for row in rows}
     assert by_name["iid50_truth__independent_fit"]["schur_curvature_method_requested"] == "auto"
     assert by_name["iid50_truth__independent_fit"]["schur_max_dense_dim_effective"] == "40"
-    assert by_name["iid50_truth__residual_prior_fit"]["schur_curvature_method_requested"] == "dense"
-    assert int(by_name["iid50_truth__residual_prior_fit"]["schur_max_dense_dim_effective"]) >= 80
+    assert by_name["iid50_truth__residual_prior_fit"]["schur_curvature_method_requested"] == "structured_residual_prior"
+    assert int(by_name["iid50_truth__residual_prior_fit"]["schur_max_dense_dim_effective"]) == 40
+
+
+def test_run_case_passes_requested_n_frames_to_schur(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    module = _load_module()
+    case = module.CaseSpec(
+        case_name="dim_case",
+        truth_model="linear_drift_residual_jitter",
+        fit_model="linear_drift_residual_jitter_prior",
+        noise_mode="disabled",
+        init_mode="truth",
+    )
+
+    calls: dict[str, object] = {}
+
+    def _fake_generate_obs_subblock(**kwargs):
+        render_dir = tmp_path / "run" / "cases" / case.case_name / "render"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = render_dir / "manifest.json"
+        manifest_path.write_text(json.dumps({"artifacts": {}}), encoding="utf-8")
+        cube = render_dir / "obs_subblock_fake_cube.fits"
+        cube.write_bytes(b"cube")
+        trace = render_dir / "obs_subblock_fake_frame_truth.csv"
+        trace.write_text("frame_index,time_s\n", encoding="utf-8")
+        return {"artifacts": {"cube_fits": str(cube), "frame_truth_csv": str(trace)}}
+
+    def _fake_inference_main(argv):
+        _ = argv
+        inf_dir = tmp_path / "run" / "cases" / case.case_name / "inference"
+        inf_dir.mkdir(parents=True, exist_ok=True)
+        recovered = inf_dir / "obs_subblock_inference_fake_recovered_trace.csv"
+        recovered.write_text(
+            "frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg\n"
+            "0,0.05,0,0,90\n1,0.15,0,0,90\n2,0.25,0,0,90\n",
+            encoding="utf-8",
+        )
+        manifest = inf_dir / "manifest.json"
+        manifest.write_text(json.dumps({"metrics": {"chi2": {"initial_model": {}, "final_model": {}}}}), encoding="utf-8")
+        return {
+            "artifacts": {"recovered_trace_csv": str(recovered), "manifest_json": str(manifest)},
+            "final_loss": 1.0,
+            "chi2": {"initial_model": {}, "final_model": {}},
+        }
+
+    def _fake_schur(**kwargs):
+        calls["n_frames"] = kwargs.get("n_frames")
+        study_dir = tmp_path / "run" / "cases" / case.case_name / "study" / "schur_summary"
+        study_dir.mkdir(parents=True, exist_ok=True)
+        summary_json = study_dir / "subblock_summary.json"
+        summary_json.write_text("{}", encoding="utf-8")
+        (study_dir / "subblock_summary_matrices.npz").write_bytes(b"npz")
+        return {"schur_summary": {"summary_json_path": str(summary_json)}}
+
+    monkeypatch.setattr(module.observation_subblock, "generate_obs_subblock", _fake_generate_obs_subblock)
+    monkeypatch.setattr(module.observation_subblock_inference, "main", _fake_inference_main)
+    monkeypatch.setattr(module.run_obs_subblock_study, "run_obs_subblock_study", _fake_schur)
+    monkeypatch.setattr(module, "_schur_metrics", lambda summary_json, theta_keys: {})
+    monkeypatch.setattr(module, "_patch_inference_variance_config", lambda inference_path, case, case_root: {})
+
+    _, args = _args_for_optimizer()
+    row = module._run_case(
+        case=case,
+        run_root=tmp_path / "run",
+        n_frames=3,
+        exposure_time_s=0.05,
+        system_preset="SHERA_TESTBED_3P",
+        dry_run=False,
+        resume=False,
+        theta_keys=module.THETA_KEYS_DEFAULT,
+        reference_diagnostics_profile="basic",
+        max_dense_dim=40,
+        args=args,
+    )
+    assert row["status"] == "completed"
+    assert calls["n_frames"] == 3
+
+
+def test_cli_optimizer_overrides_flow_into_generated_config(tmp_path: Path):
+    module = _load_module()
+    result = module.main(
+        [
+            "--results-root",
+            str(tmp_path),
+            "--run-name",
+            "opt_override",
+            "--n-frames",
+            "3",
+            "--noise",
+            "enabled",
+            "--full-default-matrix",
+            "--case-filter",
+            "drift_resid10mas_truth__residual_prior_fit",
+            "--dry-run",
+            "--optimizer-base-lr",
+            "0.3",
+            "--optimizer-n-iter",
+            "77",
+            "--schedule-warmup-steps",
+            "3",
+            "--schedule-start-factor",
+            "0.5",
+        ]
+    )
+    run_root = Path(result["run_root"])
+    cfg = json.loads(
+        (
+            run_root
+            / "cases"
+            / "drift_resid10mas_truth__residual_prior_fit"
+            / "inference_config.json"
+        ).read_text(encoding="utf-8")
+    )
+    optimizer = cfg["experiment"]["inference"]["optimizer"]
+    assert optimizer["base_lr"] == pytest.approx(0.3)
+    assert optimizer["n_iter"] == 77
+    assert optimizer["schedule"]["warmup_steps"] == 3
+    assert optimizer["schedule"]["start_factor"] == pytest.approx(0.5)
 
 
 def test_linear_drift_rejects_unsupported_compact_shape():

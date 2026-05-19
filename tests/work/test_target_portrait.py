@@ -61,6 +61,14 @@ def test_config_argument_is_accepted(tmp_path: Path) -> None:
     assert args.config == config_path
 
 
+def test_single_star_alpha_cen_a_flag_is_accepted() -> None:
+    module = _load_module()
+
+    args = module._parse_args(["--target", "ALPHA_CEN", "--single-star-alpha-cen-a"])
+
+    assert args.single_star_alpha_cen_a is True
+
+
 def test_psf_npix_argument_is_no_longer_accepted(capsys) -> None:
     module = _load_module()
 
@@ -121,6 +129,27 @@ def test_prepare_target_system_cfg_preserves_target_authority() -> None:
         assert key not in prepared["source"]
     assert prepared["optics"]["psf_npix"] == 256
     assert base_system_cfg["source"]["contrast"] == 99.0
+
+
+def test_source_summary_tolerates_single_star_without_binary_keys() -> None:
+    module = _load_module()
+    store = module.ParameterStore.from_dict(
+        {
+            "source.log_flux_total": 6.0,
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
+            "source.position_angle_deg": 0.0,
+            "optics.plate_scale_as_per_pix": 0.123,
+            "optics.psf_npix": 8,
+        }
+    )
+
+    summary = module._source_summary(store, source_kind="single_star")
+
+    assert summary["source_kind"] == "single_star"
+    assert summary["separation_as"] is None
+    assert summary["contrast"] is None
+    assert summary["x_position_as"] == pytest.approx(0.0)
 
 
 def test_config_driven_system_resolution_can_change_psf_npix(tmp_path: Path) -> None:

@@ -26,7 +26,12 @@ def compose_forward_spec(system_cfg) -> ParamSpec:
     """
 
     from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
-    from ..components.sources import build_alpha_cen_contract, build_binary_target_contract
+    from ..components.sources import (
+        build_alpha_cen_contract,
+        build_binary_contract,
+        build_binary_target_contract,
+        build_single_star_contract,
+    )
     from ..builders.detector import build_detector_contract
 
     system_block = system_cfg.get("system") if isinstance(system_cfg, Mapping) else None
@@ -53,19 +58,20 @@ def compose_forward_spec(system_cfg) -> ParamSpec:
         raise ValueError("system.detector must be a mapping/dict.")
 
     try:
-        source_kind = str(source_cfg["kind"])
+        source_kind = str(source_cfg["kind"]).lower()
     except KeyError as exc:
         raise ValueError("system.source.kind is required for forward spec composition.") from exc
 
     try:
-        optics_kind = str(optics_cfg["kind"])
+        optics_kind = str(optics_cfg["kind"]).lower()
     except KeyError as exc:
         raise ValueError("system.optics.kind is required for forward spec composition.") from exc
 
     source_contract_builders: dict[str, Callable[..., ParamSpec]] = {
         "alpha_cen": build_alpha_cen_contract,
-        "binary": build_binary_target_contract,
+        "binary": build_binary_contract,
         "binary_target": build_binary_target_contract,
+        "single_star": build_single_star_contract,
     }
     optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
         "two_plane": SheraTwoPlaneOptics.contract,
@@ -376,15 +382,15 @@ class SheraBinder:
 
         kind = self._cfg_get("source.kind", default=None)
         if kind is not None:
-            return str(kind)
+            return str(kind).lower()
 
         kind = self._cfg_get("system.source.kind", default=None)
         if kind is not None:
-            return str(kind)
+            return str(kind).lower()
 
         kind = self._cfg_get("source_kind", default=None)
         if kind is not None:
-            return str(kind)
+            return str(kind).lower()
 
         return "binary"
 
@@ -477,12 +483,18 @@ class SheraBinder:
         Source construction is typically lightweight; it is rebuilt for
         runtime updates even when optics are updated via bindings.
         """
-        from ..builders.source import build_alpha_cen_source, build_binary_target_source
+        from ..builders.source import (
+            build_alpha_cen_source,
+            build_binary_source,
+            build_binary_target_source,
+            build_single_star_source,
+        )
 
         source_builders: dict[str, Callable[..., object]] = {
-            "binary": build_binary_target_source,
+            "binary": build_binary_source,
             "binary_target": build_binary_target_source,
             "alpha_cen": build_alpha_cen_source,
+            "single_star": build_single_star_source,
         }
 
         source_kind = self._detect_source_kind()

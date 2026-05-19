@@ -230,13 +230,17 @@ and add frame masking:
   --schur-frame-mask-denominator original
 ```
 
-Structured Schur export is valid only for true independent-frame nuisance
-layouts. Hard `linear_drift` and profiled
-`linear_drift_residual_jitter_prior` temporal models are supported by the
-subblock inference path for the canonical registration keys, but their Schur
-summaries should use dense curvature until a structured temporal-curvature path
-exists. For the 20-frame four-scalar residual-prior comparison, use
-`--max-dense-dim 80`.
+Structured Schur export supports:
+
+- `structured_independent_frames` for independent temporal models;
+- `structured_linear_drift` for hard linear-drift temporal models;
+- `structured_residual_prior` for profiled
+  `linear_drift_residual_jitter_prior` temporal models.
+
+The residual-prior backend combines structured frame-separable image-data
+curvature with analytic temporal-prior curvature in expanded per-frame
+coordinates, so 20-frame four-scalar residual-prior runs do not need dense
+image-backed Hessian evaluation by default.
 
 For biased-reference correction experiments, keep render truth nominal and bias
 only the inference/reference `Theta` value with a repeatable reference override.
@@ -425,9 +429,9 @@ The first multi-subblock target should be 3-5 blocks, not 100 or 1800.
 
 - `ConcretizationTypeError`: this should no longer occur for the four scalar
   keys. If it does, check the JAX-safe source photometry update path.
-- Dense dimension too large: reduce frame count or disable Zernikes. Structured
-  Schur extraction is available for independent-frame layouts only; coupled
-  temporal models such as residual-prior drift need dense Schur for now.
+- Dense dimension too large: reduce frame count or disable Zernikes. Prefer
+  structured Schur methods for campaign runs. Dense image-backed Schur should
+  be used only for explicit small-case validation.
 - Posterior log flux starts at a long-exposure value: check
   `observation_update_summary.json["prior_mean_source"]`; real-summary mode
   should use `summary_theta_ref` unless an explicit prior context was supplied.

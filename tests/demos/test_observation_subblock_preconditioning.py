@@ -456,6 +456,72 @@ def test_preconditioning_auto_selects_frame_shared_for_shared_independent():
     assert method == "frame_shared_structured"
 
 
+def test_preconditioning_auto_selects_structured_residual_prior_for_temporal_model():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.y_position_as"),
+            _active_spec(recipe, "source.position_angle_deg"),
+        ),
+        shared_specs=(),
+        n_frame=20,
+        temporal_kind="linear_drift_residual_jitter_prior",
+        frame_times_s=tuple((np.arange(20, dtype=float) + 0.5) * 0.05),
+    )
+
+    plan = recipe._plan_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "linear_drift_residual_jitter_prior"}},
+    )
+
+    assert plan.effective_method == "structured_residual_prior_diag"
+    assert plan.dense_global_fim_materialized is False
+    assert plan.fallback_used is False
+
+
+def test_preconditioning_auto_unknown_temporal_uses_diagonal_hvp_fallback():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(),
+        n_frame=5,
+        temporal_kind="mystery_model",
+        frame_times_s=tuple(np.arange(5, dtype=float)),
+    )
+    plan = recipe._plan_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "mystery_model"}},
+    )
+    assert plan.effective_method == "diagonal_hvp"
+    assert plan.fallback_used is True
+
+
+def test_dense_preconditioning_guard_blocks_large_campaign_dense_runs():
+    recipe = _load_recipe_module()
+    with pytest.raises(ValueError, match="Dense optimizer preconditioning was selected"):
+        recipe._validate_dense_preconditioning_guard(
+            effective_method="dense_full_theta",
+            theta_dim=60,
+            max_dense_dim=20,
+            allow_dense_image_hessian=False,
+        )
+    recipe._validate_dense_preconditioning_guard(
+        effective_method="dense_full_theta",
+        theta_dim=6,
+        max_dense_dim=20,
+        allow_dense_image_hessian=False,
+    )
+    recipe._validate_dense_preconditioning_guard(
+        effective_method="dense_full_theta",
+        theta_dim=60,
+        max_dense_dim=20,
+        allow_dense_image_hessian=True,
+    )
+
+
 def test_preconditioning_frame_block_rejects_shared_active_terms():
     recipe = _load_recipe_module()
     layout = recipe.ActiveStateLayout(
@@ -470,6 +536,126 @@ def test_preconditioning_frame_block_rejects_shared_active_terms():
             layout=layout,
             temporal_cfg={"frame_model": {"kind": "independent"}},
         )
+
+
+def test_residual_prior_temporal_diagonal_scales_with_sigma_and_reduce():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.y_position_as"),
+            _active_spec(recipe, "source.position_angle_deg"),
+        ),
+        shared_specs=(),
+        n_frame=5,
+        temporal_kind="linear_drift_residual_jitter_prior",
+        frame_times_s=tuple((np.arange(5, dtype=float) + 0.5) * 0.1),
+    )
+    temporal_cfg_small = {
+        "frame_model": {
+            "kind": "linear_drift_residual_jitter_prior",
+            "residual_prior": {
+                "source.x_position_as": {"sigma": 0.01},
+                "source.y_position_as": {"sigma": 0.01},
+                "source.position_angle_deg": {"sigma": 1e-4},
+            },
+            "reduce": "sum",
+        }
+    }
+    temporal_cfg_large = {
+        "frame_model": {
+            "kind": "linear_drift_residual_jitter_prior",
+            "residual_prior": {
+                "source.x_position_as": {"sigma": 0.02},
+                "source.y_position_as": {"sigma": 0.02},
+                "source.position_angle_deg": {"sigma": 2e-4},
+            },
+            "reduce": "sum",
+        }
+    }
+    diag_small = recipe._temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg=temporal_cfg_small,
+        objective_cfg={"subblock_reduce": "sum"},
+    )
+    diag_large = recipe._temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg=temporal_cfg_large,
+        objective_cfg={"subblock_reduce": "sum"},
+    )
+    assert np.all(np.isfinite(diag_small))
+    assert np.all(diag_small >= 0.0)
+    np.testing.assert_allclose(diag_small, 4.0 * diag_large, rtol=1e-6, atol=1e-10)
+
+    diag_mean = recipe._temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg={
+            "frame_model": {
+                **temporal_cfg_small["frame_model"],
+                "reduce": "mean",
+            }
+        },
+        objective_cfg={"subblock_reduce": "sum"},
+    )
+    np.testing.assert_allclose(diag_mean, diag_small / float(layout.n_frame), rtol=1e-6, atol=1e-10)
+
+
+def test_build_structured_residual_prior_bundle_combines_data_and_temporal_diagonals():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.y_position_as"),
+            _active_spec(recipe, "source.position_angle_deg"),
+        ),
+        shared_specs=(),
+        n_frame=3,
+        temporal_kind="linear_drift_residual_jitter_prior",
+        frame_times_s=tuple((np.arange(3, dtype=float) + 0.5) * 0.1),
+    )
+
+    def frame_data_term(frame_values, _shared_values, _frame_index):
+        return 0.5 * recipe.jnp.sum(frame_values**2)
+
+    def per_frame_terms(theta):
+        state = recipe._unpack_active_state(layout, theta)
+        return recipe.jnp.stack([frame_data_term(state.frame[i], state.shared, i) for i in range(layout.n_frame)])
+
+    def total_loss(theta):
+        return recipe.jnp.sum(per_frame_terms(theta))
+
+    objective_bundle = recipe.ObjectiveBundle(
+        total_loss_fn=total_loss,
+        objective_terms_fn=lambda theta: (total_loss(theta), recipe.jnp.array(0.0), recipe.jnp.array(0.0)),
+        predict_cube_fn=lambda theta: recipe.jnp.zeros((layout.n_frame, 1, 1)),
+        per_frame_data_terms_fn=per_frame_terms,
+        frame_data_term_fn=frame_data_term,
+    )
+    theta_ref = recipe.jnp.zeros(layout.theta_size)
+    bundle = recipe._build_structured_residual_prior_preconditioning_bundle(
+        layout=layout,
+        objective_bundle=objective_bundle,
+        theta_ref=theta_ref,
+        cfg={"method": "structured_residual_prior_diag", "reference": "initial"},
+        temporal_cfg={
+            "frame_model": {
+                "kind": "linear_drift_residual_jitter_prior",
+                "residual_prior": {
+                    "source.x_position_as": {"sigma": 0.01},
+                    "source.y_position_as": {"sigma": 0.01},
+                    "source.position_angle_deg": {"sigma": 1e-4},
+                },
+                "reduce": "sum",
+            }
+        },
+        objective_cfg={"subblock_reduce": "sum"},
+        subblock_reduce="sum",
+        reference_source="initial",
+    )
+    assert bundle.fim is None
+    assert bundle.config["method"] == "structured_residual_prior_diag"
+    assert bundle.config["dense_global_fim_materialized"] is False
+    assert bundle.fim_diag.shape == (layout.theta_size,)
 
 
 def test_frame_shared_structured_bundle_builds_arrowhead_without_dense_fim():

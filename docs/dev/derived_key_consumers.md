@@ -13,6 +13,25 @@ and traces where those derived keys are consumed across:
 
 It also gives a focused recommendation for `binary.raw_fluxes` (aka “source.raw_fluxes” in earlier wording).
 
+Current source-kind convention:
+- `source.kind: binary_target` is the legacy-compatible target-registry path and
+  still declares `source.raw_fluxes` for compatibility.
+- `source.kind: single_star` is the calibration-friendly dLux `PointSource`
+  path. It exposes `source.log_flux_total` as the public flux parameter and does
+  not require `source.separation_as`, `source.contrast`, or `source.raw_fluxes`.
+- `source.kind: binary` is the generic dLux `BinarySource` path. It exposes
+  `source.log_flux_total` as total binary photons and converts internally to
+  dLux `mean_flux`.
+- Linear dLux `flux` / `mean_flux` values are source-builder details. Public
+  inference and reporting should continue to use `source.log_flux_total`.
+- New reporting code should prefer the source-aware helper
+  `compute_source_flux_diagnostics(...)` instead of assuming
+  `source.raw_fluxes` exists for every source kind.
+- `examples/scripts/generate_target_grating_portraits.py` includes an optional
+  Alpha Cen A-like `single_star` visual smoke (`--include-alpha-cen-a-single-star`)
+  that exercises the `PointSource` path without introducing a calibration-star
+  registry.
+
 ---
 
 ## 1) Derived keys declared by system kind
@@ -82,9 +101,12 @@ Notes:
 - Source builder constructs `AlphaCen` from `log_flux_total` + `contrast`; no read of `binary.raw_fluxes`.
 
 ### Reporting / plotting path
-- `inference/signals.py` requires `binary.raw_fluxes` in decoded step mappings and uses truth key `binary.raw_fluxes` to compute `binary.raw_flux_error_ppm`.
+- `inference/signals.py` computes component fluxes on demand from
+  source-kind-aware public primitives. It does not require `source.raw_fluxes`
+  in decoded step mappings.
 - `plot/plotting.py` renders panel `raw_flux_error_ppm.png` from that signal.
-- `tests/inference/test_signals.py` exercises transform parity and signal generation with `binary.raw_fluxes`.
+- `tests/inference/test_signals.py` exercises transform parity and signal
+  generation for binary flux diagnostics.
 
 ## Minimal replacement recommendation
 

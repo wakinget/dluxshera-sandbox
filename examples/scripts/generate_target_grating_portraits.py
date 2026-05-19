@@ -9,6 +9,12 @@ PYTHONPATH=src python examples/scripts/generate_target_grating_portraits.py \
 
 PYTHONPATH=src python examples/scripts/generate_target_grating_portraits.py \
   --targets ALPHA_CEN \
+  --include-alpha-cen-a-single-star \
+  --psf-npix 512 \
+  --dry-run
+
+PYTHONPATH=src python examples/scripts/generate_target_grating_portraits.py \
+  --targets ALPHA_CEN \
   --psf-npix 512 \
   --run-name alpha_cen_grating_smoke
 
@@ -40,7 +46,7 @@ import numpy as np
 from matplotlib.colors import LogNorm
 
 from dluxshera.components.detectors import DetectorSpec, GSENSE2020BSI_SPEC, HWK4123_SPEC
-from dluxshera.components.sources import TARGET_SPECS
+from dluxshera.components.sources import TARGET_SPECS, compute_source_flux_diagnostics
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
 from dluxshera.params.spec import ParamSpec
@@ -67,6 +73,13 @@ TARGET_AUTHORITY_OVERRIDE_KEYS = (
     "separation_as",
     "vmag_a",
     "vmag_b",
+)
+ALPHA_CEN_A_SINGLE_KEY = "ALPHA_CEN_A_SINGLE"
+ALPHA_CEN_A_SINGLE_DISPLAY_NAME = "Alpha Cen A (single star placeholder)"
+ALPHA_CEN_A_PLACEHOLDER_NOTE = (
+    "Placeholder calibration-star stand-in centered at (0, 0). "
+    "Flux is seeded from Alpha Cen component A; spectral shape falls back to "
+    "the current single_star flat spectrum until single-star SED weights are exposed."
 )
 
 
@@ -167,11 +180,19 @@ def _resolve_image_display_limits(
     return resolved_vmin, resolved_vmax
 
 
-def _source_summary(store: ParameterStore) -> dict[str, float | int]:
-    return {
-        "separation_as": float(np.asarray(store.get("source.separation_as"))),
-        "position_angle_deg": float(np.asarray(store.get("source.position_angle_deg"))),
-        "contrast": float(np.asarray(store.get("source.contrast"))),
+def _store_float_or_none(store: ParameterStore, key: str) -> float | None:
+    value = store.get(key, default=None)
+    if value is None:
+        return None
+    return float(np.asarray(value))
+
+
+def _source_summary(store: ParameterStore, *, source_kind: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "source_kind": source_kind,
+        "position_angle_deg": _store_float_or_none(store, "source.position_angle_deg"),
+        "x_position_as": _store_float_or_none(store, "source.x_position_as"),
+        "y_position_as": _store_float_or_none(store, "source.y_position_as"),
         "log_flux_total": float(np.asarray(store.get("source.log_flux_total"))),
         "exposure_time_s": float(np.asarray(store.get("source.exposure_time_s"))),
         "wavelength_m": float(np.asarray(store.get("source.wavelength_m"))),
@@ -180,6 +201,34 @@ def _source_summary(store: ParameterStore) -> dict[str, float | int]:
         "plate_scale_as_per_pix": float(np.asarray(store.get("optics.plate_scale_as_per_pix"))),
         "psf_npix": int(np.asarray(store.get("optics.psf_npix"))),
     }
+    if "source.separation_as" in store:
+        summary["separation_as"] = _store_float_or_none(store, "source.separation_as")
+    if "source.contrast" in store:
+        summary["contrast"] = _store_float_or_none(store, "source.contrast")
+    return summary
+
+
+def _format_panel_title(
+    *,
+    display_name: str,
+    entry_key: str,
+    summary: Mapping[str, Any],
+) -> str:
+    source_kind = str(summary.get("source_kind", "binary_target"))
+    if source_kind == "single_star":
+        return (
+            f"{display_name}\n"
+            f"single_star, x={float(summary.get('x_position_as') or 0.0):.2f} as, "
+            f"y={float(summary.get('y_position_as') or 0.0):.2f} as\n"
+            f"logF={float(summary['log_flux_total']):.2f}"
+        )
+    return (
+        f"{display_name} ({entry_key})\n"
+        f"sep={float(summary['separation_as']):.1f} as, "
+        f"PA={float(summary['position_angle_deg']):.1f} deg\n"
+        f"contrast={float(summary['contrast']):.2g}, "
+        f"logF={float(summary['log_flux_total']):.2f}"
+    )
 
 
 def _image_extent_as(store: ParameterStore, image: np.ndarray) -> np.ndarray:
@@ -298,6 +347,67 @@ def _prepare_target_system_cfg(
     return system_cfg
 
 
+def _prepare_alpha_cen_a_single_star_system_cfg(
+    base_system_cfg: Mapping[str, Any],
+    *,
+    psf_npix: int | None,
+    dp_opd_m: np.ndarray,
+) -> dict[str, Any]:
+    """Return a centered Alpha Cen A-like ``single_star`` placeholder config.
+
+    Alpha Cen A's component flux is derived through the legacy Alpha Cen
+    binary-target path, then exposed as the public single-star
+    ``source.log_flux_total`` parameter. The current ``single_star`` builder
+    uses a flat wavelength-weight spectrum, so the manifest marks the spectral
+    shape as an approximation.
+    """
+
+    alpha_system_cfg = _prepare_target_system_cfg(
+        base_system_cfg,
+        target_key="ALPHA_CEN",
+        psf_npix=psf_npix,
+        dp_opd_m=dp_opd_m,
+    )
+    alpha_spec, alpha_store = _build_forward_store(
+        alpha_system_cfg,
+        normalize_total_flux=False,
+    )
+    del alpha_spec
+    alpha_flux_diag = compute_source_flux_diagnostics("binary_target", alpha_store)
+    alpha_a_flux = float(np.asarray(alpha_flux_diag["component_fluxes"]["primary"]))
+    if not np.isfinite(alpha_a_flux) or alpha_a_flux <= 0.0:
+        raise ValueError("Alpha Cen A component flux must be positive and finite.")
+
+    system_cfg = deepcopy(dict(base_system_cfg))
+    source_cfg = system_cfg.setdefault("source", {})
+    optics_cfg = system_cfg.setdefault("optics", {})
+    if not isinstance(source_cfg, dict) or not isinstance(optics_cfg, dict):
+        raise ValueError("Expected system.source and system.optics mappings.")
+
+    wavelength_m = source_cfg.get("wavelength_m", alpha_store.get("source.wavelength_m"))
+    bandwidth_m = source_cfg.get("bandwidth_m", alpha_store.get("source.bandwidth_m"))
+    n_lambda = source_cfg.get("n_lambda", alpha_store.get("source.n_lambda"))
+    exposure_time_s = source_cfg.get("exposure_time_s", alpha_store.get("source.exposure_time_s"))
+
+    system_cfg["source"] = {
+        "kind": "single_star",
+        "wavelength_m": float(np.asarray(wavelength_m)),
+        "bandwidth_m": float(np.asarray(bandwidth_m)),
+        "n_lambda": int(np.asarray(n_lambda)),
+        "exposure_time_s": float(np.asarray(exposure_time_s)),
+        "x_position_as": 0.0,
+        "y_position_as": 0.0,
+        "position_angle_deg": 0.0,
+        "log_flux_total": float(np.log10(alpha_a_flux)),
+    }
+    if psf_npix is not None:
+        optics_cfg["psf_npix"] = int(psf_npix)
+    optics_cfg["diffractive_pupil_path"] = dp_opd_m
+    optics_cfg["dp_path"] = dp_opd_m
+    optics_cfg["dp_design_wavelength_m"] = None
+    return system_cfg
+
+
 def _build_forward_store(
     system_cfg: Mapping[str, Any],
     *,
@@ -397,8 +507,9 @@ def _save_target_portrait(
     *,
     path: Path,
     image: np.ndarray,
-    target_key: str,
-    summary: Mapping[str, float | int],
+    entry_key: str,
+    display_name: str,
+    summary: Mapping[str, Any],
     stretch: str,
     vmin: float,
     vmax: float,
@@ -408,16 +519,7 @@ def _save_target_portrait(
     im = _imshow_stretched(ax, image, stretch=stretch, vmin=vmin, vmax=vmax, extent=extent_as)
     ax.set_xlabel("X [arcsec]")
     ax.set_ylabel("Y [arcsec]")
-    ax.set_title(
-        (
-            f"{TARGET_SPECS[target_key].display_name} ({target_key})\n"
-            f"sep={float(summary['separation_as']):.3f} as, "
-            f"PA={float(summary['position_angle_deg']):.3f} deg, "
-            f"contrast={float(summary['contrast']):.3g}, "
-            f"logF={float(summary['log_flux_total']):.3f}"
-        ),
-        fontsize=10,
-    )
+    ax.set_title(_format_panel_title(display_name=display_name, entry_key=entry_key, summary=summary), fontsize=10)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     if stretch == "log":
         cbar.set_label("PSF intensity (log scale)")
@@ -431,7 +533,8 @@ def _save_target_portrait(
 def _save_montage(
     *,
     path: Path,
-    target_keys: Sequence[str],
+    entry_keys: Sequence[str],
+    display_names: Sequence[str],
     images: Sequence[np.ndarray],
     summaries: Sequence[Mapping[str, float | int]],
     extents: Sequence[np.ndarray],
@@ -443,8 +546,8 @@ def _save_montage(
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.0 * nrows))
     axes = np.atleast_1d(axes).reshape(-1)
 
-    for ax, key, image, summary, extent, limits in zip(
-        axes, target_keys, images, summaries, extents, display_limits
+    for ax, key, display_name, image, summary, extent, limits in zip(
+        axes, entry_keys, display_names, images, summaries, extents, display_limits
     ):
         panel_vmin, panel_vmax = limits
         _imshow_stretched(
@@ -458,16 +561,7 @@ def _save_montage(
         ax.set_xlabel("X [arcsec]", fontsize=8)
         ax.set_ylabel("Y [arcsec]", fontsize=8)
         ax.tick_params(axis="both", labelsize=7)
-        ax.set_title(
-            (
-                f"{TARGET_SPECS[key].display_name}\n"
-                f"sep={float(summary['separation_as']):.1f} as, "
-                f"PA={float(summary['position_angle_deg']):.1f} deg\n"
-                f"contrast={float(summary['contrast']):.2g}, "
-                f"logF={float(summary['log_flux_total']):.2f}"
-            ),
-            fontsize=9,
-        )
+        ax.set_title(_format_panel_title(display_name=display_name, entry_key=key, summary=summary), fontsize=9)
     for ax in axes[len(images):]:
         ax.axis("off")
 
@@ -484,6 +578,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--system-preset", default=SYSTEM_PRESET)
     parser.add_argument("--targets", default="all")
+    parser.add_argument(
+        "--include-alpha-cen-a-single-star",
+        action="store_true",
+        help=(
+            "Append a centered single_star placeholder seeded from Alpha Cen A "
+            "component flux. This is a calibration-demo visual smoke, not a "
+            "real calibration-star registry entry."
+        ),
+    )
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--psf-npix", type=int, default=DEFAULT_PSF_NPIX)
@@ -592,6 +695,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "config_path": None if args.config is None else str(args.config),
         "system_preset": args.system_preset,
         "targets": list(args.target_keys),
+        "single_star_placeholders_requested": (
+            [ALPHA_CEN_A_SINGLE_KEY] if args.include_alpha_cen_a_single_star else []
+        ),
         "outdir": str(outdir),
         "artifacts": {k: str(v) for k, v in artifacts.items()},
         "grating": {
@@ -616,6 +722,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "exposure_time_s": float(args.exposure_time_s),
             "n_lambda": int(args.n_lambda),
         },
+        "single_star_placeholder_note": ALPHA_CEN_A_PLACEHOLDER_NOTE,
         "observation_noise": {
             "enabled": bool(args.observation_noise),
             "seed": int(args.noise_seed),
@@ -645,16 +752,46 @@ def main(argv: Sequence[str] | None = None) -> None:
     target_summaries: list[dict[str, Any]] = []
     extents: list[np.ndarray] = []
     target_artifacts: dict[str, str] = {}
+    entry_keys: list[str] = []
+    display_names: list[str] = []
+    single_star_placeholders: dict[str, dict[str, Any]] = {}
     detector_spec = _resolve_detector_spec_from_system_cfg(base_system_cfg)
     base_noise_key = jr.PRNGKey(int(args.noise_seed))
 
-    for idx, target_key in enumerate(args.target_keys):
-        system_cfg = _prepare_target_system_cfg(
-            base_system_cfg,
-            target_key=target_key,
-            psf_npix=args.psf_npix,
-            dp_opd_m=np.asarray(dp_payload["combined_opd_m"], dtype=float),
+    render_requests: list[dict[str, Any]] = [
+        {"entry_kind": "binary_target", "entry_key": target_key}
+        for target_key in args.target_keys
+    ]
+    if args.include_alpha_cen_a_single_star:
+        render_requests.append(
+            {
+                "entry_kind": "single_star_placeholder",
+                "entry_key": ALPHA_CEN_A_SINGLE_KEY,
+            }
         )
+
+    for idx, request in enumerate(render_requests):
+        entry_kind = str(request["entry_kind"])
+        entry_key = str(request["entry_key"])
+        if entry_kind == "single_star_placeholder":
+            system_cfg = _prepare_alpha_cen_a_single_star_system_cfg(
+                base_system_cfg,
+                psf_npix=args.psf_npix,
+                dp_opd_m=np.asarray(dp_payload["combined_opd_m"], dtype=float),
+            )
+            display_name = ALPHA_CEN_A_SINGLE_DISPLAY_NAME
+            source_kind = "single_star"
+        else:
+            target_key = entry_key
+            system_cfg = _prepare_target_system_cfg(
+                base_system_cfg,
+                target_key=target_key,
+                psf_npix=args.psf_npix,
+                dp_opd_m=np.asarray(dp_payload["combined_opd_m"], dtype=float),
+            )
+            display_name = TARGET_SPECS[target_key].display_name
+            source_kind = "binary_target"
+
         forward_spec, store = _build_forward_store(system_cfg, normalize_total_flux=bool(args.normalize_total_flux))
         if plan["dp_construction"]["aperture_mask_used_for_diagnostics"] == "dp_binary_support":
             m1_support = _extract_primary_aperture_support(system_cfg, forward_spec, store)
@@ -679,21 +816,43 @@ def main(argv: Sequence[str] | None = None) -> None:
                 exposure_time_s=float(args.exposure_time_s),
             )
             image = np.asarray(noisy, dtype=float)
-        summary = _source_summary(store)
+        summary = _source_summary(store, source_kind=source_kind)
         extent = _image_extent_as(store, image)
         rendered_images.append(image)
-        target_summaries.append(
-            {
-                "target_key": target_key,
-                "target_display_name": TARGET_SPECS[target_key].display_name,
-                "source": summary,
-                "image_shape": list(image.shape),
-                "image_extent_as": extent.tolist(),
-                "image_sum": float(np.sum(image)),
-                "image_max": float(np.max(image)),
-            }
-        )
+        entry_summary = {
+            "entry_key": entry_key,
+            "entry_kind": entry_kind,
+            "display_name": display_name,
+            "source_kind": source_kind,
+            "source": summary,
+            "image_shape": list(image.shape),
+            "image_extent_as": extent.tolist(),
+            "image_sum": float(np.sum(image)),
+            "image_max": float(np.max(image)),
+        }
+        if entry_kind == "binary_target":
+            entry_summary["target_key"] = entry_key
+            entry_summary["target_display_name"] = display_name
+        else:
+            entry_summary.update(
+                {
+                    "photometry_source": "ALPHA_CEN component A placeholder",
+                    "photometry_source_target": "ALPHA_CEN",
+                    "photometry_source_component": "A",
+                    "centered_at_as": [0.0, 0.0],
+                    "spectral_shape": {
+                        "intended": "Alpha Cen A component spectral shape",
+                        "used": "flat single_star spectrum on the configured wavelength grid",
+                        "note": "Current single_star contract does not expose custom spectral weights.",
+                    },
+                    "note": ALPHA_CEN_A_PLACEHOLDER_NOTE,
+                }
+            )
+            single_star_placeholders[entry_key] = entry_summary
+        target_summaries.append(entry_summary)
         extents.append(extent)
+        entry_keys.append(entry_key)
+        display_names.append(display_name)
 
     _save_dp_diagnostic(artifacts["dp_diagnostic_png"], dp_payload)
 
@@ -707,8 +866,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         for image in rendered_images
     ]
 
-    for key, image, summary, extent, limits in zip(
-        args.target_keys,
+    for key, display_name, image, summary, extent, limits in zip(
+        entry_keys,
+        display_names,
         rendered_images,
         target_summaries,
         extents,
@@ -719,7 +879,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         _save_target_portrait(
             path=portrait_path,
             image=image,
-            target_key=key,
+            entry_key=key,
+            display_name=display_name,
             summary=summary["source"],
             stretch=args.stretch,
             vmin=panel_vmin,
@@ -734,7 +895,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     _save_montage(
         path=artifacts["montage_png"],
-        target_keys=args.target_keys,
+        entry_keys=entry_keys,
+        display_names=display_names,
         images=rendered_images,
         summaries=[item["source"] for item in target_summaries],
         extents=extents,
@@ -750,7 +912,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "requested_vmax": None if args.vmax is None else float(args.vmax),
             "per_target_limits": [
                 {"target_key": key, "vmin": float(vmin), "vmax": float(vmax)}
-                for key, (vmin, vmax) in zip(args.target_keys, per_target_limits)
+                for key, (vmin, vmax) in zip(entry_keys, per_target_limits)
             ],
         },
         "artifacts": {
@@ -760,6 +922,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "target_portraits": target_artifacts,
         },
         "targets_resolved": target_summaries,
+        "single_star_placeholders": single_star_placeholders,
     }
     artifacts["manifest_json"].write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Wrote manifest: {artifacts['manifest_json']}")

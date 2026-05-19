@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+
+SCRIPT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "scripts"
+    / "run_single_star_calibration_demo.py"
+)
+
+
+def load_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "run_single_star_calibration_demo",
+        SCRIPT_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_config(path: Path) -> None:
+    payload = {
+        "experiment": {
+            "kind": "single_star_calibration_demo",
+            "run_name": "unit_cal",
+            "calibration_source": {
+                "mode": "alpha_cen_a_placeholder",
+                "source_kind": "single_star",
+                "x_position_as": 0.0,
+                "y_position_as": 0.0,
+                "position_angle_deg": 0.0,
+                "n_lambda": 3,
+            },
+            "subblocks": {
+                "n_subblocks": 1,
+                "n_frames": 2,
+                "noise": "disabled",
+                "phi_ref": "truth_when_available",
+                "schur_curvature_method": "auto",
+                "max_dense_dim": 40,
+                "schur_damping": 1.0e-8,
+                "exposure_time_s": 0.05,
+            },
+            "seeding": {
+                "seed_policy": "different_jitter_different_noise",
+                "base_seed": 42,
+            },
+            "observation_theta": {
+                "source": {"log_flux_total": True},
+                "optics": {
+                    "plate_scale_as_per_pix": True,
+                    "primary_zernikes": {
+                        "enabled": True,
+                        "indices": "from_system",
+                        "include": [0],
+                        "exclude": [],
+                    },
+                    "secondary_zernikes": {
+                        "enabled": True,
+                        "indices": "from_system",
+                        "include": [0],
+                        "exclude": [],
+                    },
+                },
+            },
+            "prior": {
+                "sigma": {
+                    "source.log_flux_total": {"kind": "absolute", "sigma": 1.0e-5},
+                    "optics.plate_scale_as_per_pix": {
+                        "kind": "fractional",
+                        "sigma": 1.0e-5,
+                    },
+                    "optics.primary.zernike_coeffs_nm[*]": {
+                        "kind": "absolute",
+                        "sigma": 1.0,
+                    },
+                    "optics.secondary.zernike_coeffs_nm[*]": {
+                        "kind": "absolute",
+                        "sigma": 1.0,
+                    },
+                }
+            },
+            "case_generation": {
+                "mode": "prior_draw",
+                "n_cases": 1,
+                "seed": 123,
+                "draw_scale": 0.5,
+                "include_zero_bias_case": True,
+            },
+            "forecast": {"enabled": False, "subblock_duration_s": 1.0},
+            "eigenbasis": {"enabled": False},
+        }
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def write_summary(path: Path, labels: tuple[str, ...], theta_ref: np.ndarray, truth: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    info = np.eye(len(labels), dtype=float) * 4.0
+    score = info @ (theta_ref - truth)
+    payload = {
+        "schema_version": "image_backed_subblock_summary.v1",
+        "subblock_id": "synthetic",
+        "summary_kind": "synthetic_test",
+        "theta_labels": list(labels),
+        "theta_ref": theta_ref.tolist(),
+        "reduced_information": info.tolist(),
+        "reduced_score": score.tolist(),
+        "summary_diagnostics": {},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_default_plan_is_single_star_and_excludes_binary_terms(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+
+    labels = plan.layout.labels
+    assert plan.system_cfg["source"]["kind"] == "single_star"
+    assert plan.system_cfg["source"]["x_position_as"] == 0.0
+    assert plan.system_cfg["source"]["y_position_as"] == 0.0
+    assert "source.log_flux_total" in labels
+    assert "optics.plate_scale_as_per_pix" in labels
+    assert "optics.primary.zernike_coeffs_nm[0]" in labels
+    assert "optics.secondary.zernike_coeffs_nm[0]" in labels
+    assert "source.separation_as" not in labels
+    assert "source.contrast" not in labels
+    payload = module._plan_payload(plan)
+    assert payload["source_kind"] == "single_star"
+    assert payload["local_eliminated_keys"] == list(module.ACTIVE_FRAME_KEYS)
+    assert payload["active_frame_keys"] == [
+        "source.x_position_as",
+        "source.y_position_as",
+    ]
+    assert "source.position_angle_deg" not in payload["active_frame_keys"]
+    assert payload["dimension_estimate"]["frame_phi_dim"] == 2
+    assert payload["dimension_estimate"]["n_phi"] == 4
+    template_inference = (
+        plan.run_root / "templates" / "inference_template.json"
+    )
+    inference_payload = json.loads(template_inference.read_text(encoding="utf-8"))
+    assert inference_payload["experiment"]["inference"]["active"]["frame_keys"] == [
+        "source.x_position_as",
+        "source.y_position_as",
+    ]
+    assert "source.position_angle_deg" not in inference_payload["experiment"]["inference"]["active"]["frame_keys"]
+
+
+def test_single_star_forward_spec_does_not_require_binary_fields(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    spec = module.compose_forward_spec(plan.system_cfg)
+    store = module.ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+    assert store.get("source.log_flux_total") == plan.system_cfg["source"]["log_flux_total"]
+    assert "source.separation_as" not in spec
+    assert "source.contrast" not in spec
+
+
+def test_prior_draw_cases_are_reproducible_and_zero_bias_is_zero(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan_a = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path / "a",
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    plan_b = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path / "b",
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    zero = next(case for case in plan_a.cases if case.case_origin == "zero_bias")
+    draw_a = next(case for case in plan_a.cases if case.case_origin == "prior_draw")
+    draw_b = next(case for case in plan_b.cases if case.case_origin == "prior_draw")
+    assert zero.theta_reference_offsets == {}
+    assert draw_a.theta_reference_offsets == draw_b.theta_reference_offsets
+    assert any(
+        abs(value) > 0.0
+        for label, value in draw_a.theta_reference_offsets.items()
+        if "zernike_coeffs_nm" in label
+    )
+
+
+def test_command_construction_uses_single_star_schur_summary(tmp_path: Path) -> None:
+    module = load_module()
+    template_paths = {
+        "trace": tmp_path / "trace.json",
+        "render": tmp_path / "render.json",
+        "inference": tmp_path / "inference.json",
+    }
+    command = module.build_subblock_command(
+        case_root_parent=tmp_path / "subblocks",
+        case_subblock_name="case/subblock_000000",
+        template_paths=template_paths,
+        theta_labels=(
+            "source.log_flux_total",
+            "optics.plate_scale_as_per_pix",
+            "optics.primary.zernike_coeffs_nm[0]",
+            "optics.secondary.zernike_coeffs_nm[0]",
+        ),
+        layout_metadata={
+            "primary_zernike_indices": [0],
+            "secondary_zernike_indices": [0],
+        },
+        offsets={"optics.primary.zernike_coeffs_nm[0]": 1.0},
+        subblock_cfg={
+            "n_frames": 3,
+            "noise": "disabled",
+            "phi_ref": "recovered",
+            "schur_curvature_method": "auto",
+            "max_dense_dim": 40,
+            "schur_damping": 1.0e-8,
+        },
+        trace_seed=1,
+        noise_seed=2,
+    )
+
+    joined = " ".join(command)
+    assert "run_obs_subblock_study.py" in joined
+    assert "--mode schur_summary" in joined
+    assert "--enable-zernikes" in command
+    assert "--zernike-indices" in command
+    assert "source.separation_as" not in joined
+    assert "source.contrast" not in joined
+    assert "--phi-ref recovered" in joined
+
+
+def test_trace_policy_allows_inert_pa_truth_without_solving(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["subblocks"]["trace_jitter"] = {
+        "x_sigma_as": 1.0e-3,
+        "y_sigma_as": 1.0e-3,
+        "pa_sigma_deg": 1.0e-4,
+        "pa_mode": "inert_diagnostic",
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    trace_template = json.loads(
+        (plan.run_root / "templates" / "trace_template.json").read_text(encoding="utf-8")
+    )
+    assert "source.position_angle_deg" in trace_template["experiment"]["trace"]["varying_keys"]
+    inference_template = json.loads(
+        (plan.run_root / "templates" / "inference_template.json").read_text(encoding="utf-8")
+    )
+    assert "source.position_angle_deg" not in inference_template["experiment"]["inference"]["active"]["frame_keys"]
+    plan_payload = module._plan_payload(plan)
+    assert plan_payload["single_star_pa_policy"]["status"] == "inactive"
+    assert "source.position_angle_deg" in plan_payload["inactive_truth_keys"]
+
+
+def test_dimension_estimate_tracks_xy_only_phi_layout(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["subblocks"]["n_frames"] = 3
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    plan_3 = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path / "three",
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    plan_payload_3 = module._plan_payload(plan_3)
+    assert plan_payload_3["dimension_estimate"]["frame_phi_dim"] == 2
+    assert plan_payload_3["dimension_estimate"]["n_phi"] == 6
+
+    default_plan = module.build_calibration_plan(
+        config_path=None,
+        results_root=tmp_path / "default",
+        run_name="unit_default",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    default_payload = module._plan_payload(default_plan)
+    assert default_payload["n_frames"] == 20
+    assert default_payload["dimension_estimate"]["frame_phi_dim"] == 2
+    assert default_payload["dimension_estimate"]["n_phi"] == 40
+
+
+def test_truth_comparison_active_key_filter_excludes_pa() -> None:
+    module = load_module()
+    columns = [
+        "source.x_position_as_truth",
+        "source.x_position_as_recovered",
+        "source.x_position_as_residual",
+        "source.y_position_as_truth",
+        "source.y_position_as_recovered",
+        "source.y_position_as_residual",
+        "source.position_angle_deg_truth",
+        "source.position_angle_deg_recovered",
+        "source.position_angle_deg_residual",
+    ]
+    selected = module.select_active_truth_comparison_keys(columns)
+    assert selected == ["source.x_position_as", "source.y_position_as"]
+
+
+def test_aggregate_math_does_not_assume_binary_labels(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    case = next(case for case in plan.cases if case.case_origin == "prior_draw")
+    labels = plan.layout.labels
+    truth = np.asarray(plan.truth_vector, dtype=float)
+    theta_ref = truth + np.asarray(
+        [case.theta_reference_offsets.get(label, 0.0) for label in labels],
+        dtype=float,
+    )
+    write_summary(plan.summary_paths[case.case_name][0], labels, theta_ref, truth)
+
+    result = module.aggregate_case(plan, case)
+
+    posterior_csv = Path(result["posterior_by_parameter_csv"])
+    rows = posterior_csv.read_text(encoding="utf-8").splitlines()
+    assert posterior_csv.exists()
+    assert "correction_fraction" in rows[0]
+    assert "posterior_error_over_sigma" in rows[0]
+    assert "source.separation_as" not in posterior_csv.read_text(encoding="utf-8")
+    assert (plan.run_root / "cases" / case.case_name / "posterior_history.csv").exists()

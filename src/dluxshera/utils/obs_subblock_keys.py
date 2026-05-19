@@ -439,24 +439,33 @@ def apply_jax_safe_source_photometry_update(
     calling a full ``refresh_derived(...)`` inside autodiff.
     """
 
-    if forward_spec is not None:
-        for key in ("source.log_flux_total", "source.contrast", "source.raw_fluxes"):
-            if key not in forward_spec:
-                raise ValueError(
-                    f"JAX-safe source photometry update requires {key!r} in the forward spec."
-                )
+    has_binary_flux_dependents = (
+        forward_spec is None
+        or (
+            "source.contrast" in forward_spec
+            and "source.raw_fluxes" in forward_spec
+        )
+    )
+    if forward_spec is not None and "source.log_flux_total" not in forward_spec:
+        raise ValueError(
+            "JAX-safe source photometry update requires "
+            "'source.log_flux_total' in the forward spec."
+        )
 
     effective_log_flux = (
         store.get("source.log_flux_total")
         if log_flux_total is None
         else log_flux_total
     )
+    effective_log_flux = jnp.asarray(effective_log_flux, dtype=float)
+    if not has_binary_flux_dependents:
+        return store.replace({"source.log_flux_total": effective_log_flux})
+
     effective_contrast = (
         store.get("source.contrast")
         if contrast is None
         else contrast
     )
-    effective_log_flux = jnp.asarray(effective_log_flux, dtype=float)
     effective_contrast = jnp.asarray(effective_contrast, dtype=float)
     raw_fluxes = compute_source_raw_fluxes_from_log_flux_total_and_contrast(
         effective_log_flux,
