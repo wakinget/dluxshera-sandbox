@@ -162,6 +162,13 @@ def _default_experiment_config() -> dict[str, Any]:
             "reference_optimizer_kind": "sgd",
             "reference_base_lr": 0.7,
             "reference_n_iter": 80,
+            "reference_early_stopping_enabled": None,
+            "reference_early_stopping_min_iter": None,
+            "reference_early_stopping_patience": None,
+            "reference_early_stopping_loss_rtol": None,
+            "reference_early_stopping_loss_atol": None,
+            "reference_early_stopping_step_atol": None,
+            "reference_early_stopping_grad_norm_atol": None,
             "reference_schedule_kind": "linear_warmup",
             "reference_schedule_warmup_steps": 10,
             "reference_schedule_start_factor": 0.125,
@@ -788,6 +795,12 @@ def build_subblock_command(
         ("reference_schedule_kind", "--reference-schedule-kind"),
         ("reference_schedule_warmup_steps", "--reference-schedule-warmup-steps"),
         ("reference_schedule_start_factor", "--reference-schedule-start-factor"),
+        ("reference_early_stopping_min_iter", "--reference-early-stopping-min-iter"),
+        ("reference_early_stopping_patience", "--reference-early-stopping-patience"),
+        ("reference_early_stopping_loss_rtol", "--reference-early-stopping-loss-rtol"),
+        ("reference_early_stopping_loss_atol", "--reference-early-stopping-loss-atol"),
+        ("reference_early_stopping_step_atol", "--reference-early-stopping-step-atol"),
+        ("reference_early_stopping_grad_norm_atol", "--reference-early-stopping-grad-norm-atol"),
         ("schur_frame_quality_policy", "--schur-frame-quality-policy"),
         ("schur_frame_chi2_threshold", "--schur-frame-chi2-threshold"),
         ("schur_frame_quality_missing", "--schur-frame-quality-missing"),
@@ -796,6 +809,8 @@ def build_subblock_command(
     ):
         if subblock_cfg.get(flag_key) is not None:
             command.extend([flag, str(subblock_cfg[flag_key])])
+    if subblock_cfg.get("reference_early_stopping_enabled") is True:
+        command.append("--reference-early-stopping")
     jitter = dict(subblock_cfg.get("trace_jitter", {}) or {})
     if jitter.get("x_sigma_as") is not None:
         command.extend(["--trace-jitter-x-sigma-as", str(float(jitter["x_sigma_as"]))])
@@ -919,6 +934,13 @@ def build_calibration_plan(
                     "dense_global_hessian_materialized": "",
                     "trace_seed": seeds["trace_seed"],
                     "noise_seed": seeds["noise_seed"],
+                    "reference_early_stopping_enabled": subblock_cfg.get("reference_early_stopping_enabled"),
+                    "reference_early_stopping_min_iter": subblock_cfg.get("reference_early_stopping_min_iter"),
+                    "reference_early_stopping_patience": subblock_cfg.get("reference_early_stopping_patience"),
+                    "reference_early_stopping_loss_rtol": subblock_cfg.get("reference_early_stopping_loss_rtol"),
+                    "reference_early_stopping_loss_atol": subblock_cfg.get("reference_early_stopping_loss_atol"),
+                    "reference_early_stopping_step_atol": subblock_cfg.get("reference_early_stopping_step_atol"),
+                    "reference_early_stopping_grad_norm_atol": subblock_cfg.get("reference_early_stopping_grad_norm_atol"),
                     "command": " ".join(command),
                     "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
                     "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),

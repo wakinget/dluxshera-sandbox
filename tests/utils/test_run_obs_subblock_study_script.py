@@ -2609,3 +2609,54 @@ def test_evaluate_schur_summary_uses_structured_path_with_tiny_quadratic(
     assert comparison_summary["dense_vs_structured_comparison_requested"] is True
     assert comparison_summary["dense_vs_structured_comparison_run"] is True
     assert comparison_summary["dense_vs_structured_comparison"] is not None
+
+
+def test_parser_accepts_reference_early_stopping_flags() -> None:
+    module = load_module()
+    args = module._build_parser().parse_args([
+        "--reference-early-stopping",
+        "--reference-early-stopping-min-iter",
+        "11",
+        "--reference-early-stopping-patience",
+        "7",
+        "--reference-early-stopping-loss-rtol",
+        "1e-6",
+        "--reference-early-stopping-loss-atol",
+        "1e-9",
+        "--reference-early-stopping-step-atol",
+        "1e-10",
+        "--reference-early-stopping-grad-norm-atol",
+        "1e-8",
+    ])
+    assert args.reference_early_stopping is True
+    assert args.reference_early_stopping_min_iter == 11
+    assert args.reference_early_stopping_patience == 7
+
+
+def test_build_schur_config_applies_reference_early_stopping_overrides() -> None:
+    module = load_module()
+    cfg = module._build_schur_inference_config(
+        {"experiment": {"inference": {"optimizer": {"kind": "sgd", "base_lr": 0.1, "n_iter": 4}}}},
+        early_stopping_enabled=True,
+        early_stopping_min_iter=2,
+        early_stopping_patience=3,
+        early_stopping_loss_rtol=1e-6,
+        early_stopping_loss_atol=1e-9,
+        early_stopping_step_atol=1e-10,
+        early_stopping_grad_norm_atol=1e-8,
+    )
+    es = cfg["experiment"]["inference"]["optimizer"]["early_stopping"]
+    assert es["enabled"] is True
+    assert es["min_iter"] == 2
+    assert es["patience"] == 3
+    assert es["loss_rtol"] == 1e-6
+
+
+def test_reference_optimizer_override_sources_tracks_early_stopping() -> None:
+    module = load_module()
+    sources = module._reference_optimizer_override_sources(
+        early_stopping_enabled=True,
+        early_stopping_min_iter=2,
+    )
+    assert sources["early_stopping_enabled"] == module.SOURCE_CLI_OVERRIDE
+    assert sources["early_stopping_min_iter"] == module.SOURCE_CLI_OVERRIDE

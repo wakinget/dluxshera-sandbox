@@ -2538,6 +2538,13 @@ def _reference_optimizer_override_sources(
         "preconditioning_eig_floor_rel": preconditioning_eig_floor_rel,
         "preconditioning_eig_floor_abs": preconditioning_eig_floor_abs,
         "preconditioning_lr_clip": preconditioning_lr_clip,
+        "early_stopping_enabled": early_stopping_enabled,
+        "early_stopping_min_iter": early_stopping_min_iter,
+        "early_stopping_patience": early_stopping_patience,
+        "early_stopping_loss_rtol": early_stopping_loss_rtol,
+        "early_stopping_loss_atol": early_stopping_loss_atol,
+        "early_stopping_step_atol": early_stopping_step_atol,
+        "early_stopping_grad_norm_atol": early_stopping_grad_norm_atol,
     }
     return {key: SOURCE_CLI_OVERRIDE for key, value in raw.items() if value is not None}
 
@@ -2669,6 +2676,50 @@ def _build_schur_config_provenance(
                 schur_config,
                 f"{base}.optimizer.preconditioning.lr_clip",
                 cli_override=optimizer_override_sources.get("preconditioning_lr_clip")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+        },
+        "early_stopping": {
+            "enabled": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.enabled",
+                cli_override=optimizer_override_sources.get("early_stopping_enabled")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "min_iter": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.min_iter",
+                cli_override=optimizer_override_sources.get("early_stopping_min_iter")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "patience": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.patience",
+                cli_override=optimizer_override_sources.get("early_stopping_patience")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "loss_rtol": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.loss_rtol",
+                cli_override=optimizer_override_sources.get("early_stopping_loss_rtol")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "loss_atol": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.loss_atol",
+                cli_override=optimizer_override_sources.get("early_stopping_loss_atol")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "step_atol": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.step_atol",
+                cli_override=optimizer_override_sources.get("early_stopping_step_atol")
+                == SOURCE_CLI_OVERRIDE,
+            ),
+            "grad_norm_atol": _field_source(
+                schur_config,
+                f"{base}.optimizer.early_stopping.grad_norm_atol",
+                cli_override=optimizer_override_sources.get("early_stopping_grad_norm_atol")
                 == SOURCE_CLI_OVERRIDE,
             ),
         },
@@ -8461,6 +8512,48 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reference-preconditioning-lr-clip",
         default=None,
         help="Override experiment.inference.optimizer.preconditioning.lr_clip as MIN,MAX.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping",
+        action="store_true",
+        default=False,
+        help="Enable experiment.inference.optimizer.early_stopping.enabled.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping-min-iter",
+        type=int,
+        default=None,
+        help="Override experiment.inference.optimizer.early_stopping.min_iter.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping-patience",
+        type=int,
+        default=None,
+        help="Override experiment.inference.optimizer.early_stopping.patience.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping-loss-rtol",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.early_stopping.loss_rtol.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping-loss-atol",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.early_stopping.loss_atol.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping-step-atol",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.early_stopping.step_atol.",
+    )
+    parser.add_argument(
+        "--reference-early-stopping-grad-norm-atol",
+        type=float,
+        default=None,
+        help="Override experiment.inference.optimizer.early_stopping.grad_norm_atol.",
     )
     parser.add_argument(
         "--reference-diagnostics-profile",

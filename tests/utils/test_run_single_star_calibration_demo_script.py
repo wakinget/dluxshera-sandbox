@@ -423,3 +423,64 @@ def test_aggregate_math_does_not_assume_binary_labels(tmp_path: Path) -> None:
     assert "posterior_error_over_sigma" in rows[0]
     assert "source.separation_as" not in posterior_csv.read_text(encoding="utf-8")
     assert (plan.run_root / "cases" / case.case_name / "posterior_history.csv").exists()
+
+
+def test_subblock_command_forwards_reference_early_stopping_flags(tmp_path: Path) -> None:
+    module = load_module()
+    template_paths = {
+        "trace": tmp_path / "trace.json",
+        "render": tmp_path / "render.json",
+        "inference": tmp_path / "inference.json",
+    }
+    command = module.build_subblock_command(
+        case_root_parent=tmp_path / "subblocks",
+        case_subblock_name="case/subblock_000000",
+        template_paths=template_paths,
+        theta_labels=("source.log_flux_total",),
+        layout_metadata={"primary_zernike_indices": [], "secondary_zernike_indices": []},
+        offsets={},
+        subblock_cfg={
+            "reference_early_stopping_enabled": True,
+            "reference_early_stopping_min_iter": 10,
+            "reference_early_stopping_patience": 5,
+            "reference_early_stopping_loss_rtol": 1.0e-6,
+            "reference_early_stopping_loss_atol": 1.0e-9,
+            "reference_early_stopping_step_atol": 1.0e-10,
+            "reference_early_stopping_grad_norm_atol": 1.0e-8,
+        },
+        trace_seed=1,
+        noise_seed=2,
+    )
+
+    joined = " ".join(command)
+    assert "--reference-early-stopping" in command
+    assert "--reference-early-stopping-min-iter 10" in joined
+    assert "--reference-early-stopping-patience 5" in joined
+    assert "--reference-early-stopping-loss-rtol 1e-06" in joined
+    assert "--reference-early-stopping-loss-atol 1e-09" in joined
+    assert "--reference-early-stopping-step-atol 1e-10" in joined
+    assert "--reference-early-stopping-grad-norm-atol 1e-08" in joined
+
+
+def test_subblock_command_omits_reference_early_stopping_flags_by_default(tmp_path: Path) -> None:
+    module = load_module()
+    template_paths = {
+        "trace": tmp_path / "trace.json",
+        "render": tmp_path / "render.json",
+        "inference": tmp_path / "inference.json",
+    }
+    command = module.build_subblock_command(
+        case_root_parent=tmp_path / "subblocks",
+        case_subblock_name="case/subblock_000000",
+        template_paths=template_paths,
+        theta_labels=("source.log_flux_total",),
+        layout_metadata={"primary_zernike_indices": [], "secondary_zernike_indices": []},
+        offsets={},
+        subblock_cfg={},
+        trace_seed=1,
+        noise_seed=2,
+    )
+
+    joined = " ".join(command)
+    assert "--reference-early-stopping" not in joined
+    assert "--reference-early-stopping-min-iter" not in joined
