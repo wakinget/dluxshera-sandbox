@@ -48,7 +48,7 @@ def write_config(path: Path) -> None:
                 "n_frames": 2,
                 "noise": "disabled",
                 "phi_ref": "truth_when_available",
-                "schur_curvature_method": "auto",
+                "schur_curvature_method": "structured_independent_frames",
                 "max_dense_dim": 40,
                 "schur_damping": 1.0e-8,
                 "exposure_time_s": 0.05,
@@ -237,7 +237,7 @@ def test_command_construction_uses_single_star_schur_summary(tmp_path: Path) -> 
             "n_frames": 3,
             "noise": "disabled",
             "phi_ref": "recovered",
-            "schur_curvature_method": "auto",
+            "schur_curvature_method": "structured_independent_frames",
             "max_dense_dim": 40,
             "schur_damping": 1.0e-8,
         },
@@ -253,6 +253,7 @@ def test_command_construction_uses_single_star_schur_summary(tmp_path: Path) -> 
     assert "source.separation_as" not in joined
     assert "source.contrast" not in joined
     assert "--phi-ref recovered" in joined
+    assert "--schur-curvature-method structured_independent_frames" in joined
 
 
 def test_cli_accepts_memory_diagnostics_flag() -> None:
@@ -275,6 +276,25 @@ def test_plan_forwards_memory_diagnostics_to_subblock_commands(tmp_path: Path) -
     )
     command = plan.subblock_commands["zero_bias_case"][0]
     assert "--memory-diagnostics" in command
+
+
+def test_cli_override_schur_method_is_honored_in_plan(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    args = module._build_parser().parse_args(["--schur-curvature-method", "dense"])
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+        args=args,
+    )
+    row = plan.subblock_rows[0]
+    assert row["schur_curvature_method_requested"] == "dense"
+    assert row["schur_route_source"] == "user_request"
+    assert "--schur-curvature-method" in plan.subblock_commands["zero_bias_case"][0]
+    assert "dense" in plan.subblock_commands["zero_bias_case"][0]
 
 
 def test_dry_run_writes_plan_without_executing_subprocesses(tmp_path: Path) -> None:

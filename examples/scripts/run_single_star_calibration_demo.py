@@ -79,6 +79,7 @@ SUPPORTED_SEED_POLICIES = (
     "same_jitter_different_noise",
     "different_jitter_same_noise",
 )
+DEFAULT_SINGLE_STAR_SCHUR_METHOD = "structured_independent_frames"
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,7 @@ def _default_experiment_config() -> dict[str, Any]:
             "n_frames": 20,
             "noise": "enabled",
             "phi_ref": "recovered",
-            "schur_curvature_method": "auto",
+            "schur_curvature_method": "structured_independent_frames",
             "max_dense_dim": 40,
             "schur_damping": 1.0e-8,
             "exposure_time_s": 0.05,
@@ -276,6 +277,8 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace | None) -
         ("noise", "noise"),
         ("phi_ref", "phi_ref"),
         ("reference_diagnostics_profile", "reference_diagnostics_profile"),
+        ("schur_curvature_method", "schur_curvature_method"),
+        ("max_dense_dim", "max_dense_dim"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -299,6 +302,28 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace | None) -
     theta["optics"] = optics
     out["observation_theta"] = theta
     return out
+
+
+def _schur_settings_for_single_star_config(
+    subblock_cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    requested = str(subblock_cfg.get("schur_curvature_method") or DEFAULT_SINGLE_STAR_SCHUR_METHOD)
+    requested_norm = requested.strip().lower()
+    route_source = "user_request" if subblock_cfg.get("schur_curvature_method") is not None else "single_star_default_structured"
+    effective = requested
+    if requested_norm == "auto":
+        effective = DEFAULT_SINGLE_STAR_SCHUR_METHOD
+        route_source = "auto_prefers_structured_independent_frames"
+    dense_like = requested_norm == "dense"
+    return {
+        "schur_curvature_method_requested": requested,
+        "schur_curvature_method_effective": effective,
+        "schur_route_source": route_source,
+        "max_dense_dim": int(subblock_cfg.get("max_dense_dim", 40)),
+        "structured_curvature_expected": str(effective).startswith("structured_"),
+        "validate_structured_against_dense": bool(subblock_cfg.get("validate_structured_against_dense", False)),
+        "dense_route_requested": dense_like,
+    }
 
 
 def _resolve_single_star_system(
@@ -736,7 +761,7 @@ def build_subblock_command(
         "--phi-ref",
         str(subblock_cfg.get("phi_ref", "recovered")),
         "--schur-curvature-method",
-        str(subblock_cfg.get("schur_curvature_method", "auto")),
+        str(subblock_cfg.get("schur_curvature_method", DEFAULT_SINGLE_STAR_SCHUR_METHOD)),
         "--max-dense-dim",
         str(int(subblock_cfg.get("max_dense_dim", 40))),
         "--schur-damping",
@@ -825,6 +850,8 @@ def build_calibration_plan(
         experiment_cfg=experiment_cfg,
     )
     subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
+    schur_settings = _schur_settings_for_single_star_config(subblock_cfg)
+    subblock_cfg["schur_curvature_method"] = schur_settings["schur_curvature_method_requested"]
     if args is not None and bool(getattr(args, "memory_diagnostics", False)):
         subblock_cfg["memory_diagnostics"] = True
     seeding = dict(experiment_cfg.get("seeding", {}) or {})
@@ -875,10 +902,19 @@ def build_calibration_plan(
                     "n_frames": int(subblock_cfg.get("n_frames", 20)),
                     "noise": str(subblock_cfg.get("noise", "enabled")),
                     "phi_ref": str(subblock_cfg.get("phi_ref", "recovered")),
+                    "schur_curvature_method_requested": schur_settings["schur_curvature_method_requested"],
+                    "schur_curvature_method_effective": schur_settings["schur_curvature_method_effective"],
+                    "schur_route_source": schur_settings["schur_route_source"],
+                    "max_dense_dim": schur_settings["max_dense_dim"],
+                    "structured_curvature_used": schur_settings["structured_curvature_expected"],
+                    "dense_global_hessian_materialized": "",
                     "trace_seed": seeds["trace_seed"],
                     "noise_seed": seeds["noise_seed"],
                     "command": " ".join(command),
                     "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
+                    "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
+                    "schur_diagnostics_path": str((subblock_root / subblock_name / "study" / "schur_summary" / "schur_diagnostics.json")),
+                    "schur_memory_audit_path": str((subblock_root / subblock_name / "study" / "schur_summary" / "schur_summary_memory_audit.json")),
                 }
             )
     resolved_config = {"experiment": experiment_cfg, "system": system_cfg}
@@ -1450,7 +1486,38 @@ def execute_subblocks(
             raise RuntimeError(
                 f"Subprocess failed ({diag.return_code}) for {summary_path}: {diagnostics_json}"
             )
-        return case_name, summary_path, {"diagnostics_json": str(diagnostics_json), "return_code": diag.return_code, "failure_class": diag.failure_class, "peak_total_rss_mb": diag.memory_sampler.get("peak_total_rss_mb")}
+        schur_diag_path = summary_path.parent / "schur_diagnostics.json"
+        schur_diag: dict[str, Any] = {}
+        if schur_diag_path.exists():
+            try:
+                schur_diag = json.loads(schur_diag_path.read_text(encoding="utf-8"))
+            except Exception:
+                schur_diag = {}
+        return case_name, summary_path, {
+            "diagnostics_json": str(diagnostics_json),
+            "subprocess_diagnostics_path": str(diagnostics_json),
+            "schur_diagnostics_path": str(schur_diag_path),
+            "schur_memory_audit_path": str(summary_path.parent / "schur_summary_memory_audit.json"),
+            "return_code": diag.return_code,
+            "failure_class": diag.failure_class,
+            "peak_total_rss_mb": diag.memory_sampler.get("peak_total_rss_mb"),
+            "schur_curvature_method_requested": schur_diag.get("schur_curvature_method_requested"),
+            "schur_curvature_method_effective": schur_diag.get("schur_curvature_method_effective"),
+            "structured_curvature_used": schur_diag.get("structured_curvature_used"),
+            "structured_supported_layout": schur_diag.get("structured_supported_layout"),
+            "dense_global_hessian_materialized": schur_diag.get("dense_global_hessian_materialized"),
+            "dense_hessian_allowed": schur_diag.get("dense_hessian_allowed"),
+            "dense_hessian_skipped_reason": schur_diag.get("dense_hessian_skipped_reason"),
+            "dense_hessian_materialized_reason": schur_diag.get("dense_hessian_materialized_reason"),
+            "validate_structured_against_dense": schur_diag.get("validate_structured_against_dense"),
+            "max_dense_dim": schur_diag.get("max_dense_dim"),
+            "combined_dim": schur_diag.get("combined_dim"),
+            "n_theta": schur_diag.get("n_theta"),
+            "n_phi": schur_diag.get("n_phi"),
+            "n_frames": schur_diag.get("n_frames"),
+            "frame_keys": schur_diag.get("frame_keys"),
+            "theta_keys": schur_diag.get("theta_keys"),
+        }
 
     if max_workers <= 1:
         for job in jobs:
@@ -1508,6 +1575,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument("--memory-diagnostics", action="store_true")
+    parser.add_argument("--schur-curvature-method", default=None)
+    parser.add_argument("--max-dense-dim", type=int, default=None)
     parser.add_argument("--memory-progress-tail-lines", type=int, default=3)
     parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
     parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")

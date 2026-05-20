@@ -237,6 +237,23 @@ Structured Schur export supports:
 - `structured_residual_prior` for profiled
   `linear_drift_residual_jitter_prior` temporal models.
 
+Robust routing policy across demo workflows:
+
+- independent frame-local models (including the single-star calibration demo
+  `source.x_position_as/source.y_position_as` local solve) should request
+  `structured_independent_frames` by default;
+- hard linear-drift models should request `structured_linear_drift`;
+- residual-prior models should request `structured_residual_prior`;
+- dense Schur should be treated as validation/debug behavior, not the normal
+  default path.
+
+To confirm actual routing and memory behavior, inspect `schur_diagnostics.json`
+and `subblock_status.csv` fields such as
+`schur_curvature_method_requested`, `schur_curvature_method_effective`,
+`structured_curvature_used`, and `dense_global_hessian_materialized`, then
+cross-check `subprocess_diagnostics.json` and
+`schur_summary_memory_audit.json` for memory attribution.
+
 The residual-prior backend combines structured frame-separable image-data
 curvature with analytic temporal-prior curvature in expanded per-frame
 coordinates, so 20-frame four-scalar residual-prior runs do not need dense
