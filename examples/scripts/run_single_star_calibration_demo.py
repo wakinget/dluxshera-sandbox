@@ -15,6 +15,8 @@ import os
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
+from statistics import mean, median
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -104,6 +106,7 @@ class CalibrationPlan:
     subblock_rows: list[dict[str, Any]]
     prior_draw_rows: list[dict[str, Any]]
     status_rows: list[dict[str, Any]]
+    case_scheduling: str = "grouped"
 
 
 def _ensure_dir(path: Path) -> None:
@@ -283,6 +286,10 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace | None) -
         value = getattr(args, attr, None)
         if value is not None:
             subblocks[key] = value
+    if getattr(args, "reference_init_mode", None) is not None:
+        subblocks["reference_init_mode"] = args.reference_init_mode
+    if getattr(args, "case_scheduling", None) is not None:
+        out["case_scheduling"] = args.case_scheduling
     out["subblocks"] = subblocks
     theta = dict(out.get("observation_theta", {}) or {})
     source = dict(theta.get("source", {}) or {})
@@ -801,6 +808,8 @@ def build_subblock_command(
         command.extend(["--trace-jitter-pa-sigma-deg", str(float(jitter["pa_sigma_deg"]))])
     for label, offset in sorted(offsets.items()):
         command.extend(["--theta-reference-offset", f"{label}={float(offset)}"])
+    if subblock_cfg.get("reference_init_mode") is not None:
+        command.extend(["--reference-init-mode", str(subblock_cfg.get("reference_init_mode"))])
     if bool(subblock_cfg.get("memory_diagnostics", False)):
         command.append("--memory-diagnostics")
     return command
@@ -931,6 +940,7 @@ def build_calibration_plan(
         subblock_rows=rows,
         prior_draw_rows=prior_draw_rows,
         status_rows=[],
+        case_scheduling=str(experiment_cfg.get("case_scheduling", "grouped")),
     )
 
 
@@ -957,6 +967,7 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
         "theta_layout": plan.layout.to_dict(),
         "layout_metadata": plan.layout_metadata,
         "n_cases": len(plan.cases),
+        "case_scheduling": plan.case_scheduling,
         "n_subblocks": int(plan.config["experiment"].get("subblocks", {}).get("n_subblocks", 3)),
         "n_frames": n_frames,
         "dimension_estimate": {
@@ -1452,8 +1463,9 @@ def execute_subblocks(
     env = os.environ.copy()
     src_path = str(REPO_ROOT / "src")
     env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
-    jobs: list[tuple[str, Path, list[str]]] = []
+    by_case: dict[str, list[tuple[str, Path, list[str]]]] = {}
     for case_name, commands in plan.subblock_commands.items():
+        by_case[case_name] = []
         for command, summary_path in zip(commands, plan.summary_paths[case_name], strict=True):
             if resume and summary_path.exists():
                 try:
@@ -1462,7 +1474,17 @@ def execute_subblocks(
                 except Exception:
                     if not fail_fast:
                         pass
-            jobs.append((case_name, summary_path, command))
+            by_case[case_name].append((case_name, summary_path, command))
+    jobs: list[tuple[str, Path, list[str]]] = []
+    if plan.case_scheduling == "round_robin":
+        max_len = max((len(v) for v in by_case.values()), default=0)
+        for i in range(max_len):
+            for case_name in by_case:
+                if i < len(by_case[case_name]):
+                    jobs.append(by_case[case_name][i])
+    else:
+        for case_name in by_case:
+            jobs.extend(by_case[case_name])
     if not jobs:
         return
 
@@ -1499,8 +1521,10 @@ def execute_subblocks(
             "schur_diagnostics_path": str(schur_diag_path),
             "schur_memory_audit_path": str(summary_path.parent / "schur_summary_memory_audit.json"),
             "return_code": diag.return_code,
+            "elapsed_seconds": float(diag.elapsed_seconds),
             "failure_class": diag.failure_class,
             "peak_total_rss_mb": diag.memory_sampler.get("peak_total_rss_mb"),
+            "resource_time_maximum_resident_set_mb": diag.resource_time.get("maximum_resident_set_mb"),
             "schur_curvature_method_requested": schur_diag.get("schur_curvature_method_requested"),
             "schur_curvature_method_effective": schur_diag.get("schur_curvature_method_effective"),
             "structured_curvature_used": schur_diag.get("structured_curvature_used"),
@@ -1519,11 +1543,29 @@ def execute_subblocks(
             "theta_keys": schur_diag.get("theta_keys"),
         }
 
+    
+    run_started = now_iso_local_ms()
+    t0 = __import__("time").time()
+
+    def _write_progress(last_completed: dict[str, Any] | None = None) -> None:
+        _write_csv(plan.run_root / "subblock_status.csv", status_rows)
+        _write_csv(plan.run_root / "memory_failure_summary.csv", [{"case_name": r.get("case_name"), "summary_path": r.get("summary_path"), "diagnostics_json": r.get("diagnostics_json"), "failure_class": r.get("failure_class"), "resource_time_maximum_resident_set_mb": r.get("resource_time_maximum_resident_set_mb")} for r in status_rows])
+        total = len(jobs)
+        completed = len(status_rows)
+        failed = sum(1 for r in status_rows if r.get("return_code") not in (0, "0"))
+        running = max(0, min(max_workers, total - completed))
+        pending = max(0, total - completed - running)
+        durations = [float(r.get("elapsed_seconds",0.0)) for r in status_rows if r.get("elapsed_seconds") is not None]
+        cc = Counter(r.get("case_name") for r in status_rows)
+        progress = {"schema_version":"single_star_campaign_progress.v1","updated_at":now_iso_local_ms(),"run_started_at":run_started,"run_root":str(plan.run_root),"total_subblocks_planned":total,"completed_count":completed,"failed_count":failed,"running_count":running,"pending_count":pending,"completed_by_case":dict(cc),"elapsed_wall_seconds":__import__("time").time()-t0,"mean_completed_subblock_seconds":(mean(durations) if durations else None),"median_completed_subblock_seconds":(median(durations) if durations else None),"estimated_remaining_seconds_at_current_rate":((mean(durations)*pending) if durations else None),"max_resource_time_rss_mb":max([float(r.get("resource_time_maximum_resident_set_mb") or 0.0) for r in status_rows], default=0.0),"last_completed":last_completed}
+        _write_json(plan.run_root / "progress.json", progress)
+
     if max_workers <= 1:
         for job in jobs:
             try:
                 case_name, summary_path, row = run_job(job)
                 status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
+                _write_progress(last_completed={"case_name":case_name,"summary_path":str(summary_path)})
                 if not quiet:
                     print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
             except Exception as exc:
@@ -1538,6 +1580,7 @@ def execute_subblocks(
             try:
                 case_name, summary_path, row = future.result()
                 status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
+                _write_progress(last_completed={"case_name":case_name,"summary_path":str(summary_path)})
                 if not quiet:
                     print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
             except Exception as exc:
@@ -1564,6 +1607,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-frames", type=int, default=None)
     parser.add_argument("--noise", choices=("enabled", "disabled", "inherit"), default=None)
     parser.add_argument("--phi-ref", choices=("recovered", "truth_when_available", "init"), default=None)
+    parser.add_argument("--reference-init-mode", choices=("initial", "truth_when_available"), default=None)
+    parser.add_argument("--case-scheduling", choices=("grouped", "round_robin"), default="grouped")
     parser.add_argument("--zernike-indices", default=None)
     parser.add_argument("--include-plate-scale", dest="include_plate_scale", action="store_true", default=None)
     parser.add_argument("--no-include-plate-scale", dest="include_plate_scale", action="store_false")
