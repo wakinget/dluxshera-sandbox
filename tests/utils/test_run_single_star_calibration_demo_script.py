@@ -255,6 +255,49 @@ def test_command_construction_uses_single_star_schur_summary(tmp_path: Path) -> 
     assert "--phi-ref recovered" in joined
 
 
+def test_cli_accepts_memory_diagnostics_flag() -> None:
+    module = load_module()
+    args = module._build_parser().parse_args(["--memory-diagnostics"])
+    assert bool(args.memory_diagnostics) is True
+
+
+def test_plan_forwards_memory_diagnostics_to_subblock_commands(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    args = module._build_parser().parse_args(["--memory-diagnostics"])
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+        args=args,
+    )
+    command = plan.subblock_commands["zero_bias_case"][0]
+    assert "--memory-diagnostics" in command
+
+
+def test_dry_run_writes_plan_without_executing_subprocesses(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    payload = module.main(
+        [
+            "--config",
+            str(config_path),
+            "--results-root",
+            str(tmp_path),
+            "--run-name",
+            "dry_run_case",
+            "--dry-run",
+        ]
+    )
+    assert payload["run_root"].endswith("dry_run_case")
+    run_root = Path(payload["run_root"])
+    assert (run_root / "subblock_plan.csv").exists()
+    assert not (run_root / "subblock_status.csv").exists()
+
+
 def test_trace_policy_allows_inert_pa_truth_without_solving(tmp_path: Path) -> None:
     module = load_module()
     config_path = tmp_path / "config.json"

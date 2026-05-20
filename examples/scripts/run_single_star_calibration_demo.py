@@ -12,7 +12,6 @@ import csv
 import json
 import math
 import os
-import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,6 +59,7 @@ from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.noise import make_subseed
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 from dluxshera.utils.obs_subblock_keys import parse_obs_subblock_key_address
+from dluxshera.utils.subprocess_diagnostics import run_subprocess_with_diagnostics
 from dluxshera.utils.single_star_calibration import (
     ALPHA_CEN_A_PLACEHOLDER_NOTE,
     prepare_alpha_cen_a_single_star_system_config,
@@ -102,6 +102,7 @@ class CalibrationPlan:
     subblock_commands: dict[str, list[list[str]]]
     subblock_rows: list[dict[str, Any]]
     prior_draw_rows: list[dict[str, Any]]
+    status_rows: list[dict[str, Any]]
 
 
 def _ensure_dir(path: Path) -> None:
@@ -775,6 +776,8 @@ def build_subblock_command(
         command.extend(["--trace-jitter-pa-sigma-deg", str(float(jitter["pa_sigma_deg"]))])
     for label, offset in sorted(offsets.items()):
         command.extend(["--theta-reference-offset", f"{label}={float(offset)}"])
+    if bool(subblock_cfg.get("memory_diagnostics", False)):
+        command.append("--memory-diagnostics")
     return command
 
 
@@ -822,6 +825,8 @@ def build_calibration_plan(
         experiment_cfg=experiment_cfg,
     )
     subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
+    if args is not None and bool(getattr(args, "memory_diagnostics", False)):
+        subblock_cfg["memory_diagnostics"] = True
     seeding = dict(experiment_cfg.get("seeding", {}) or {})
     seed_policy = str(seeding.get("seed_policy", "different_jitter_different_noise"))
     if seed_policy not in SUPPORTED_SEED_POLICIES:
@@ -873,6 +878,7 @@ def build_calibration_plan(
                     "trace_seed": seeds["trace_seed"],
                     "noise_seed": seeds["noise_seed"],
                     "command": " ".join(command),
+                    "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
                 }
             )
     resolved_config = {"experiment": experiment_cfg, "system": system_cfg}
@@ -888,6 +894,7 @@ def build_calibration_plan(
         subblock_commands=commands,
         subblock_rows=rows,
         prior_draw_rows=prior_draw_rows,
+        status_rows=[],
     )
 
 
@@ -1374,7 +1381,24 @@ def aggregate_campaign(plan: CalibrationPlan) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "run_root": str(plan.run_root),
         "cases": summaries,
+        "memory_failure_summary_csv": str(plan.run_root / "memory_failure_summary.csv"),
     }
+    status_path = plan.run_root / "subblock_status.csv"
+    if status_path.exists():
+        rows = list(csv.DictReader(status_path.open("r", encoding="utf-8")))
+        _write_csv(
+            plan.run_root / "memory_failure_summary.csv",
+            [
+                {
+                    "case_name": row.get("case_name"),
+                    "summary_path": row.get("summary_path"),
+                    "diagnostics_json": row.get("diagnostics_json"),
+                    "failure_class": row.get("failure_class"),
+                    "peak_total_rss_mb": row.get("peak_total_rss_mb"),
+                }
+                for row in rows
+            ],
+        )
     _write_json(plan.run_root / "campaign_summary.json", payload)
     return payload
 
@@ -1386,6 +1410,8 @@ def execute_subblocks(
     max_workers: int,
     fail_fast: bool,
     quiet: bool,
+    memory_diagnostics: bool,
+    resource_time: bool,
 ) -> None:
     env = os.environ.copy()
     src_path = str(REPO_ROOT / "src")
@@ -1404,41 +1430,54 @@ def execute_subblocks(
     if not jobs:
         return
 
-    def run_job(job: tuple[str, Path, list[str]]) -> tuple[str, Path]:
+    status_rows: list[dict[str, Any]] = []
+
+    def run_job(job: tuple[str, Path, list[str]]) -> tuple[str, Path, dict[str, Any]]:
         case_name, summary_path, command = job
-        result = subprocess.run(
-            command,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        case_root = summary_path.parent.parent
+        diagnostics_json = case_root / "subprocess_diagnostics.json"
+        diag = run_subprocess_with_diagnostics(
+            command=command,
+            cwd=REPO_ROOT,
             env=env,
+            stdout_log=case_root / "subprocess.stdout.log",
+            stderr_log=case_root / "subprocess.stderr.log",
+            diagnostics_json=diagnostics_json,
+            memory_diagnostics=memory_diagnostics,
+            resource_time=resource_time,
         )
-        del result
-        return case_name, summary_path
+        if int(diag.return_code) != 0:
+            raise RuntimeError(
+                f"Subprocess failed ({diag.return_code}) for {summary_path}: {diagnostics_json}"
+            )
+        return case_name, summary_path, {"diagnostics_json": str(diagnostics_json), "return_code": diag.return_code, "failure_class": diag.failure_class, "peak_total_rss_mb": diag.memory_sampler.get("peak_total_rss_mb")}
 
     if max_workers <= 1:
         for job in jobs:
             try:
-                case_name, summary_path = run_job(job)
+                case_name, summary_path, row = run_job(job)
+                status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
                 if not quiet:
                     print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
-            except subprocess.CalledProcessError as exc:
+            except Exception as exc:
                 if fail_fast:
-                    raise RuntimeError(exc.stderr or str(exc)) from exc
-                print(exc.stderr or str(exc), file=sys.stderr, flush=True)
+                    raise RuntimeError(str(exc)) from exc
+                print(str(exc), file=sys.stderr, flush=True)
+        _write_csv(plan.run_root / "subblock_status.csv", status_rows)
         return
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_job = {pool.submit(run_job, job): job for job in jobs}
         for future in as_completed(future_to_job):
             try:
-                case_name, summary_path = future.result()
+                case_name, summary_path, row = future.result()
+                status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
                 if not quiet:
                     print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
-            except subprocess.CalledProcessError as exc:
+            except Exception as exc:
                 if fail_fast:
-                    raise RuntimeError(exc.stderr or str(exc)) from exc
-                print(exc.stderr or str(exc), file=sys.stderr, flush=True)
+                    raise RuntimeError(str(exc)) from exc
+                print(str(exc), file=sys.stderr, flush=True)
+    _write_csv(plan.run_root / "subblock_status.csv", status_rows)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1468,6 +1507,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("none", "basic", "review", "full"),
         default=None,
     )
+    parser.add_argument("--memory-diagnostics", action="store_true")
+    parser.add_argument("--memory-progress-tail-lines", type=int, default=3)
+    parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
+    parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")
     return parser
 
 
@@ -1492,6 +1535,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             max_workers=max(1, int(args.max_workers)),
             fail_fast=bool(args.fail_fast),
             quiet=bool(args.quiet),
+            memory_diagnostics=bool(args.memory_diagnostics),
+            resource_time=True if args.resource_time is None else bool(args.resource_time),
         )
     summary = aggregate_campaign(plan)
     if not args.quiet:
