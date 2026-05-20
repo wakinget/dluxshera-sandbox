@@ -2347,6 +2347,13 @@ def apply_reference_optimizer_overrides(
     preconditioning_eig_floor_rel: float | None = None,
     preconditioning_eig_floor_abs: float | None = None,
     preconditioning_lr_clip: tuple[float, float] | None = None,
+    early_stopping_enabled: bool | None = None,
+    early_stopping_min_iter: int | None = None,
+    early_stopping_patience: int | None = None,
+    early_stopping_loss_rtol: float | None = None,
+    early_stopping_loss_atol: float | None = None,
+    early_stopping_step_atol: float | None = None,
+    early_stopping_grad_norm_atol: float | None = None,
 ) -> dict[str, str]:
     """Patch explicit recovered-reference optimizer overrides into config.
 
@@ -2404,6 +2411,27 @@ def apply_reference_optimizer_overrides(
             path="reference_schedule",
         )
         sources["schedule"] = SOURCE_CLI_OVERRIDE
+
+    if any(v is not None for v in (
+        early_stopping_enabled, early_stopping_min_iter, early_stopping_patience,
+        early_stopping_loss_rtol, early_stopping_loss_atol, early_stopping_step_atol,
+        early_stopping_grad_norm_atol,
+    )):
+        early_cfg = _ensure_mapping(optimizer_cfg, "early_stopping", path="experiment.inference.optimizer")
+        if early_stopping_enabled is not None:
+            early_cfg["enabled"] = bool(early_stopping_enabled); sources["early_stopping_enabled"] = SOURCE_CLI_OVERRIDE
+        if early_stopping_min_iter is not None:
+            early_cfg["min_iter"] = int(early_stopping_min_iter); sources["early_stopping_min_iter"] = SOURCE_CLI_OVERRIDE
+        if early_stopping_patience is not None:
+            early_cfg["patience"] = int(early_stopping_patience); sources["early_stopping_patience"] = SOURCE_CLI_OVERRIDE
+        if early_stopping_loss_rtol is not None:
+            early_cfg["loss_rtol"] = float(early_stopping_loss_rtol); sources["early_stopping_loss_rtol"] = SOURCE_CLI_OVERRIDE
+        if early_stopping_loss_atol is not None:
+            early_cfg["loss_atol"] = float(early_stopping_loss_atol); sources["early_stopping_loss_atol"] = SOURCE_CLI_OVERRIDE
+        if early_stopping_step_atol is not None:
+            early_cfg["step_atol"] = float(early_stopping_step_atol); sources["early_stopping_step_atol"] = SOURCE_CLI_OVERRIDE
+        if early_stopping_grad_norm_atol is not None:
+            early_cfg["grad_norm_atol"] = float(early_stopping_grad_norm_atol); sources["early_stopping_grad_norm_atol"] = SOURCE_CLI_OVERRIDE
 
     if (
         preconditioning_enabled is not None
@@ -2487,6 +2515,13 @@ def _reference_optimizer_override_sources(
     preconditioning_eig_floor_rel: float | None = None,
     preconditioning_eig_floor_abs: float | None = None,
     preconditioning_lr_clip: tuple[float, float] | None = None,
+    early_stopping_enabled: bool | None = None,
+    early_stopping_min_iter: int | None = None,
+    early_stopping_patience: int | None = None,
+    early_stopping_loss_rtol: float | None = None,
+    early_stopping_loss_atol: float | None = None,
+    early_stopping_step_atol: float | None = None,
+    early_stopping_grad_norm_atol: float | None = None,
 ) -> dict[str, str]:
     """Return provenance labels for explicitly requested optimizer overrides."""
 
@@ -3879,6 +3914,13 @@ def _build_study_inference_config(
     reference_optimizer_kind: str | None = None,
     reference_base_lr: float | None = None,
     reference_n_iter: int | None = None,
+    reference_early_stopping_enabled: bool | None = None,
+    reference_early_stopping_min_iter: int | None = None,
+    reference_early_stopping_patience: int | None = None,
+    reference_early_stopping_loss_rtol: float | None = None,
+    reference_early_stopping_loss_atol: float | None = None,
+    reference_early_stopping_step_atol: float | None = None,
+    reference_early_stopping_grad_norm_atol: float | None = None,
     reference_optimizer_kwargs: Mapping[str, Any] | None = None,
     reference_schedule: Mapping[str, Any] | None = None,
     reference_preconditioning_enabled: bool | None = None,
@@ -3955,6 +3997,13 @@ def _build_study_inference_config(
         optimizer_kind=reference_optimizer_kind,
         base_lr=reference_base_lr,
         n_iter=reference_n_iter,
+        early_stopping_enabled=reference_early_stopping_enabled,
+        early_stopping_min_iter=reference_early_stopping_min_iter,
+        early_stopping_patience=reference_early_stopping_patience,
+        early_stopping_loss_rtol=reference_early_stopping_loss_rtol,
+        early_stopping_loss_atol=reference_early_stopping_loss_atol,
+        early_stopping_step_atol=reference_early_stopping_step_atol,
+        early_stopping_grad_norm_atol=reference_early_stopping_grad_norm_atol,
         optimizer_kwargs=reference_optimizer_kwargs,
         schedule=reference_schedule,
         preconditioning_enabled=reference_preconditioning_enabled,
@@ -8513,6 +8562,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         reference_optimizer_kind=args.reference_optimizer_kind,
         reference_base_lr=args.reference_base_lr,
         reference_n_iter=args.reference_n_iter,
+        reference_early_stopping_enabled=(True if args.reference_early_stopping else None),
+        reference_early_stopping_min_iter=args.reference_early_stopping_min_iter,
+        reference_early_stopping_patience=args.reference_early_stopping_patience,
+        reference_early_stopping_loss_rtol=args.reference_early_stopping_loss_rtol,
+        reference_early_stopping_loss_atol=args.reference_early_stopping_loss_atol,
+        reference_early_stopping_step_atol=args.reference_early_stopping_step_atol,
+        reference_early_stopping_grad_norm_atol=args.reference_early_stopping_grad_norm_atol,
         reference_optimizer_kwargs=parse_reference_optimizer_kwargs(
             args.reference_optimizer_kwarg
         ),

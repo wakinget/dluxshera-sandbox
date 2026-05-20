@@ -62,6 +62,55 @@ def _build_artifacts_mapping(
 
     return artifacts or None
 
+
+@dataclass(frozen=True)
+class EarlyStoppingConfig:
+    enabled: bool = False
+    min_iter: int = 0
+    patience: int = 5
+    loss_rtol: float | None = None
+    loss_atol: float | None = None
+    step_atol: float | None = None
+    grad_norm_atol: float | None = None
+    require_finite_loss: bool = True
+    restore_best: bool = False
+    monitor: str = "loss"
+
+
+def normalize_early_stopping_config(
+    cfg: Mapping[str, Any] | EarlyStoppingConfig | None,
+    *,
+    path: str = "optimizer.early_stopping",
+) -> EarlyStoppingConfig:
+    if cfg is None:
+        return EarlyStoppingConfig()
+    if isinstance(cfg, EarlyStoppingConfig):
+        return cfg
+    if not isinstance(cfg, Mapping):
+        raise ValueError(f"{path} must be a mapping when provided.")
+    data = dict(cfg)
+    enabled = bool(data.get("enabled", False))
+    min_iter = int(data.get("min_iter", 0))
+    patience = int(data.get("patience", 5))
+    if min_iter < 0:
+        raise ValueError(f"{path}.min_iter must be >= 0.")
+    if patience <= 0:
+        raise ValueError(f"{path}.patience must be > 0.")
+    monitor = str(data.get("monitor", "loss"))
+    if monitor != "loss":
+        raise ValueError(f"{path}.monitor currently supports only 'loss'.")
+    def _optf(k):
+        v=data.get(k)
+        return None if v is None else float(v)
+    return EarlyStoppingConfig(
+        enabled=enabled, min_iter=min_iter, patience=patience,
+        loss_rtol=_optf("loss_rtol"), loss_atol=_optf("loss_atol"),
+        step_atol=_optf("step_atol"), grad_norm_atol=_optf("grad_norm_atol"),
+        require_finite_loss=bool(data.get("require_finite_loss", True)),
+        restore_best=bool(data.get("restore_best", False)),
+        monitor=monitor,
+    )
+
 ############################
 # Exports
 ############################
@@ -98,6 +147,8 @@ __all__ = [
     "build_scalar_lr_schedule",
     "build_schedule_factor_history",
     "validate_optimizer_schedule_config",
+    "EarlyStoppingConfig",
+    "normalize_early_stopping_config",
 ]
 
 
@@ -710,6 +761,7 @@ def _gd_loop(
     num_steps: int = 100,
     optimizer: Optional[optax.GradientTransformation] = None,
     show_progress: bool = True,
+    early_stopping: EarlyStoppingConfig | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
     Run a pure in-memory gradient-descent loop in θ-space.
@@ -774,13 +826,22 @@ def _gd_loop(
     grad_norms = []
     step_norms = []
 
+    stop_cfg = early_stopping or EarlyStoppingConfig()
     iterator = range(num_steps)
     if show_progress:
         iterator = tqdm(iterator)
 
-    for _ in iterator:
+    stopped_early = False
+    stop_reason: str | None = None
+    stop_iteration: int | None = None
+    for step_idx in iterator:
         loss, g = jax.value_and_grad(loss_fn)(theta)
         losses.append(loss)
+        if stop_cfg.enabled and stop_cfg.require_finite_loss and not bool(np.isfinite(loss)):
+            stopped_early = True
+            stop_reason = "non_finite_loss"
+            stop_iteration = int(step_idx)
+            break
 
         updates, opt_state = optimizer.update(g, opt_state, params=theta)
         theta = optax.apply_updates(theta, updates)
@@ -788,6 +849,27 @@ def _gd_loop(
         grad_norms.append(np.linalg.norm(g))
         step_norms.append(np.linalg.norm(updates))
         theta_history.append(theta)
+        if stop_cfg.enabled and step_idx + 1 >= max(stop_cfg.min_iter, stop_cfg.patience):
+            recent_losses = losses[-(stop_cfg.patience + 1):]
+            if len(recent_losses) >= stop_cfg.patience + 1:
+                l_old = recent_losses[0]
+                l_new = recent_losses[-1]
+                delta = np.abs(l_old - l_new)
+                rel = delta / np.maximum(np.abs(l_old), 1.0)
+                if stop_cfg.loss_atol is not None and bool(delta <= stop_cfg.loss_atol):
+                    stopped_early, stop_reason, stop_iteration = True, "loss_atol_patience", int(step_idx)
+                    break
+                if stop_cfg.loss_rtol is not None and bool(rel <= stop_cfg.loss_rtol):
+                    stopped_early, stop_reason, stop_iteration = True, "loss_rtol_patience", int(step_idx)
+                    break
+            if stop_cfg.step_atol is not None and len(step_norms) >= stop_cfg.patience:
+                if bool(np.all(np.asarray(step_norms[-stop_cfg.patience:]) <= stop_cfg.step_atol)):
+                    stopped_early, stop_reason, stop_iteration = True, "step_atol_patience", int(step_idx)
+                    break
+            if stop_cfg.grad_norm_atol is not None and len(grad_norms) >= stop_cfg.patience:
+                if bool(np.all(np.asarray(grad_norms[-stop_cfg.patience:]) <= stop_cfg.grad_norm_atol)):
+                    stopped_early, stop_reason, stop_iteration = True, "grad_norm_atol_patience", int(step_idx)
+                    break
 
     losses.append(loss_fn(theta))
 
@@ -799,6 +881,27 @@ def _gd_loop(
         trace["grad_norm"] = np.stack(grad_norms)
     if step_norms:
         trace["step_norm"] = np.stack(step_norms)
+    loss_arr = np.stack(losses)
+    best_iter = int(onp.nanargmin(onp.asarray(loss_arr))) if loss_arr.size else None
+    trace["early_stopping"] = {
+        "enabled": bool(stop_cfg.enabled),
+        "stopped_early": bool(stopped_early),
+        "stop_iteration": stop_iteration,
+        "configured_n_iter": int(num_steps),
+        "actual_n_iter": int(len(theta_history) - 1),
+        "stop_reason": stop_reason,
+        "best_iteration": best_iter,
+        "best_loss": float(loss_arr[best_iter]) if best_iter is not None else None,
+        "final_loss": float(loss_arr[-1]) if loss_arr.size else None,
+        "min_iter": int(stop_cfg.min_iter),
+        "patience": int(stop_cfg.patience),
+        "loss_rtol": stop_cfg.loss_rtol,
+        "loss_atol": stop_cfg.loss_atol,
+        "step_atol": stop_cfg.step_atol,
+        "grad_norm_atol": stop_cfg.grad_norm_atol,
+    }
+    if stop_cfg.restore_best and best_iter is not None and 0 <= best_iter < len(theta_history):
+        theta = theta_history[best_iter]
 
     return theta, trace
 
@@ -968,6 +1071,7 @@ def run_gd_with_artifacts(
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
     show_progress: bool = True,
+    early_stopping: Mapping[str, Any] | EarlyStoppingConfig | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Run θ-space gradient descent and assemble canonical optimization artifacts.
@@ -1058,6 +1162,7 @@ def run_gd_with_artifacts(
     docs/architecture/optimization_artifacts_and_plotting.md : Artifact schema.
     docs/architecture/inference_and_loss.md : Inference/loss pipeline context.
     """
+    stop_cfg = normalize_early_stopping_config(early_stopping)
     theta, full_trace = _gd_loop(
         loss_fn,
         theta0,
@@ -1065,6 +1170,7 @@ def run_gd_with_artifacts(
         num_steps=num_steps,
         optimizer=optimizer,
         show_progress=show_progress,
+        early_stopping=stop_cfg,
     )
 
     history = {
@@ -1080,6 +1186,8 @@ def run_gd_with_artifacts(
         trace["grad_norm"] = full_trace["grad_norm"]
     if "step_norm" in full_trace:
         trace["step_norm"] = full_trace["step_norm"]
+    if "early_stopping" in full_trace:
+        history["early_stopping"] = full_trace["early_stopping"]
     trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
     if scalar_lr_history is not None:
         scalar_lr_trace = onp.asarray(scalar_lr_history, dtype=float).reshape(-1)
@@ -1117,6 +1225,7 @@ def run_gd_with_artifacts(
             "name": "sgd" if optimizer is None else type(optimizer).__name__,
             "learning_rate": learning_rate,
             "num_steps": num_steps,
+            "early_stopping": dict(full_trace.get("early_stopping", {})),
         },
     }
     if schedule_meta is not None:
@@ -1146,6 +1255,7 @@ def run_gd_with_artifacts(
         "num_steps_completed": int(loss_array.size),
         "loss_init": loss_init,
         "loss_final": loss_final,
+        "early_stopping": dict(full_trace.get("early_stopping", {})),
     }
 
     if extra_summary:
@@ -1223,6 +1333,7 @@ def run_shera_gd(
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
     show_progress: bool = True,
+    early_stopping: Mapping[str, Any] | EarlyStoppingConfig | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Shera-specific front end for θ-space gradient descent.
@@ -1371,6 +1482,7 @@ def run_shera_gd(
         extra_summary=extra_summary,
         return_artifacts=return_artifacts,
         show_progress=show_progress,
+        early_stopping=early_stopping,
     )
 
 

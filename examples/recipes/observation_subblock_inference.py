@@ -81,6 +81,7 @@ from dluxshera.config.numeric import (
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.losses import gaussian_image_nll
 from dluxshera.inference.optimization import (
+    normalize_early_stopping_config,
     build_fim_diagonal_preconditioner,
     build_schedule_factor_history,
     fim_theta,
@@ -3578,6 +3579,10 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         n_iter=n_iter,
         path="experiment.inference.optimizer.schedule",
     )
+    early_stopping_cfg = normalize_early_stopping_config(
+        optimizer_cfg.get("early_stopping"),
+        path="experiment.inference.optimizer.early_stopping",
+    )
     preconditioning_cfg = _optional_dict(
         optimizer_cfg,
         "preconditioning",
@@ -4548,6 +4553,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ),
         optimizer_kind=str(optimizer_cfg["kind"]),
         optimizer_kwargs=dict(optimizer_cfg["kwargs"]),
+        early_stopping=early_stopping_cfg,
         return_artifacts=False,
         show_progress=not bool(args.no_progress),
     )
