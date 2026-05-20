@@ -632,3 +632,14 @@ The intended long-term direction is:
 
 That framing should help keep the implementation, schema, and future extensions
 pointed in the right direction.
+
+## Parent-side subprocess memory diagnostics (campaign scripts)
+
+Campaign runners can now emit parent-side subprocess diagnostics in addition to child stage-level diagnostics written by `run_obs_subblock_study.py` (`schur_summary_memory_timeline.jsonl`, `schur_summary_memory_audit.json`).
+
+- `examples/scripts/run_single_star_calibration_demo.py --memory-diagnostics` forwards `--memory-diagnostics` to each child subblock command.
+- Each subblock now records parent-side subprocess diagnostics (`subprocess_diagnostics.json` plus optional RSS samples JSONL) with command metadata, timestamps, elapsed time, return code, and failure classification.
+- `failure_class=probable_sigkill` (for return code `-9`) is evidence only and should be interpreted as possible memory pressure, not definitive OOM proof.
+- On HPC/SLURM, use these artifacts to correlate scheduler kill events with observed RSS peaks and `/usr/bin/time -v` reports (when available).
+
+This instrumentation is intentionally dependency-light and meant for evidence gathering before large batch scaling; it does not alter Schur math, curvature routing, or inference defaults.
