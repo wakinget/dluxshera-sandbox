@@ -7247,6 +7247,11 @@ def _run_profile_objective(
         "run_count": len(rows),
         "best_run": best_run,
     }
+    if runtime_profiler is not None and runtime_profile_summary_path is not None and runtime_profile_timeline_path is not None:
+        write_profile_timeline_jsonl(runtime_profile_timeline_path, runtime_profiler.events)
+        payload = runtime_profiler.summary_payload(outputs={"summary_json": str(runtime_profile_summary_path), "timeline_jsonl": str(runtime_profile_timeline_path)})
+        write_profile_summary_json(runtime_profile_summary_path, payload)
+        summary.setdefault("runtime_profile", {}).update({"enabled": True, "summary_json": str(runtime_profile_summary_path), "timeline_jsonl": str(runtime_profile_timeline_path)})
     _write_json(summary_path, summary)
     return summary
 
@@ -7444,6 +7449,10 @@ def run_obs_subblock_study(
     allow_dense_image_hessian: bool = False,
     memory_diagnostics: bool = False,
     memory_diagnostics_file: Path | None = None,
+    profile_runtime: bool = False,
+    profile_runtime_file: Path | None = None,
+    profile_runtime_timeline: Path | None = None,
+    profile_runtime_detail: str = "basic",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run one observation sub-block screening study."""
@@ -7495,8 +7504,15 @@ def run_obs_subblock_study(
     study_root = _study_root(case_root, study_mode)
     study_root.mkdir(parents=True, exist_ok=True)
     summary_path = study_root / "summary.json"
+    runtime_profiler: RuntimeProfiler | None = None
+    runtime_profile_summary_path: Path | None = None
+    runtime_profile_timeline_path: Path | None = None
     memory_recorder: MemoryDiagnosticsRecorder | None = None
     memory_audit_path: Path | None = None
+    if profile_runtime and study_mode == MODE_SCHUR_SUMMARY:
+        runtime_profile_summary_path = (profile_runtime_file.resolve() if profile_runtime_file is not None else study_root / "runtime_profile_summary.json")
+        runtime_profile_timeline_path = (profile_runtime_timeline.resolve() if profile_runtime_timeline is not None else study_root / "runtime_profile_timeline.jsonl")
+        runtime_profiler = RuntimeProfiler(run_context={"script":"run_obs_subblock_study.py","mode":study_mode,"case_root":str(case_root),"n_frames":n_frames,"phi_ref":normalized_phi_ref,"schur_curvature_method":normalized_schur_curvature_method,"profile_runtime_detail":profile_runtime_detail})
     if memory_diagnostics and study_mode == MODE_SCHUR_SUMMARY:
         memory_timeline_path = (
             memory_diagnostics_file.resolve()
@@ -7653,6 +7669,8 @@ def run_obs_subblock_study(
         },
         "cli_overrides_applied": template_info["applied_overrides"],
     }
+    if runtime_profiler is not None:
+        summary["runtime_profile"] = {"enabled": True, "summary_json": str(runtime_profile_summary_path), "timeline_jsonl": str(runtime_profile_timeline_path)}
     if memory_recorder is not None:
         summary["memory_diagnostics"] = {
             "enabled": True,
@@ -7686,7 +7704,9 @@ def run_obs_subblock_study(
             noise_mode=noise_mode,
             dry_run=dry_run,
         )
-    prep = _prepare_case_render_artifacts(
+    if runtime_profiler is not None:
+        with runtime_profiler.profile_stage("case_prepare.run", cacheability="not_cacheable", category="case_prepare"):
+            prep = _prepare_case_render_artifacts(
         case_root=case_root,
         template_paths=template_paths,
         candidate_key=candidate,
@@ -7698,6 +7718,20 @@ def run_obs_subblock_study(
         render_seed=render_seed,
         dry_run=dry_run,
     )
+    if runtime_profiler is None:
+        prep = _prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths=template_paths,
+        candidate_key=candidate,
+        truth_value=truth_value,
+        n_frames=n_frames,
+        dt_s=dt_s,
+        exposure_time_s=exposure_time_s,
+        noise_mode=noise_mode,
+        render_seed=render_seed,
+        dry_run=dry_run,
+    )
+
     if memory_recorder is not None:
         memory_recorder.record(
             "case_prepare.done",
@@ -8588,6 +8622,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "the schur_summary study directory."
         ),
     )
+    parser.add_argument("--profile-runtime", action="store_true", default=False, help="Enable runtime profiling artifacts for schur_summary mode.")
+    parser.add_argument("--profile-runtime-file", type=Path, default=None, help="Optional runtime profile summary JSON output path.")
+    parser.add_argument("--profile-runtime-timeline", type=Path, default=None, help="Optional runtime profile timeline JSONL output path.")
+    parser.add_argument("--profile-runtime-detail", choices=("basic","full"), default="basic", help="Runtime profiling detail level.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -8697,6 +8735,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         ),
         memory_diagnostics=bool(args.memory_diagnostics),
         memory_diagnostics_file=args.memory_diagnostics_file,
+        profile_runtime=bool(args.profile_runtime),
+        profile_runtime_file=args.profile_runtime_file,
+        profile_runtime_timeline=args.profile_runtime_timeline,
+        profile_runtime_detail=str(args.profile_runtime_detail),
         dry_run=bool(args.dry_run),
     )
     print(f"Study mode: {summary['mode']}")

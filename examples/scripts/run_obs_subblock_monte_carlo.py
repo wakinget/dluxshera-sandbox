@@ -195,6 +195,8 @@ class MonteCarloRunConfig:
     progress_interval_s: float = 30.0
     tail_lines: int = 1
     memory_diagnostics: bool = False
+    profile_runtime: bool = False
+    profile_runtime_detail: str = "basic"
     memory_progress_tail_lines: int = 3
     verbose: bool = False
 
@@ -257,6 +259,14 @@ class MonteCarloTrialSpec:
     @property
     def memory_diagnostics_path(self) -> Path:
         return self.expected_summary_json.with_name("schur_summary_memory_timeline.jsonl")
+
+    @property
+    def runtime_profile_summary_path(self) -> Path:
+        return self.expected_summary_json.with_name("runtime_profile_summary.json")
+
+    @property
+    def runtime_profile_timeline_path(self) -> Path:
+        return self.expected_summary_json.with_name("runtime_profile_timeline.jsonl")
 
 
 @dataclass(frozen=True)
@@ -394,6 +404,8 @@ def memory_failure_fields(
         "last_stdout_line": (tail_text_file(spec.stdout_log, n_lines=1) or ("",))[-1],
         "last_stderr_line": (tail_text_file(spec.stderr_log, n_lines=1) or ("",))[-1],
         "memory_diagnostics_path": str(memory_path) if memory_path.exists() else "",
+        "runtime_profile_summary_path": str(spec.runtime_profile_summary_path),
+        "runtime_profile_timeline_path": str(spec.runtime_profile_timeline_path),
         "last_memory_stage": "" if last_memory is None else last_memory.get("stage", ""),
         "last_memory_rss_mb": "" if last_memory is None else last_memory.get("rss_mb", ""),
         "last_memory_peak_rss_mb": ""
@@ -932,6 +944,9 @@ def build_trial_command(spec: MonteCarloTrialSpec, config: MonteCarloRunConfig) 
         )
     if config.memory_diagnostics:
         command.append("--memory-diagnostics")
+    if config.profile_runtime:
+        command.append("--profile-runtime")
+        command.extend(["--profile-runtime-detail", str(config.profile_runtime_detail)])
     return command
 
 
@@ -2533,6 +2548,10 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
         merged["plots"] = False
     if args.memory_diagnostics:
         merged["memory_diagnostics"] = True
+    if args.profile_runtime:
+        merged["profile_runtime"] = True
+    if args.profile_runtime_detail is not None:
+        merged["profile_runtime_detail"] = args.profile_runtime_detail
     merged["run_name"] = filesystem_safe_token(str(merged["run_name"]))
     merged["results_root"] = Path(merged["results_root"]).expanduser()
     merged["theta_keys"] = parse_theta_keys(merged["theta_keys"])
@@ -2770,6 +2789,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quiet", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--progress-interval", type=float, default=None)
     parser.add_argument("--tail-lines", type=int, default=None)
+    parser.add_argument("--profile-runtime", action="store_true", default=False, help="Forward runtime profiling to child study runs.")
+    parser.add_argument("--profile-runtime-detail", choices=("basic","full"), default="basic", help="Forwarded runtime profiling detail level.")
     parser.add_argument(
         "--memory-diagnostics",
         action="store_true",
