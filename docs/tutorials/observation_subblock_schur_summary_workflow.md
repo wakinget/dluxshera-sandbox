@@ -475,3 +475,29 @@ This tutorial does not cover:
 - final parameter allocation,
 - full canonical Zernike observation-level updates,
 - mission-scale scientific interpretation.
+
+## Runtime profiling and cacheability diagnostics
+
+Enable profiling:
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py --results-root Results/obs_subblock_runtime_profile --case-name schur_profile_3f_noiseless --mode schur_summary --n-frames 3 --noise disabled --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix --phi-ref truth_when_available --max-dense-dim 40 --schur-damping 1e-8 --profile-runtime
+```
+
+Recovered-reference profiling:
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py --results-root Results/obs_subblock_runtime_profile --case-name schur_profile_20f_recovered --mode schur_summary --n-frames 20 --noise enabled --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix --phi-ref recovered --schur-curvature-method auto --max-dense-dim 40 --schur-damping 1e-8 --reference-diagnostics-profile none --profile-runtime
+```
+
+`runtime_profile_summary.json` includes stage totals and environment metadata. Treat timings as diagnostics only.
+
+## Runtime profiling and cacheability diagnostics
+
+Enable profiling:
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py --results-root Results/obs_subblock_runtime_profile --case-name schur_profile_3f_noiseless --mode schur_summary --n-frames 3 --noise disabled --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix --phi-ref truth_when_available --max-dense-dim 40 --schur-damping 1e-8 --profile-runtime
+```
+
+Recovered-reference profiling:
+```bash
+PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py --results-root Results/obs_subblock_runtime_profile --case-name schur_profile_20f_recovered --mode schur_summary --n-frames 20 --noise enabled --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix --phi-ref recovered --schur-curvature-method auto --max-dense-dim 40 --schur-damping 1e-8 --reference-diagnostics-profile none --profile-runtime
+```

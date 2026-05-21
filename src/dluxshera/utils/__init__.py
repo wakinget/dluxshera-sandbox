@@ -11,3 +11,12 @@ from .noise import (
     make_subseed,
     perturb_array,
 )
+
+from .runtime_profile import (
+    CACHEABILITY_VALUES,
+    RuntimeProfileEvent,
+    RuntimeProfiler,
+    block_until_ready_if_jax,
+    write_profile_summary_json,
+    write_profile_timeline_jsonl,
+)
