@@ -98,6 +98,9 @@ SUPPORTED_REFERENCE_DIAGNOSTICS_PROFILES = ("none", "basic", "review", "full")
 SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES = ("warn", "mask", "reject")
 SUPPORTED_SCHUR_FRAME_QUALITY_MISSING = ("allow_all", "error")
 SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS = ("original", "kept")
+ZERNIKE_THETA_LABEL_PATTERN = re.compile(
+    r"^optics\.(primary|secondary)\.zernike_coeffs_nm\[(\d+)\]$"
+)
 SUBBLOCK_OPTION_FLAG_MAP = {
     "exposure_time_s": "--exposure-time-s",
     "reference_diagnostics_profile": "--reference-diagnostics-profile",
@@ -145,6 +148,15 @@ class CampaignPlan:
     config: dict[str, Any]
     partition: dict[str, Any]
     case_generation: dict[str, Any]
+    truth_realization: dict[str, Any]
+    truth_realization_rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class TruthRealizationResult:
+    truth_overrides_by_label: dict[str, float]
+    rows: list[dict[str, Any]]
+    summary: dict[str, Any]
 
 
 def _ensure_dir(path: Path) -> None:
@@ -307,6 +319,25 @@ def _default_experiment_config() -> dict[str, Any]:
                 "optics.plate_scale_as_per_pix": {"kind": "fractional", "sigma": 1.0e-5},
                 "optics.primary.zernike_coeffs_nm[*]": {"kind": "absolute", "sigma": 1.0e-1, "unit": "nm"},
                 "optics.secondary.zernike_coeffs_nm[*]": {"kind": "absolute", "sigma": 1.0e-1, "unit": "nm"},
+            },
+        },
+        "truth_realization": {
+            "enabled": False,
+            "seed": 20260521,
+            "mode": "zernike_per_coefficient_sigma",
+            "zernikes": {
+                "primary": {
+                    "enabled": True,
+                    "indices": "from_observation_theta",
+                    "mean_nm": 0.0,
+                    "sigma_nm": 5.0,
+                },
+                "secondary": {
+                    "enabled": True,
+                    "indices": "from_observation_theta",
+                    "mean_nm": 0.0,
+                    "sigma_nm": 2.0,
+                },
             },
         },
         "forecast": {
@@ -675,6 +706,112 @@ def _resolve_eigen_sources(eigen_cfg: Mapping[str, Any]) -> tuple[str, ...]:
     return sources
 
 
+def _parse_zernike_theta_label(label: str) -> tuple[str, int] | None:
+    match = ZERNIKE_THETA_LABEL_PATTERN.fullmatch(label)
+    if match is None:
+        return None
+    return str(match.group(1)), int(match.group(2))
+
+
+def _zernike_labels_by_mirror(labels: Sequence[str]) -> dict[str, list[tuple[int, str]]]:
+    grouped: dict[str, list[tuple[int, str]]] = {"primary": [], "secondary": []}
+    for label in labels:
+        parsed = _parse_zernike_theta_label(label)
+        if parsed is None:
+            continue
+        mirror, index = parsed
+        grouped[mirror].append((index, label))
+    for mirror in grouped:
+        grouped[mirror].sort(key=lambda item: item[0])
+    return grouped
+
+
+def _realize_campaign_truth(
+    *,
+    experiment_cfg: Mapping[str, Any],
+    labels: Sequence[str],
+    base_truth_by_label: Mapping[str, float],
+) -> TruthRealizationResult:
+    raw_cfg = experiment_cfg.get("truth_realization", {}) or {}
+    if not isinstance(raw_cfg, Mapping) or not bool(raw_cfg.get("enabled", False)):
+        return TruthRealizationResult({}, [], {"enabled": False, "status": "disabled"})
+    mode = str(raw_cfg.get("mode", ""))
+    if mode != "zernike_per_coefficient_sigma":
+        raise ValueError(f"Unsupported truth_realization.mode: {mode!r}")
+    seed = int(raw_cfg.get("seed", 0))
+    combine_with_system_truth = bool(raw_cfg.get("combine_with_system_truth", False))
+    zernike_cfg = raw_cfg.get("zernikes", {}) or {}
+    if not isinstance(zernike_cfg, Mapping):
+        raise ValueError("truth_realization.zernikes must be a mapping.")
+    grouped = _zernike_labels_by_mirror(labels)
+    rng = np.random.default_rng(seed)
+    overrides: dict[str, float] = {}
+    rows: list[dict[str, Any]] = []
+    for mirror in ("primary", "secondary"):
+        mirror_cfg = zernike_cfg.get(mirror, {}) or {}
+        if not isinstance(mirror_cfg, Mapping):
+            raise ValueError(f"truth_realization.zernikes.{mirror} must be a mapping.")
+        if not bool(mirror_cfg.get("enabled", False)):
+            continue
+        sigma_nm = float(mirror_cfg.get("sigma_nm", mirror_cfg.get("rms_nm", 0.0)))
+        mean_nm = float(mirror_cfg.get("mean_nm", 0.0))
+        if sigma_nm < 0.0 or (not math.isfinite(sigma_nm)) or (not math.isfinite(mean_nm)):
+            raise ValueError(f"truth_realization.zernikes.{mirror} sigma/mean must be finite, sigma>=0.")
+        indices_cfg = mirror_cfg.get("indices", "from_observation_theta")
+        available = dict(grouped[mirror])
+        if indices_cfg == "from_observation_theta":
+            selected_indices = sorted(available)
+            selected_by = "from_observation_theta"
+        elif isinstance(indices_cfg, Sequence) and not isinstance(indices_cfg, (str, bytes)):
+            selected_indices = [int(v) for v in indices_cfg]
+            selected_by = "explicit_indices"
+        else:
+            raise ValueError(f"Unsupported truth_realization.zernikes.{mirror}.indices: {indices_cfg!r}")
+        if not selected_indices:
+            raise ValueError(f"truth_realization.zernikes.{mirror} selected no indices.")
+        missing = [idx for idx in selected_indices if idx not in available]
+        if missing:
+            raise ValueError(f"truth_realization.zernikes.{mirror} requested missing observation-theta indices: {missing}")
+        for index in selected_indices:
+            label = available[index]
+            draw_z = float(rng.normal())
+            draw_value_nm = float(draw_z * sigma_nm)
+            base_truth = float(base_truth_by_label[label])
+            truth_value = (base_truth if combine_with_system_truth else 0.0) + mean_nm + draw_value_nm
+            overrides[label] = float(truth_value)
+            rows.append(
+                {
+                    "theta_label": label,
+                    "mirror": mirror,
+                    "zernike_index": int(index),
+                    "enabled": True,
+                    "truth_seed": int(seed),
+                    "mode": mode,
+                    "distribution": "normal",
+                    "mean_nm": mean_nm,
+                    "sigma_nm": sigma_nm,
+                    "draw_z": draw_z,
+                    "draw_value_nm": draw_value_nm,
+                    "base_truth_value_nm": base_truth,
+                    "truth_value_nm": float(truth_value),
+                    "combine_with_system_truth": combine_with_system_truth,
+                    "selected_by": selected_by,
+                    "status": "applied",
+                }
+            )
+    return TruthRealizationResult(
+        overrides,
+        rows,
+        {
+            "enabled": True,
+            "mode": mode,
+            "seed": int(seed),
+            "combine_with_system_truth": combine_with_system_truth,
+            "n_overrides": len(overrides),
+        },
+    )
+
+
 def _match_wildcard_pattern(pattern: str, label: str) -> bool:
     if "[*]" not in pattern:
         return pattern == label
@@ -803,6 +940,7 @@ def _generate_prior_draw_cases(
                     "sigma_kind": sigma_meta[label]["sigma_kind"],
                     "sigma_source_rule": sigma_meta[label]["sigma_source_rule"],
                     "unit": sigma_meta[label]["unit"],
+                    "sigma_config_value": sigma_meta[label]["sigma_config_value"],
                     "draw_seed": int(draw_seed),
                     "draw_index": int(draw_index),
                 }
@@ -1026,14 +1164,22 @@ def build_campaign_plan(
     layout_metadata["resolved_system"] = system_cfg
     partition = _validate_partition_config(experiment_cfg.get("state_partition"), layout)
     prior_truth = build_prior_mean_from_store(layout.labels, store=system_store)
+    base_truth_by_label = {
+        label: float(prior_truth[index]) for index, label in enumerate(layout.labels)
+    }
+    truth_realization = _realize_campaign_truth(
+        experiment_cfg=experiment_cfg,
+        labels=layout.labels,
+        base_truth_by_label=base_truth_by_label,
+    )
+    truth_by_label = dict(base_truth_by_label)
+    truth_by_label.update(truth_realization.truth_overrides_by_label)
+    prior_truth = np.asarray([truth_by_label[label] for label in layout.labels], dtype=float)
     configured_cases = _parse_bias_cases(
         experiment_cfg,
         layout=layout,
         layout_metadata=layout_metadata,
     )
-    truth_by_label = {
-        label: float(prior_truth[index]) for index, label in enumerate(layout.labels)
-    }
     prior_draw_cases, prior_draw_rows_by_case = _generate_prior_draw_cases(
         experiment_cfg=experiment_cfg,
         labels=layout.labels,
@@ -1131,6 +1277,8 @@ def build_campaign_plan(
         config=resolved_config,
         partition=partition,
         case_generation=case_generation,
+        truth_realization=dict(truth_realization.summary),
+        truth_realization_rows=list(truth_realization.rows),
     )
 
 
@@ -1155,6 +1303,7 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "layout_metadata": plan.layout_metadata,
         "state_partition": plan.partition,
         "case_generation": dict(plan.case_generation),
+        "truth_realization": dict(plan.truth_realization),
         "subblock_command_options": dict(subblock_command_options),
         "seeding": _resolve_seeding_config(plan.config["experiment"]),
         "eigenbasis": {
@@ -2810,6 +2959,7 @@ def aggregate_campaign(
         "n_cases": len(plan.cases),
         "n_theta": plan.layout.size,
         "eigen_sources": list(sources),
+        "truth_realization": dict(plan.truth_realization),
         "forecast": forecast_summary,
         "case_outputs": [
             {
@@ -2848,6 +2998,8 @@ def run_observation_bias_campaign(
     )
     _ensure_dir(plan.run_root)
     _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
+    _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
+    _write_csv_rows(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
     _write_json(plan.run_root / "resolved_config.json", plan.config)
     _write_csv_rows(plan.run_root / "subblock_plan.csv", _flatten_subblock_plan_rows(plan))
     _write_csv_rows(plan.run_root / "bias_cases.csv", _bias_case_rows(plan))

@@ -1,0 +1,84 @@
+experiment:
+  kind: observation_bias_campaign
+  seed: 42
+  run_name: nonzero_truth_wfe_ke0p1nm_smoke
+
+  truth_realization:
+    enabled: true
+    seed: 20260521
+    mode: zernike_per_coefficient_sigma
+    zernikes:
+      primary:
+        enabled: true
+        indices: from_observation_theta
+        mean_nm: 0.0
+        sigma_nm: 5.0
+      secondary:
+        enabled: true
+        indices: from_observation_theta
+        mean_nm: 0.0
+        sigma_nm: 2.0
+
+  subblocks:
+    n_subblocks: 5
+    n_frames: 3
+    noise: disabled
+    phi_ref: truth_when_available
+    schur_curvature_method: auto
+    max_dense_dim: 80
+    schur_damping: 1.0e-8
+    reference_diagnostics_profile: none
+    variance_floor: 1.0
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 42
+
+  observation_theta:
+    source:
+      separation_as: true
+      log_flux_total: true
+      contrast: true
+    optics:
+      plate_scale_as_per_pix: true
+      primary_zernikes:
+        enabled: true
+        indices: [0, 1, 2, 3, 4, 5]
+      secondary_zernikes:
+        enabled: true
+        indices: [0, 1, 2, 3, 4, 5]
+
+  bias_cases:
+    - case_name: zero_knowledge_error
+      theta_reference_offsets: {}
+
+  prior_draws:
+    enabled: true
+    n_cases: 3
+    center: truth
+    distribution: normal
+    draw_seed: 12345
+    case_name_template: ke0p1nm_draw_{draw_index:03d}
+    sigmas:
+      source.separation_as:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: arcsec
+      source.log_flux_total:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: log_flux
+      source.contrast:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.1
+        unit: nm
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.1
+        unit: nm

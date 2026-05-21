@@ -501,3 +501,42 @@ Recovered-reference profiling:
 ```bash
 PYTHONPATH=src python examples/scripts/run_obs_subblock_study.py --results-root Results/obs_subblock_runtime_profile --case-name schur_profile_20f_recovered --mode schur_summary --n-frames 20 --noise enabled --theta-keys source.separation_as,source.log_flux_total,source.contrast,optics.plate_scale_as_per_pix --phi-ref recovered --schur-curvature-method auto --max-dense-dim 40 --schur-damping 1e-8 --reference-diagnostics-profile none --profile-runtime
 ```
+
+## Observation bias campaign: nonzero truth realization vs prior draws
+
+`examples/scripts/run_observation_bias_campaign.py` now separates three concepts:
+
+1. `truth_realization`: draws the **campaign truth** (e.g., nonzero primary/secondary Zernike WFE).
+2. `prior_draws`: draws **knowledge error** around that truth.
+3. `theta_reference_offsets`: internal low-level offsets passed to subblock Schur summaries.
+
+The `zernike_per_coefficient_sigma` truth mode draws each selected coefficient independently, so realized vector RMS fluctuates run-to-run even with fixed per-coefficient sigma.
+
+Dry-run smoke command:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/nonzero_truth_wfe_smoke.yaml \
+  --results-root Results/observation_bias_campaign \
+  --dry-run
+```
+
+Resume/run command:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/nonzero_truth_wfe_smoke.yaml \
+  --results-root Results/observation_bias_campaign \
+  --max-workers 3 \
+  --resume
+```
+
+Verification checklist before overnight scale-up:
+
+- inspect `truth_realization_by_label.csv`;
+- confirm primary Zernike truth values are nonzero at several-nm scale;
+- confirm secondary Zernike truth values are nonzero at smaller scale;
+- inspect `prior_draws.csv`;
+- confirm `reference_value - truth_value` tracks the configured Zernike prior sigma scale;
+- inspect `subblock_plan.csv`;
+- confirm case count and expected summary paths.

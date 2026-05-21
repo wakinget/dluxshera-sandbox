@@ -977,3 +977,84 @@ def test_overnight_prescription_dry_run_plan_has_mask_quality_and_forecast(tmp_p
     assert row["n_frames"] == 20
     assert row["schur_frame_quality_policy"] == "mask"
     assert payload["forecast"]["n_subblocks_grid"][-1] == 1800
+
+def test_truth_realization_disabled_returns_empty_overrides():
+    module = load_module()
+    labels = (
+        "source.separation_as",
+        "optics.primary.zernike_coeffs_nm[0]",
+        "optics.secondary.zernike_coeffs_nm[0]",
+    )
+    base_truth = {label: 0.0 for label in labels}
+    result = module._realize_campaign_truth(
+        experiment_cfg={"truth_realization": {"enabled": False}},
+        labels=labels,
+        base_truth_by_label=base_truth,
+    )
+    assert result.truth_overrides_by_label == {}
+    assert result.rows == []
+    assert result.summary["enabled"] is False
+
+
+def test_truth_realization_draws_deterministically_by_mirror_sigma():
+    module = load_module()
+    labels = (
+        "source.separation_as",
+        "optics.primary.zernike_coeffs_nm[0]",
+        "optics.primary.zernike_coeffs_nm[1]",
+        "optics.secondary.zernike_coeffs_nm[0]",
+    )
+    base_truth = {label: 0.0 for label in labels}
+    cfg = {
+        "truth_realization": {
+            "enabled": True,
+            "seed": 7,
+            "mode": "zernike_per_coefficient_sigma",
+            "zernikes": {
+                "primary": {"enabled": True, "indices": "from_observation_theta", "mean_nm": 0.0, "sigma_nm": 5.0},
+                "secondary": {"enabled": True, "indices": "from_observation_theta", "mean_nm": 0.0, "sigma_nm": 2.0},
+            },
+        }
+    }
+    first = module._realize_campaign_truth(experiment_cfg=cfg, labels=labels, base_truth_by_label=base_truth)
+    second = module._realize_campaign_truth(experiment_cfg=cfg, labels=labels, base_truth_by_label=base_truth)
+    assert first.truth_overrides_by_label == second.truth_overrides_by_label
+    assert "source.separation_as" not in first.truth_overrides_by_label
+    rows = {row["theta_label"]: row for row in first.rows}
+    assert rows["optics.primary.zernike_coeffs_nm[0]"]["sigma_nm"] == pytest.approx(5.0)
+    assert rows["optics.secondary.zernike_coeffs_nm[0]"]["sigma_nm"] == pytest.approx(2.0)
+
+
+def test_prior_draw_rows_use_realized_truth_values(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign_truth_realized.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["bias_cases"] = []
+    payload["experiment"]["prior_draws"] = {
+        "enabled": True,
+        "n_cases": 1,
+        "center": "truth",
+        "distribution": "normal",
+        "draw_seed": 11,
+        "case_name_template": "draw_{draw_index:03d}",
+        "sigmas": {
+            "source.separation_as": {"kind": "absolute", "sigma": 1.0e-5},
+            "optics.primary.zernike_coeffs_nm[*]": {"kind": "absolute", "sigma": 0.1},
+            "optics.secondary.zernike_coeffs_nm[*]": {"kind": "absolute", "sigma": 0.1},
+        },
+    }
+    payload["experiment"]["truth_realization"] = {
+        "enabled": True,
+        "seed": 20260521,
+        "mode": "zernike_per_coefficient_sigma",
+        "zernikes": {
+            "primary": {"enabled": True, "indices": "from_observation_theta", "mean_nm": 0.0, "sigma_nm": 5.0},
+            "secondary": {"enabled": True, "indices": "from_observation_theta", "mean_nm": 0.0, "sigma_nm": 2.0},
+        },
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    plan = module.build_campaign_plan(config_path=config_path, results_root=tmp_path, run_name="truth_realized", system_preset="SHERA_FLIGHT_3P")
+    row = plan.prior_draw_rows_by_case["draw_000"][1]
+    assert row["truth_value"] == pytest.approx(float(plan.prior_truth[1]))
+    assert row["theta_reference_offset"] == pytest.approx(row["reference_value"] - row["truth_value"])
