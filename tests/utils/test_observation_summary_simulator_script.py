@@ -51,6 +51,7 @@ def _write_summary_json(
     theta_ref: tuple[float, ...] = (1.25, 3.5),
     reduced_information: np.ndarray | None = None,
     reduced_score: np.ndarray | None = None,
+    summary_information_scale: str | None = "summed_likelihood",
 ) -> Path:
     if reduced_information is None:
         reduced_information = np.array([[4.0, 0.1], [0.1, 2.0]], dtype=float)
@@ -73,6 +74,14 @@ def _write_summary_json(
             "recommended_prior_mean_source": "summary_theta_ref",
         },
     }
+    if summary_information_scale is not None:
+        payload["information_accounting"] = {
+            "summary_information_scale": summary_information_scale,
+            "summary_frame_reduce": "sum",
+            "summary_subblock_reduce": (
+                "mean" if summary_information_scale == "optimizer" else "sum"
+            ),
+        }
     path = tmp_path / f"{stem}_subblock_summary.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
@@ -504,6 +513,41 @@ def test_summary_simulator_dry_run_returns_payload_without_writing_outputs(
     assert result["manifest"]["prior_sigma_policy"]["base"] == (
         "dluxshera.inference.observation_forecast.build_default_prior_sigma"
     )
+    assert result["summary_scale_validation"]["accepted_summary_information_scale"] == (
+        "summed_likelihood"
+    )
+
+
+def test_summary_simulator_rejects_optimizer_scale_summary_by_default(tmp_path: Path):
+    module = _load_script_module()
+    summary_path = _write_summary_json(
+        tmp_path,
+        stem="optimizer_summary",
+        summary_information_scale="optimizer",
+    )
+
+    with pytest.raises(ValueError, match="optimizer"):
+        module.run_observation_summary_simulator(
+            summary_paths=[summary_path],
+            n_subblocks_grid=(1,),
+            results_root=tmp_path / "results",
+            run_name="rejected_optimizer_summary",
+            dry_run=True,
+        )
+
+    result = module.run_observation_summary_simulator(
+        summary_paths=[summary_path],
+        n_subblocks_grid=(1,),
+        results_root=tmp_path / "results",
+        run_name="allowed_optimizer_summary",
+        allow_optimizer_scale_summaries=True,
+        dry_run=True,
+    )
+
+    validation = result["summary_scale_validation"]
+    assert validation["summary_scale_policy"] == "allow_optimizer"
+    assert validation["accepted_summary_information_scale"] == "optimizer"
+    assert validation["override_used"] is True
 
 
 def test_summary_simulator_raises_early_when_separation_label_is_missing(

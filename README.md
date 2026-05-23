@@ -21,11 +21,12 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 
 ## Install
 
-This repository is not yet an installable Python package. Installation is done by:
+This repository supports editable installs via `pyproject.toml`.
+Canonical developer installation is:
 
-1. Creating a virtual environment
-2. Installing dependencies from `requirements.txt`
-3. Running notebooks/scripts from within that environment
+1. Create a virtual environment.
+2. Install editable package + dev extras with `python -m pip install -e ".[dev]"`.
+3. Run scripts/tests from that environment (no `PYTHONPATH=src` required).
 
 This will automatically install a temporary **Fresnel-enabled fork of dLux** until the upstream PR is merged.
 
@@ -99,7 +100,14 @@ If activation works, your prompt usually shows something like `(.venv)`.
 
 ```bash
 python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+Compatibility shims are still available:
+
+```bash
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 ---
@@ -185,7 +193,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 ```
 
 #### 5) Tell VS Code to use your `.venv`
@@ -218,7 +226,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 
 python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
 ```
@@ -333,12 +341,9 @@ python examples/recipes/twoplane_astrometry.py
 
 - The new Fresnel propagation utilities for dLux are currently under review. For the time being, dLux installation uses my own local fork. When the PR is fully integrated, these installation instructions will change.
 - Notebooks rely on `notebook_setup.py` located in `examples/notebooks/`.
-- The repo is not yet a Python package; imports follow the current directory structure:
-  ```
-  from Classes.modeling import SheraThreePlane_Model
-  from Classes.optimization import ...
-  ```
-- A `pyproject.toml` will be added later to support `pip install -e .`.
+- Packaging is managed via `pyproject.toml` (`pip install -e .` or `pip install -e ".[dev]"`).
+- If `python` is unavailable on your host, use `python3` for the same commands.
+- `zodiax` is constrained to `<0.5` for current dLux compatibility.
 
 ## Key concepts
 

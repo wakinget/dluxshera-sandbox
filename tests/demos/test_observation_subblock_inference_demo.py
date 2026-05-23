@@ -44,6 +44,7 @@ def _build_inference_config(
     enable_preconditioning: bool = False,
     active_frame_keys: list[str] | None = None,
     optimizer_schedule: dict[str, object] | None = None,
+    early_stopping: dict[str, object] | None = None,
 ) -> dict[str, object]:
     data: dict[str, object] = {"cube": str(cube_path)}
     if trace_path is not None:
@@ -98,6 +99,7 @@ def _build_inference_config(
                     "base_lr": 0.01,
                     "n_iter": n_iter,
                     "schedule": optimizer_schedule,
+                    "early_stopping": early_stopping,
                     "preconditioning": {
                         "enabled": enable_preconditioning,
                         "damping": 1e-6,
@@ -239,6 +241,69 @@ def test_observation_subblock_inference_recipe_smoke_with_truth_outputs(tmp_path
     assert np.isfinite(float(result["final_loss"]))
     assert len(result["chi2"]["final_model"]["per_frame_chi2"]) == int(result["frame_count"])
     assert float(result["final_loss"]) <= float(result["initial_loss"])
+
+
+def test_observation_subblock_inference_recipe_records_early_stopping_metadata(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    render_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "observation_subblock.py",
+        "observation_subblock_recipe_for_early_stopping_smoke",
+    )
+    inference_recipe = _load_recipe(
+        repo_root / "examples" / "recipes" / "observation_subblock_inference.py",
+        "observation_subblock_inference_recipe_early_stopping_smoke",
+    )
+
+    render_cfg_path = (
+        repo_root
+        / "examples"
+        / "recipes"
+        / "observation_subblock_template"
+        / "subblock_generation_prescription.yaml"
+    )
+    render_result = render_recipe.generate_obs_subblock(
+        config_path=render_cfg_path,
+        results_dir=tmp_path / "render_results_early_stopping",
+        run_name="render_for_early_stopping",
+        show_progress=False,
+    )
+
+    cfg = _build_inference_config(
+        cube_path=Path(render_result["artifacts"]["cube_fits"]),
+        trace_path=Path(render_result["artifacts"]["truth_trace_csv"]),
+        manifest_path=Path(render_result["artifacts"]["manifest_json"]),
+        outputs_outdir=tmp_path / "inference_results_early_stopping",
+        n_iter=5,
+        write_plots=False,
+        early_stopping={
+            "enabled": True,
+            "min_iter": 2,
+            "patience": 2,
+            "loss_rtol": 1.0e-8,
+            "loss_atol": 0.0,
+            "step_atol": 1.0e-10,
+            "grad_norm_atol": 1.0e-8,
+        },
+    )
+    cfg_path = tmp_path / "inference_early_stopping_config.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    result = inference_recipe.main(
+        ["--config", str(cfg_path), "--no-progress"],
+    )
+
+    manifest = json.loads(
+        Path(result["artifacts"]["manifest_json"]).read_text(encoding="utf-8")
+    )
+    early_stopping = manifest["optimizer"]["early_stopping"]
+    assert early_stopping["enabled"] is True
+    assert early_stopping["min_iter"] == 2
+    assert early_stopping["patience"] == 2
+    assert early_stopping["loss_rtol"] == pytest.approx(1.0e-8)
+    assert early_stopping["source"] == "experiment.inference.optimizer.early_stopping"
+    assert manifest["optimizer"]["early_stopping_result"]["enabled"] is True
+    assert result["early_stopping"]["enabled"] is True
+    assert "early_stopping" not in result["trace_history"]
 
 
 def test_observation_subblock_inference_recipe_writes_schedule_artifact_when_configured(tmp_path):

@@ -4,9 +4,11 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 
 
 SCRIPT_PATH = (
@@ -119,6 +121,11 @@ def write_summary(path: Path, labels: tuple[str, ...], theta_ref: np.ndarray, tr
         "reduced_information": info.tolist(),
         "reduced_score": score.tolist(),
         "summary_diagnostics": {},
+        "information_accounting": {
+            "summary_information_scale": "summed_likelihood",
+            "summary_frame_reduce": "sum",
+            "summary_subblock_reduce": "sum",
+        },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -318,6 +325,58 @@ def test_dry_run_writes_plan_without_executing_subprocesses(tmp_path: Path) -> N
     assert not (run_root / "subblock_status.csv").exists()
 
 
+def test_failed_subblock_records_status_before_fail_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="failed_status",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+
+    def _fail_subprocess(**kwargs):
+        kwargs["stderr_log"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["stderr_log"].write_text("Traceback\nAttributeError: missing reference flag\n")
+        kwargs["stdout_log"].write_text("")
+        kwargs["diagnostics_json"].write_text("{}")
+        return SimpleNamespace(
+            return_code=1,
+            elapsed_seconds=0.1,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line="AttributeError: missing reference flag",
+            failure_class="nonzero_exit",
+            failure_hint="Process exited with nonzero status.",
+            memory_sampler={"peak_total_rss_mb": None},
+            resource_time={"maximum_resident_set_mb": 156.0},
+        )
+
+    monkeypatch.setattr(module, "run_subprocess_with_diagnostics", _fail_subprocess)
+
+    with pytest.raises(RuntimeError, match="child stderr tail"):
+        module.execute_subblocks(
+            plan,
+            resume=False,
+            max_workers=1,
+            fail_fast=True,
+            quiet=True,
+            memory_diagnostics=False,
+            resource_time=False,
+        )
+
+    rows = list(module.csv.DictReader((plan.run_root / "subblock_status.csv").open()))
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["return_code"] == "1"
+    assert rows[0]["last_stderr_line"] == "AttributeError: missing reference flag"
+    assert (plan.run_root / "memory_failure_summary.csv").exists()
+    assert (plan.run_root / "progress.json").exists()
+
+
 def test_trace_policy_allows_inert_pa_truth_without_solving(tmp_path: Path) -> None:
     module = load_module()
     config_path = tmp_path / "config.json"
@@ -484,3 +543,21 @@ def test_subblock_command_omits_reference_early_stopping_flags_by_default(tmp_pa
     joined = " ".join(command)
     assert "--reference-early-stopping" not in joined
     assert "--reference-early-stopping-min-iter" not in joined
+
+
+def test_aggregate_only_rejects_mismatched_existing_case_set(tmp_path: Path) -> None:
+    module = load_module()
+    plan = module.build_calibration_plan(
+        config_path=None,
+        results_root=tmp_path,
+        run_name="agg_mismatch",
+        system_preset=None,
+        args=module._build_parser().parse_args(["--run-name", "agg_mismatch", "--aggregate-only"]),
+    )
+    plan.run_root.mkdir(parents=True, exist_ok=True)
+    (plan.run_root / "campaign_plan.json").write_text(
+        json.dumps({"summary_paths": {"different_case": ["dummy.json"]}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="different case set"):
+        module.main(["--results-root", str(tmp_path), "--run-name", "agg_mismatch", "--aggregate-only"])

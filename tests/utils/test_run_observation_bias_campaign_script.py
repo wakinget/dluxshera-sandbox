@@ -145,6 +145,11 @@ def write_summary(path: Path, labels: tuple[str, ...], theta_ref: np.ndarray, tr
         "reduced_information": info.tolist(),
         "reduced_score": score.tolist(),
         "summary_diagnostics": {},
+        "information_accounting": {
+            "summary_information_scale": "summed_likelihood",
+            "summary_frame_reduce": "sum",
+            "summary_subblock_reduce": "sum",
+        },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -319,6 +324,58 @@ def test_command_forwarding_includes_reference_optimizer_controls(tmp_path: Path
     assert "0.1,2.0" in command
 
 
+def test_subblock_command_forwards_reference_early_stopping_flags(tmp_path: Path):
+    module = load_module()
+    command = module.build_subblock_command(
+        case_root_parent=tmp_path / "subblocks",
+        case_subblock_name="case/subblock_000",
+        theta_labels=("source.separation_as",),
+        offsets={},
+        subblock_cfg={
+            "reference_early_stopping_enabled": True,
+            "reference_early_stopping_min_iter": 60,
+            "reference_early_stopping_patience": 12,
+            "reference_early_stopping_loss_rtol": 1.0e-8,
+            "reference_early_stopping_loss_atol": 0.0,
+            "reference_early_stopping_step_atol": 1.0e-10,
+            "reference_early_stopping_grad_norm_atol": 1.0e-8,
+        },
+    )
+
+    assert "--reference-early-stopping" in command
+    expected_pairs = {
+        "--reference-early-stopping-min-iter": "60",
+        "--reference-early-stopping-patience": "12",
+        "--reference-early-stopping-loss-rtol": "1e-08",
+        "--reference-early-stopping-loss-atol": "0.0",
+        "--reference-early-stopping-step-atol": "1e-10",
+        "--reference-early-stopping-grad-norm-atol": "1e-08",
+    }
+    for flag, value in expected_pairs.items():
+        index = command.index(flag)
+        assert command[index + 1] == value
+
+
+@pytest.mark.parametrize("enabled_value", [False, None])
+def test_subblock_command_omits_reference_early_stopping_flag_when_disabled(
+    tmp_path: Path,
+    enabled_value: bool | None,
+):
+    module = load_module()
+    subblock_cfg: dict[str, Any] = {}
+    if enabled_value is not None:
+        subblock_cfg["reference_early_stopping_enabled"] = enabled_value
+    command = module.build_subblock_command(
+        case_root_parent=tmp_path / "subblocks",
+        case_subblock_name="case/subblock_000",
+        theta_labels=("source.separation_as",),
+        offsets={},
+        subblock_cfg=subblock_cfg,
+    )
+
+    assert "--reference-early-stopping" not in command
+
+
 def test_subblock_plan_records_forwarded_command_options(tmp_path: Path):
     module = load_module()
     config_path = tmp_path / "campaign.json"
@@ -330,6 +387,13 @@ def test_subblock_plan_records_forwarded_command_options(tmp_path: Path):
             "reference_diagnostics_profile": "basic",
             "schur_frame_quality_policy": "warn",
             "schur_frame_chi2_threshold": 5.0,
+            "reference_early_stopping_enabled": True,
+            "reference_early_stopping_min_iter": 60,
+            "reference_early_stopping_patience": 12,
+            "reference_early_stopping_loss_rtol": 1.0e-8,
+            "reference_early_stopping_loss_atol": 0.0,
+            "reference_early_stopping_step_atol": 1.0e-10,
+            "reference_early_stopping_grad_norm_atol": 1.0e-8,
         }
     )
     config_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -345,9 +409,17 @@ def test_subblock_plan_records_forwarded_command_options(tmp_path: Path):
     assert row["reference_diagnostics_profile"] == "basic"
     assert row["schur_frame_quality_policy"] == "warn"
     assert row["schur_frame_chi2_threshold"] == pytest.approx(5.0)
+    assert row["reference_early_stopping_enabled"] is True
+    assert row["reference_early_stopping_min_iter"] == 60
+    assert row["reference_early_stopping_patience"] == 12
+    assert row["reference_early_stopping_loss_rtol"] == pytest.approx(1.0e-8)
+    assert row["reference_early_stopping_loss_atol"] == pytest.approx(0.0)
+    assert row["reference_early_stopping_step_atol"] == pytest.approx(1.0e-10)
+    assert row["reference_early_stopping_grad_norm_atol"] == pytest.approx(1.0e-8)
     payload = module._plan_payload(plan)
     assert payload["subblock_command_options"]["exposure_time_s"] == pytest.approx(0.05)
     assert "--exposure-time-s" in payload["subblock_command_options"]["forwarded_flags"]
+    assert "--reference-early-stopping" in payload["subblock_command_options"]["forwarded_flags"]
 
 
 def _prior_draw_only_payload(*, include_implicit_zero_bias: bool | None) -> dict[str, Any]:
@@ -1058,3 +1130,33 @@ def test_prior_draw_rows_use_realized_truth_values(tmp_path: Path):
     row = plan.prior_draw_rows_by_case["draw_000"][1]
     assert row["truth_value"] == pytest.approx(float(plan.prior_truth[1]))
     assert row["theta_reference_offset"] == pytest.approx(row["reference_value"] - row["truth_value"])
+
+
+def test_bias_parser_supports_resource_time_flags() -> None:
+    module = load_module()
+    parser = module._build_parser()
+    assert parser.parse_args(["--no-resource-time"]).resource_time is False
+    assert parser.parse_args(["--resource-time"]).resource_time is True
+
+
+def test_aggregate_only_rejects_mismatched_existing_case_set(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    run_root = tmp_path / "unit_campaign"
+    run_root.mkdir(parents=True, exist_ok=True)
+    (run_root / "campaign_plan.json").write_text(
+        json.dumps({"summary_paths": {"different_case": ["dummy.json"]}}),
+        encoding="utf-8",
+    )
+    args = module._build_parser().parse_args(
+        ["--config", str(config_path), "--run-name", "unit_campaign", "--aggregate-only"]
+    )
+    with pytest.raises(ValueError, match="different case set"):
+        module.run_observation_bias_campaign(
+            config_path=config_path,
+            results_root=tmp_path,
+            run_name="unit_campaign",
+            aggregate_only=True,
+            args=args,
+        )

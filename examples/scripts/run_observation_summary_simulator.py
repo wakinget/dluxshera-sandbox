@@ -57,8 +57,11 @@ from dluxshera.inference.observation_forecast import (
     resolve_prior_context_for_summaries,
 )
 from dluxshera.inference.observation_summary import (
+    SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER,
+    SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
     load_subblock_summary,
     load_subblock_summary_artifact_payload,
+    validate_summary_information_scale,
 )
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 
@@ -560,7 +563,14 @@ def validate_required_forecast_labels(theta_labels: Sequence[str]) -> None:
 
 def load_summary_artifacts(
     summary_paths: Sequence[Path | str],
-) -> tuple[tuple[SubblockSummary, ...], tuple[dict[str, Any], ...], tuple[Path, ...]]:
+    *,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+) -> tuple[
+    tuple[SubblockSummary, ...],
+    tuple[dict[str, Any], ...],
+    tuple[Path, ...],
+    dict[str, Any],
+]:
     """Load and validate summary artifacts for the simulator.
 
     Called by ``run_observation_summary_simulator`` before prior resolution.
@@ -589,7 +599,12 @@ def load_summary_artifacts(
     summaries = tuple(load_subblock_summary(path) for path in paths)
     require_identical_theta_labels(summaries)
     payloads = tuple(load_subblock_summary_artifact_payload(path) for path in paths)
-    return summaries, payloads, paths
+    summary_scale_validation = validate_summary_information_scale(
+        payloads,
+        policy=summary_scale_policy,
+        summary_paths=paths,
+    )
+    return summaries, payloads, paths, summary_scale_validation
 
 
 def summarize_source_indices(
@@ -1734,6 +1749,7 @@ def run_observation_summary_simulator(
     truth_mode: str = TRUTH_MODE_THETA_REF,
     truth_json_path: Path | None = None,
     truth_offset: str | Mapping[str, float] | None = None,
+    allow_optimizer_scale_summaries: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run the observation summary forecast simulator.
@@ -1802,7 +1818,17 @@ def run_observation_summary_simulator(
     run_dir = Path(results_root).resolve() / resolved_run_name
     planned_artifacts = build_artifact_paths(run_dir, mode=mode)
 
-    summaries, payloads, resolved_summary_paths = load_summary_artifacts(summary_paths)
+    summary_scale_policy = (
+        SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
+        if allow_optimizer_scale_summaries
+        else SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+    )
+    summaries, payloads, resolved_summary_paths, summary_scale_validation = (
+        load_summary_artifacts(
+            summary_paths,
+            summary_scale_policy=summary_scale_policy,
+        )
+    )
     theta_labels = require_identical_theta_labels(summaries)
     validate_required_forecast_labels(theta_labels)
     prior_context = resolve_prior_context_for_summaries(
@@ -1842,6 +1868,9 @@ def run_observation_summary_simulator(
             "diagnostics": dict(summaries[index].diagnostics),
             "artifact_metadata": payloads[index].get("metadata"),
             "artifact_prior_context": payloads[index].get("prior_context"),
+            "summary_information_scale": summary_scale_validation[
+                "input_summaries"
+            ][index]["summary_information_scale"],
         }
         for index in range(len(summaries))
     ]
@@ -1855,6 +1884,7 @@ def run_observation_summary_simulator(
         "dry_run": bool(dry_run),
         "input_summary_paths": [str(path) for path in resolved_summary_paths],
         "input_summaries": input_summary_payload,
+        "summary_scale_validation": summary_scale_validation,
         "theta_labels": list(theta_labels),
         "theta_dim": int(len(theta_labels)),
         "n_subblocks_grid": list(grid),
@@ -1917,6 +1947,7 @@ def run_observation_summary_simulator(
             "theta_labels": list(theta_labels),
             "n_subblocks_grid": list(grid),
             "prior_mean_source": str(prior_context.prior_mean_source),
+            "summary_scale_validation": summary_scale_validation,
         }
 
     if mode == MODE_FIXED_INFORMATION_SCORE_NOISE:
@@ -2064,6 +2095,7 @@ def run_observation_summary_simulator(
             "theta_labels": list(theta_labels),
             "n_subblocks_grid": list(grid),
             "prior_mean_source": str(prior_context.prior_mean_source),
+            "summary_scale_validation": summary_scale_validation,
         }
 
     forecast_rows: list[dict[str, Any]] = []
@@ -2156,6 +2188,7 @@ def run_observation_summary_simulator(
         "theta_labels": list(theta_labels),
         "n_subblocks_grid": list(grid),
         "prior_mean_source": str(prior_context.prior_mean_source),
+        "summary_scale_validation": summary_scale_validation,
     }
 
 
@@ -2297,6 +2330,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-optimizer-scale-summaries",
+        action="store_true",
+        help=(
+            "Allow legacy/debug summary artifacts with optimizer or missing "
+            "information-accounting scale metadata."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Resolve inputs and planned paths without running updates or writing plots.",
@@ -2342,6 +2383,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         truth_mode=str(args.truth_mode),
         truth_json_path=args.truth_json,
         truth_offset=args.truth_offset,
+        allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
         dry_run=bool(args.dry_run),
     )
 

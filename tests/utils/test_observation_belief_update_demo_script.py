@@ -123,6 +123,11 @@ def _write_real_summary_artifact(tmp_path: Path) -> Path:
         reduced=reduced,
         metadata={
             "generator": "unit_test",
+            "information_accounting": {
+                "summary_information_scale": "summed_likelihood",
+                "summary_frame_reduce": "sum",
+                "summary_subblock_reduce": "sum",
+            },
             "prior_context": {
                 "recommended_prior_mean_source": "summary_theta_ref",
                 "theta_ref_by_label": {
@@ -494,6 +499,10 @@ def test_observation_belief_demo_loads_real_summary_artifact(tmp_path: Path):
     assert summary["truth"]["kind"] == "not_available"
     assert summary["summary_paths"] == [str(summary_path.resolve())]
     assert summary["prior_mean_source"] == "explicit_prior_config"
+    assert summary["summary_scale_validation"]["summary_scale_policy"] == "require_summed"
+    assert summary["summary_scale_validation"]["accepted_summary_information_scale"] == (
+        "summed_likelihood"
+    )
     assert "posterior_error" not in posterior_rows[0]
     assert artifacts["posterior_sigma_vs_n_subblocks_png"].exists()
     assert artifacts["posterior_sigma_over_prior_sigma_vs_n_subblocks_png"].exists()
@@ -623,3 +632,25 @@ def test_real_summary_mode_dry_run_reports_summary_theta_ref_prior_provenance(tm
     assert result["dry_run"] is True
     assert result["summary"]["prior_mean_source"] == "summary_theta_ref"
     assert result["summary"]["prior"]["mean"]["source.log_flux_total"] == pytest.approx(7.01)
+
+
+def test_real_summary_mode_rejects_unclassified_artifact_by_default(tmp_path: Path):
+    module = _load_script_module()
+    summary_path = _write_real_summary_artifact(tmp_path)
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload.pop("information_accounting")
+    payload["metadata"].pop("information_accounting")
+    summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="information-accounting"):
+        module.main(
+            [
+                "--results-dir",
+                str(tmp_path),
+                "--run-name",
+                "missing_scale_case",
+                "--summary-path",
+                str(summary_path),
+                "--dry-run",
+            ]
+        )

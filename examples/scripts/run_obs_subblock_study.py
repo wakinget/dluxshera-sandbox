@@ -17,6 +17,7 @@ mode under ``<case_root>/study/<mode>/``:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import importlib.util
 import json
@@ -66,6 +67,10 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
+from dluxshera.utils.obs_subblock_cli import (
+    add_reference_optimizer_args,
+    collect_reference_optimizer_overrides,
+)
 from dluxshera.utils.obs_subblock_keys import (
     OBS_SUBBLOCK_SUPPORTED_INDEXED_KEYS,
     OBS_SUBBLOCK_SUPPORTED_SCALAR_KEYS,
@@ -182,6 +187,12 @@ DEFAULT_SCHUR_DAMPING = 1.0e-8
 DEFAULT_SCHUR_MAX_DENSE_DIM = 40
 DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE = False
 DEFAULT_SCHUR_PHI_REF = "truth_when_available"
+SUMMARY_INFORMATION_SCALE_SUMMED = "summed_likelihood"
+SUMMARY_INFORMATION_SCALE_OPTIMIZER = "optimizer"
+SUPPORTED_SUMMARY_INFORMATION_SCALES = (
+    SUMMARY_INFORMATION_SCALE_SUMMED,
+    SUMMARY_INFORMATION_SCALE_OPTIMIZER,
+)
 SCHUR_CURVATURE_METHOD_AUTO = "auto"
 SCHUR_CURVATURE_METHOD_DENSE = "dense"
 SCHUR_CURVATURE_METHOD_STRUCTURED = "structured_independent_frames"
@@ -213,6 +224,112 @@ DEFAULT_SCHUR_FRAME_CHI2_THRESHOLD = 5.0
 DEFAULT_SCHUR_FRAME_QUALITY_MISSING = "allow_all"
 DEFAULT_SCHUR_FRAME_MASK_DENOMINATOR = "original"
 DEFAULT_SCHUR_FRAME_MASK_MIN_GOOD_FRAMES = 1
+
+
+def build_summary_inference_config(
+    inference_cfg: Mapping[str, Any],
+    *,
+    summary_information_scale: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return a curvature-export inference config and its scale provenance."""
+
+    if summary_information_scale not in SUPPORTED_SUMMARY_INFORMATION_SCALES:
+        raise ValueError("Unsupported summary information scale.")
+
+    summary_cfg = copy.deepcopy(dict(inference_cfg))
+    inference_block = summary_cfg.get("experiment", {}).get("inference")
+    if not isinstance(inference_block, dict):
+        inference_block = summary_cfg.get("inference", summary_cfg)
+    if not isinstance(inference_block, dict):
+        raise ValueError("summary inference config must contain an inference mapping.")
+    objective_cfg = inference_block.setdefault("objective", {})
+    if not isinstance(objective_cfg, dict):
+        raise ValueError("summary inference objective config must be a mapping.")
+
+    source_inference = inference_cfg.get("experiment", {}).get("inference")
+    if not isinstance(source_inference, Mapping):
+        source_inference = inference_cfg.get("inference", inference_cfg)
+    source_objective = (
+        source_inference.get("objective", {})
+        if isinstance(source_inference, Mapping)
+        else {}
+    )
+    optimizer_frame_reduce = str(source_objective.get("frame_reduce", "sum"))
+    optimizer_subblock_reduce = str(source_objective.get("subblock_reduce", "sum"))
+
+    if summary_information_scale == SUMMARY_INFORMATION_SCALE_SUMMED:
+        objective_cfg["frame_reduce"] = "sum"
+        objective_cfg["subblock_reduce"] = "sum"
+
+    summary_frame_reduce = str(objective_cfg.get("frame_reduce", "sum"))
+    summary_subblock_reduce = str(objective_cfg.get("subblock_reduce", "sum"))
+    notes = (
+        [
+            "Exported Schur summary is in summed-likelihood units.",
+            "Optimizer objective reductions are recorded separately.",
+        ]
+        if summary_information_scale == SUMMARY_INFORMATION_SCALE_SUMMED
+        else [
+            "Exported Schur summary uses optimizer objective reductions.",
+            "Optimizer-normalized summaries are intended for legacy/debug comparisons.",
+        ]
+    )
+    metadata = {
+        "summary_information_scale": str(summary_information_scale),
+        "optimizer_frame_reduce": optimizer_frame_reduce,
+        "optimizer_subblock_reduce": optimizer_subblock_reduce,
+        "summary_frame_reduce": summary_frame_reduce,
+        "summary_subblock_reduce": summary_subblock_reduce,
+        "notes": notes,
+    }
+    warnings: list[str] = []
+    if (
+        summary_information_scale == SUMMARY_INFORMATION_SCALE_OPTIMIZER
+        and optimizer_subblock_reduce == "mean"
+    ):
+        warnings.append(
+            "Warning: exporting Schur summary on optimizer-normalized objective "
+            "scale with subblock_reduce='mean'. This is useful for debugging or "
+            "reproducing legacy results but should not be used for physical "
+            "observation-level information forecasts."
+        )
+    metadata["warnings"] = warnings
+    return summary_cfg, metadata
+
+
+def _summary_information_accounting(
+    accounting: Mapping[str, Any],
+    *,
+    n_frames_total: int | None,
+    included_frame_count: int | None,
+    frame_quality_policy: str,
+    schur_curvature_method: str,
+) -> dict[str, Any]:
+    """Complete config-level information accounting with artifact counts."""
+
+    payload = copy.deepcopy(dict(accounting))
+    total = None if n_frames_total is None else int(n_frames_total)
+    included = None if included_frame_count is None else int(included_frame_count)
+    payload.update(
+        {
+            "n_frames_total": total,
+            "included_frame_count": included,
+            "frame_quality_policy": str(frame_quality_policy),
+            "schur_curvature_method": str(schur_curvature_method),
+            "legacy_equivalent_scale_factor_from_optimizer_objective": None,
+        }
+    )
+    if (
+        payload.get("summary_information_scale") == SUMMARY_INFORMATION_SCALE_SUMMED
+        and payload.get("optimizer_frame_reduce") == payload.get("summary_frame_reduce")
+        and payload.get("optimizer_subblock_reduce") == "mean"
+        and payload.get("summary_subblock_reduce") == "sum"
+        and included is not None
+    ):
+        payload["legacy_equivalent_scale_factor_from_optimizer_objective"] = float(
+            included
+        )
+    return payload
 
 
 @dataclass(frozen=True)
@@ -3982,6 +4099,7 @@ def _build_study_inference_config(
     reference_preconditioning_eig_floor_abs: float | None = None,
     reference_preconditioning_lr_clip: tuple[float, float] | None = None,
     reference_diagnostics_profile: str | None = None,
+    reference_init_mode: str | None = None,
 ) -> dict[str, Any]:
     """Build one run-specific inference config for study-mode execution.
 
@@ -4017,6 +4135,20 @@ def _build_study_inference_config(
         )
 
     inference_cfg = case_module._ensure_mapping(cfg["experiment"], "inference", path="experiment")
+    if reference_init_mode == "truth_when_available":
+        init_cfg = case_module._ensure_mapping(
+            inference_cfg,
+            "init",
+            path="experiment.inference",
+        )
+        frame_init_cfg = case_module._ensure_mapping(
+            init_cfg,
+            "frame",
+            path="experiment.inference.init",
+        )
+        frame_init_cfg["mode"] = "from_truth_trace"
+    elif reference_init_mode not in {None, "initial"}:
+        raise ValueError("reference_init_mode must be initial or truth_when_available.")
     diagnostics_cfg = case_module._ensure_mapping(
         inference_cfg,
         "diagnostics",
@@ -5024,8 +5156,13 @@ def _extract_reference_inference_plan(
 
     optimizer_cfg = inference_cfg.get("optimizer", {})
     preconditioning_cfg = optimizer_cfg.get("preconditioning", {})
+    early_stopping_cfg = optimizer_cfg.get("early_stopping", {})
     optimizer_sources = dict((provenance or {}).get("optimizer", {}))
     preconditioning_sources = dict((provenance or {}).get("preconditioning", {}))
+    early_stopping_sources = {
+        f"early_stopping_{key}": value
+        for key, value in dict((provenance or {}).get("early_stopping", {})).items()
+    }
     diagnostics_sources = dict((provenance or {}).get("diagnostics", {}))
     return {
         "optimizer_kind": str(optimizer_cfg.get("kind", "adam")),
@@ -5048,9 +5185,17 @@ def _extract_reference_inference_plan(
             1.0e-8,
         ),
         "preconditioning_lr_clip": preconditioning_cfg.get("lr_clip"),
+        "early_stopping_enabled": early_stopping_cfg.get("enabled"),
+        "early_stopping_min_iter": early_stopping_cfg.get("min_iter"),
+        "early_stopping_patience": early_stopping_cfg.get("patience"),
+        "early_stopping_loss_rtol": early_stopping_cfg.get("loss_rtol"),
+        "early_stopping_loss_atol": early_stopping_cfg.get("loss_atol"),
+        "early_stopping_step_atol": early_stopping_cfg.get("step_atol"),
+        "early_stopping_grad_norm_atol": early_stopping_cfg.get("grad_norm_atol"),
         "sources": {
             **optimizer_sources,
             **preconditioning_sources,
+            **early_stopping_sources,
         },
         "diagnostics": _extract_reference_diagnostics_plan(
             inference_cfg,
@@ -5193,6 +5338,11 @@ def _build_schur_summary_audit(
         "inference_init": plan.get("inference_init"),
         "summary_export_inference_config_path": plan.get(
             "summary_export_inference_config_path"
+        ),
+        "information_accounting": (
+            plan.get("information_accounting")
+            if summary_payload is None
+            else summary_payload.get("information_accounting")
         ),
         "reference_inference": {
             "status": "ran" if reference_ran else "not_run",
@@ -5586,6 +5736,7 @@ def _build_schur_summary_plan(
     schur_curvature_method: str,
     phi_ref_mode: str,
     summary_objective: str,
+    summary_information_scale: str,
     validate_surrogate: bool,
     validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     validation_steps: int = 5,
@@ -5623,7 +5774,11 @@ def _build_schur_summary_plan(
     )
     experiment_cfg = schur_config.get("experiment", {})
     inference_cfg = experiment_cfg.get("inference", {})
-    objective_cfg = inference_cfg.get("objective", {})
+    summary_inference_cfg, information_accounting_base = build_summary_inference_config(
+        inference_cfg,
+        summary_information_scale=summary_information_scale,
+    )
+    objective_cfg = summary_inference_cfg.get("objective", {})
     n_frames_effective = (
         None if n_frames_requested is None else int(n_frames_requested)
     )
@@ -5699,6 +5854,7 @@ def _build_schur_summary_plan(
         ),
     }
     warnings: list[str] = []
+    warnings.extend(information_accounting_base.get("warnings", []))
     if theta_classification["experimental"]:
         warnings.append(
             "Experimental Theta keys requested: "
@@ -5939,6 +6095,13 @@ def _build_schur_summary_plan(
         },
         "schur_damping": float(schur_damping),
         "summary_objective_kind": str(summary_objective),
+        "information_accounting": _summary_information_accounting(
+            information_accounting_base,
+            n_frames_total=n_frames_effective,
+            included_frame_count=n_frames_effective,
+            frame_quality_policy=schur_frame_quality_policy,
+            schur_curvature_method=curvature_method_planned or curvature_method_requested,
+        ),
         "variance_model": str(objective_cfg.get("noise_model", {}).get("variance_model")),
         "validate_surrogate": bool(validate_surrogate),
         "validate_structured_against_dense": bool(validate_structured_against_dense),
@@ -6083,6 +6246,7 @@ def _write_structured_schur_summary_artifact(
         "truth_trace_path": metadata.get("truth_trace_path"),
         "config_path": metadata.get("config_path"),
         "objective": metadata.get("objective"),
+        "information_accounting": metadata.get("information_accounting"),
         "system": metadata.get("system"),
         "prior_context": metadata.get("prior_context"),
         "recovered_reference": metadata.get("recovered_reference"),
@@ -6166,7 +6330,8 @@ def _evaluate_schur_summary(
     schur_curvature_method: str,
     phi_ref: str,
     summary_objective: str,
-    validate_surrogate: bool,
+    summary_information_scale: str = SUMMARY_INFORMATION_SCALE_SUMMED,
+    validate_surrogate: bool = True,
     validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     validation_steps: int = 5,
     recovered_theta: np.ndarray | None = None,
@@ -6202,6 +6367,14 @@ def _evaluate_schur_summary(
         theta_reference_overrides or _disabled_theta_reference_overrides_payload()
     )
     context = _prepare_inference_context(config_path=config_path)
+    summary_inference_cfg, information_accounting_base = build_summary_inference_config(
+        context["inference_cfg"],
+        summary_information_scale=summary_information_scale,
+    )
+    # Reference solves consume the config on disk before this point. Curvature
+    # export below reads this copy so optimizer loss normalization does not
+    # silently become observation-level information normalization.
+    context["inference_cfg"] = summary_inference_cfg
     theta_layout = _build_observation_theta_layout(
         theta_keys=theta_keys,
         enable_zernikes=enable_zernikes,
@@ -6354,6 +6527,13 @@ def _evaluate_schur_summary(
                 "does not support frame masking; all frames were included."
             ),
         }
+    information_accounting = _summary_information_accounting(
+        information_accounting_base,
+        n_frames_total=int(context["layout"].n_frame),
+        included_frame_count=int(frame_quality_state["included_frame_count"]),
+        frame_quality_policy=schur_frame_quality_policy,
+        schur_curvature_method=curvature_method_used,
+    )
     record(
         "curvature_method.select.done",
         schur_curvature_method_requested=curvature_method_requested,
@@ -6607,6 +6787,9 @@ def _evaluate_schur_summary(
             h_phiphi_data = np.asarray(sidecar_data["h_pp"], dtype=float)
             g_theta = np.asarray(sidecar_data["g_theta"], dtype=float)
             g_phi_data = np.asarray(sidecar_data["g_phi"], dtype=float)
+            # Data blocks above use summary-export reductions. Build the
+            # analytic temporal prior from its configured physical prior reduce
+            # instead of scaling the final Schur result by frame count.
             h_phiphi_prior = build_residual_prior_temporal_curvature(
                 frame_times_s=np.asarray(context["layout"].frame_times_s, dtype=float),
                 frame_keys=context["layout"].frame_keys,
@@ -6783,6 +6966,7 @@ def _evaluate_schur_summary(
             ),
             "theta_reference_overrides": theta_reference_override_payload,
             "theta_reference_consistency": theta_reference_consistency,
+            "information_accounting": information_accounting,
             **dense_comparison_state,
         },
     )
@@ -6843,6 +7027,7 @@ def _evaluate_schur_summary(
             },
         },
         "objective": objective_metadata,
+        "information_accounting": information_accounting,
         "recovered_reference": dict(recovered_reference_metadata or {}),
         "system": {
             "preset": context["system_cfg"].get("preset"),
@@ -7063,6 +7248,7 @@ def _evaluate_schur_summary(
         "theta_reference_consistency": theta_reference_consistency,
         "phi_ref_source": phi_ref_source,
         "phi_ref_mode": normalize_schur_phi_ref_mode(phi_ref),
+        "information_accounting": information_accounting,
         "combined_dim": combined_dim,
         "n_theta": int(theta_layout.size),
         "n_phi": int(fast_phi_ref_values.size),
@@ -7247,11 +7433,6 @@ def _run_profile_objective(
         "run_count": len(rows),
         "best_run": best_run,
     }
-    if runtime_profiler is not None and runtime_profile_summary_path is not None and runtime_profile_timeline_path is not None:
-        write_profile_timeline_jsonl(runtime_profile_timeline_path, runtime_profiler.events)
-        payload = runtime_profiler.summary_payload(outputs={"summary_json": str(runtime_profile_summary_path), "timeline_jsonl": str(runtime_profile_timeline_path)})
-        write_profile_summary_json(runtime_profile_summary_path, payload)
-        summary.setdefault("runtime_profile", {}).update({"enabled": True, "summary_json": str(runtime_profile_summary_path), "timeline_jsonl": str(runtime_profile_timeline_path)})
     _write_json(summary_path, summary)
     return summary
 
@@ -7411,6 +7592,7 @@ def run_obs_subblock_study(
     phi_ref: str = DEFAULT_SCHUR_PHI_REF,
     variance_floor: float | None = None,
     summary_objective: str = "full_objective",
+    summary_information_scale: str = SUMMARY_INFORMATION_SCALE_SUMMED,
     validate_surrogate: bool = True,
     validate_structured_against_dense: bool = DEFAULT_VALIDATE_STRUCTURED_AGAINST_DENSE,
     validation_steps: int = 5,
@@ -7442,7 +7624,15 @@ def run_obs_subblock_study(
     reference_preconditioning_eig_floor_rel: float | None = None,
     reference_preconditioning_eig_floor_abs: float | None = None,
     reference_preconditioning_lr_clip: tuple[float, float] | None = None,
+    reference_early_stopping_enabled: bool | None = None,
+    reference_early_stopping_min_iter: int | None = None,
+    reference_early_stopping_patience: int | None = None,
+    reference_early_stopping_loss_rtol: float | None = None,
+    reference_early_stopping_loss_atol: float | None = None,
+    reference_early_stopping_step_atol: float | None = None,
+    reference_early_stopping_grad_norm_atol: float | None = None,
     reference_diagnostics_profile: str | None = None,
+    reference_init_mode: str | None = None,
     reuse_reference_inference: str | Path | None = None,
     theta_reference_offsets: Mapping[str, float] | None = None,
     theta_reference_values: Mapping[str, float] | None = None,
@@ -7464,6 +7654,8 @@ def run_obs_subblock_study(
     normalized_schur_curvature_method = normalize_schur_curvature_method(
         schur_curvature_method
     )
+    if summary_information_scale not in SUPPORTED_SUMMARY_INFORMATION_SCALES:
+        raise ValueError("Unsupported --summary-information-scale.")
     theta_reference_offset_overrides = dict(theta_reference_offsets or {})
     theta_reference_value_overrides = dict(theta_reference_values or {})
     theta_reference_conflicts = sorted(
@@ -7593,6 +7785,7 @@ def run_obs_subblock_study(
             "phi_ref": normalized_phi_ref,
             "variance_floor": variance_floor,
             "summary_objective": str(summary_objective),
+            "summary_information_scale": str(summary_information_scale),
             "validate_surrogate": bool(validate_surrogate),
             "validate_structured_against_dense": bool(validate_structured_against_dense),
             "validation_steps": int(validation_steps),
@@ -7638,6 +7831,13 @@ def run_obs_subblock_study(
                     if reference_preconditioning_lr_clip is None
                     else list(reference_preconditioning_lr_clip)
                 ),
+                "reference_early_stopping_enabled": reference_early_stopping_enabled,
+                "reference_early_stopping_min_iter": reference_early_stopping_min_iter,
+                "reference_early_stopping_patience": reference_early_stopping_patience,
+                "reference_early_stopping_loss_rtol": reference_early_stopping_loss_rtol,
+                "reference_early_stopping_loss_atol": reference_early_stopping_loss_atol,
+                "reference_early_stopping_step_atol": reference_early_stopping_step_atol,
+                "reference_early_stopping_grad_norm_atol": reference_early_stopping_grad_norm_atol,
             },
             "reference_diagnostics_profile": reference_diagnostics_profile,
             "reuse_reference_inference": None
@@ -7849,7 +8049,15 @@ def run_obs_subblock_study(
             reference_preconditioning_eig_floor_rel=reference_preconditioning_eig_floor_rel,
             reference_preconditioning_eig_floor_abs=reference_preconditioning_eig_floor_abs,
             reference_preconditioning_lr_clip=reference_preconditioning_lr_clip,
+            reference_early_stopping_enabled=reference_early_stopping_enabled,
+            reference_early_stopping_min_iter=reference_early_stopping_min_iter,
+            reference_early_stopping_patience=reference_early_stopping_patience,
+            reference_early_stopping_loss_rtol=reference_early_stopping_loss_rtol,
+            reference_early_stopping_loss_atol=reference_early_stopping_loss_atol,
+            reference_early_stopping_step_atol=reference_early_stopping_step_atol,
+            reference_early_stopping_grad_norm_atol=reference_early_stopping_grad_norm_atol,
             reference_diagnostics_profile=reference_diagnostics_profile,
+            reference_init_mode=reference_init_mode,
         )
         theta_reference_override_metadata = resolve_theta_reference_overrides(
             inference_config=schur_config,
@@ -7876,6 +8084,13 @@ def run_obs_subblock_study(
                 preconditioning_eig_floor_rel=reference_preconditioning_eig_floor_rel,
                 preconditioning_eig_floor_abs=reference_preconditioning_eig_floor_abs,
                 preconditioning_lr_clip=reference_preconditioning_lr_clip,
+                early_stopping_enabled=reference_early_stopping_enabled,
+                early_stopping_min_iter=reference_early_stopping_min_iter,
+                early_stopping_patience=reference_early_stopping_patience,
+                early_stopping_loss_rtol=reference_early_stopping_loss_rtol,
+                early_stopping_loss_atol=reference_early_stopping_loss_atol,
+                early_stopping_step_atol=reference_early_stopping_step_atol,
+                early_stopping_grad_norm_atol=reference_early_stopping_grad_norm_atol,
             ),
             reference_preconditioning_enabled=reference_preconditioning_enabled,
             reference_preconditioning_reference=reference_preconditioning_reference,
@@ -7910,6 +8125,7 @@ def run_obs_subblock_study(
             schur_curvature_method=normalized_schur_curvature_method,
             phi_ref_mode=normalized_phi_ref,
             summary_objective=str(summary_objective),
+            summary_information_scale=str(summary_information_scale),
             validate_surrogate=bool(validate_surrogate),
             validate_structured_against_dense=bool(validate_structured_against_dense),
             validation_steps=int(validation_steps),
@@ -8048,6 +8264,7 @@ def run_obs_subblock_study(
             schur_curvature_method=normalized_schur_curvature_method,
             phi_ref=normalized_phi_ref,
             summary_objective=str(summary_objective),
+            summary_information_scale=str(summary_information_scale),
             validate_surrogate=bool(validate_surrogate),
             validate_structured_against_dense=bool(validate_structured_against_dense),
             validation_steps=int(validation_steps),
@@ -8328,6 +8545,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Local objective variant used for schur_summary mode.",
     )
     parser.add_argument(
+        "--summary-information-scale",
+        choices=SUPPORTED_SUMMARY_INFORMATION_SCALES,
+        default=SUMMARY_INFORMATION_SCALE_SUMMED,
+        help=(
+            "Information scale used for exported Schur summaries. "
+            "'summed_likelihood' exports physical summed-frame likelihood units "
+            "and is appropriate for observation-level forecasts. 'optimizer' "
+            "preserves optimizer objective reductions for legacy/debug comparisons."
+        ),
+    )
+    parser.add_argument(
         "--validate-surrogate",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -8444,151 +8672,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override experiment.inference.init.frame.values.source.position_angle_deg.",
     )
-    parser.add_argument(
-        "--reference-optimizer-kind",
-        choices=("sgd", "adam"),
-        default=None,
-        help="Override experiment.inference.optimizer.kind for recovered-reference inference.",
-    )
-    parser.add_argument(
-        "--reference-base-lr",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.base_lr for recovered-reference inference.",
-    )
-    parser.add_argument(
-        "--reference-n-iter",
-        type=int,
-        default=None,
-        help="Override experiment.inference.optimizer.n_iter for recovered-reference inference.",
-    )
-    parser.add_argument(
-        "--reference-optimizer-kwarg",
-        action="append",
-        default=None,
-        metavar="KEY=VALUE",
-        help="Repeatable optimizer kwarg override, for example b1=0.8.",
-    )
-    parser.add_argument(
-        "--reference-schedule-kind",
-        choices=(
-            "constant",
-            "linear_warmup",
-            "piecewise_constant",
-            "exponential_decay",
-            "cosine_decay",
-            "linear_warmup_cosine_decay",
-        ),
-        default=None,
-        help="Optional recovered-reference scalar LR schedule override.",
-    )
-    parser.add_argument("--reference-schedule-warmup-steps", type=int, default=None)
-    parser.add_argument("--reference-schedule-start-factor", type=float, default=None)
-    parser.add_argument("--reference-schedule-min-factor", type=float, default=None)
-    parser.add_argument("--reference-schedule-boundaries", default=None)
-    parser.add_argument("--reference-schedule-factors", default=None)
-    parser.add_argument("--reference-schedule-decay-rate", type=float, default=None)
-    parser.add_argument("--reference-schedule-transition-steps", type=int, default=None)
-    parser.add_argument(
-        "--reference-schedule-staircase",
-        action="store_true",
-        default=False,
-    )
-    preconditioning_group = parser.add_mutually_exclusive_group()
-    preconditioning_group.add_argument(
-        "--reference-preconditioning-enabled",
-        dest="reference_preconditioning_enabled",
-        action="store_const",
-        const=True,
-        default=None,
-        help="Enable optimizer preconditioning in the generated reference-inference config.",
-    )
-    preconditioning_group.add_argument(
-        "--reference-preconditioning-disabled",
-        dest="reference_preconditioning_enabled",
-        action="store_const",
-        const=False,
-        help="Disable optimizer preconditioning in the generated reference-inference config.",
-    )
-    parser.add_argument(
-        "--reference-preconditioning-method",
-        default=None,
-        help="Override experiment.inference.optimizer.preconditioning.method.",
-    )
-    parser.add_argument(
-        "--reference-preconditioning-reference",
-        choices=("initial", "truth_when_available"),
-        default=None,
-        help=(
-            "Override optimizer preconditioning reference for recovered-reference "
-            "inference. Template value is used when omitted."
-        ),
-    )
-    parser.add_argument(
-        "--reference-preconditioning-damping",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.preconditioning.damping.",
-    )
-    parser.add_argument(
-        "--reference-preconditioning-eig-floor-rel",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.preconditioning.eig_floor_rel.",
-    )
-    parser.add_argument(
-        "--reference-preconditioning-eig-floor-abs",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.preconditioning.eig_floor_abs.",
-    )
-    parser.add_argument(
-        "--reference-preconditioning-lr-clip",
-        default=None,
-        help="Override experiment.inference.optimizer.preconditioning.lr_clip as MIN,MAX.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping",
-        action="store_true",
-        default=False,
-        help="Enable experiment.inference.optimizer.early_stopping.enabled.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping-min-iter",
-        type=int,
-        default=None,
-        help="Override experiment.inference.optimizer.early_stopping.min_iter.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping-patience",
-        type=int,
-        default=None,
-        help="Override experiment.inference.optimizer.early_stopping.patience.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping-loss-rtol",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.early_stopping.loss_rtol.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping-loss-atol",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.early_stopping.loss_atol.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping-step-atol",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.early_stopping.step_atol.",
-    )
-    parser.add_argument(
-        "--reference-early-stopping-grad-norm-atol",
-        type=float,
-        default=None,
-        help="Override experiment.inference.optimizer.early_stopping.grad_norm_atol.",
-    )
+    add_reference_optimizer_args(parser)
     parser.add_argument(
         "--reference-diagnostics-profile",
         choices=tuple(sorted(SCHUR_REFERENCE_DIAGNOSTICS_PROFILES)),
@@ -8637,6 +8721,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     jax.config.update("jax_enable_x64", True)
     args = _build_parser().parse_args(argv)
+    reference_args = collect_reference_optimizer_overrides(args)
     case_module = _load_case_runner_module()
     case_root = case_module.resolve_case_root(
         case_root=args.case_root,
@@ -8668,6 +8753,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         phi_ref=str(args.phi_ref),
         variance_floor=args.variance_floor,
         summary_objective=str(args.summary_objective),
+        summary_information_scale=str(args.summary_information_scale),
         validate_surrogate=bool(args.validate_surrogate),
         validate_structured_against_dense=bool(
             args.validate_structured_against_dense
@@ -8690,41 +8776,68 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         init_x_as=args.init_x_as,
         init_y_as=args.init_y_as,
         init_pa_deg=args.init_pa_deg,
-        reference_optimizer_kind=args.reference_optimizer_kind,
-        reference_base_lr=args.reference_base_lr,
-        reference_n_iter=args.reference_n_iter,
-        reference_early_stopping_enabled=(True if args.reference_early_stopping else None),
-        reference_early_stopping_min_iter=args.reference_early_stopping_min_iter,
-        reference_early_stopping_patience=args.reference_early_stopping_patience,
-        reference_early_stopping_loss_rtol=args.reference_early_stopping_loss_rtol,
-        reference_early_stopping_loss_atol=args.reference_early_stopping_loss_atol,
-        reference_early_stopping_step_atol=args.reference_early_stopping_step_atol,
-        reference_early_stopping_grad_norm_atol=args.reference_early_stopping_grad_norm_atol,
+        reference_optimizer_kind=reference_args["reference_optimizer_kind"],
+        reference_base_lr=reference_args["reference_base_lr"],
+        reference_n_iter=reference_args["reference_n_iter"],
+        reference_early_stopping_enabled=(
+            True if getattr(args, "reference_early_stopping", False) else None
+        ),
+        reference_early_stopping_min_iter=getattr(
+            args, "reference_early_stopping_min_iter", None
+        ),
+        reference_early_stopping_patience=getattr(
+            args, "reference_early_stopping_patience", None
+        ),
+        reference_early_stopping_loss_rtol=getattr(
+            args, "reference_early_stopping_loss_rtol", None
+        ),
+        reference_early_stopping_loss_atol=getattr(
+            args, "reference_early_stopping_loss_atol", None
+        ),
+        reference_early_stopping_step_atol=getattr(
+            args, "reference_early_stopping_step_atol", None
+        ),
+        reference_early_stopping_grad_norm_atol=getattr(
+            args, "reference_early_stopping_grad_norm_atol", None
+        ),
         reference_optimizer_kwargs=parse_reference_optimizer_kwargs(
-            args.reference_optimizer_kwarg
+            getattr(args, "reference_optimizer_kwarg", None)
         ),
         reference_schedule=parse_reference_schedule_config(
-            kind=args.reference_schedule_kind,
-            warmup_steps=args.reference_schedule_warmup_steps,
-            start_factor=args.reference_schedule_start_factor,
-            min_factor=args.reference_schedule_min_factor,
-            boundaries=args.reference_schedule_boundaries,
-            factors=args.reference_schedule_factors,
-            decay_rate=args.reference_schedule_decay_rate,
-            transition_steps=args.reference_schedule_transition_steps,
-            staircase=bool(args.reference_schedule_staircase),
+            kind=getattr(args, "reference_schedule_kind", None),
+            warmup_steps=getattr(args, "reference_schedule_warmup_steps", None),
+            start_factor=getattr(args, "reference_schedule_start_factor", None),
+            min_factor=getattr(args, "reference_schedule_min_factor", None),
+            boundaries=getattr(args, "reference_schedule_boundaries", None),
+            factors=getattr(args, "reference_schedule_factors", None),
+            decay_rate=getattr(args, "reference_schedule_decay_rate", None),
+            transition_steps=getattr(args, "reference_schedule_transition_steps", None),
+            staircase=bool(getattr(args, "reference_schedule_staircase", False)),
         ),
-        reference_preconditioning_enabled=args.reference_preconditioning_enabled,
-        reference_preconditioning_method=args.reference_preconditioning_method,
-        reference_preconditioning_reference=args.reference_preconditioning_reference,
-        reference_preconditioning_damping=args.reference_preconditioning_damping,
-        reference_preconditioning_eig_floor_rel=args.reference_preconditioning_eig_floor_rel,
-        reference_preconditioning_eig_floor_abs=args.reference_preconditioning_eig_floor_abs,
+        reference_preconditioning_enabled=getattr(
+            args, "reference_preconditioning_enabled", None
+        ),
+        reference_preconditioning_method=getattr(
+            args, "reference_preconditioning_method", None
+        ),
+        reference_preconditioning_reference=getattr(
+            args, "reference_preconditioning_reference", None
+        ),
+        reference_preconditioning_damping=getattr(
+            args, "reference_preconditioning_damping", None
+        ),
+        reference_preconditioning_eig_floor_rel=getattr(
+            args, "reference_preconditioning_eig_floor_rel", None
+        ),
+        reference_preconditioning_eig_floor_abs=getattr(
+            args, "reference_preconditioning_eig_floor_abs", None
+        ),
         reference_preconditioning_lr_clip=parse_reference_preconditioning_lr_clip(
-            args.reference_preconditioning_lr_clip
+            getattr(args, "reference_preconditioning_lr_clip", None)
         ),
-        reference_diagnostics_profile=args.reference_diagnostics_profile,
-        reuse_reference_inference=args.reuse_reference_inference,
+        reference_diagnostics_profile=getattr(args, "reference_diagnostics_profile", None),
+        reference_init_mode=getattr(args, "reference_init_mode", None),
+        reuse_reference_inference=getattr(args, "reuse_reference_inference", None),
         theta_reference_offsets=parse_key_value_float_overrides(
             args.theta_reference_offset,
             option_name="--theta-reference-offset",
@@ -8733,12 +8846,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             args.theta_reference_value,
             option_name="--theta-reference-value",
         ),
-        memory_diagnostics=bool(args.memory_diagnostics),
-        memory_diagnostics_file=args.memory_diagnostics_file,
-        profile_runtime=bool(args.profile_runtime),
-        profile_runtime_file=args.profile_runtime_file,
-        profile_runtime_timeline=args.profile_runtime_timeline,
-        profile_runtime_detail=str(args.profile_runtime_detail),
+        memory_diagnostics=bool(getattr(args, "memory_diagnostics", False)),
+        memory_diagnostics_file=getattr(args, "memory_diagnostics_file", None),
+        profile_runtime=bool(getattr(args, "profile_runtime", False)),
+        profile_runtime_file=getattr(args, "profile_runtime_file", None),
+        profile_runtime_timeline=getattr(args, "profile_runtime_timeline", None),
+        profile_runtime_detail=str(getattr(args, "profile_runtime_detail", "basic")),
         dry_run=bool(args.dry_run),
     )
     print(f"Study mode: {summary['mode']}")

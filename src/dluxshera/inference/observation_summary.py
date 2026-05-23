@@ -20,14 +20,172 @@ __all__ = [
     "ImageBackedSubblockSummaryArtifact",
     "LocalQuadraticBlocks",
     "SchurReducedLocalQuadratic",
+    "SUMMARY_INFORMATION_SCALE_OPTIMIZER",
+    "SUMMARY_INFORMATION_SCALE_SUMMED_LIKELIHOOD",
+    "SUMMARY_INFORMATION_SCALE_UNKNOWN",
+    "SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER",
+    "SUMMARY_SCALE_POLICY_REQUIRE_SUMMED",
+    "SUMMARY_SCALE_POLICY_WARN",
     "build_combined_local_parameter_layout",
+    "get_summary_information_accounting",
+    "get_summary_information_scale",
     "inspect_subblock_summary_artifact",
     "load_subblock_summary_artifact_payload",
     "load_subblock_summary",
     "partition_local_curvature",
     "schur_reduce_local_quadratic",
+    "validate_summary_information_scale",
     "validate_subblock_summary_artifact",
 ]
+
+SUMMARY_INFORMATION_SCALE_SUMMED_LIKELIHOOD = "summed_likelihood"
+SUMMARY_INFORMATION_SCALE_OPTIMIZER = "optimizer"
+SUMMARY_INFORMATION_SCALE_UNKNOWN = "unknown"
+SUMMARY_SCALE_POLICY_REQUIRE_SUMMED = "require_summed"
+SUMMARY_SCALE_POLICY_WARN = "warn"
+SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER = "allow_optimizer"
+_SUMMARY_SCALE_POLICIES = (
+    SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+    SUMMARY_SCALE_POLICY_WARN,
+    SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER,
+)
+
+
+def get_summary_information_accounting(
+    payload_or_summary: Mapping[str, Any] | Any,
+) -> dict[str, Any]:
+    """Return exported Schur-summary information-accounting metadata, if any."""
+
+    if not isinstance(payload_or_summary, Mapping):
+        return {}
+    for candidate in (
+        payload_or_summary.get("information_accounting"),
+        payload_or_summary.get("metadata", {}).get("information_accounting")
+        if isinstance(payload_or_summary.get("metadata"), Mapping)
+        else None,
+        payload_or_summary.get("summary_diagnostics", {}).get("information_accounting")
+        if isinstance(payload_or_summary.get("summary_diagnostics"), Mapping)
+        else None,
+    ):
+        if isinstance(candidate, Mapping):
+            return dict(candidate)
+    return {}
+
+
+def get_summary_information_scale(
+    payload_or_summary: Mapping[str, Any] | Any,
+) -> str | None:
+    """Return the exported Schur-summary information scale, if it was recorded."""
+
+    accounting = get_summary_information_accounting(payload_or_summary)
+    scale = accounting.get("summary_information_scale")
+    if scale is None:
+        return None
+    value = str(scale).strip()
+    return value or None
+
+
+def validate_summary_information_scale(
+    payloads: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    *,
+    policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+    summary_paths: Sequence[Path | str] | None = None,
+) -> dict[str, Any]:
+    """Validate information units for real loaded summary artifacts.
+
+    ``SubblockSummary`` intentionally stays metadata-light. Real image-backed
+    consumers call this helper with raw artifact JSON before treating reduced
+    information as one-second observation information.
+    """
+
+    if policy not in _SUMMARY_SCALE_POLICIES:
+        raise ValueError(
+            f"Unsupported summary-scale policy {policy!r}; expected one of "
+            + ", ".join(_SUMMARY_SCALE_POLICIES)
+            + "."
+        )
+    payload_list = [payloads] if isinstance(payloads, Mapping) else list(payloads)
+    if not payload_list:
+        raise ValueError("Summary-scale validation requires at least one artifact.")
+    paths = tuple(summary_paths or ())
+    if paths and len(paths) != len(payload_list):
+        raise ValueError("summary_paths length must match summary artifact payloads.")
+
+    inputs: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    invalid_optimizer: list[str] = []
+    invalid_missing: list[str] = []
+    scales: list[str] = []
+    for index, payload in enumerate(payload_list):
+        accounting = get_summary_information_accounting(payload)
+        scale = get_summary_information_scale(payload)
+        recorded_scale = scale or SUMMARY_INFORMATION_SCALE_UNKNOWN
+        path = str(paths[index]) if paths else None
+        label = path or f"input summary {index}"
+        if scale is None:
+            invalid_missing.append(label)
+            warnings.append(
+                f"{label} does not record information_accounting."
+            )
+        elif scale == SUMMARY_INFORMATION_SCALE_OPTIMIZER:
+            invalid_optimizer.append(label)
+            warnings.append(
+                f"{label} uses optimizer-normalized summary information."
+            )
+        elif scale != SUMMARY_INFORMATION_SCALE_SUMMED_LIKELIHOOD:
+            invalid_missing.append(label)
+            warnings.append(
+                f"{label} records unsupported summary_information_scale={scale!r}."
+            )
+        scales.append(recorded_scale)
+        inputs.append(
+            {
+                "source_summary_index": int(index),
+                "summary_json_path": path,
+                "summary_information_scale": recorded_scale,
+                "has_information_accounting": bool(accounting),
+                "information_accounting": accounting,
+            }
+        )
+
+    if policy == SUMMARY_SCALE_POLICY_REQUIRE_SUMMED and invalid_optimizer:
+        raise ValueError(
+            "Loaded summary artifact was exported with "
+            "summary_information_scale='optimizer'. Observation-level "
+            "forecasts and belief updates require summed-likelihood information "
+            "by default because optimizer-normalized summaries undercount "
+            "accumulated subblock information. Re-run summary export with "
+            "--summary-information-scale summed_likelihood, or pass "
+            "--allow-optimizer-scale-summaries for legacy/debug comparisons. "
+            f"Affected summaries: {', '.join(invalid_optimizer)}."
+        )
+    if policy == SUMMARY_SCALE_POLICY_REQUIRE_SUMMED and invalid_missing:
+        raise ValueError(
+            "Loaded summary artifact does not record supported "
+            "summary information-accounting metadata. Observation-level "
+            "consumers require summary_information_scale='summed_likelihood' "
+            "by default. Re-export the summary, or pass "
+            "--allow-optimizer-scale-summaries only for legacy/debug artifacts. "
+            f"Affected summaries: {', '.join(invalid_missing)}."
+        )
+
+    unique_scales = tuple(dict.fromkeys(scales))
+    return {
+        "summary_scale_policy": str(policy),
+        "accepted_summary_information_scale": (
+            unique_scales[0] if len(unique_scales) == 1 else "mixed"
+        ),
+        "override_used": bool(
+            policy != SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+            and any(scale != SUMMARY_INFORMATION_SCALE_SUMMED_LIKELIHOOD for scale in scales)
+        ),
+        "warnings": (
+            warnings
+            if policy != SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+            else []
+        ),
+        "input_summaries": inputs,
+    }
 
 
 def _as_label_tuple(labels: Sequence[str], *, name: str) -> tuple[str, ...]:
@@ -446,6 +604,7 @@ class ImageBackedSubblockSummaryArtifact:
             "truth_trace_path": self.metadata.get("truth_trace_path"),
             "config_path": self.metadata.get("config_path"),
             "objective": self.metadata.get("objective"),
+            "information_accounting": self.metadata.get("information_accounting"),
             "system": self.metadata.get("system"),
             "prior_context": self.metadata.get("prior_context"),
             "recovered_reference": self.metadata.get("recovered_reference"),

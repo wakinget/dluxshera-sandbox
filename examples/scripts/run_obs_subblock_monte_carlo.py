@@ -48,6 +48,7 @@ from dluxshera.inference.observation_summary import (
 )
 from dluxshera.inference.schedules import validate_optimizer_schedule_config
 from dluxshera.utils.noise import make_subseed
+from dluxshera.utils.obs_subblock_cli import append_reference_optimizer_flags
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -101,6 +102,7 @@ PLAN_COLUMNS = (
     "schur_frame_quality_missing",
     "schur_frame_mask_denominator",
     "schur_frame_mask_min_good_frames",
+    "summary_information_scale",
     "results_root",
     "case_root",
     "command_path",
@@ -174,6 +176,15 @@ class MonteCarloRunConfig:
     reference_preconditioning_eig_floor_rel: float | None = None
     reference_preconditioning_eig_floor_abs: float | None = None
     reference_preconditioning_lr_clip: tuple[float, float] | None = None
+    reference_early_stopping_enabled: bool | None = None
+    reference_early_stopping_min_iter: int | None = None
+    reference_early_stopping_patience: int | None = None
+    reference_early_stopping_loss_rtol: float | None = None
+    reference_early_stopping_loss_atol: float | None = None
+    reference_early_stopping_step_atol: float | None = None
+    reference_early_stopping_grad_norm_atol: float | None = None
+    reference_init_mode: str | None = None
+    reuse_reference_inference: str | None = None
     schur_damping: float | None = None
     schur_frame_quality_policy: str = "warn"
     schur_frame_chi2_threshold: float = FIT_WARNING_MAX_FRAME_REDUCED_CHI2
@@ -182,6 +193,7 @@ class MonteCarloRunConfig:
     schur_frame_mask_min_good_frames: int = 1
     max_dense_dim: int | None = DEFAULT_MC_MAX_DENSE_DIM
     summary_objective: str | None = None
+    summary_information_scale: str = "summed_likelihood"
     validate_surrogate: bool | None = None
     aggregation_enabled: bool = True
     truth_mode: str = "summary_theta_ref"
@@ -245,6 +257,7 @@ class MonteCarloTrialSpec:
     schur_frame_quality_missing: str
     schur_frame_mask_denominator: str
     schur_frame_mask_min_good_frames: int
+    summary_information_scale: str
     results_root: Path
     case_root: Path
     command_path: Path
@@ -717,6 +730,9 @@ def _trial_from_row(row: Mapping[str, Any], *, run_root: Path) -> MonteCarloTria
         schur_frame_quality_missing=str(row.get("schur_frame_quality_missing") or "allow_all"),
         schur_frame_mask_denominator=str(row.get("schur_frame_mask_denominator") or "original"),
         schur_frame_mask_min_good_frames=int(row.get("schur_frame_mask_min_good_frames") or 1),
+        summary_information_scale=str(
+            row.get("summary_information_scale") or "summed_likelihood"
+        ),
         results_root=Path(str(row["results_root"])).resolve(),
         case_root=case_root.resolve(),
         command_path=command_path if command_path.is_absolute() else (run_root / command_path).resolve(),
@@ -787,6 +803,7 @@ def build_trial_plan(config: MonteCarloRunConfig) -> list[MonteCarloTrialSpec]:
                 schur_frame_quality_missing=config.schur_frame_quality_missing,
                 schur_frame_mask_denominator=config.schur_frame_mask_denominator,
                 schur_frame_mask_min_good_frames=int(config.schur_frame_mask_min_good_frames),
+                summary_information_scale=str(config.summary_information_scale),
                 results_root=run_root,
                 case_root=case_root.resolve(),
                 command_path=(run_root / "commands" / f"{trial_name}.sh").resolve(),
@@ -841,6 +858,8 @@ def build_trial_command(spec: MonteCarloTrialSpec, config: MonteCarloRunConfig) 
         str(spec.schur_frame_mask_denominator),
         "--schur-frame-mask-min-good-frames",
         str(spec.schur_frame_mask_min_good_frames),
+        "--summary-information-scale",
+        str(spec.summary_information_scale),
     ]
     if spec.variance_floor is not None:
         command.extend(["--variance-floor", str(spec.variance_floor)])
@@ -852,96 +871,8 @@ def build_trial_command(spec: MonteCarloTrialSpec, config: MonteCarloRunConfig) 
         command.extend(["--summary-objective", str(config.summary_objective)])
     if config.validate_surrogate is not None:
         command.append("--validate-surrogate" if config.validate_surrogate else "--no-validate-surrogate")
-    if config.reference_optimizer_kind is not None:
-        command.extend(["--reference-optimizer-kind", str(config.reference_optimizer_kind)])
-    if config.reference_base_lr is not None:
-        command.extend(["--reference-base-lr", str(config.reference_base_lr)])
-    if config.reference_n_iter is not None:
-        command.extend(["--reference-n-iter", str(config.reference_n_iter)])
-    for key, value in sorted((config.reference_optimizer_kwargs or {}).items()):
-        command.extend(["--reference-optimizer-kwarg", f"{key}={value}"])
-    if spec.reference_schedule is not None:
-        schedule = dict(spec.reference_schedule)
-        command.extend(["--reference-schedule-kind", str(schedule["kind"])])
-        if "warmup_steps" in schedule:
-            command.extend(
-                ["--reference-schedule-warmup-steps", str(schedule["warmup_steps"])]
-            )
-        if "start_factor" in schedule:
-            command.extend(
-                ["--reference-schedule-start-factor", str(schedule["start_factor"])]
-            )
-        if "min_factor" in schedule:
-            command.extend(
-                ["--reference-schedule-min-factor", str(schedule["min_factor"])]
-            )
-        if "boundaries" in schedule:
-            command.extend(
-                [
-                    "--reference-schedule-boundaries",
-                    ",".join(str(int(value)) for value in schedule["boundaries"]),
-                ]
-            )
-        if "factors" in schedule:
-            command.extend(
-                [
-                    "--reference-schedule-factors",
-                    ",".join(str(float(value)) for value in schedule["factors"]),
-                ]
-            )
-        if "decay_rate" in schedule:
-            command.extend(
-                ["--reference-schedule-decay-rate", str(schedule["decay_rate"])]
-            )
-        if "transition_steps" in schedule:
-            command.extend(
-                [
-                    "--reference-schedule-transition-steps",
-                    str(schedule["transition_steps"]),
-                ]
-            )
-        if bool(schedule.get("staircase", False)):
-            command.append("--reference-schedule-staircase")
-    if config.reference_preconditioning_enabled is True:
-        command.append("--reference-preconditioning-enabled")
-    elif config.reference_preconditioning_enabled is False:
-        command.append("--reference-preconditioning-disabled")
-    if config.reference_preconditioning_method is not None:
-        command.extend(
-            ["--reference-preconditioning-method", str(config.reference_preconditioning_method)]
-        )
-    if config.reference_preconditioning_reference is not None:
-        command.extend(
-            [
-                "--reference-preconditioning-reference",
-                str(config.reference_preconditioning_reference),
-            ]
-        )
-    if config.reference_preconditioning_damping is not None:
-        command.extend(
-            ["--reference-preconditioning-damping", str(config.reference_preconditioning_damping)]
-        )
-    if config.reference_preconditioning_eig_floor_rel is not None:
-        command.extend(
-            [
-                "--reference-preconditioning-eig-floor-rel",
-                str(config.reference_preconditioning_eig_floor_rel),
-            ]
-        )
-    if config.reference_preconditioning_eig_floor_abs is not None:
-        command.extend(
-            [
-                "--reference-preconditioning-eig-floor-abs",
-                str(config.reference_preconditioning_eig_floor_abs),
-            ]
-        )
-    if config.reference_preconditioning_lr_clip is not None:
-        command.extend(
-            [
-                "--reference-preconditioning-lr-clip",
-                _format_lr_clip(config.reference_preconditioning_lr_clip),
-            ]
-        )
+    reference_cfg = {**dataclasses.asdict(config), "reference_schedule": spec.reference_schedule}
+    append_reference_optimizer_flags(command, reference_cfg)
     if config.memory_diagnostics:
         command.append("--memory-diagnostics")
     if config.profile_runtime:
@@ -1001,6 +932,7 @@ def _plan_row(spec: MonteCarloTrialSpec, result: MonteCarloTrialResult | None = 
         "schur_frame_quality_missing": spec.schur_frame_quality_missing,
         "schur_frame_mask_denominator": spec.schur_frame_mask_denominator,
         "schur_frame_mask_min_good_frames": spec.schur_frame_mask_min_good_frames,
+        "summary_information_scale": spec.summary_information_scale,
         "results_root": str(spec.results_root),
         "case_root": str(spec.case_root),
         "command_path": str(spec.command_path),
@@ -2440,6 +2372,7 @@ def _config_from_file(path: Path | None) -> dict[str, Any]:
         "schur_frame_mask_min_good_frames": trial.get("schur_frame_mask_min_good_frames"),
         "max_dense_dim": trial.get("max_dense_dim"),
         "variance_floor": trial.get("variance_floor"),
+        "summary_information_scale": trial.get("summary_information_scale"),
         "reference_diagnostics_profile": trial.get("reference_diagnostics_profile"),
         "reference_optimizer_kind": reference_optimizer.get("kind"),
         "reference_base_lr": reference_optimizer.get("base_lr"),
@@ -2527,9 +2460,19 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
                 if args.reference_preconditioning_lr_clip is not None
                 else None
             ),
+            "reference_early_stopping_enabled": args.reference_early_stopping_enabled,
+            "reference_early_stopping_min_iter": args.reference_early_stopping_min_iter,
+            "reference_early_stopping_patience": args.reference_early_stopping_patience,
+            "reference_early_stopping_loss_rtol": args.reference_early_stopping_loss_rtol,
+            "reference_early_stopping_loss_atol": args.reference_early_stopping_loss_atol,
+            "reference_early_stopping_step_atol": args.reference_early_stopping_step_atol,
+            "reference_early_stopping_grad_norm_atol": args.reference_early_stopping_grad_norm_atol,
+            "reference_init_mode": args.reference_init_mode,
+            "reuse_reference_inference": args.reuse_reference_inference,
             "schur_damping": args.schur_damping,
             "max_dense_dim": args.max_dense_dim,
             "summary_objective": args.summary_objective,
+            "summary_information_scale": args.summary_information_scale,
             "validate_surrogate": args.validate_surrogate,
             "truth_mode": args.truth_mode,
             "truth_json": args.truth_json,
@@ -2661,6 +2604,11 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
         raise ValueError("Unsupported --schur-frame-quality-missing.")
     if merged["schur_frame_mask_denominator"] not in SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS:
         raise ValueError("Unsupported --schur-frame-mask-denominator.")
+    if merged["summary_information_scale"] not in {
+        "summed_likelihood",
+        "optimizer",
+    }:
+        raise ValueError("Unsupported --summary-information-scale.")
     merged["schur_frame_chi2_threshold"] = float(merged["schur_frame_chi2_threshold"])
     if (
         merged["schur_frame_chi2_threshold"] <= 0.0
@@ -2776,9 +2724,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-preconditioning-eig-floor-rel", type=float, default=None)
     parser.add_argument("--reference-preconditioning-eig-floor-abs", type=float, default=None)
     parser.add_argument("--reference-preconditioning-lr-clip", default=None)
+    parser.add_argument("--reference-early-stopping", dest="reference_early_stopping_enabled", action="store_true", default=None)
+    parser.add_argument("--reference-early-stopping-min-iter", type=int, default=None)
+    parser.add_argument("--reference-early-stopping-patience", type=int, default=None)
+    parser.add_argument("--reference-early-stopping-loss-rtol", type=float, default=None)
+    parser.add_argument("--reference-early-stopping-loss-atol", type=float, default=None)
+    parser.add_argument("--reference-early-stopping-step-atol", type=float, default=None)
+    parser.add_argument("--reference-early-stopping-grad-norm-atol", type=float, default=None)
+    parser.add_argument("--reference-init-mode", choices=("initial", "truth_when_available"), default=None)
+    parser.add_argument("--reuse-reference-inference", default=None)
     parser.add_argument("--schur-damping", type=float, default=None)
     parser.add_argument("--max-dense-dim", type=int, default=None)
     parser.add_argument("--summary-objective", choices=("data_only", "full_objective"), default=None)
+    parser.add_argument(
+        "--summary-information-scale",
+        choices=("summed_likelihood", "optimizer"),
+        default=None,
+    )
     parser.add_argument("--validate-surrogate", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--truth-mode", choices=("summary_theta_ref", "explicit"), default=None)
     parser.add_argument("--truth-json", type=Path, default=None)

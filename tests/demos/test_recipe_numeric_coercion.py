@@ -93,6 +93,7 @@ def test_subblock_validation_normalizes_scientific_optimizer_values():
     assert optimizer["schedule"]["kind"] == "linear_warmup"
     assert optimizer["schedule"]["warmup_steps"] == 2
     assert optimizer["schedule"]["start_factor"] == pytest.approx(0.25)
+    assert optimizer["early_stopping"] is None
     assert preconditioning["method"] == "auto"
     assert preconditioning["damping"] == pytest.approx(5e-4)
     assert preconditioning["eig_floor_rel"] == pytest.approx(1e-6)
@@ -134,6 +135,58 @@ def test_subblock_validation_rejects_bad_schedule_kind():
     cfg["inference"]["optimizer"]["schedule"]["kind"] = "bad_schedule"
 
     with pytest.raises(ValueError, match="optimizer.schedule.kind"):
+        recipe._validate_experiment_cfg(cfg)
+
+
+def test_subblock_validation_normalizes_early_stopping_values():
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_early_stopping_tests",
+    )
+    cfg = _subblock_experiment_cfg()
+    cfg["inference"]["optimizer"]["early_stopping"] = {
+        "enabled": True,
+        "min_iter": "60",
+        "patience": "12",
+        "loss_rtol": "1e-8",
+        "loss_atol": "0.0",
+        "step_atol": "1e-10",
+        "grad_norm_atol": "1e-8",
+    }
+
+    validated = recipe._validate_experiment_cfg(cfg)
+    early_stopping = validated["inference"]["optimizer"]["early_stopping"]
+    assert early_stopping["enabled"] is True
+    assert early_stopping["min_iter"] == 60
+    assert early_stopping["patience"] == 12
+    assert early_stopping["loss_rtol"] == pytest.approx(1.0e-8)
+    assert early_stopping["loss_atol"] == pytest.approx(0.0)
+    assert early_stopping["step_atol"] == pytest.approx(1.0e-10)
+    assert early_stopping["grad_norm_atol"] == pytest.approx(1.0e-8)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "match"),
+    [
+        ("min_iter", -1, "min_iter"),
+        ("patience", 0, "patience"),
+        ("loss_rtol", -1.0, "loss_rtol"),
+        ("loss_atol", float("nan"), "loss_atol"),
+        ("unknown", 1, "unsupported keys"),
+    ],
+)
+def test_subblock_validation_rejects_bad_early_stopping_values(key, value, match):
+    recipe = _load_recipe(
+        ("examples", "recipes", "observation_subblock_inference.py"),
+        "observation_subblock_inference_bad_early_stopping_tests",
+    )
+    cfg = _subblock_experiment_cfg()
+    cfg["inference"]["optimizer"]["early_stopping"] = {
+        "enabled": True,
+        key: value,
+    }
+
+    with pytest.raises(ValueError, match=match):
         recipe._validate_experiment_cfg(cfg)
 
 

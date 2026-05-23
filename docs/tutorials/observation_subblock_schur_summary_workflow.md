@@ -15,6 +15,10 @@ trace generation -> subblock rendering -> Schur summary export -> inspection -> 
 This is a hands-on smoke workflow. It is not a full campaign generator, a
 trajectory ingestion layer, or the final online observation filter.
 
+For campaign wrappers that consume these summaries, aggregate-only flows should
+reuse stored run plans/manifests from the original run root; do not rely on
+new CLI overrides to redefine expected summary paths during aggregation.
+
 ## Conceptual map
 
 `Theta` is the observation-level slow/shared parameter vector. In this tutorial
@@ -202,6 +206,24 @@ Use the smallest control surface that matches the change:
   from the inference template, a generated config patch, or a CLI override.
 
 ## Step 3: Run the Schur summary export
+
+### Information accounting and optimizer scaling
+
+The recovered-reference optimizer may use normalized loss reductions such as
+`subblock_reduce: mean` for numerical stability. Exported Schur summaries
+default to `--summary-information-scale summed_likelihood`, which evaluates the
+curvature on the physical summed-frame likelihood scale. Observation-level
+forecasts and belief updates consume those exported `S`, `g`, and `theta_ref`
+units as-is.
+
+Use `--summary-information-scale optimizer` only for legacy or scale-debug
+comparisons. With an optimizer `subblock_reduce: mean`, that mode writes
+optimizer-normalized summaries and emits a warning because those summaries
+undercount physical subblock information for observation-level accumulation.
+Real-summary forecast and belief-update consumers require
+`summed_likelihood` metadata by default. Pass
+`--allow-optimizer-scale-summaries` only when intentionally comparing legacy
+optimizer-scale or unclassified debug artifacts; outputs record that override.
 
 Run the same small case without `--dry-run`:
 

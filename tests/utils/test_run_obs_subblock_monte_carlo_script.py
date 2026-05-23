@@ -415,6 +415,24 @@ def test_reference_schedule_override_appears_in_command_plan_and_manifest(tmp_pa
     }
 
 
+def test_reference_early_stopping_appears_in_trial_command(tmp_path: Path):
+    module = _load_module()
+    cfg = _config(
+        module,
+        tmp_path,
+        reference_early_stopping_enabled=True,
+        reference_early_stopping_min_iter=10,
+        reference_early_stopping_patience=4,
+        reference_early_stopping_loss_rtol=1.0e-8,
+    )
+    command = " ".join(module.build_trial_command(module.build_trial_plan(cfg)[0], cfg))
+
+    assert "--reference-early-stopping" in command
+    assert "--reference-early-stopping-min-iter 10" in command
+    assert "--reference-early-stopping-patience 4" in command
+    assert "--reference-early-stopping-loss-rtol 1e-08" in command
+
+
 def test_default_mc_optimizer_and_dense_guard_are_recorded(tmp_path: Path):
     module = _load_module()
     cfg = _config(module, tmp_path, run_name="defaults")

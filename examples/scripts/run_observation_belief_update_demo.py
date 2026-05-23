@@ -40,7 +40,13 @@ from dluxshera.inference.observation_forecast import (
     require_identical_summary_theta_labels,
     resolve_prior_context_for_summaries,
 )
-from dluxshera.inference.observation_summary import load_subblock_summary
+from dluxshera.inference.observation_summary import (
+    SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER,
+    SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+    load_subblock_summary,
+    load_subblock_summary_artifact_payload,
+    validate_summary_information_scale,
+)
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 
 
@@ -612,6 +618,7 @@ def run_observation_belief_update_demo(
     zernike_indices: Sequence[int] = DEFAULT_ZERNIKE_INDICES,
     include_plate_scale: bool = True,
     summary_paths: Sequence[Path | str] = (),
+    allow_optimizer_scale_summaries: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Run the observation-level belief update demo from synthetic or real summaries."""
@@ -625,6 +632,18 @@ def run_observation_belief_update_demo(
 
     if use_external_summaries:
         summaries = [load_subblock_summary(path) for path in summary_path_list]
+        summary_payloads = [
+            load_subblock_summary_artifact_payload(path) for path in summary_path_list
+        ]
+        summary_scale_validation = validate_summary_information_scale(
+            summary_payloads,
+            policy=(
+                SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
+                if allow_optimizer_scale_summaries
+                else SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+            ),
+            summary_paths=summary_path_list,
+        )
         summary_labels = require_identical_summary_theta_labels(summaries)
         layout = ObservationThetaLayout(
             labels=summary_labels,
@@ -642,6 +661,13 @@ def run_observation_belief_update_demo(
             }
         }
     else:
+        summary_scale_validation = {
+            "summary_scale_policy": "synthetic_summary_exempt",
+            "accepted_summary_information_scale": "synthetic",
+            "override_used": False,
+            "warnings": [],
+            "input_summaries": [],
+        }
         layout_config = build_demo_theta_layout_config(
             enable_zernikes=enable_zernikes,
             zernike_indices=zernike_indices,
@@ -764,6 +790,7 @@ def run_observation_belief_update_demo(
             "external_summary_artifacts" if use_external_summaries else "synthetic_summaries"
         ),
         "summary_paths": [str(path) for path in summary_path_list],
+        "summary_scale_validation": summary_scale_validation,
         "prior_mean_provenance": dict(prior_context.provenance),
         "prior_mean_source": str(prior_context.prior_mean_source),
         "prior_source_requested": str(prior_source),
@@ -808,6 +835,7 @@ def run_observation_belief_update_demo(
             "external_summary_artifacts" if use_external_summaries else "synthetic_summaries"
         ),
         "summary_paths": [str(path) for path in summary_path_list],
+        "summary_scale_validation": summary_scale_validation,
         "theta_layout": layout.to_dict(),
         "prior_mean_provenance": dict(prior_context.provenance),
         "prior_mean_source": str(prior_context.prior_mean_source),
@@ -1112,6 +1140,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-optimizer-scale-summaries",
+        action="store_true",
+        help=(
+            "Allow legacy/debug real summary artifacts with optimizer or missing "
+            "information-accounting scale metadata."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Resolve the synthetic update without writing artifacts.",
@@ -1136,6 +1172,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         zernike_indices=parse_zernike_indices(args.zernike_indices),
         include_plate_scale=bool(args.include_plate_scale),
         summary_paths=() if args.summary_paths is None else tuple(args.summary_paths),
+        allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
         dry_run=bool(args.dry_run),
     )
 

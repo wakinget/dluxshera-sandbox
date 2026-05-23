@@ -158,6 +158,32 @@ def test_zero_bias_reference_n_iter_only_applies_to_zero_case(tmp_path):
     assert "--reference-n-iter" not in cases[2].command
 
 
+def test_recovered_reference_early_stopping_is_forwarded_to_scalar_commands(tmp_path):
+    module = _load_script_module()
+    config = module.ScalarBiasStudyConfig(
+        **{
+            **_config(module, tmp_path).__dict__,
+            "reference_early_stopping_enabled": True,
+            "reference_early_stopping_min_iter": 12,
+            "reference_early_stopping_patience": 3,
+        }
+    )
+    spec = module.build_case_plan(
+        config,
+        {
+            "source.separation_as": 1.0,
+            "source.log_flux_total": 5.0,
+            "source.contrast": 0.2,
+            "optics.plate_scale_as_per_pix": 0.01,
+        },
+    )[0]
+    command = " ".join(spec.command)
+
+    assert "--reference-early-stopping" in command
+    assert "--reference-early-stopping-min-iter 12" in command
+    assert "--reference-early-stopping-patience 3" in command
+
+
 def test_write_command_file_contains_shell_safe_command_and_offset(tmp_path):
     module = _load_script_module()
     config = _config(module, tmp_path)

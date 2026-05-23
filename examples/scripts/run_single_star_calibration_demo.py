@@ -17,7 +17,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from statistics import mean, median
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -55,13 +55,28 @@ from dluxshera.inference.observation_forecast import (
     DEFAULT_SYSTEM_PRESET,
     build_prior_mean_from_store,
 )
-from dluxshera.inference.observation_summary import load_subblock_summary
+from dluxshera.inference.observation_summary import (
+    SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER,
+    SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+    load_subblock_summary,
+    load_subblock_summary_artifact_payload,
+    validate_summary_information_scale,
+)
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.seeding import derive_campaign_subblock_seeds
+from dluxshera.utils.campaigns import load_existing_campaign_plan
 from dluxshera.utils.noise import make_subseed
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
+from dluxshera.utils.obs_subblock_cli import (
+    append_reference_optimizer_flags,
+    append_schur_frame_quality_flags,
+)
 from dluxshera.utils.obs_subblock_keys import parse_obs_subblock_key_address
-from dluxshera.utils.subprocess_diagnostics import run_subprocess_with_diagnostics
+from dluxshera.utils.subprocess_diagnostics import (
+    run_subprocess_with_diagnostics,
+    stderr_tail,
+)
 from dluxshera.utils.single_star_calibration import (
     ALPHA_CEN_A_PLACEHOLDER_NOTE,
     prepare_alpha_cen_a_single_star_system_config,
@@ -157,6 +172,7 @@ def _default_experiment_config() -> dict[str, Any]:
             "schur_curvature_method": "structured_independent_frames",
             "max_dense_dim": 40,
             "schur_damping": 1.0e-8,
+            "summary_information_scale": "summed_likelihood",
             "exposure_time_s": 0.05,
             "reference_diagnostics_profile": "basic",
             "reference_optimizer_kind": "sgd",
@@ -289,6 +305,7 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace | None) -
         ("reference_diagnostics_profile", "reference_diagnostics_profile"),
         ("schur_curvature_method", "schur_curvature_method"),
         ("max_dense_dim", "max_dense_dim"),
+        ("summary_information_scale", "summary_information_scale"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -480,7 +497,7 @@ def generate_calibration_cases(
     if bool(cfg.get("include_zero_bias_case", mode == "zero_bias")):
         cases.append(
             CalibrationCase(
-                "zero_bias",
+                "zero_bias_case",
                 {},
                 "zero_bias",
                 prior_sigma_by_label={label: prior_sigma[label] for label in labels},
@@ -556,17 +573,14 @@ def _derive_subblock_seeds(
     seed_policy: str,
     base_seed: int,
 ) -> dict[str, int]:
-    token = f"{run_name}.{case_name}.subblock_{subblock_index:03d}"
-    if seed_policy == "same_jitter_different_noise":
-        trace_seed = make_subseed(base_seed, f"{run_name}.{case_name}.shared_trace")
-        noise_seed = make_subseed(base_seed, f"{token}.noise")
-    elif seed_policy == "different_jitter_same_noise":
-        trace_seed = make_subseed(base_seed, f"{token}.trace")
-        noise_seed = make_subseed(base_seed, f"{run_name}.{case_name}.shared_noise")
-    else:
-        trace_seed = make_subseed(base_seed, f"{token}.trace")
-        noise_seed = make_subseed(base_seed, f"{token}.noise")
-    return {"trace_seed": int(trace_seed), "noise_seed": int(noise_seed)}
+    derived = derive_campaign_subblock_seeds(
+        base_seed=int(base_seed),
+        seed_policy=str(seed_policy),
+        campaign_token=str(run_name),
+        case_token=str(case_name),
+        subblock_index=int(subblock_index),
+    )
+    return {"trace_seed": int(derived.trace_seed), "noise_seed": int(derived.noise_seed)}
 
 
 def _trace_key_policy(experiment_cfg: Mapping[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
@@ -787,30 +801,13 @@ def build_subblock_command(
     ]
     if subblock_cfg.get("exposure_time_s") is not None:
         command.extend(["--exposure-time-s", str(float(subblock_cfg["exposure_time_s"]))])
+    append_reference_optimizer_flags(command, subblock_cfg)
+    append_schur_frame_quality_flags(command, subblock_cfg)
     for flag_key, flag in (
-        ("reference_diagnostics_profile", "--reference-diagnostics-profile"),
-        ("reference_optimizer_kind", "--reference-optimizer-kind"),
-        ("reference_base_lr", "--reference-base-lr"),
-        ("reference_n_iter", "--reference-n-iter"),
-        ("reference_schedule_kind", "--reference-schedule-kind"),
-        ("reference_schedule_warmup_steps", "--reference-schedule-warmup-steps"),
-        ("reference_schedule_start_factor", "--reference-schedule-start-factor"),
-        ("reference_early_stopping_min_iter", "--reference-early-stopping-min-iter"),
-        ("reference_early_stopping_patience", "--reference-early-stopping-patience"),
-        ("reference_early_stopping_loss_rtol", "--reference-early-stopping-loss-rtol"),
-        ("reference_early_stopping_loss_atol", "--reference-early-stopping-loss-atol"),
-        ("reference_early_stopping_step_atol", "--reference-early-stopping-step-atol"),
-        ("reference_early_stopping_grad_norm_atol", "--reference-early-stopping-grad-norm-atol"),
-        ("schur_frame_quality_policy", "--schur-frame-quality-policy"),
-        ("schur_frame_chi2_threshold", "--schur-frame-chi2-threshold"),
-        ("schur_frame_quality_missing", "--schur-frame-quality-missing"),
-        ("schur_frame_mask_denominator", "--schur-frame-mask-denominator"),
-        ("schur_frame_mask_min_good_frames", "--schur-frame-mask-min-good-frames"),
+        ("summary_information_scale", "--summary-information-scale"),
     ):
         if subblock_cfg.get(flag_key) is not None:
             command.extend([flag, str(subblock_cfg[flag_key])])
-    if subblock_cfg.get("reference_early_stopping_enabled") is True:
-        command.append("--reference-early-stopping")
     jitter = dict(subblock_cfg.get("trace_jitter", {}) or {})
     if jitter.get("x_sigma_as") is not None:
         command.extend(["--trace-jitter-x-sigma-as", str(float(jitter["x_sigma_as"]))])
@@ -823,8 +820,6 @@ def build_subblock_command(
         command.extend(["--trace-jitter-pa-sigma-deg", str(float(jitter["pa_sigma_deg"]))])
     for label, offset in sorted(offsets.items()):
         command.extend(["--theta-reference-offset", f"{label}={float(offset)}"])
-    if subblock_cfg.get("reference_init_mode") is not None:
-        command.extend(["--reference-init-mode", str(subblock_cfg.get("reference_init_mode"))])
     if bool(subblock_cfg.get("memory_diagnostics", False)):
         command.append("--memory-diagnostics")
     return command
@@ -1031,7 +1026,11 @@ def write_plan_artifacts(plan: CalibrationPlan) -> None:
     _write_csv(plan.run_root / "prior_draws.csv", plan.prior_draw_rows)
 
 
-def _load_case_summaries(paths: Sequence[Path]) -> list[SubblockSummary]:
+def _load_case_summaries(
+    paths: Sequence[Path],
+    *,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+) -> tuple[list[SubblockSummary], dict[str, Any]]:
     missing = [path for path in paths if not path.exists()]
     if missing:
         raise FileNotFoundError("Missing subblock summaries: " + ", ".join(str(path) for path in missing))
@@ -1040,7 +1039,12 @@ def _load_case_summaries(paths: Sequence[Path]) -> list[SubblockSummary]:
     for summary in summaries[1:]:
         if tuple(summary.theta_labels) != labels:
             raise ValueError("Subblock summary theta labels differ within case.")
-    return summaries
+    summary_scale_validation = validate_summary_information_scale(
+        [load_subblock_summary_artifact_payload(path) for path in paths],
+        policy=summary_scale_policy,
+        summary_paths=paths,
+    )
+    return summaries, summary_scale_validation
 
 
 def _prior_for_case(plan: CalibrationPlan, case: CalibrationCase, summaries: Sequence[SubblockSummary]) -> tuple[ObservationBeliefState, np.ndarray, np.ndarray, np.ndarray]:
@@ -1375,9 +1379,17 @@ def _plot_case(case_root: Path, history: Sequence[Mapping[str, Any]], posterior_
         plt.close(fig)
 
 
-def aggregate_case(plan: CalibrationPlan, case: CalibrationCase) -> dict[str, Any]:
+def aggregate_case(
+    plan: CalibrationPlan,
+    case: CalibrationCase,
+    *,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+) -> dict[str, Any]:
     case_root = plan.run_root / "cases" / case.case_name
-    summaries = _load_case_summaries(plan.summary_paths[case.case_name])
+    summaries, summary_scale_validation = _load_case_summaries(
+        plan.summary_paths[case.case_name],
+        summary_scale_policy=summary_scale_policy,
+    )
     prior, truth, reference, prior_sigma = _prior_for_case(plan, case, summaries)
     update = update_observation_belief(prior, summaries)
     accumulated = accumulate_summary_information(plan.layout.labels, summaries)
@@ -1410,6 +1422,7 @@ def aggregate_case(plan: CalibrationPlan, case: CalibrationCase) -> dict[str, An
             "posterior": update.posterior.to_dict(),
             "prior": prior.to_dict(),
             "summary_paths": [str(path) for path in plan.summary_paths[case.case_name]],
+            "summary_scale_validation": summary_scale_validation,
         },
     )
     eigen_cfg = dict(plan.config["experiment"].get("eigenbasis", {}) or {})
@@ -1439,17 +1452,31 @@ def aggregate_case(plan: CalibrationPlan, case: CalibrationCase) -> dict[str, An
         "case_name": case.case_name,
         "case_root": str(case_root),
         "n_summaries": len(summaries),
+        "summary_scale_validation": summary_scale_validation,
         "posterior_by_parameter_csv": str(case_root / "posterior_by_parameter.csv"),
         "forecast_summary": forecast_summary,
     }
 
 
-def aggregate_campaign(plan: CalibrationPlan) -> dict[str, Any]:
-    summaries = [aggregate_case(plan, case) for case in plan.cases]
+def aggregate_campaign(
+    plan: CalibrationPlan,
+    *,
+    allow_optimizer_scale_summaries: bool = False,
+) -> dict[str, Any]:
+    summary_scale_policy = (
+        SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
+        if allow_optimizer_scale_summaries
+        else SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+    )
+    summaries = [
+        aggregate_case(plan, case, summary_scale_policy=summary_scale_policy)
+        for case in plan.cases
+    ]
     payload = {
         "schema_version": SCHEMA_VERSION,
         "run_root": str(plan.run_root),
         "cases": summaries,
+        "summary_scale_policy": summary_scale_policy,
         "memory_failure_summary_csv": str(plan.run_root / "memory_failure_summary.csv"),
     }
     status_path = plan.run_root / "subblock_status.csv"
@@ -1526,10 +1553,6 @@ def execute_subblocks(
             memory_diagnostics=memory_diagnostics,
             resource_time=resource_time,
         )
-        if int(diag.return_code) != 0:
-            raise RuntimeError(
-                f"Subprocess failed ({diag.return_code}) for {summary_path}: {diagnostics_json}"
-            )
         schur_diag_path = summary_path.parent / "schur_diagnostics.json"
         schur_diag: dict[str, Any] = {}
         if schur_diag_path.exists():
@@ -1538,15 +1561,24 @@ def execute_subblocks(
             except Exception:
                 schur_diag = {}
         return case_name, summary_path, {
+            "status": "ok" if int(diag.return_code) == 0 else "failed",
             "diagnostics_json": str(diagnostics_json),
             "subprocess_diagnostics_path": str(diagnostics_json),
+            "stdout_log": str(diag.stdout_log),
+            "stderr_log": str(diag.stderr_log),
+            "last_stderr_line": diag.last_stderr_line,
             "schur_diagnostics_path": str(schur_diag_path),
             "schur_memory_audit_path": str(summary_path.parent / "schur_summary_memory_audit.json"),
             "return_code": diag.return_code,
             "elapsed_seconds": float(diag.elapsed_seconds),
             "failure_class": diag.failure_class,
+            "failure_hint": diag.failure_hint,
             "peak_total_rss_mb": diag.memory_sampler.get("peak_total_rss_mb"),
             "resource_time_maximum_resident_set_mb": diag.resource_time.get("maximum_resident_set_mb"),
+            "resource_time_mode_effective": diag.resource_time.get(
+                "resource_time_mode_effective",
+                diag.resource_time.get("mode_effective"),
+            ),
             "schur_curvature_method_requested": schur_diag.get("schur_curvature_method_requested"),
             "schur_curvature_method_effective": schur_diag.get("schur_curvature_method_effective"),
             "structured_curvature_used": schur_diag.get("structured_curvature_used"),
@@ -1571,7 +1603,7 @@ def execute_subblocks(
 
     def _write_progress(last_completed: dict[str, Any] | None = None) -> None:
         _write_csv(plan.run_root / "subblock_status.csv", status_rows)
-        _write_csv(plan.run_root / "memory_failure_summary.csv", [{"case_name": r.get("case_name"), "summary_path": r.get("summary_path"), "diagnostics_json": r.get("diagnostics_json"), "failure_class": r.get("failure_class"), "resource_time_maximum_resident_set_mb": r.get("resource_time_maximum_resident_set_mb")} for r in status_rows])
+        _write_csv(plan.run_root / "memory_failure_summary.csv", [{"case_name": r.get("case_name"), "summary_path": r.get("summary_path"), "status": r.get("status"), "return_code": r.get("return_code"), "failure_class": r.get("failure_class"), "failure_hint": r.get("failure_hint"), "subprocess_diagnostics_path": r.get("subprocess_diagnostics_path"), "stdout_log": r.get("stdout_log"), "stderr_log": r.get("stderr_log"), "last_stderr_line": r.get("last_stderr_line"), "resource_time_maximum_resident_set_mb": r.get("resource_time_maximum_resident_set_mb")} for r in status_rows])
         total = len(jobs)
         completed = len(status_rows)
         failed = sum(1 for r in status_rows if r.get("return_code") not in (0, "0"))
@@ -1588,6 +1620,12 @@ def execute_subblocks(
                 case_name, summary_path, row = run_job(job)
                 status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
                 _write_progress(last_completed={"case_name":case_name,"summary_path":str(summary_path)})
+                if int(row["return_code"]) != 0:
+                    stderr_tail_text = "\n".join(stderr_tail(Path(str(row["stderr_log"]))))
+                    raise RuntimeError(
+                        f"Subprocess failed ({row['return_code']}) for {summary_path}: "
+                        f"{row['subprocess_diagnostics_path']}\nchild stderr tail:\n{stderr_tail_text}"
+                    )
                 if not quiet:
                     print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
             except Exception as exc:
@@ -1603,6 +1641,12 @@ def execute_subblocks(
                 case_name, summary_path, row = future.result()
                 status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
                 _write_progress(last_completed={"case_name":case_name,"summary_path":str(summary_path)})
+                if int(row["return_code"]) != 0:
+                    stderr_tail_text = "\n".join(stderr_tail(Path(str(row["stderr_log"]))))
+                    raise RuntimeError(
+                        f"Subprocess failed ({row['return_code']}) for {summary_path}: "
+                        f"{row['subprocess_diagnostics_path']}\nchild stderr tail:\n{stderr_tail_text}"
+                    )
                 if not quiet:
                     print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
             except Exception as exc:
@@ -1644,6 +1688,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory-diagnostics", action="store_true")
     parser.add_argument("--schur-curvature-method", default=None)
     parser.add_argument("--max-dense-dim", type=int, default=None)
+    parser.add_argument(
+        "--summary-information-scale",
+        choices=("summed_likelihood", "optimizer"),
+        default=None,
+    )
+    parser.add_argument(
+        "--allow-optimizer-scale-summaries",
+        action="store_true",
+        help="Allow legacy/debug optimizer-scale or unclassified real summaries.",
+    )
     parser.add_argument("--memory-progress-tail-lines", type=int, default=3)
     parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
     parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")
@@ -1659,7 +1713,30 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         system_preset=args.system_preset,
         args=args,
     )
-    write_plan_artifacts(plan)
+    skip_plan_rewrite = False
+    if args.aggregate_only:
+        stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
+        if stored_plan is not None:
+            skip_plan_rewrite = True
+            stored_paths = stored_plan.get("summary_paths")
+            if isinstance(stored_paths, Mapping):
+                expected_cases = set(plan.summary_paths.keys())
+                stored_cases = set(str(k) for k in stored_paths.keys())
+                if expected_cases != stored_cases:
+                    raise ValueError(
+                        "Aggregate-only found an existing campaign_plan.json with a different case set. "
+                        "Use the same run shape (or regenerate the run root) before aggregating."
+                    )
+                plan = replace(
+                    plan,
+                    summary_paths={
+                        str(case): [Path(str(path)) for path in paths]
+                        for case, paths in stored_paths.items()
+                        if isinstance(paths, list)
+                    },
+                )
+    if not skip_plan_rewrite:
+        write_plan_artifacts(plan)
     if args.dry_run:
         if not args.quiet:
             print(f"Dry-run plan written to {plan.run_root}")
@@ -1674,7 +1751,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             memory_diagnostics=bool(args.memory_diagnostics),
             resource_time=True if args.resource_time is None else bool(args.resource_time),
         )
-    summary = aggregate_campaign(plan)
+    summary = aggregate_campaign(
+        plan,
+        allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
+    )
     if not args.quiet:
         print(f"Calibration summary written to {plan.run_root / 'campaign_summary.json'}")
     return summary

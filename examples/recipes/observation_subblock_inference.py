@@ -61,7 +61,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple
 
@@ -3773,6 +3773,11 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
                     if schedule_meta["normalized_config"] is None
                     else dict(schedule_meta["normalized_config"])
                 ),
+                "early_stopping": (
+                    None
+                    if optimizer_cfg.get("early_stopping") is None
+                    else asdict(early_stopping_cfg)
+                ),
                 "preconditioning": {
                     "enabled": preconditioning_enabled,
                     "method": preconditioning_method,
@@ -4183,6 +4188,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     )
 
     optimizer_cfg = inference_cfg["optimizer"]
+    early_stopping_cfg = normalize_early_stopping_config(
+        optimizer_cfg.get("early_stopping"),
+        path="experiment.inference.optimizer.early_stopping",
+    )
+    early_stopping_metadata = {
+        **asdict(early_stopping_cfg),
+        "source": "experiment.inference.optimizer.early_stopping",
+    }
     schedule_factor_history, schedule_meta_raw = build_schedule_factor_history(
         optimizer_cfg.get("schedule"),
         n_iter=int(optimizer_cfg["n_iter"]),
@@ -4437,6 +4450,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                         "first_step_scalar_lr": first_step_scalar_lr,
                         "kwargs": optimizer_kwargs,
                         "schedule": to_jsonable_obs_subblock_payload(schedule_meta),
+                        "early_stopping": to_jsonable_obs_subblock_payload(
+                            early_stopping_metadata
+                        ),
                         "run_shera_gd_lr_vec_semantics": (
                             "lr_vec is a preconditioning scale only; run_shera_gd "
                             "applies base_lr through learning_rate"
@@ -4865,6 +4881,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "n_iter": int(optimizer_cfg["n_iter"]),
             "kwargs": dict(optimizer_cfg["kwargs"]),
             "schedule": to_jsonable_obs_subblock_payload(schedule_meta),
+            "early_stopping": to_jsonable_obs_subblock_payload(
+                early_stopping_metadata
+            ),
+            "early_stopping_result": to_jsonable_obs_subblock_payload(
+                trace_history.get("early_stopping", {})
+            ),
             "preconditioning": (
                 {"enabled": False}
                 if preconditioning_bundle is None
@@ -5011,11 +5033,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         },
         "theta0": np.asarray(theta0, dtype=float),
         "theta_final": theta_final_np,
+        "early_stopping": to_jsonable_obs_subblock_payload(
+            trace_history.get("early_stopping", {})
+        ),
         # Keep the optimizer trace available to in-process orchestration scripts
         # such as the Adam sweep without expanding the on-disk inference schema.
         "trace_history": {
             name: np.asarray(values, dtype=float)
             for name, values in trace_history.items()
+            if name != "early_stopping"
         }
         | {
             "schedule_factor": np.asarray(schedule_factor_history, dtype=float),

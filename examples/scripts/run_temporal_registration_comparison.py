@@ -5,7 +5,7 @@ Smoke commands
 Dry-run default plan:
 
 ```
-PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
+python examples/scripts/run_temporal_registration_comparison.py \
   --results-root Results/temporal_registration_comparison \
   --run-name smoke_default \
   --dry-run
@@ -14,7 +14,7 @@ PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
 Run a tiny 3-frame noiseless solver smoke:
 
 ```
-PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
+python examples/scripts/run_temporal_registration_comparison.py \
   --results-root Results/temporal_registration_comparison \
   --run-name smoke_3f_noiseless \
   --n-frames 3 \
@@ -26,7 +26,7 @@ PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
 Run the focused 20-frame shot-noise comparison:
 
 ```
-PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
+python examples/scripts/run_temporal_registration_comparison.py \
   --results-root Results/temporal_registration_comparison \
   --run-name focused_20f_shotnoise \
   --n-frames 20 \
@@ -38,7 +38,7 @@ PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
 Dry-run the full matrix including residual-prior fits:
 
 ```
-PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
+python examples/scripts/run_temporal_registration_comparison.py \
   --results-root Results/temporal_registration_comparison \
   --run-name residual_prior_full_dryrun \
   --noise disabled \
@@ -50,7 +50,7 @@ PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
 Run a tiny residual-prior solver smoke:
 
 ```
-PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
+python examples/scripts/run_temporal_registration_comparison.py \
   --results-root Results/temporal_registration_comparison \
   --run-name residual_prior_3f_noiseless \
   --n-frames 3 \
@@ -63,7 +63,7 @@ PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
 Run a focused 20-frame shot-noise residual-prior comparison:
 
 ```
-PYTHONPATH=src python examples/scripts/run_temporal_registration_comparison.py \
+python examples/scripts/run_temporal_registration_comparison.py \
   --results-root Results/temporal_registration_comparison \
   --run-name residual_prior_20f_shotnoise \
   --n-frames 20 \
@@ -99,6 +99,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
 import math
 import shutil
@@ -111,18 +112,34 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from dluxshera.config.io import load_user_config
 from dluxshera.inference.observation_summary import load_subblock_summary
 from dluxshera.utils.obs_subblock_io import write_obs_subblock_truth_csv
 
-from examples.recipes import observation_subblock
-from examples.recipes import observation_subblock_inference
-from examples.scripts import run_obs_subblock_study
+
+def _load_repo_module(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module {name} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+observation_subblock = _load_repo_module(
+    "observation_subblock_recipe",
+    REPO_ROOT / "examples" / "recipes" / "observation_subblock.py",
+)
+observation_subblock_inference = _load_repo_module(
+    "observation_subblock_inference_recipe",
+    REPO_ROOT / "examples" / "recipes" / "observation_subblock_inference.py",
+)
+run_obs_subblock_study = _load_repo_module(
+    "run_obs_subblock_study_script",
+    REPO_ROOT / "examples" / "scripts" / "run_obs_subblock_study.py",
+)
 
 
 TRACE_KEYS = (
@@ -849,6 +866,9 @@ def _run_case(
         "preconditioning_dense_global_fim_materialized": "",
         "preconditioning_fallback_used": "",
         "preconditioning_plan_reason": "",
+        "summary_information_scale": str(
+            getattr(args, "summary_information_scale", "summed_likelihood")
+        ),
         "status": "planned" if dry_run else "started",
     }
     schur_settings = _schur_settings_for_case(
@@ -962,6 +982,9 @@ def _run_case(
                 schur_frame_quality_policy="mask",
                 schur_frame_chi2_threshold=5.0,
                 schur_frame_mask_denominator="original",
+                summary_information_scale=str(
+                    getattr(args, "summary_information_scale", "summed_likelihood")
+                ),
                 reference_diagnostics_profile=reference_diagnostics_profile,
                 reuse_reference_inference=manifest_json.parent,
                 dry_run=False,
@@ -1136,6 +1159,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--full-default-matrix", action="store_true")
     parser.add_argument("--residual-prior-sweep", action="store_true")
     parser.add_argument("--max-dense-dim", type=int, default=40)
+    parser.add_argument(
+        "--summary-information-scale",
+        choices=("summed_likelihood", "optimizer"),
+        default="summed_likelihood",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--aggregate-only", action="store_true")
@@ -1176,6 +1204,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "exposure_time_s": float(args.exposure_time_s),
         "subblock_duration_s": float(args.n_frames * args.exposure_time_s),
         "case_count": len(cases),
+        "summary_information_scale": str(args.summary_information_scale),
         "generator": "examples/scripts/run_temporal_registration_comparison.py",
     }
     if args.aggregate_only:

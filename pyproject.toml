@@ -7,13 +7,39 @@ name = "dluxshera"
 version = "0.1.0"
 description = "Shera / dLux-based astrometric modeling tools"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [
   { name = "Dylan McKeithen" }
 ]
+dependencies = [
+  "dLux @ git+https://github.com/wakinget/dLux.git@d0ab6df843503535c05225b15197233144be3cf1",
+  "dLuxToliman==0.3.0",
+  "jax==0.4.30",
+  "jaxlib==0.4.30",
+  "numpy>=1.24",
+  "scipy>=1.9",
+  "astropy>=5.0",
+  "matplotlib>=3.9",
+  "PyQt6",
+  "tqdm>=4.67",
+  "pandas>=1.5",
+  "numpyro==0.18.0",
+  "optax>=0.2.4",
+  "equinox>=0.11.10",
+  "chex>=0.1.88",
+  "jaxtyping>=0.2.36",
+  "zodiax>=0.4.1,<0.5",
+  "interpax==0.3.12",
+  "ipykernel>=6.31",
+  "jupyterlab>=4.4",
+  "ipywidgets",
+  "jupyterlab_widgets",
+]
 
-# You can fill this in later; leaving it empty is okay for now
-dependencies = []
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

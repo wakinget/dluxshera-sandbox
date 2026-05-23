@@ -89,6 +89,21 @@ def normalize_early_stopping_config(
     if not isinstance(cfg, Mapping):
         raise ValueError(f"{path} must be a mapping when provided.")
     data = dict(cfg)
+    allowed = {
+        "enabled",
+        "min_iter",
+        "patience",
+        "loss_rtol",
+        "loss_atol",
+        "step_atol",
+        "grad_norm_atol",
+        "require_finite_loss",
+        "restore_best",
+        "monitor",
+    }
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(f"{path} contains unsupported keys: {', '.join(unknown)}.")
     enabled = bool(data.get("enabled", False))
     min_iter = int(data.get("min_iter", 0))
     patience = int(data.get("patience", 5))
@@ -100,8 +115,13 @@ def normalize_early_stopping_config(
     if monitor != "loss":
         raise ValueError(f"{path}.monitor currently supports only 'loss'.")
     def _optf(k):
-        v=data.get(k)
-        return None if v is None else float(v)
+        v = data.get(k)
+        if v is None:
+            return None
+        value = float(v)
+        if not onp.isfinite(value) or value < 0.0:
+            raise ValueError(f"{path}.{k} must be finite and >= 0.")
+        return value
     return EarlyStoppingConfig(
         enabled=enabled, min_iter=min_iter, patience=patience,
         loss_rtol=_optf("loss_rtol"), loss_atol=_optf("loss_atol"),

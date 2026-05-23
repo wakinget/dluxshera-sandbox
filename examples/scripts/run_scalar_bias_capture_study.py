@@ -32,6 +32,7 @@ from dluxshera.inference.observation_belief import (
 from dluxshera.inference.observation_forecast import build_default_prior_sigma
 from dluxshera.inference.observation_summary import load_subblock_summary
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
+from dluxshera.utils.obs_subblock_cli import append_reference_optimizer_flags
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -208,12 +209,22 @@ class ScalarBiasStudyConfig:
     max_dense_dim: int = 40
     schur_curvature_method: str = "auto"
     schur_damping: float = 1.0e-8
+    summary_information_scale: str = "summed_likelihood"
     schur_frame_quality_policy: str = "warn"
     reference_schedule_kind: str = "linear_warmup"
     reference_schedule_warmup_steps: int = 10
     reference_schedule_start_factor: float = 0.125
     reference_diagnostics_profile: str = "basic"
     reference_n_iter: int | None = None
+    reference_early_stopping_enabled: bool | None = None
+    reference_early_stopping_min_iter: int | None = None
+    reference_early_stopping_patience: int | None = None
+    reference_early_stopping_loss_rtol: float | None = None
+    reference_early_stopping_loss_atol: float | None = None
+    reference_early_stopping_step_atol: float | None = None
+    reference_early_stopping_grad_norm_atol: float | None = None
+    reference_init_mode: str | None = None
+    reuse_reference_inference: str | None = None
     zero_bias_reference_n_iter: int | None = None
 
     @property
@@ -434,20 +445,14 @@ def build_schur_summary_command(config: ScalarBiasStudyConfig, spec_seed_args: M
         ",".join(config.theta_keys),
         "--phi-ref",
         config.phi_ref,
-        "--reference-schedule-kind",
-        config.reference_schedule_kind,
-        "--reference-schedule-warmup-steps",
-        str(config.reference_schedule_warmup_steps),
-        "--reference-schedule-start-factor",
-        str(config.reference_schedule_start_factor),
-        "--reference-diagnostics-profile",
-        config.reference_diagnostics_profile,
         "--max-dense-dim",
         str(config.max_dense_dim),
         "--schur-curvature-method",
         config.schur_curvature_method,
         "--schur-damping",
         str(config.schur_damping),
+        "--summary-information-scale",
+        config.summary_information_scale,
         "--schur-frame-quality-policy",
         config.schur_frame_quality_policy,
         "--trace-seed",
@@ -455,6 +460,7 @@ def build_schur_summary_command(config: ScalarBiasStudyConfig, spec_seed_args: M
         "--render-seed",
         str(spec_seed_args["render_seed"]),
     ]
+    append_reference_optimizer_flags(command, config.__dict__)
     if config.trace_template is not None:
         command.extend(["--trace-template", str(config.trace_template)])
     effective_reference_n_iter = _effective_reference_n_iter(
@@ -1318,6 +1324,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-plots", dest="plots", action="store_false")
     parser.add_argument("--reference-n-iter", type=int, default=None)
     parser.add_argument("--zero-bias-reference-n-iter", type=int, default=None)
+    parser.add_argument(
+        "--summary-information-scale",
+        choices=("summed_likelihood", "optimizer"),
+        default="summed_likelihood",
+    )
     parser.add_argument("--belief-update-script", type=Path, default=None, help="Reserved for subprocess-based update experiments; direct helpers are used by default.")
     return parser
 
@@ -1372,6 +1383,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         plots=bool(args.plots),
         reference_n_iter=args.reference_n_iter,
         zero_bias_reference_n_iter=args.zero_bias_reference_n_iter,
+        summary_information_scale=str(args.summary_information_scale),
     )
     truth_values = resolve_truth_values_for_parameters(config.theta_keys, trace_template=config.trace_template)
     cases = build_case_plan(config, truth_values)

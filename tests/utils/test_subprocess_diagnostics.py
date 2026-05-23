@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 from dluxshera.utils.subprocess_diagnostics import classify_return_code, run_subprocess_with_diagnostics
 
@@ -47,3 +50,44 @@ def test_classify_return_code_probable_sigkill() -> None:
     klass, hint = classify_return_code(-9)
     assert klass == "probable_sigkill"
     assert hint is not None
+
+
+def test_resource_time_gnu_requested_but_unavailable_does_not_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    original_which = shutil.which
+
+    def fake_which(name: str) -> str | None:
+        if name == "/usr/bin/time":
+            return None
+        return original_which(name)
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    payload = run_subprocess_with_diagnostics(
+        command=[sys.executable, "-c", "print('ok')"],
+        cwd=tmp_path,
+        env=None,
+        stdout_log=tmp_path / "o.log",
+        stderr_log=tmp_path / "e.log",
+        diagnostics_json=tmp_path / "d.json",
+        resource_time="gnu",
+    )
+    assert payload.return_code == 0
+    raw = json.loads((tmp_path / "d.json").read_text(encoding="utf-8"))
+    assert raw["resource_time"]["resource_time_mode_requested"] == "gnu"
+    assert raw["resource_time"]["resource_time_mode_effective"] == "disabled"
+
+
+def test_resource_time_disabled_mode_records_effective_disabled(tmp_path: Path) -> None:
+    payload = run_subprocess_with_diagnostics(
+        command=[sys.executable, "-c", "print('ok')"],
+        cwd=tmp_path,
+        env=None,
+        stdout_log=tmp_path / "o.log",
+        stderr_log=tmp_path / "e.log",
+        diagnostics_json=tmp_path / "d.json",
+        resource_time="disabled",
+    )
+    assert payload.return_code == 0
+    raw = json.loads((tmp_path / "d.json").read_text(encoding="utf-8"))
+    assert raw["resource_time"]["resource_time_mode_effective"] == "disabled"

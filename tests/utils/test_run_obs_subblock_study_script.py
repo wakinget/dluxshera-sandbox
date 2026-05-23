@@ -184,6 +184,38 @@ def _write_templates(tmp_path: Path) -> tuple[Path, Path, Path]:
     return trace_path, render_path, inference_path
 
 
+def test_build_summary_inference_config_defaults_curvature_to_summed_likelihood():
+    module = _load_script_module()
+    inference_cfg = _inference_template()["experiment"]["inference"]
+    inference_cfg["objective"]["subblock_reduce"] = "mean"
+
+    summary_cfg, accounting = module.build_summary_inference_config(
+        inference_cfg,
+        summary_information_scale="summed_likelihood",
+    )
+
+    assert inference_cfg["objective"]["subblock_reduce"] == "mean"
+    assert summary_cfg["objective"]["frame_reduce"] == "sum"
+    assert summary_cfg["objective"]["subblock_reduce"] == "sum"
+    assert accounting["optimizer_subblock_reduce"] == "mean"
+    assert accounting["summary_subblock_reduce"] == "sum"
+
+
+def test_build_summary_inference_config_optimizer_scale_records_mean_warning():
+    module = _load_script_module()
+    inference_cfg = _inference_template()["experiment"]["inference"]
+    inference_cfg["objective"]["subblock_reduce"] = "mean"
+
+    summary_cfg, accounting = module.build_summary_inference_config(
+        inference_cfg,
+        summary_information_scale="optimizer",
+    )
+
+    assert summary_cfg["objective"]["subblock_reduce"] == "mean"
+    assert accounting["summary_information_scale"] == "optimizer"
+    assert "subblock_reduce='mean'" in accounting["warnings"][0]
+
+
 def test_fisher_noise_audit_uses_resolved_data_variance_floor():
     script = _load_script_module()
     recipe = _load_recipe_module()
@@ -1484,6 +1516,8 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     ] == "inference_template"
     assert plan["preconditioning"]["sources"]["preconditioning_enabled"] == "inference_template"
     assert "diagnostics" in plan["reference_inference_config_if_run"]
+    assert plan["information_accounting"]["summary_information_scale"] == "summed_likelihood"
+    assert plan["information_accounting"]["summary_subblock_reduce"] == "sum"
     summary_export_cfg = _read_json(Path(plan["summary_export_inference_config_path"]))
     assert summary_export_cfg["system"]["optics"]["plate_scale_as_per_pix"] == pytest.approx(
         0.01001
@@ -1503,6 +1537,7 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert audit_path.exists()
     audit = _read_json(audit_path)
     assert audit["theta_reference_overrides"] == overrides
+    assert audit["information_accounting"] == plan["information_accounting"]
     assert (case_root / "study" / "schur_summary" / "summary.json").exists()
 
 
@@ -1568,6 +1603,7 @@ def test_build_schur_summary_plan_records_recovered_unpreconditioned_warning(tmp
         schur_curvature_method="auto",
         phi_ref_mode="recovered",
         summary_objective="full_objective",
+        summary_information_scale="summed_likelihood",
         validate_surrogate=True,
         validation_steps=5,
         frame_truth_preview=None,
@@ -1624,6 +1660,53 @@ def test_schur_summary_recovered_plan_reports_preconditioning_enabled_cli_source
     ]
     assert preconditioning["enabled"] is True
     assert preconditioning["reference"] == "initial"
+
+
+def test_schur_summary_dry_run_accepts_reference_early_stopping_kwargs(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    _trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_recovered_early_stopping"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="recovered",
+        reference_optimizer_kind="sgd",
+        reference_base_lr=0.7,
+        reference_n_iter=5,
+        reference_early_stopping_enabled=True,
+        reference_early_stopping_min_iter=2,
+        reference_early_stopping_patience=2,
+        reference_early_stopping_loss_rtol=1.0e-8,
+        reference_early_stopping_loss_atol=0.0,
+        reference_early_stopping_step_atol=1.0e-10,
+        reference_early_stopping_grad_norm_atol=1.0e-8,
+        reference_diagnostics_profile="none",
+        dry_run=True,
+    )
+
+    plan = _read_json(Path(summary["schur_summary_plan_path"]))
+    reference = plan["reference_inference_config_if_run"]
+    assert reference["sources"]["early_stopping_enabled"] == "cli_override"
+    assert reference["sources"]["early_stopping_min_iter"] == "cli_override"
+    assert reference["sources"]["early_stopping_patience"] == "cli_override"
+    optimizer = _read_json(Path(summary["schur_config_path"]))["experiment"][
+        "inference"
+    ]["optimizer"]
+    early_stopping = optimizer["early_stopping"]
+    assert early_stopping["enabled"] is True
+    assert early_stopping["min_iter"] == 2
+    assert early_stopping["patience"] == 2
+    assert early_stopping["loss_rtol"] == pytest.approx(1.0e-8)
+    assert early_stopping["loss_atol"] == pytest.approx(0.0)
+    assert early_stopping["step_atol"] == pytest.approx(1.0e-10)
+    assert early_stopping["grad_norm_atol"] == pytest.approx(1.0e-8)
 
 
 def test_schur_summary_recovered_plan_records_reference_optimizer_overrides(
@@ -2612,8 +2695,12 @@ def test_evaluate_schur_summary_uses_structured_path_with_tiny_quadratic(
 
 
 def test_parser_accepts_reference_early_stopping_flags() -> None:
-    module = load_module()
+    module = _load_script_module()
     args = module._build_parser().parse_args([
+        "--mode",
+        "schur_summary",
+        "--case-root",
+        "case",
         "--reference-early-stopping",
         "--reference-early-stopping-min-iter",
         "11",
@@ -2633,10 +2720,30 @@ def test_parser_accepts_reference_early_stopping_flags() -> None:
     assert args.reference_early_stopping_patience == 7
 
 
+def test_parser_defaults_reference_early_stopping_and_main_dry_run(tmp_path: Path) -> None:
+    module = _load_script_module()
+    argv = [
+        "--mode",
+        "schur_summary",
+        "--case-root",
+        str(tmp_path / "case"),
+        "--dry-run",
+    ]
+    args = module._build_parser().parse_args(argv[:-1])
+    assert hasattr(args, "reference_early_stopping")
+    assert args.reference_early_stopping is False
+
+    summary = module.main(argv)
+
+    assert summary["dry_run"] is True
+    assert summary["mode"] == "schur_summary"
+
+
 def test_build_schur_config_applies_reference_early_stopping_overrides() -> None:
-    module = load_module()
-    cfg = module._build_schur_inference_config(
-        {"experiment": {"inference": {"optimizer": {"kind": "sgd", "base_lr": 0.1, "n_iter": 4}}}},
+    module = _load_script_module()
+    inference_cfg = {"optimizer": {"kind": "sgd", "base_lr": 0.1, "n_iter": 4}}
+    module.apply_reference_optimizer_overrides(
+        inference_cfg,
         early_stopping_enabled=True,
         early_stopping_min_iter=2,
         early_stopping_patience=3,
@@ -2645,7 +2752,7 @@ def test_build_schur_config_applies_reference_early_stopping_overrides() -> None
         early_stopping_step_atol=1e-10,
         early_stopping_grad_norm_atol=1e-8,
     )
-    es = cfg["experiment"]["inference"]["optimizer"]["early_stopping"]
+    es = inference_cfg["optimizer"]["early_stopping"]
     assert es["enabled"] is True
     assert es["min_iter"] == 2
     assert es["patience"] == 3
@@ -2653,7 +2760,7 @@ def test_build_schur_config_applies_reference_early_stopping_overrides() -> None
 
 
 def test_reference_optimizer_override_sources_tracks_early_stopping() -> None:
-    module = load_module()
+    module = _load_script_module()
     sources = module._reference_optimizer_override_sources(
         early_stopping_enabled=True,
         early_stopping_min_iter=2,

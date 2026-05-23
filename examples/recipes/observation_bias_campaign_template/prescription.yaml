@@ -11,6 +11,13 @@ experiment:
     schur_curvature_method: auto
     max_dense_dim: 40
     schur_damping: 1.0e-8
+    reference_early_stopping_enabled: false
+    reference_early_stopping_min_iter: null
+    reference_early_stopping_patience: null
+    reference_early_stopping_loss_rtol: null
+    reference_early_stopping_loss_atol: null
+    reference_early_stopping_step_atol: null
+    reference_early_stopping_grad_norm_atol: null
     trace_jitter:
       x_sigma_as: 1.0e-3
       y_sigma_as: 1.0e-3

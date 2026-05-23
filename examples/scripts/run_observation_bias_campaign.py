@@ -15,11 +15,10 @@ import json
 import math
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -60,16 +59,31 @@ from dluxshera.inference.observation_forecast import (
     resolve_prior_context_for_summaries,
 )
 from dluxshera.inference.observation_summary import (
+    SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER,
+    SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
     load_subblock_summary,
     load_subblock_summary_artifact_payload,
+    validate_summary_information_scale,
 )
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
+from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.obs_subblock_cli import (
+    REFERENCE_EARLY_STOPPING_FLAG_MAP,
+    REFERENCE_OPTIMIZER_FLAG_MAP,
+    REFERENCE_PRECONDITIONING_FLAG_MAP,
+    REFERENCE_SCHEDULE_FLAG_MAP,
+    SCHUR_FRAME_QUALITY_FLAG_MAP,
+    append_reference_optimizer_flags,
+    append_schur_frame_quality_flags,
+)
 from dluxshera.utils.obs_subblock_keys import (
     parse_obs_subblock_key_address,
 )
+from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.noise import make_subseed
+from dluxshera.utils.subprocess_diagnostics import run_subprocess_with_diagnostics
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -102,26 +116,14 @@ ZERNIKE_THETA_LABEL_PATTERN = re.compile(
     r"^optics\.(primary|secondary)\.zernike_coeffs_nm\[(\d+)\]$"
 )
 SUBBLOCK_OPTION_FLAG_MAP = {
+    "summary_information_scale": "--summary-information-scale",
     "exposure_time_s": "--exposure-time-s",
-    "reference_diagnostics_profile": "--reference-diagnostics-profile",
-    "schur_frame_quality_policy": "--schur-frame-quality-policy",
-    "schur_frame_chi2_threshold": "--schur-frame-chi2-threshold",
-    "schur_frame_quality_missing": "--schur-frame-quality-missing",
-    "schur_frame_mask_denominator": "--schur-frame-mask-denominator",
-    "schur_frame_mask_min_good_frames": "--schur-frame-mask-min-good-frames",
-    "reference_optimizer_kind": "--reference-optimizer-kind",
-    "reference_base_lr": "--reference-base-lr",
-    "reference_n_iter": "--reference-n-iter",
-    "reference_schedule_kind": "--reference-schedule-kind",
-    "reference_schedule_warmup_steps": "--reference-schedule-warmup-steps",
-    "reference_schedule_start_factor": "--reference-schedule-start-factor",
-    "reference_preconditioning_method": "--reference-preconditioning-method",
-    "reference_preconditioning_reference": "--reference-preconditioning-reference",
-    "reference_preconditioning_damping": "--reference-preconditioning-damping",
-    "reference_preconditioning_eig_floor_rel": "--reference-preconditioning-eig-floor-rel",
-    "reference_preconditioning_eig_floor_abs": "--reference-preconditioning-eig-floor-abs",
-    "reference_preconditioning_lr_clip": "--reference-preconditioning-lr-clip",
     "variance_floor": "--variance-floor",
+    **REFERENCE_OPTIMIZER_FLAG_MAP,
+    **REFERENCE_SCHEDULE_FLAG_MAP,
+    **REFERENCE_PRECONDITIONING_FLAG_MAP,
+    **REFERENCE_EARLY_STOPPING_FLAG_MAP,
+    **SCHUR_FRAME_QUALITY_FLAG_MAP,
 }
 
 
@@ -267,6 +269,7 @@ def _default_experiment_config() -> dict[str, Any]:
             "schur_curvature_method": "auto",
             "max_dense_dim": 40,
             "schur_damping": 1.0e-8,
+            "summary_information_scale": "summed_likelihood",
         },
         "seeding": {
             "seed_policy": "different_jitter_different_noise",
@@ -614,6 +617,7 @@ def _apply_cli_overrides(experiment_cfg: dict[str, Any], args: argparse.Namespac
         ("phi_ref", "phi_ref"),
         ("max_dense_dim", "max_dense_dim"),
         ("schur_curvature_method", "schur_curvature_method"),
+        ("summary_information_scale", "summary_information_scale"),
     ):
         value = getattr(args, arg_name, None)
         if value is not None:
@@ -662,25 +666,19 @@ def _derive_subblock_seeds(
     seed_policy: str,
     base_seed: int,
 ) -> dict[str, int]:
-    if seed_policy not in SUPPORTED_SEED_POLICIES:
-        raise ValueError(f"Unsupported seed_policy: {seed_policy}")
-    token = f"{run_name}.{case_name}.subblock_{subblock_index:03d}"
-    subblock_seed = make_subseed(int(base_seed), token)
-    if seed_policy == "same_jitter_different_noise":
-        trace_seed = make_subseed(int(base_seed), f"{run_name}.{case_name}.shared_trace")
-        noise_seed = make_subseed(int(base_seed), f"{token}.noise")
-    elif seed_policy == "different_jitter_same_noise":
-        trace_seed = make_subseed(int(base_seed), f"{token}.trace")
-        noise_seed = make_subseed(int(base_seed), f"{run_name}.{case_name}.shared_noise")
-    else:
-        trace_seed = make_subseed(int(base_seed), f"{token}.trace")
-        noise_seed = make_subseed(int(base_seed), f"{token}.noise")
+    derived = derive_campaign_subblock_seeds(
+        base_seed=int(base_seed),
+        seed_policy=str(seed_policy),
+        campaign_token=str(run_name),
+        case_token=str(case_name),
+        subblock_index=int(subblock_index),
+    )
     return {
-        "seed_policy": seed_policy,
-        "base_seed": int(base_seed),
-        "subblock_seed": int(subblock_seed),
-        "trace_seed": int(trace_seed),
-        "noise_seed": int(noise_seed),
+        "seed_policy": derived.policy,
+        "base_seed": int(derived.base_seed),
+        "subblock_seed": int(derived.subblock_seed),
+        "trace_seed": int(derived.trace_seed),
+        "noise_seed": int(derived.noise_seed),
     }
 
 
@@ -985,6 +983,12 @@ def resolve_subblock_command_options(
             key="reference_diagnostics_profile",
             choices=SUPPORTED_REFERENCE_DIAGNOSTICS_PROFILES,
         )
+    if subblock_cfg.get("summary_information_scale") is not None:
+        options["summary_information_scale"] = _validate_choice(
+            subblock_cfg["summary_information_scale"],
+            key="summary_information_scale",
+            choices=("summed_likelihood", "optimizer"),
+        )
     if subblock_cfg.get("schur_frame_quality_policy") is not None:
         options["schur_frame_quality_policy"] = _validate_choice(
             subblock_cfg["schur_frame_quality_policy"],
@@ -1020,28 +1024,53 @@ def resolve_subblock_command_options(
         "reference_optimizer_kind",
         "reference_base_lr",
         "reference_n_iter",
+        "reference_optimizer_kwargs",
         "reference_schedule_kind",
         "reference_schedule_warmup_steps",
         "reference_schedule_start_factor",
+        "reference_schedule_min_factor",
+        "reference_schedule_boundaries",
+        "reference_schedule_factors",
+        "reference_schedule_decay_rate",
+        "reference_schedule_transition_steps",
+        "reference_schedule_staircase",
         "reference_preconditioning_method",
         "reference_preconditioning_reference",
         "reference_preconditioning_damping",
         "reference_preconditioning_eig_floor_rel",
         "reference_preconditioning_eig_floor_abs",
         "reference_preconditioning_lr_clip",
+        "reference_early_stopping_min_iter",
+        "reference_early_stopping_patience",
+        "reference_early_stopping_loss_rtol",
+        "reference_early_stopping_loss_atol",
+        "reference_early_stopping_step_atol",
+        "reference_early_stopping_grad_norm_atol",
         "variance_floor",
     )
     for key in optional_keys:
         if subblock_cfg.get(key) is not None:
             value = subblock_cfg[key]
-            if key == "reference_n_iter" or key == "reference_schedule_warmup_steps":
+            if key in {
+                "reference_n_iter",
+                "reference_schedule_warmup_steps",
+                "reference_schedule_transition_steps",
+                "reference_early_stopping_min_iter",
+                "reference_early_stopping_patience",
+            }:
                 value = int(value)
             elif key in {
                 "reference_base_lr",
                 "reference_schedule_start_factor",
+                "reference_schedule_min_factor",
+                "reference_schedule_decay_rate",
                 "reference_preconditioning_damping",
                 "reference_preconditioning_eig_floor_rel",
                 "reference_preconditioning_eig_floor_abs",
+                "reference_early_stopping_loss_rtol",
+                "reference_early_stopping_loss_atol",
+                "reference_early_stopping_step_atol",
+                "reference_early_stopping_grad_norm_atol",
                 "variance_floor",
             }:
                 value = float(value)
@@ -1049,6 +1078,10 @@ def resolve_subblock_command_options(
     if subblock_cfg.get("reference_preconditioning_enabled") is not None:
         options["reference_preconditioning_enabled"] = bool(
             subblock_cfg["reference_preconditioning_enabled"]
+        )
+    if subblock_cfg.get("reference_early_stopping_enabled") is not None:
+        options["reference_early_stopping_enabled"] = bool(
+            subblock_cfg["reference_early_stopping_enabled"]
         )
     forwarded_flags = [
         SUBBLOCK_OPTION_FLAG_MAP[key]
@@ -1061,6 +1094,8 @@ def resolve_subblock_command_options(
             if options["reference_preconditioning_enabled"]
             else "--reference-preconditioning-disabled"
         )
+    if options.get("reference_early_stopping_enabled") is True:
+        forwarded_flags.append("--reference-early-stopping")
     options["forwarded_flags"] = forwarded_flags
     return options
 
@@ -1123,14 +1158,18 @@ def build_subblock_command(
         )
     command_options = resolve_subblock_command_options(subblock_cfg)
     for key, flag in SUBBLOCK_OPTION_FLAG_MAP.items():
+        if key in {
+            *REFERENCE_OPTIMIZER_FLAG_MAP,
+            *REFERENCE_SCHEDULE_FLAG_MAP,
+            *REFERENCE_PRECONDITIONING_FLAG_MAP,
+            *REFERENCE_EARLY_STOPPING_FLAG_MAP,
+            *SCHUR_FRAME_QUALITY_FLAG_MAP,
+        }:
+            continue
         if key in command_options:
             command.extend([flag, _format_cli_value(command_options[key])])
-    if "reference_preconditioning_enabled" in command_options:
-        command.append(
-            "--reference-preconditioning-enabled"
-            if command_options["reference_preconditioning_enabled"]
-            else "--reference-preconditioning-disabled"
-        )
+    append_reference_optimizer_flags(command, command_options)
+    append_schur_frame_quality_flags(command, command_options)
     return command
 
 
@@ -1369,17 +1408,6 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
     }
 
 
-def _run_command(command: Sequence[str], *, env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(command),
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=dict(env),
-    )
-
-
 def execute_subblocks(
     plan: CampaignPlan,
     *,
@@ -1387,6 +1415,7 @@ def execute_subblocks(
     max_workers: int,
     fail_fast: bool,
     quiet: bool,
+    resource_time: bool,
 ) -> None:
     env = os.environ.copy()
     src_path = str(REPO_ROOT / "src")
@@ -1400,34 +1429,97 @@ def execute_subblocks(
     if not jobs:
         return
 
-    def _job(item: tuple[str, Path, list[str]]) -> tuple[str, Path, subprocess.CompletedProcess[str]]:
+    status_rows: list[dict[str, Any]] = []
+
+    def _job(item: tuple[str, Path, list[str]]) -> tuple[str, Path, dict[str, Any]]:
         case_name, summary_path, command = item
-        result = _run_command(command, env=env)
-        return case_name, summary_path, result
+        case_root = summary_path.parent.parent
+        diagnostics_path = case_root / "subprocess_diagnostics.json"
+        diag = run_subprocess_with_diagnostics(
+            command=command,
+            cwd=REPO_ROOT,
+            env=dict(env),
+            stdout_log=case_root / "subprocess.stdout.log",
+            stderr_log=case_root / "subprocess.stderr.log",
+            diagnostics_json=diagnostics_path,
+            resource_time=resource_time,
+        )
+        return case_name, summary_path, {
+            "case_name": case_name,
+            "summary_path": str(summary_path),
+            "status": "ok" if int(diag.return_code) == 0 else "failed",
+            "return_code": int(diag.return_code),
+            "failure_class": diag.failure_class,
+            "failure_hint": diag.failure_hint,
+            "subprocess_diagnostics_path": str(diagnostics_path),
+            "stdout_log": str(diag.stdout_log),
+            "stderr_log": str(diag.stderr_log),
+            "last_stderr_line": diag.last_stderr_line,
+            "resource_time_maximum_resident_set_mb": diag.resource_time.get(
+                "maximum_resident_set_mb"
+            ),
+            "resource_time_mode_effective": diag.resource_time.get(
+                "resource_time_mode_effective",
+                diag.resource_time.get("mode_effective"),
+            ),
+            "stderr_tail": "\n".join(diag.stderr_tail),
+        }
+
+    def _record(row: Mapping[str, Any]) -> None:
+        status_rows.append(dict(row))
+        _write_csv_rows(plan.run_root / "subblock_status.csv", status_rows)
+        _write_csv_rows(plan.run_root / "memory_failure_summary.csv", status_rows)
+        failed = sum(item.get("status") == "failed" for item in status_rows)
+        _write_json(
+            plan.run_root / "progress.json",
+            {
+                "schema_version": "observation_bias_campaign_progress.v1",
+                "updated_at": now_iso_local_ms(),
+                "run_root": str(plan.run_root),
+                "total_subblocks_planned": len(jobs),
+                "completed_count": len(status_rows),
+                "failed_count": int(failed),
+                "pending_count": len(jobs) - len(status_rows),
+                "last_completed": dict(row),
+            },
+        )
+
+    def _raise_for_failure(row: Mapping[str, Any]) -> None:
+        if int(row.get("return_code", 0)) == 0:
+            return
+        raise RuntimeError(
+            f"Subprocess failed ({row['return_code']}) for {row['summary_path']}: "
+            f"{row['subprocess_diagnostics_path']}\nchild stderr tail:\n"
+            f"{row.get('stderr_tail') or '<empty>'}"
+        )
 
     if max_workers <= 1:
         for job in jobs:
             try:
-                case_name, summary_path, _ = _job(job)
+                case_name, summary_path, row = _job(job)
+                _record(row)
+                _raise_for_failure(row)
                 if not quiet:
                     print(f"[observation_bias_campaign] completed {case_name}: {summary_path}", flush=True)
-            except subprocess.CalledProcessError as exc:
+            except RuntimeError as exc:
                 if fail_fast:
-                    raise RuntimeError(exc.stderr or str(exc)) from exc
-                print(exc.stderr or str(exc), file=sys.stderr, flush=True)
+                    raise RuntimeError(str(exc)) from exc
+                print(str(exc), file=sys.stderr, flush=True)
         return
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_job = {pool.submit(_job, job): job for job in jobs}
         for future in as_completed(future_to_job):
             try:
-                case_name, summary_path, _ = future.result()
+                case_name, summary_path, row = future.result()
+                _record(row)
+                _raise_for_failure(row)
                 if not quiet:
                     print(f"[observation_bias_campaign] completed {case_name}: {summary_path}", flush=True)
-            except subprocess.CalledProcessError as exc:
+            except RuntimeError as exc:
                 if fail_fast:
-                    raise RuntimeError(exc.stderr or str(exc)) from exc
-                print(exc.stderr or str(exc), file=sys.stderr, flush=True)
+                    raise RuntimeError(str(exc)) from exc
+                print(str(exc), file=sys.stderr, flush=True)
 
 
 def _flatten_subblock_plan_rows(plan: CampaignPlan) -> list[dict[str, Any]]:
@@ -1466,7 +1558,11 @@ def _bias_case_rows(plan: CampaignPlan) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_case_summaries(paths: Sequence[Path]) -> list[SubblockSummary]:
+def _load_case_summaries(
+    paths: Sequence[Path],
+    *,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+) -> tuple[list[SubblockSummary], dict[str, Any]]:
     missing = [path for path in paths if not path.exists()]
     if missing:
         raise FileNotFoundError(
@@ -1479,7 +1575,12 @@ def _load_case_summaries(paths: Sequence[Path]) -> list[SubblockSummary]:
             raise ValueError(
                 f"Summary {index} labels differ from the first summary for this case."
             )
-    return summaries
+    summary_scale_validation = validate_summary_information_scale(
+        [load_subblock_summary_artifact_payload(path) for path in paths],
+        policy=summary_scale_policy,
+        summary_paths=paths,
+    )
+    return summaries, summary_scale_validation
 
 
 def _truth_reference_maps(
@@ -2492,11 +2593,15 @@ def aggregate_case(
     plan: CampaignPlan,
     case: BiasCase,
     prior_source: str,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
 ) -> dict[str, Any]:
     case_root = plan.run_root / "cases" / case.case_name
     _ensure_dir(case_root)
     summary_paths = plan.summary_paths[case.case_name]
-    summaries = _load_case_summaries(summary_paths)
+    summaries, summary_scale_validation = _load_case_summaries(
+        summary_paths,
+        summary_scale_policy=summary_scale_policy,
+    )
     summary_reference_mean = np.asarray(summaries[0].theta_ref, dtype=float)
     use_case_prior = bool(case.prior_sigma_by_label)
     if use_case_prior:
@@ -2673,6 +2778,7 @@ def aggregate_case(
             "warnings": prior_warnings,
             "prior_sigma_source": prior_sigma_source,
         },
+        "summary_scale_validation": summary_scale_validation,
     }
     _write_json(case_root / "observation_update_summary.json", update_summary)
     case_manifest = {
@@ -2697,6 +2803,7 @@ def aggregate_case(
         "layout_metadata": plan.layout_metadata,
         "state_partition": plan.partition,
         "summary_paths": [str(path) for path in summary_paths],
+        "summary_scale_validation": summary_scale_validation,
         "subblock_plan": list(plan.subblock_plans.get(case.case_name, [])),
         "planned_commands": [" ".join(command) for command in plan.subblock_commands[case.case_name]],
         "outputs": {
@@ -2750,6 +2857,7 @@ def aggregate_case(
             "forecast_information_diagnostics"
         ],
         "forecast_summary": forecast_payload["forecast_summary"],
+        "summary_scale_validation": summary_scale_validation,
     }
 
 
@@ -2859,7 +2967,13 @@ def aggregate_campaign(
     plan: CampaignPlan,
     *,
     prior_source: str,
+    allow_optimizer_scale_summaries: bool = False,
 ) -> dict[str, Any]:
+    summary_scale_policy = (
+        SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
+        if allow_optimizer_scale_summaries
+        else SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+    )
     all_posterior_rows: list[dict[str, Any]] = []
     all_science_rows: list[dict[str, Any]] = []
     all_eigenvalues_by_source: dict[str, list[dict[str, Any]]] = {}
@@ -2872,7 +2986,12 @@ def aggregate_campaign(
     all_subblock_plan_rows = _flatten_subblock_plan_rows(plan)
     case_payloads: list[dict[str, Any]] = []
     for case in plan.cases:
-        payload = aggregate_case(plan=plan, case=case, prior_source=prior_source)
+        payload = aggregate_case(
+            plan=plan,
+            case=case,
+            prior_source=prior_source,
+            summary_scale_policy=summary_scale_policy,
+        )
         case_payloads.append(payload)
         all_posterior_rows.extend(payload["posterior_rows"])
         all_science_rows.append(payload["science"])
@@ -2961,11 +3080,13 @@ def aggregate_campaign(
         "eigen_sources": list(sources),
         "truth_realization": dict(plan.truth_realization),
         "forecast": forecast_summary,
+        "summary_scale_policy": summary_scale_policy,
         "case_outputs": [
             {
                 "case_name": payload["case_name"],
                 "case_root": payload["case_root"],
                 "science": payload["science"],
+                "summary_scale_validation": payload["summary_scale_validation"],
             }
             for payload in case_payloads
         ],
@@ -2987,6 +3108,8 @@ def run_observation_bias_campaign(
     quiet: bool = False,
     system_preset: str | None = None,
     prior_source: str = "summary_theta_ref",
+    allow_optimizer_scale_summaries: bool = False,
+    resource_time: bool = True,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     plan = build_campaign_plan(
@@ -2996,14 +3119,58 @@ def run_observation_bias_campaign(
         system_preset=system_preset,
         args=args,
     )
+    skip_plan_rewrite = False
+    if aggregate_only:
+        stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
+        if stored_plan is not None:
+            skip_plan_rewrite = True
+            stored_paths = stored_plan.get("summary_paths")
+            if isinstance(stored_paths, Mapping):
+                expected_cases = set(plan.summary_paths.keys())
+                stored_cases = set(str(k) for k in stored_paths.keys())
+                if expected_cases != stored_cases:
+                    raise ValueError(
+                        "Aggregate-only found an existing campaign_plan.json with a different case set. "
+                        "Use the same run shape (or regenerate the run root) before aggregating."
+                    )
+                summary_paths = {
+                    str(case): [Path(str(path)) for path in paths]
+                    for case, paths in stored_paths.items()
+                    if isinstance(paths, list)
+                }
+                subblock_commands_payload = stored_plan.get("subblock_commands")
+                if isinstance(subblock_commands_payload, Mapping):
+                    subblock_commands = {
+                        str(case): [str(command).split(" ") for command in commands]
+                        for case, commands in subblock_commands_payload.items()
+                        if isinstance(commands, list)
+                    }
+                else:
+                    subblock_commands = plan.subblock_commands
+                subblock_plan_payload = stored_plan.get("subblock_plan")
+                if isinstance(subblock_plan_payload, Mapping):
+                    subblock_plans = {
+                        str(case): list(rows)
+                        for case, rows in subblock_plan_payload.items()
+                        if isinstance(rows, list)
+                    }
+                else:
+                    subblock_plans = plan.subblock_plans
+                plan = replace(
+                    plan,
+                    summary_paths=summary_paths,
+                    subblock_commands=subblock_commands,
+                    subblock_plans=subblock_plans,
+                )
     _ensure_dir(plan.run_root)
-    _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
-    _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
-    _write_csv_rows(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
-    _write_json(plan.run_root / "resolved_config.json", plan.config)
-    _write_csv_rows(plan.run_root / "subblock_plan.csv", _flatten_subblock_plan_rows(plan))
-    _write_csv_rows(plan.run_root / "bias_cases.csv", _bias_case_rows(plan))
-    _write_csv_rows(plan.run_root / "prior_draws.csv", _flatten_prior_draw_rows(plan))
+    if not skip_plan_rewrite:
+        _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
+        _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
+        _write_csv_rows(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
+        _write_json(plan.run_root / "resolved_config.json", plan.config)
+        _write_csv_rows(plan.run_root / "subblock_plan.csv", _flatten_subblock_plan_rows(plan))
+        _write_csv_rows(plan.run_root / "bias_cases.csv", _bias_case_rows(plan))
+        _write_csv_rows(plan.run_root / "prior_draws.csv", _flatten_prior_draw_rows(plan))
     if dry_run:
         payload = _plan_payload(plan)
         if not quiet:
@@ -3016,8 +3183,13 @@ def run_observation_bias_campaign(
             max_workers=max(1, int(max_workers)),
             fail_fast=fail_fast,
             quiet=quiet,
+            resource_time=bool(resource_time),
         )
-    return aggregate_campaign(plan, prior_source=prior_source)
+    return aggregate_campaign(
+        plan,
+        prior_source=prior_source,
+        allow_optimizer_scale_summaries=allow_optimizer_scale_summaries,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -3037,8 +3209,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phi-ref", choices=("truth_when_available", "recovered"), default=None)
     parser.add_argument("--max-dense-dim", type=int, default=None)
     parser.add_argument("--schur-curvature-method", choices=("auto", "dense", "structured_independent_frames"), default=None)
+    parser.add_argument(
+        "--summary-information-scale",
+        choices=("summed_likelihood", "optimizer"),
+        default=None,
+    )
+    parser.add_argument(
+        "--allow-optimizer-scale-summaries",
+        action="store_true",
+        help="Allow legacy/debug optimizer-scale or unclassified real summaries.",
+    )
     parser.add_argument("--seed-policy", choices=SUPPORTED_SEED_POLICIES, default=None)
     parser.add_argument("--base-seed", type=int, default=None)
+    parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
+    parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")
     parser.add_argument("--system-preset", default=None)
     parser.add_argument(
         "--prior-source",
@@ -3063,6 +3247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         quiet=bool(args.quiet),
         system_preset=args.system_preset,
         prior_source=str(args.prior_source),
+        allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
+        resource_time=True if args.resource_time is None else bool(args.resource_time),
         args=args,
     )
     return 0

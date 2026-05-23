@@ -181,3 +181,22 @@ def test_structured_schur_reduction_supports_frame_mask_and_scale():
     )
     with pytest.raises(ValueError, match="at least one frame"):
         schur_reduce_independent_frame_blocks(blocks, frame_indices=[])
+
+
+def test_summed_likelihood_structured_information_scales_from_mean_export():
+    n_frames = 4
+    summed, _ = _frame_quadratic_case(n_frames=n_frames, reduce="sum")
+    optimizer_mean, _ = _frame_quadratic_case(n_frames=n_frames, reduce="mean")
+
+    np.testing.assert_allclose(
+        summed.reduced_information,
+        float(n_frames) * optimizer_mean.reduced_information,
+        rtol=1.0e-8,
+        atol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        summed.reduced_score,
+        float(n_frames) * optimizer_mean.reduced_score,
+        rtol=1.0e-8,
+        atol=1.0e-8,
+    )

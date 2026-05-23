@@ -14,9 +14,12 @@ from dluxshera.inference.observation_belief import (
 from dluxshera.inference.observation_summary import (
     ImageBackedSubblockSummaryArtifact,
     build_combined_local_parameter_layout,
+    get_summary_information_accounting,
+    get_summary_information_scale,
     load_subblock_summary,
     partition_local_curvature,
     schur_reduce_local_quadratic,
+    validate_summary_information_scale,
 )
 
 
@@ -34,6 +37,70 @@ def test_build_combined_local_parameter_layout_is_deterministic():
         "phi.frame[0].source.x_position_as",
         "phi.frame[0].source.y_position_as",
     )
+
+
+def _summary_payload_with_scale(scale: str | None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "image_backed_subblock_summary.v1",
+        "subblock_id": "test",
+    }
+    if scale is not None:
+        payload["information_accounting"] = {
+            "summary_information_scale": scale,
+            "summary_frame_reduce": "sum",
+            "summary_subblock_reduce": "sum" if scale == "summed_likelihood" else "mean",
+        }
+    return payload
+
+
+def test_summary_information_scale_validation_requires_summed_artifacts():
+    payload = _summary_payload_with_scale("summed_likelihood")
+
+    assert get_summary_information_scale(payload) == "summed_likelihood"
+    assert get_summary_information_accounting(payload)["summary_subblock_reduce"] == "sum"
+    validation = validate_summary_information_scale(payload)
+
+    assert validation["accepted_summary_information_scale"] == "summed_likelihood"
+    assert validation["summary_scale_policy"] == "require_summed"
+    assert validation["override_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("payloads", "match"),
+    [
+        ([_summary_payload_with_scale("optimizer")], "optimizer"),
+        ([_summary_payload_with_scale(None)], "information-accounting"),
+        (
+            [
+                _summary_payload_with_scale("summed_likelihood"),
+                _summary_payload_with_scale("optimizer"),
+            ],
+            "optimizer",
+        ),
+    ],
+)
+def test_summary_information_scale_validation_rejects_untrusted_units(
+    payloads: list[dict[str, object]],
+    match: str,
+):
+    with pytest.raises(ValueError, match=match):
+        validate_summary_information_scale(payloads)
+
+
+def test_summary_information_scale_validation_records_explicit_override():
+    validation = validate_summary_information_scale(
+        [_summary_payload_with_scale("optimizer"), _summary_payload_with_scale(None)],
+        policy="allow_optimizer",
+        summary_paths=("optimizer.json", "legacy.json"),
+    )
+
+    assert validation["accepted_summary_information_scale"] == "mixed"
+    assert validation["override_used"] is True
+    assert [item["summary_information_scale"] for item in validation["input_summaries"]] == [
+        "optimizer",
+        "unknown",
+    ]
+    assert validation["warnings"]
 
 
 def test_partition_local_curvature_returns_expected_shapes():
