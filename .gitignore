@@ -210,6 +210,7 @@ src/dluxshera/data/pixel_offsets/*.png
 src/dluxshera/data/pixel_response/*.png
 src/dluxshera/data/pupils/*.png
 src/dluxshera/data/airbus_data
+examples/notebooks/airbus*
 
 # Mac folder files
 *.DS_Store
