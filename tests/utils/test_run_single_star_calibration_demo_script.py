@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import csv
 import json
 import sys
 from pathlib import Path
@@ -106,6 +107,67 @@ def write_config(path: Path) -> None:
         }
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def write_truth_realization_config(
+    path: Path,
+    *,
+    primary_sigma_nm: float,
+    secondary_sigma_nm: float,
+    n_cases: int = 1,
+    draw_scale: float = 1.0,
+) -> None:
+    write_config(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["experiment"]["case_generation"].update(
+        {
+            "mode": "prior_draw",
+            "n_cases": int(n_cases),
+            "seed": 123,
+            "draw_scale": float(draw_scale),
+            "include_zero_bias_case": True,
+        }
+    )
+    payload["experiment"]["prior"]["sigma"].update(
+        {
+            "optics.primary.zernike_coeffs_nm[*]": {
+                "kind": "absolute",
+                "sigma": 0.01,
+                "unit": "nm",
+            },
+            "optics.secondary.zernike_coeffs_nm[*]": {
+                "kind": "absolute",
+                "sigma": 0.01,
+                "unit": "nm",
+            },
+        }
+    )
+    payload["experiment"]["truth_realization"] = {
+        "enabled": True,
+        "seed": 20260727,
+        "mode": "zernike_per_coefficient_sigma",
+        "combine_with_system_truth": False,
+        "zernikes": {
+            "primary": {
+                "enabled": True,
+                "indices": "from_observation_theta",
+                "mean_nm": 0.0,
+                "sigma_nm": float(primary_sigma_nm),
+            },
+            "secondary": {
+                "enabled": True,
+                "indices": "from_observation_theta",
+                "mean_nm": 0.0,
+                "sigma_nm": float(secondary_sigma_nm),
+            },
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def write_summary(path: Path, labels: tuple[str, ...], theta_ref: np.ndarray, truth: np.ndarray) -> None:
@@ -216,6 +278,140 @@ def test_prior_draw_cases_are_reproducible_and_zero_bias_is_zero(tmp_path: Path)
         for label, value in draw_a.theta_reference_offsets.items()
         if "zernike_coeffs_nm" in label
     )
+
+
+def test_truth_realization_config_builds_nonzero_render_truth(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "truth.json"
+    write_truth_realization_config(
+        config_path,
+        primary_sigma_nm=0.3,
+        secondary_sigma_nm=0.0,
+    )
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="truth_case",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    assert plan.truth_realization["enabled"] is True
+    rows = plan.truth_realization_rows
+    primary = [row for row in rows if row["mirror"] == "primary"]
+    secondary = [row for row in rows if row["mirror"] == "secondary"]
+    assert primary
+    assert any(abs(float(row["truth_offset"])) > 0.0 for row in primary)
+    assert secondary
+    assert all(float(row["truth_offset"]) == pytest.approx(0.0) for row in secondary)
+    truth_by_label = {
+        label: float(plan.truth_vector[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+    assert truth_by_label["optics.primary.zernike_coeffs_nm[0]"] == pytest.approx(
+        float(primary[0]["realized_truth_value"])
+    )
+    assert plan.system_cfg["optics"]["primary"]["zernike_coeffs_nm"][0] == pytest.approx(
+        truth_by_label["optics.primary.zernike_coeffs_nm[0]"]
+    )
+    render_payload = json.loads(
+        (plan.run_root / "templates" / "render_template.json").read_text(encoding="utf-8")
+    )
+    assert render_payload["system"]["optics"]["primary"]["zernike_coeffs_nm"][0] == pytest.approx(
+        truth_by_label["optics.primary.zernike_coeffs_nm[0]"]
+    )
+
+
+def test_truth_realization_zero_sigma_control_writes_zero_offsets(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "zero_truth.json"
+    write_truth_realization_config(
+        config_path,
+        primary_sigma_nm=0.0,
+        secondary_sigma_nm=0.0,
+    )
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="zero_truth",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    assert plan.truth_realization_rows
+    assert all(
+        float(row["truth_offset"]) == pytest.approx(0.0)
+        for row in plan.truth_realization_rows
+    )
+
+
+def test_truth_realization_prior_draws_are_centered_on_realized_truth(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "truth_prior.json"
+    write_truth_realization_config(
+        config_path,
+        primary_sigma_nm=0.3,
+        secondary_sigma_nm=0.0,
+        draw_scale=1.0,
+    )
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="truth_prior",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    truth_by_label = {
+        label: float(plan.truth_vector[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+    zero = next(case for case in plan.cases if case.case_origin == "zero_bias")
+    assert zero.theta_reference_offsets == {}
+    primary_label = "optics.primary.zernike_coeffs_nm[0]"
+    primary_draw = next(
+        row for row in plan.prior_draw_rows if row["theta_label"] == primary_label
+    )
+    assert float(primary_draw["truth_value"]) == pytest.approx(truth_by_label[primary_label])
+    assert float(primary_draw["reference_value"]) == pytest.approx(
+        truth_by_label[primary_label] + float(primary_draw["theta_reference_offset"])
+    )
+    assert float(primary_draw["truth_value"]) != pytest.approx(0.0)
+    draw_case = next(case for case in plan.cases if case.case_origin == "prior_draw")
+    command = " ".join(plan.subblock_commands[draw_case.case_name][0])
+    assert f"--theta-reference-offset {primary_label}=" in command
+    zero_command = " ".join(plan.subblock_commands[zero.case_name][0])
+    assert "--theta-reference-offset" not in zero_command
+    assert "--trace-jitter-pa-sigma-deg" not in zero_command
+
+
+def test_truth_realization_dry_run_writes_artifacts(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "truth_dry.json"
+    write_truth_realization_config(
+        config_path,
+        primary_sigma_nm=0.3,
+        secondary_sigma_nm=0.0,
+    )
+    payload = module.main(
+        [
+            "--config",
+            str(config_path),
+            "--results-root",
+            str(tmp_path),
+            "--run-name",
+            "truth_dry",
+            "--dry-run",
+            "--quiet",
+        ]
+    )
+    run_root = Path(payload["run_root"])
+    for name in [
+        "campaign_plan.json",
+        "resolved_config.json",
+        "calibration_cases.csv",
+        "prior_draws.csv",
+        "subblock_plan.csv",
+        "truth_realization_by_label.csv",
+    ]:
+        assert (run_root / name).exists()
+    truth_rows = _read_csv(run_root / "truth_realization_by_label.csv")
+    assert any(row["mirror"] == "primary" for row in truth_rows)
+    assert any(abs(float(row["truth_offset"])) > 0.0 for row in truth_rows)
 
 
 def test_command_construction_uses_single_star_schur_summary(tmp_path: Path) -> None:

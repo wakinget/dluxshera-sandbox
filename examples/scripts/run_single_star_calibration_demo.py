@@ -66,6 +66,10 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.campaign_truth import (
+    apply_truth_overrides_to_system_config,
+    realize_campaign_truth,
+)
 from dluxshera.utils.noise import make_subseed
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 from dluxshera.utils.obs_subblock_cli import (
@@ -121,6 +125,8 @@ class CalibrationPlan:
     subblock_commands: dict[str, list[list[str]]]
     subblock_rows: list[dict[str, Any]]
     prior_draw_rows: list[dict[str, Any]]
+    truth_realization: dict[str, Any]
+    truth_realization_rows: list[dict[str, Any]]
     status_rows: list[dict[str, Any]]
     case_scheduling: str = "grouped"
 
@@ -857,8 +863,24 @@ def build_calibration_plan(
         raise ValueError("Single-star calibration theta must not include separation or contrast.")
     metadata["system"] = source_provenance
     metadata["resolved_system"] = system_cfg
-    truth_vector = build_prior_mean_from_store(layout.labels, store=store)
-    truth_by_label = {label: float(truth_vector[i]) for i, label in enumerate(layout.labels)}
+    base_truth_vector = build_prior_mean_from_store(layout.labels, store=store)
+    base_truth_by_label = {
+        label: float(base_truth_vector[i]) for i, label in enumerate(layout.labels)
+    }
+    truth_realization = realize_campaign_truth(
+        experiment_cfg=experiment_cfg,
+        labels=layout.labels,
+        base_truth_by_label=base_truth_by_label,
+    )
+    truth_by_label = dict(base_truth_by_label)
+    truth_by_label.update(truth_realization.truth_overrides_by_label)
+    truth_vector = np.asarray([truth_by_label[label] for label in layout.labels], dtype=float)
+    if truth_realization.truth_overrides_by_label:
+        system_cfg = apply_truth_overrides_to_system_config(
+            system_cfg,
+            truth_realization.truth_overrides_by_label,
+        )
+        metadata["resolved_system"] = system_cfg
     cases, prior_draw_rows = generate_calibration_cases(
         experiment_cfg=experiment_cfg,
         labels=layout.labels,
@@ -945,6 +967,9 @@ def build_calibration_plan(
                 }
             )
     resolved_config = {"experiment": experiment_cfg, "system": system_cfg}
+    resolved_config["experiment"]["truth_realization_summary"] = dict(
+        truth_realization.summary
+    )
     return CalibrationPlan(
         run_root=run_root,
         layout=layout,
@@ -957,6 +982,8 @@ def build_calibration_plan(
         subblock_commands=commands,
         subblock_rows=rows,
         prior_draw_rows=prior_draw_rows,
+        truth_realization=dict(truth_realization.summary),
+        truth_realization_rows=list(truth_realization.rows),
         status_rows=[],
         case_scheduling=str(experiment_cfg.get("case_scheduling", "grouped")),
     )
@@ -984,6 +1011,7 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
         "observation_theta_labels": list(plan.layout.labels),
         "theta_layout": plan.layout.to_dict(),
         "layout_metadata": plan.layout_metadata,
+        "truth_realization": dict(plan.truth_realization),
         "n_cases": len(plan.cases),
         "case_scheduling": plan.case_scheduling,
         "n_subblocks": int(plan.config["experiment"].get("subblocks", {}).get("n_subblocks", 3)),
@@ -1012,6 +1040,8 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
 def write_plan_artifacts(plan: CalibrationPlan) -> None:
     _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
     _write_json(plan.run_root / "resolved_config.json", plan.config)
+    _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
+    _write_csv(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
     _write_csv(plan.run_root / "subblock_plan.csv", plan.subblock_rows)
     _write_csv(
         plan.run_root / "calibration_cases.csv",
