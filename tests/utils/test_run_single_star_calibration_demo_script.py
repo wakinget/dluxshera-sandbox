@@ -269,6 +269,13 @@ def test_cli_accepts_memory_diagnostics_flag() -> None:
     assert bool(args.memory_diagnostics) is True
 
 
+def test_cli_accepts_no_resource_time_dry_run() -> None:
+    module = load_module()
+    args = module._build_parser().parse_args(["--no-resource-time", "--dry-run"])
+    assert args.resource_time is False
+    assert args.dry_run is True
+
+
 def test_plan_forwards_memory_diagnostics_to_subblock_commands(tmp_path: Path) -> None:
     module = load_module()
     config_path = tmp_path / "config.json"

@@ -29,7 +29,6 @@ import json
 import math
 import os
 import shlex
-import subprocess
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -49,6 +48,10 @@ from dluxshera.inference.observation_summary import (
 from dluxshera.inference.schedules import validate_optimizer_schedule_config
 from dluxshera.utils.noise import make_subseed
 from dluxshera.utils.obs_subblock_cli import append_reference_optimizer_flags
+from dluxshera.utils.subprocess_diagnostics import (
+    require_resource_time_available,
+    run_subprocess_with_diagnostics,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -207,6 +210,7 @@ class MonteCarloRunConfig:
     progress_interval_s: float = 30.0
     tail_lines: int = 1
     memory_diagnostics: bool = False
+    resource_time: bool | str | None = None
     profile_runtime: bool = False
     profile_runtime_detail: str = "basic"
     memory_progress_tail_lines: int = 3
@@ -1170,6 +1174,7 @@ def run_trial_subprocess(
     command: Sequence[str],
     *,
     resume: bool = False,
+    resource_time: bool | str | None = None,
 ) -> MonteCarloTrialResult:
     """Execute one trial command and capture per-trial logs."""
 
@@ -1185,31 +1190,23 @@ def run_trial_subprocess(
             matrix_npz_path=spec.expected_matrix_npz if spec.expected_matrix_npz.exists() else None,
         )
 
-    spec.stdout_log.parent.mkdir(parents=True, exist_ok=True)
-    spec.stderr_log.parent.mkdir(parents=True, exist_ok=True)
-    started = now_iso_utc()
-    t0 = time.monotonic()
-    with spec.stdout_log.open("w", encoding="utf-8") as stdout, spec.stderr_log.open(
-        "w",
-        encoding="utf-8",
-    ) as stderr:
-        env = dict(os.environ)
-        src_path = str(REPO_ROOT / "src")
-        env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
-        env.setdefault("MPLCONFIGDIR", str(spec.command_path.parent.parent / "matplotlib"))
-        completed = subprocess.run(
-            [str(part) for part in command],
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
-            text=True,
-            check=False,
-        )
-    elapsed = time.monotonic() - t0
-    finished = now_iso_utc()
+    env = dict(os.environ)
+    src_path = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+    env.setdefault("MPLCONFIGDIR", str(spec.command_path.parent.parent / "matplotlib"))
+    diagnostics_json = spec.case_root / "subprocess_diagnostics.json"
+    diag = run_subprocess_with_diagnostics(
+        command=[str(part) for part in command],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout_log=spec.stdout_log,
+        stderr_log=spec.stderr_log,
+        diagnostics_json=diagnostics_json,
+        resource_time=resource_time,
+    )
+    return_code = int(diag.return_code)
     rejection_path = spec.expected_summary_json.with_name("schur_summary_rejection.json")
-    if completed.returncode != 0 and rejection_path.exists():
+    if return_code != 0 and rejection_path.exists():
         status = "rejected"
         reason = "schur_summary_rejection"
         try:
@@ -1218,26 +1215,24 @@ def run_trial_subprocess(
                 reason = str(rejection_payload["reason"])
         except Exception:
             reason = "schur_summary_rejection"
-    elif completed.returncode != 0:
+    elif return_code != 0:
         status = "failed"
-        reason = f"subprocess_return_code_{completed.returncode}"
+        reason = f"subprocess_return_code_{return_code}"
     elif not spec.expected_summary_json.exists():
         status = "rejected"
         reason = "missing_expected_summary_json"
     else:
         status = "completed"
         reason = None
-    failure_class, failure_hint = classify_subprocess_failure(
-        int(completed.returncode)
-    )
+    failure_class, failure_hint = classify_subprocess_failure(return_code)
     failure_fields = memory_failure_fields(spec=spec)
     return MonteCarloTrialResult(
         trial_id=spec.trial_id,
         status=status,
-        return_code=int(completed.returncode),
-        started_at=started,
-        finished_at=finished,
-        elapsed_seconds=float(elapsed),
+        return_code=return_code,
+        started_at=diag.started_at,
+        finished_at=diag.finished_at,
+        elapsed_seconds=float(diag.elapsed_seconds),
         summary_json_path=spec.expected_summary_json if spec.expected_summary_json.exists() else None,
         matrix_npz_path=spec.expected_matrix_npz if spec.expected_matrix_npz.exists() else None,
         failure_reason=reason,
@@ -1280,6 +1275,8 @@ def run_trial_pool(
             and valid_existing_summary(spec.expected_summary_json)
         )
     ]
+    if pending:
+        require_resource_time_available(config.resource_time)
     for spec in plan:
         if config.resume and valid_existing_summary(spec.expected_summary_json):
             results[spec.trial_id] = MonteCarloTrialResult(
@@ -1312,11 +1309,14 @@ def run_trial_pool(
     def submit_ready(pool: ThreadPoolExecutor) -> None:
         while pending_queue and len(active) < max(1, int(config.max_workers)):
             spec = pending_queue.pop(0)
+            kwargs: dict[str, Any] = {"resume": False}
+            if config.resource_time is not None:
+                kwargs["resource_time"] = config.resource_time
             future = pool.submit(
                 run_trial_subprocess,
                 spec,
                 commands[spec.trial_id],
-                resume=False,
+                **kwargs,
             )
             active[future] = (spec, time.monotonic())
             fields: dict[str, Any] = {
@@ -2479,6 +2479,11 @@ def build_config_from_args(args: argparse.Namespace) -> MonteCarloRunConfig:
             "progress_interval_s": args.progress_interval,
             "tail_lines": args.tail_lines,
             "memory_progress_tail_lines": args.memory_progress_tail_lines,
+            "resource_time": (
+                None
+                if args.resource_time is None
+                else ("enabled" if args.resource_time else "disabled")
+            ),
         }
     )
     merged = deep_merge(defaults, file_cfg)
@@ -2762,6 +2767,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "parent-side memory failure classification."
         ),
     )
+    parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
+    parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")
     parser.add_argument("--memory-progress-tail-lines", type=int, default=None)
     parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--no-plots", action="store_true", default=False)

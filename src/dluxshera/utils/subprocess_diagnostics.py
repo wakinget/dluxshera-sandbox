@@ -1,13 +1,17 @@
 """Helpers for subprocess execution with optional resource diagnostics."""
 from __future__ import annotations
-import json, os, shutil, signal, subprocess, sys, threading, time
+import json, os, shutil, signal, subprocess, sys, tempfile, threading, time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence, Literal
 
 SCHEMA_VERSION = "subprocess_resource_diagnostics.v1"
-ResourceTimeMode = Literal["auto", "gnu", "portable", "disabled"]
+ResourceTimeMode = Literal["auto", "enabled", "disabled", "gnu", "portable"]
+
+
+class ResourceTimeUnavailableError(RuntimeError):
+    """Raised when strict external resource timing is requested but unavailable."""
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -70,17 +74,61 @@ def stderr_tail(path: Path, *, max_lines: int = 10) -> list[str]:
         return []
     return lines[-max_lines:]
 
-def _resolve_resource_time_mode(
-    resource_time: bool | str,
-) -> tuple[bool, ResourceTimeMode]:
+def _resolve_resource_time_mode(resource_time: bool | str | None) -> tuple[bool, ResourceTimeMode]:
+    if resource_time is None:
+        return True, "auto"
     if isinstance(resource_time, bool):
-        return resource_time, ("auto" if resource_time else "disabled")
+        return resource_time, ("enabled" if resource_time else "disabled")
     mode = str(resource_time).strip().lower()
-    if mode not in {"auto", "gnu", "portable", "disabled"}:
+    if mode not in {"auto", "enabled", "gnu", "portable", "disabled"}:
         raise ValueError(
-            "resource_time must be bool or one of: auto, gnu, portable, disabled."
+            "resource_time must be bool or one of: auto, enabled, gnu, portable, disabled."
         )
     return mode != "disabled", mode  # type: ignore[return-value]
+
+
+def _time_candidates() -> list[str]:
+    candidates: list[str] = []
+    if Path("/usr/bin/time").exists():
+        candidates.append("/usr/bin/time")
+    path_time = shutil.which("time")
+    if path_time is not None and path_time not in candidates:
+        candidates.append(path_time)
+    return candidates
+
+
+def detect_resource_time_command() -> list[str] | None:
+    """
+    Return a GNU-compatible external time prefix, or None.
+
+    The returned command intentionally uses only implementations that pass a
+    probe for the flags used by this helper. BSD/macOS ``time`` usually exists
+    but rejects ``-v``; that must be treated as unavailable.
+    """
+
+    for candidate in _time_candidates():
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                out_path = Path(tmpdir) / "time.stderr.log"
+                probe = subprocess.run(
+                    [
+                        candidate,
+                        "-v",
+                        "-o",
+                        str(out_path),
+                        sys.executable,
+                        "-c",
+                        "pass",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if probe.returncode == 0 and out_path.exists():
+                    return [candidate, "-v"]
+        except Exception:
+            continue
+    return None
 
 
 def _build_resource_time_prefix(
@@ -89,9 +137,11 @@ def _build_resource_time_prefix(
     requested_mode: ResourceTimeMode,
     time_stderr_path: Path,
 ) -> tuple[list[str], dict[str, Any]]:
-    gnu_time = shutil.which("/usr/bin/time")
-    portable_time = shutil.which("time")
     metadata: dict[str, Any] = {
+        "mode": requested_mode,
+        "enabled": False,
+        "reason": "disabled" if not requested_enabled else None,
+        "command": None,
         "resource_time_requested": requested_enabled,
         "resource_time_mode_requested": requested_mode,
         "resource_time_mode_effective": "disabled",
@@ -103,22 +153,14 @@ def _build_resource_time_prefix(
     if not requested_enabled:
         return [], metadata
 
-    gnu_supported = False
-    if gnu_time is not None:
-        try:
-            probe = subprocess.run(
-                [gnu_time, "-v", sys.executable, "-c", "pass"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            gnu_supported = probe.returncode == 0
-        except Exception:
-            gnu_supported = False
-    if requested_mode in {"gnu", "auto"} and gnu_supported and gnu_time is not None:
-        cmd = [gnu_time, "-v", "-o", str(time_stderr_path)]
+    detected = detect_resource_time_command()
+    if detected is not None:
+        cmd = [*detected, "-o", str(time_stderr_path)]
         metadata.update(
             {
+                "enabled": True,
+                "reason": None,
+                "command": cmd,
                 "resource_time_mode_effective": "gnu",
                 "resource_time_available": True,
                 "resource_time_command": cmd,
@@ -127,39 +169,39 @@ def _build_resource_time_prefix(
         )
         return cmd, metadata
 
-    if requested_mode == "gnu":
-        metadata.update(
-            {
-                "resource_time_warning": (
-                    "GNU /usr/bin/time not available; external resource timing disabled."
-                ),
-            }
+    reason = "external_time_unavailable_or_incompatible"
+    if requested_mode in {"enabled", "gnu"}:
+        raise ResourceTimeUnavailableError(
+            "External resource timing was required, but no GNU-compatible "
+            "`time -v -o` command is available. Re-run with --no-resource-time "
+            "or omit --resource-time to use auto fallback."
         )
-        return [], metadata
-
-    if requested_mode in {"portable", "auto"} and portable_time is not None:
-        cmd = [portable_time, "-p", "-o", str(time_stderr_path)]
-        metadata.update(
-            {
-                "resource_time_mode_effective": "portable",
-                "resource_time_available": True,
-                "resource_time_command": cmd,
-                "resource_time_parse_status": "pending",
-            }
-        )
-        return cmd, metadata
 
     metadata.update(
         {
+            "reason": reason,
             "resource_time_warning": (
-                "No compatible external `time` binary found; only parent elapsed timing recorded."
+                "No GNU-compatible external `time -v -o` binary found; only parent elapsed timing recorded."
             ),
         }
     )
     return [], metadata
 
 
-def run_subprocess_with_diagnostics(*,command: Sequence[str],cwd: Path,env: dict[str, str] | None,stdout_log: Path,stderr_log: Path,diagnostics_json: Path,memory_diagnostics: bool = False,resource_time: bool | str = True,sample_interval_s: float = 0.25) -> SubprocessDiagnostics:
+def require_resource_time_available(resource_time: bool | str | None) -> None:
+    """Fail before campaign fan-out when strict external timing was requested."""
+
+    requested_enabled, requested_mode = _resolve_resource_time_mode(resource_time)
+    if requested_enabled and requested_mode in {"enabled", "gnu"}:
+        if detect_resource_time_command() is None:
+            raise ResourceTimeUnavailableError(
+                "External resource timing was required, but no GNU-compatible "
+                "`time -v -o` command is available. Re-run with --no-resource-time "
+                "or omit --resource-time to use auto fallback."
+            )
+
+
+def run_subprocess_with_diagnostics(*,command: Sequence[str],cwd: Path,env: dict[str, str] | None,stdout_log: Path,stderr_log: Path,diagnostics_json: Path,memory_diagnostics: bool = False,resource_time: bool | str | None = None,sample_interval_s: float = 0.25) -> SubprocessDiagnostics:
     stdout_log.parent.mkdir(parents=True, exist_ok=True); stderr_log.parent.mkdir(parents=True, exist_ok=True); diagnostics_json.parent.mkdir(parents=True, exist_ok=True)
     requested_enabled, requested_mode = _resolve_resource_time_mode(resource_time)
     time_stderr_path = stderr_log.with_name(f"{stderr_log.stem}.time.stderr.log")
@@ -203,7 +245,7 @@ def run_subprocess_with_diagnostics(*,command: Sequence[str],cwd: Path,env: dict
         tree=[r['descendant_tree_rss_mb'] for r in samples if r.get('descendant_tree_rss_mb') is not None]
         peak_direct=max(direct) if direct else None; peak_tree=max(tree) if tree else None
     resource_block={
-        "enabled":bool(requested_enabled),
+        "enabled":bool(rt_meta["enabled"]),
         "mode_requested":requested_mode,
         "mode_effective":rt_meta["resource_time_mode_effective"],
         "available":bool(rt_meta["resource_time_available"]),
@@ -218,6 +260,9 @@ def run_subprocess_with_diagnostics(*,command: Sequence[str],cwd: Path,env: dict
         "resource_time_command": rt_meta["resource_time_command"],
         "resource_time_parse_status": rt_meta["resource_time_parse_status"],
         "resource_time_warning": rt_meta["resource_time_warning"],
+        "mode": rt_meta["mode"],
+        "reason": rt_meta["reason"],
+        "command": rt_meta["command"],
     }
     if rt_meta["resource_time_available"] and time_stderr_path.exists():
         txt=time_stderr_path.read_text(encoding='utf-8')

@@ -83,7 +83,10 @@ from dluxshera.utils.obs_subblock_keys import (
 )
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.noise import make_subseed
-from dluxshera.utils.subprocess_diagnostics import run_subprocess_with_diagnostics
+from dluxshera.utils.subprocess_diagnostics import (
+    require_resource_time_available,
+    run_subprocess_with_diagnostics,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1415,7 +1418,7 @@ def execute_subblocks(
     max_workers: int,
     fail_fast: bool,
     quiet: bool,
-    resource_time: bool,
+    resource_time: bool | str | None,
 ) -> None:
     env = os.environ.copy()
     src_path = str(REPO_ROOT / "src")
@@ -1428,6 +1431,7 @@ def execute_subblocks(
             jobs.append((case_name, summary_path, command))
     if not jobs:
         return
+    require_resource_time_available(resource_time)
 
     status_rows: list[dict[str, Any]] = []
 
@@ -3109,7 +3113,7 @@ def run_observation_bias_campaign(
     system_preset: str | None = None,
     prior_source: str = "summary_theta_ref",
     allow_optimizer_scale_summaries: bool = False,
-    resource_time: bool = True,
+    resource_time: bool | str | None = None,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     plan = build_campaign_plan(
@@ -3183,7 +3187,7 @@ def run_observation_bias_campaign(
             max_workers=max(1, int(max_workers)),
             fail_fast=fail_fast,
             quiet=quiet,
-            resource_time=bool(resource_time),
+            resource_time=resource_time,
         )
     return aggregate_campaign(
         plan,
@@ -3248,7 +3252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         system_preset=args.system_preset,
         prior_source=str(args.prior_source),
         allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
-        resource_time=True if args.resource_time is None else bool(args.resource_time),
+        resource_time="auto" if args.resource_time is None else ("enabled" if args.resource_time else "disabled"),
         args=args,
     )
     return 0

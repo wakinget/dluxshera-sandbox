@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,8 @@ def test_command_construction_includes_schur_summary_arguments(tmp_path: Path):
     assert "--trace-jitter-x-sigma-as" in command
     assert "--trace-jitter-y-sigma-as" in command
     assert "--trace-jitter-pa-sigma-deg" in command
+    assert "--resource-time" not in command
+    assert "--no-resource-time" not in command
 
 
 def test_command_forwarding_includes_diagnostics_exposure_and_quality_flags(tmp_path: Path):
@@ -638,6 +641,54 @@ def test_dry_run_writes_plan_and_does_not_execute_subprocess(
     planned = payload["subblock_plan"]["matched_pair"][0]
     assert "trace_seed" in planned
     assert "noise_seed" in planned
+
+
+def test_no_resource_time_executes_without_external_time_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="no_resource_time",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    calls: list[str | bool | None] = []
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        calls.append(kwargs["resource_time"])
+        Path(kwargs["stdout_log"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(kwargs["stdout_log"]).write_text("", encoding="utf-8")
+        Path(kwargs["stderr_log"]).write_text("", encoding="utf-8")
+        return SimpleNamespace(
+            return_code=0,
+            failure_class=None,
+            failure_hint=None,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(
+        module,
+        "run_subprocess_with_diagnostics",
+        fake_run_subprocess_with_diagnostics,
+    )
+    module.execute_subblocks(
+        plan,
+        resume=False,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+    )
+    assert calls
+    assert set(calls) == {"disabled"}
 
 
 def test_aggregate_update_from_synthetic_summaries(tmp_path: Path):
@@ -1137,6 +1188,9 @@ def test_bias_parser_supports_resource_time_flags() -> None:
     parser = module._build_parser()
     assert parser.parse_args(["--no-resource-time"]).resource_time is False
     assert parser.parse_args(["--resource-time"]).resource_time is True
+    parsed = parser.parse_args(["--no-resource-time", "--dry-run"])
+    assert parsed.resource_time is False
+    assert parsed.dry_run is True
 
 
 def test_aggregate_only_rejects_mismatched_existing_case_set(tmp_path: Path) -> None:

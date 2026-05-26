@@ -74,6 +74,7 @@ from dluxshera.utils.obs_subblock_cli import (
 )
 from dluxshera.utils.obs_subblock_keys import parse_obs_subblock_key_address
 from dluxshera.utils.subprocess_diagnostics import (
+    require_resource_time_available,
     run_subprocess_with_diagnostics,
     stderr_tail,
 )
@@ -1507,7 +1508,7 @@ def execute_subblocks(
     fail_fast: bool,
     quiet: bool,
     memory_diagnostics: bool,
-    resource_time: bool,
+    resource_time: bool | str | None,
 ) -> None:
     env = os.environ.copy()
     src_path = str(REPO_ROOT / "src")
@@ -1536,6 +1537,7 @@ def execute_subblocks(
             jobs.extend(by_case[case_name])
     if not jobs:
         return
+    require_resource_time_available(resource_time)
 
     status_rows: list[dict[str, Any]] = []
 
@@ -1749,7 +1751,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             fail_fast=bool(args.fail_fast),
             quiet=bool(args.quiet),
             memory_diagnostics=bool(args.memory_diagnostics),
-            resource_time=True if args.resource_time is None else bool(args.resource_time),
+            resource_time="auto" if args.resource_time is None else ("enabled" if args.resource_time else "disabled"),
         )
     summary = aggregate_campaign(
         plan,

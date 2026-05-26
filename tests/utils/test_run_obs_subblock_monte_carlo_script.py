@@ -172,6 +172,8 @@ def test_plan_generation_and_command_construction(tmp_path: Path):
     assert "--reference-n-iter 80" in joined
     assert "--schur-frame-quality-policy warn" in joined
     assert "--schur-frame-chi2-threshold 5.0" in joined
+    assert "--resource-time" not in joined
+    assert "--no-resource-time" not in joined
 
     module.write_command_file(plan[0], command)
     text = plan[0].command_path.read_text(encoding="utf-8")
@@ -179,6 +181,27 @@ def test_plan_generation_and_command_construction(tmp_path: Path):
     assert "run_obs_subblock_study.py" in text
     assert "--max-dense-dim 40" in text
     assert "--reference-base-lr 0.7" in text
+
+
+def test_resource_time_cli_is_wrapper_only_for_trial_commands(tmp_path: Path):
+    module = _load_module()
+    parser = module._build_parser()
+    parsed = parser.parse_args(
+        [
+            "--run-name",
+            "no_resource_time",
+            "--results-root",
+            str(tmp_path),
+            "--no-resource-time",
+            "--dry-run",
+        ]
+    )
+    assert parsed.resource_time is False
+    cfg = module.build_config_from_args(parsed)
+    assert cfg.resource_time == "disabled"
+    command = module.build_trial_command(module.build_trial_plan(cfg)[0], cfg)
+    assert "--no-resource-time" not in command
+    assert "--resource-time" not in command
 
 
 def test_frame_quality_cli_command_plan_and_manifest(tmp_path: Path):
