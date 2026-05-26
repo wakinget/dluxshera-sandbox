@@ -773,6 +773,29 @@ def _history_to_schedule(
     return history, schedule_fn
 
 
+def _completed_step_history(
+    values: Sequence[float],
+    *,
+    history_name: str,
+    actual_steps: int,
+    configured_steps: int,
+    early_stopping: Mapping[str, Any],
+) -> onp.ndarray:
+    """Return one scalar per completed optimizer update."""
+
+    trace = onp.asarray(values, dtype=float).reshape(-1)
+    if trace.shape[0] < actual_steps:
+        raise ValueError(
+            f"History length mismatch for {history_name}: expected "
+            f"actual_steps={actual_steps}, got {trace.shape[0]}. "
+            f"reference_n_iter={configured_steps}, early_stopping="
+            f"{bool(early_stopping.get('enabled', False))}, "
+            f"stop_reason={early_stopping.get('stop_reason')}, "
+            f"stopped_early={early_stopping.get('stopped_early')}."
+        )
+    return trace[:actual_steps]
+
+
 def _gd_loop(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
@@ -906,9 +929,15 @@ def _gd_loop(
     trace["early_stopping"] = {
         "enabled": bool(stop_cfg.enabled),
         "stopped_early": bool(stopped_early),
+        "triggered": bool(stopped_early),
         "stop_iteration": stop_iteration,
+        "final_iteration_index": (
+            None if len(theta_history) <= 1 else int(len(theta_history) - 2)
+        ),
         "configured_n_iter": int(num_steps),
+        "configured_max_iterations": int(num_steps),
         "actual_n_iter": int(len(theta_history) - 1),
+        "actual_optimizer_steps": int(len(theta_history) - 1),
         "stop_reason": stop_reason,
         "best_iteration": best_iter,
         "best_loss": float(loss_arr[best_iter]) if best_iter is not None else None,
@@ -1193,9 +1222,11 @@ def run_gd_with_artifacts(
         early_stopping=stop_cfg,
     )
 
+    early_stopping_result = dict(full_trace.get("early_stopping", {}))
+    actual_steps = int(early_stopping_result.get("actual_n_iter", full_trace["theta"].shape[0] - 1))
     history = {
-        "loss": full_trace["loss"][:-1],
-        "theta": full_trace["theta"][1:],
+        "loss": full_trace["loss"][:actual_steps],
+        "theta": full_trace["theta"][1 : actual_steps + 1],
     }
 
     trace: Dict[str, np.ndarray] = {
@@ -1203,26 +1234,30 @@ def run_gd_with_artifacts(
         "theta": history["theta"],
     }
     if "grad_norm" in full_trace:
-        trace["grad_norm"] = full_trace["grad_norm"]
+        trace["grad_norm"] = full_trace["grad_norm"][:actual_steps]
     if "step_norm" in full_trace:
-        trace["step_norm"] = full_trace["step_norm"]
+        trace["step_norm"] = full_trace["step_norm"][:actual_steps]
     if "early_stopping" in full_trace:
         history["early_stopping"] = full_trace["early_stopping"]
     trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
     if scalar_lr_history is not None:
-        scalar_lr_trace = onp.asarray(scalar_lr_history, dtype=float).reshape(-1)
-        if scalar_lr_trace.shape != (history["loss"].shape[0],):
-            raise ValueError(
-                "scalar_lr_history length must match the number of optimizer steps."
-            )
+        scalar_lr_trace = _completed_step_history(
+            scalar_lr_history,
+            history_name="scalar_lr_history",
+            actual_steps=actual_steps,
+            configured_steps=int(num_steps),
+            early_stopping=early_stopping_result,
+        )
         trace["scalar_lr"] = scalar_lr_trace
         history["scalar_lr"] = scalar_lr_trace
     if schedule_factor_history is not None:
-        factor_trace = onp.asarray(schedule_factor_history, dtype=float).reshape(-1)
-        if factor_trace.shape != (history["loss"].shape[0],):
-            raise ValueError(
-                "schedule_factor_history length must match the number of optimizer steps."
-            )
+        factor_trace = _completed_step_history(
+            schedule_factor_history,
+            history_name="schedule_factor_history",
+            actual_steps=actual_steps,
+            configured_steps=int(num_steps),
+            early_stopping=early_stopping_result,
+        )
         trace["schedule_factor"] = factor_trace
         history["schedule_factor"] = factor_trace
 
@@ -1245,7 +1280,9 @@ def run_gd_with_artifacts(
             "name": "sgd" if optimizer is None else type(optimizer).__name__,
             "learning_rate": learning_rate,
             "num_steps": num_steps,
-            "early_stopping": dict(full_trace.get("early_stopping", {})),
+            "configured_num_steps": int(num_steps),
+            "actual_num_steps": int(actual_steps),
+            "early_stopping": early_stopping_result,
         },
     }
     if schedule_meta is not None:
@@ -1275,7 +1312,7 @@ def run_gd_with_artifacts(
         "num_steps_completed": int(loss_array.size),
         "loss_init": loss_init,
         "loss_final": loss_final,
-        "early_stopping": dict(full_trace.get("early_stopping", {})),
+        "early_stopping": early_stopping_result,
     }
 
     if extra_summary:

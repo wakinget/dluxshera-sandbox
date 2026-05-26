@@ -286,3 +286,133 @@ def test_run_shera_gd_writes_lr_history_artifacts_when_schedule_is_configured(tm
     np.testing.assert_allclose(trace["scalar_lr"], scalar_lr_history)
     np.testing.assert_allclose(trace["schedule_factor"], schedule_factor_history)
     assert meta["optimizer"]["schedule"]["kind"] == "piecewise_constant"
+
+
+def test_run_shera_gd_truncates_scheduled_histories_after_early_stopping():
+    theta0 = np.array([1.0], dtype=float)
+    scalar_lr_history = np.array([0.2, 0.15, 0.1, 0.05, 0.025], dtype=float)
+    schedule_factor_history = scalar_lr_history / 0.2
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum(theta**2)
+
+    _theta, history = run_shera_gd(
+        loss_fn=loss_fn,
+        theta0=theta0,
+        learning_rate=0.2,
+        scalar_lr_history=scalar_lr_history,
+        schedule_factor_history=schedule_factor_history,
+        schedule_meta={"enabled": True, "kind": "test"},
+        num_steps=5,
+        optimizer_kind="sgd",
+        return_artifacts=False,
+        show_progress=False,
+        early_stopping={
+            "enabled": True,
+            "patience": 2,
+            "step_atol": 1.0,
+        },
+    )
+
+    actual_steps = int(history["early_stopping"]["actual_n_iter"])
+    assert actual_steps < 5
+    assert history["scalar_lr"].shape == (actual_steps,)
+    assert history["schedule_factor"].shape == (actual_steps,)
+    np.testing.assert_allclose(history["scalar_lr"], scalar_lr_history[:actual_steps])
+    np.testing.assert_allclose(
+        history["schedule_factor"],
+        schedule_factor_history[:actual_steps],
+    )
+
+
+def test_run_shera_gd_writes_truncated_lr_artifacts_after_early_stopping(tmp_path):
+    theta0 = np.array([1.0], dtype=float)
+    scalar_lr_history = np.array([0.2, 0.15, 0.1, 0.05], dtype=float)
+    schedule_factor_history = scalar_lr_history / 0.2
+    run_dir = tmp_path / "early_stop_scheduled_run"
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum(theta**2)
+
+    run_shera_gd(
+        loss_fn=loss_fn,
+        theta0=theta0,
+        learning_rate=0.2,
+        scalar_lr_history=scalar_lr_history,
+        schedule_factor_history=schedule_factor_history,
+        schedule_meta={"enabled": True, "kind": "test"},
+        num_steps=4,
+        optimizer_kind="sgd",
+        run_dir=run_dir,
+        return_artifacts=False,
+        show_progress=False,
+        early_stopping={
+            "enabled": True,
+            "patience": 2,
+            "step_atol": 1.0,
+        },
+    )
+
+    trace = load_trace(run_dir)
+    meta = load_meta(run_dir)
+    actual_steps = int(meta["optimizer"]["early_stopping"]["actual_optimizer_steps"])
+    assert actual_steps < 4
+    assert trace["scalar_lr"].shape == (actual_steps,)
+    assert trace["schedule_factor"].shape == (actual_steps,)
+    assert meta["optimizer"]["actual_num_steps"] == actual_steps
+    assert meta["optimizer"]["early_stopping"]["triggered"] is True
+    np.testing.assert_allclose(trace["scalar_lr"], scalar_lr_history[:actual_steps])
+
+
+def test_run_shera_gd_keeps_full_scheduled_histories_without_early_stopping():
+    theta0 = np.array([1.0], dtype=float)
+    scalar_lr_history = np.array([0.2, 0.15, 0.1], dtype=float)
+    schedule_factor_history = scalar_lr_history / 0.2
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum(theta**2)
+
+    _theta, history = run_shera_gd(
+        loss_fn=loss_fn,
+        theta0=theta0,
+        learning_rate=0.2,
+        scalar_lr_history=scalar_lr_history,
+        schedule_factor_history=schedule_factor_history,
+        schedule_meta={"enabled": True, "kind": "test"},
+        num_steps=3,
+        optimizer_kind="sgd",
+        return_artifacts=False,
+        show_progress=False,
+    )
+
+    assert history["loss"].shape == (3,)
+    np.testing.assert_allclose(history["scalar_lr"], scalar_lr_history)
+    np.testing.assert_allclose(history["schedule_factor"], schedule_factor_history)
+
+
+def test_run_shera_gd_history_length_error_has_context():
+    theta0 = np.array([1.0], dtype=float)
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum(theta**2)
+
+    with pytest.raises(ValueError) as excinfo:
+        run_shera_gd(
+            loss_fn=loss_fn,
+            theta0=theta0,
+            learning_rate=0.2,
+            scalar_lr_history=np.array([0.2], dtype=float),
+            schedule_factor_history=np.array([1.0], dtype=float),
+            schedule_meta={"enabled": True, "kind": "test"},
+            num_steps=3,
+            optimizer_kind="sgd",
+            return_artifacts=False,
+            show_progress=False,
+        )
+
+    message = str(excinfo.value)
+    assert "scalar_lr_history" in message
+    assert "expected actual_steps=3" in message
+    assert "got 1" in message
+    assert "reference_n_iter=3" in message
+    assert "early_stopping=False" in message
