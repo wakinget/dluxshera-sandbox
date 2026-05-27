@@ -1,5 +1,132 @@
 # Trajectory-Driven Observation Campaign Design
 
+## Implemented first path
+
+The first implemented trajectory-driven path is centered on:
+
+- `src/dluxshera/utils/obs_subblock_trajectory.py`
+- `examples/scripts/run_trajectory_subblock_campaign.py`
+- the Airbus example CSV at
+  `src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv`
+
+The Airbus adapter reads X, Y, and Z pointing samples. X and Y map directly to
+`source.x_position_as` and `source.y_position_as` in arcseconds. Z maps to
+`source.position_angle_deg` after conversion from arcseconds to degrees with
+`deg = arcsec / 3600`.
+
+The current preparation workflow:
+
+1. loads the raw Airbus trajectory
+2. normalizes it to canonical dLuxShera frame keys
+3. selects a requested time window
+4. linearly interpolates the trajectory to the frame cadence, normally 50 ms
+5. splits the selected frames into non-overlapping subblocks
+6. writes each subblock's `frame_truth.csv`
+7. fits a per-subblock line for each active registration key and writes
+   `starting_guess_prediction.csv`
+8. writes case-local trace/render/inference config records and `command.sh`
+
+For a 20-frame, 50 ms subblock, frame times are
+`t_block_start + i * 0.05` for `i = 0 ... 19`, so one block covers 0.00 through
+0.95 s and the next block starts at 1.00 s. The exact boundary frame is not
+duplicated.
+
+The renderer still consumes the canonical explicit trace schema:
+
+```text
+frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg
+```
+
+Single-star calibration-style preparation can omit PA by passing explicit
+output keys, for example:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_trajectory_subblock_campaign.py \
+  --run-name airbus_single_star_xy_dryrun \
+  --trajectory-csv src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv \
+  --duration-s 2.0 \
+  --source-kind single_star \
+  --output-keys source.x_position_as,source.y_position_as \
+  --dry-run
+```
+
+The recovered-reference inference recipe now supports
+`experiment.inference.init.frame.mode: starting_guess_csv`. The config maps
+active frame keys to columns in `starting_guess_prediction.csv`, for example:
+
+```yaml
+inference:
+  init:
+    frame:
+      mode: starting_guess_csv
+      path: starting_guess_prediction.csv
+      columns:
+        source.x_position_as: source.x_position_as_linear_fit
+        source.y_position_as: source.y_position_as_linear_fit
+        source.position_angle_deg: source.position_angle_deg_linear_fit
+```
+
+This starting-guess CSV is optimizer initialization only. It is not truth.
+
+## Example commands
+
+Dry-run two seconds of Airbus trajectory preparation:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_trajectory_subblock_campaign.py \
+  --run-name airbus_trajectory_dryrun_2s \
+  --trajectory-csv src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv \
+  --start-s 0.0 \
+  --duration-s 2.0 \
+  --frame-dt-s 0.05 \
+  --n-frames-per-subblock 20 \
+  --source-kind binary \
+  --phi-ref recovered \
+  --dry-run
+```
+
+Prepare and execute a small two-block smoke through the existing study runner:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_trajectory_subblock_campaign.py \
+  --run-name airbus_trajectory_smoke_2blocks \
+  --trajectory-csv src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv \
+  --start-s 60.0 \
+  --duration-s 2.0 \
+  --frame-dt-s 0.05 \
+  --n-frames-per-subblock 20 \
+  --source-kind binary \
+  --phi-ref recovered \
+  --max-workers 1 \
+  --run-children
+```
+
+The generated layout is:
+
+```text
+Results/trajectory_subblock_campaign/<run_name>/
+  campaign_plan.json
+  resolved_config.json
+  trajectory_ingest_summary.json
+  subblock_plan.csv
+  subblocks/
+    subblock_000000/
+      frame_truth.csv
+      starting_guess_prediction.csv
+      trace_config.json
+      render_config.json
+      inference_config.json
+      command.sh
+```
+
+Current limitations remain explicit:
+
+- dynamic cropping is not implemented
+- `psf_npixels` / ROI-origin realism is not tested by this path
+- high-order WFE map insertion is not implemented
+- the trajectory currently affects frame-level source registration truth and
+  starting guesses only
+
 ## Purpose
 
 This note defines a near-term design for using a realistic pointing trajectory to

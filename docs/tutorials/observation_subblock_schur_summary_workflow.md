@@ -15,6 +15,15 @@ trace generation -> subblock rendering -> Schur summary export -> inspection -> 
 This is a hands-on smoke workflow. It is not a full campaign generator, a
 trajectory ingestion layer, or the final online observation filter.
 
+Trajectory-driven campaigns can now prepare compatible subblocks before this
+Schur-summary step. Use
+`examples/scripts/run_trajectory_subblock_campaign.py` to convert the Airbus
+trajectory into per-subblock `frame_truth.csv` files and
+`starting_guess_prediction.csv` initializer tables. The generated `command.sh`
+files invoke this same `run_obs_subblock_study.py --mode schur_summary` path
+with `--external-frame-truth-csv` and `--starting-guess-csv`, so IID trace
+generation can be replaced without changing the render or Schur export logic.
+
 For campaign wrappers that consume these summaries, aggregate-only flows should
 reuse stored run plans/manifests from the original run root; do not rely on
 new CLI overrides to redefine expected summary paths during aggregation.

@@ -3457,6 +3457,7 @@ def _prepare_case_render_artifacts(
     exposure_time_s: float | None,
     noise_mode: str,
     render_seed: int | None = None,
+    external_frame_truth_csv: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Ensure the case has render-ready artifacts for a screening study.
@@ -3470,6 +3471,11 @@ def _prepare_case_render_artifacts(
     case_module = _load_case_runner_module()
     layout = case_module.build_case_layout(case_root.resolve())
     trace_input = case_module._discover_case_trace_input(layout)
+    if external_frame_truth_csv is not None:
+        trace_input = case_module.ResolvedInput(
+            external_frame_truth_csv.resolve(),
+            "external_frame_truth_csv",
+        )
     render_inputs = case_module._discover_case_render_inputs(layout)
 
     stages_to_run: list[str] = []
@@ -3508,6 +3514,7 @@ def _prepare_case_render_artifacts(
                 exposure_time_s=exposure_time_s,
                 noise_mode=noise_mode,
                 render_seed=render_seed,
+                trace_path_override=external_frame_truth_csv,
                 dry_run=dry_run,
             )
             render_inputs = case_module._discover_case_render_inputs(layout)
@@ -4100,6 +4107,8 @@ def _build_study_inference_config(
     reference_preconditioning_lr_clip: tuple[float, float] | None = None,
     reference_diagnostics_profile: str | None = None,
     reference_init_mode: str | None = None,
+    starting_guess_csv: Path | None = None,
+    starting_guess_columns: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build one run-specific inference config for study-mode execution.
 
@@ -4147,8 +4156,31 @@ def _build_study_inference_config(
             path="experiment.inference.init",
         )
         frame_init_cfg["mode"] = "from_truth_trace"
+    elif reference_init_mode == "starting_guess_csv":
+        if starting_guess_csv is None:
+            raise ValueError("reference_init_mode=starting_guess_csv requires starting_guess_csv.")
+        init_cfg = case_module._ensure_mapping(
+            inference_cfg,
+            "init",
+            path="experiment.inference",
+        )
+        frame_init_cfg = case_module._ensure_mapping(
+            init_cfg,
+            "frame",
+            path="experiment.inference.init",
+        )
+        frame_init_cfg.clear()
+        frame_init_cfg["mode"] = "starting_guess_csv"
+        frame_init_cfg["path"] = case_module._path_for_config(
+            starting_guess_csv.resolve(),
+            config_dir=run_root,
+        )
+        if starting_guess_columns is not None:
+            frame_init_cfg["columns"] = dict(starting_guess_columns)
     elif reference_init_mode not in {None, "initial"}:
-        raise ValueError("reference_init_mode must be initial or truth_when_available.")
+        raise ValueError(
+            "reference_init_mode must be initial, truth_when_available, or starting_guess_csv."
+        )
     diagnostics_cfg = case_module._ensure_mapping(
         inference_cfg,
         "diagnostics",
@@ -7612,6 +7644,9 @@ def run_obs_subblock_study(
     init_x_as: float | None = None,
     init_y_as: float | None = None,
     init_pa_deg: float | None = None,
+    external_frame_truth_csv: Path | None = None,
+    starting_guess_csv: Path | None = None,
+    starting_guess_mode: str | None = None,
     reference_preconditioning_enabled: bool | None = None,
     reference_optimizer_kind: str | None = None,
     reference_base_lr: float | None = None,
@@ -7658,6 +7693,16 @@ def run_obs_subblock_study(
         raise ValueError("Unsupported --summary-information-scale.")
     theta_reference_offset_overrides = dict(theta_reference_offsets or {})
     theta_reference_value_overrides = dict(theta_reference_values or {})
+    effective_reference_init_mode = reference_init_mode
+    if starting_guess_csv is not None and starting_guess_mode in {None, "starting_guess_csv"}:
+        effective_reference_init_mode = "starting_guess_csv"
+    elif starting_guess_mode not in {None, "starting_guess_csv"}:
+        raise ValueError("starting_guess_mode must be 'starting_guess_csv' when provided.")
+    starting_guess_columns = {
+        "source.x_position_as": "source.x_position_as_linear_fit",
+        "source.y_position_as": "source.y_position_as_linear_fit",
+        "source.position_angle_deg": "source.position_angle_deg_linear_fit",
+    }
     theta_reference_conflicts = sorted(
         set(theta_reference_offset_overrides) & set(theta_reference_value_overrides)
     )
@@ -7890,6 +7935,7 @@ def run_obs_subblock_study(
             dt_s=dt_s,
             exposure_time_s=exposure_time_s,
             noise_mode=noise_mode,
+            trace_path_override=external_frame_truth_csv,
             dry_run=dry_run,
         )
         summary["case_summary_path"] = case_summary["summary_path"]
@@ -7916,6 +7962,7 @@ def run_obs_subblock_study(
         exposure_time_s=exposure_time_s,
         noise_mode=noise_mode,
         render_seed=render_seed,
+        external_frame_truth_csv=external_frame_truth_csv,
         dry_run=dry_run,
     )
     if runtime_profiler is None:
@@ -7929,6 +7976,7 @@ def run_obs_subblock_study(
         exposure_time_s=exposure_time_s,
         noise_mode=noise_mode,
         render_seed=render_seed,
+        external_frame_truth_csv=external_frame_truth_csv,
         dry_run=dry_run,
     )
 
@@ -8057,7 +8105,9 @@ def run_obs_subblock_study(
             reference_early_stopping_step_atol=reference_early_stopping_step_atol,
             reference_early_stopping_grad_norm_atol=reference_early_stopping_grad_norm_atol,
             reference_diagnostics_profile=reference_diagnostics_profile,
-            reference_init_mode=reference_init_mode,
+            reference_init_mode=effective_reference_init_mode,
+            starting_guess_csv=starting_guess_csv,
+            starting_guess_columns=starting_guess_columns,
         )
         theta_reference_override_metadata = resolve_theta_reference_overrides(
             inference_config=schur_config,
@@ -8672,6 +8722,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override experiment.inference.init.frame.values.source.position_angle_deg.",
     )
+    parser.add_argument(
+        "--external-frame-truth-csv",
+        type=Path,
+        default=None,
+        help="External canonical frame_truth.csv used as render truth trace.",
+    )
+    parser.add_argument(
+        "--starting-guess-csv",
+        type=Path,
+        default=None,
+        help="Per-frame starting_guess_prediction.csv used for recovered-reference initialization.",
+    )
+    parser.add_argument(
+        "--starting-guess-mode",
+        choices=("starting_guess_csv",),
+        default=None,
+        help="Frame initialization mode for --starting-guess-csv.",
+    )
     add_reference_optimizer_args(parser)
     parser.add_argument(
         "--reference-diagnostics-profile",
@@ -8776,6 +8844,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         init_x_as=args.init_x_as,
         init_y_as=args.init_y_as,
         init_pa_deg=args.init_pa_deg,
+        external_frame_truth_csv=args.external_frame_truth_csv,
+        starting_guess_csv=args.starting_guess_csv,
+        starting_guess_mode=args.starting_guess_mode,
         reference_optimizer_kind=reference_args["reference_optimizer_kind"],
         reference_base_lr=reference_args["reference_base_lr"],
         reference_n_iter=reference_args["reference_n_iter"],

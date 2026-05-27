@@ -33,8 +33,8 @@ Tested now vs scaffolded
   prediction/loss helpers.
 - Scaffolded only: non-empty priors, temporal models outside the three
   registration layouts above, frame init modes beyond
-  ``shared_guess``/``from_system``/``from_truth_trace``, and objective kinds
-  beyond Gaussian image NLL.
+  ``shared_guess``/``from_system``/``from_truth_trace``/``starting_guess_csv``,
+  and objective kinds beyond Gaussian image NLL.
 
 Examples
 --------
@@ -359,6 +359,17 @@ def _resolve_relative_path(
     raise ValueError(
         f"{field_name} is relative but config_path is not available to resolve it."
     )
+
+
+def _resolve_required_config_path(
+    value: Any,
+    *,
+    config_path: Path | None,
+    field_name: str,
+) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string.")
+    return _resolve_relative_path(value, config_path=config_path, field_name=field_name)
 
 
 def _stable_hash_payload(payload: Any) -> str:
@@ -832,12 +843,101 @@ def _extract_frame_init_values(
     return configured
 
 
+def _load_starting_guess_frame_matrix(
+    frame_init_cfg: dict[str, Any],
+    *,
+    layout: ActiveStateLayout,
+    config_path: Path | None,
+) -> np.ndarray:
+    """Load per-frame active initialization values from a prediction CSV."""
+
+    csv_path = _resolve_required_config_path(
+        frame_init_cfg.get("path"),
+        config_path=config_path,
+        field_name="experiment.inference.init.frame.path",
+    )
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Starting-guess CSV not found: {csv_path}")
+
+    columns_cfg = frame_init_cfg.get("columns")
+    if not isinstance(columns_cfg, dict):
+        raise ValueError(
+            "experiment.inference.init.frame.columns must map active frame keys "
+            "to CSV columns for starting_guess_csv mode."
+        )
+    unknown_keys = sorted(set(columns_cfg) - set(layout.frame_keys))
+    if unknown_keys:
+        raise ValueError(
+            "experiment.inference.init.frame.columns contains keys not present in "
+            "active.frame_keys: " + ", ".join(unknown_keys)
+        )
+    missing_key_mappings = [key for key in layout.frame_keys if key not in columns_cfg]
+    if missing_key_mappings:
+        raise ValueError(
+            "starting_guess_csv mode requires a column mapping for each active "
+            "frame key; missing: " + ", ".join(missing_key_mappings)
+        )
+
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"Starting-guess CSV has no header row: {csv_path}")
+        fieldnames = [name.strip() for name in reader.fieldnames if name is not None]
+        required_columns = [str(columns_cfg[key]).strip() for key in layout.frame_keys]
+        blank_columns = [key for key in layout.frame_keys if not str(columns_cfg[key]).strip()]
+        if blank_columns:
+            raise ValueError(
+                "starting_guess_csv column mappings must be non-empty; blank for: "
+                + ", ".join(blank_columns)
+            )
+        missing_columns = [column for column in required_columns if column not in fieldnames]
+        if missing_columns:
+            raise ValueError(
+                "Starting-guess CSV is missing required mapped columns: "
+                + ", ".join(missing_columns)
+            )
+
+        rows: list[list[float]] = []
+        for row_index, row in enumerate(reader, start=2):
+            values: list[float] = []
+            for key, column in zip(layout.frame_keys, required_columns):
+                text = "" if row.get(column) is None else str(row.get(column)).strip()
+                if text == "":
+                    raise ValueError(
+                        f"Starting-guess CSV row {row_index}: missing value for "
+                        f"active key {key!r} column {column!r}."
+                    )
+                value = float(
+                    coerce_numeric_value(
+                        text,
+                        path=(
+                            "experiment.inference.init.frame."
+                            f"starting_guess_csv[{row_index}].{column}"
+                        ),
+                    )
+                )
+                if not np.isfinite(value):
+                    raise ValueError(
+                        f"Starting-guess CSV row {row_index}: {column!r} must be finite."
+                    )
+                values.append(value)
+            rows.append(values)
+
+    if len(rows) != layout.n_frame:
+        raise ValueError(
+            "starting_guess_csv row count must match active layout n_frames: "
+            f"got {len(rows)}, expected {layout.n_frame}."
+        )
+    return np.asarray(rows, dtype=float)
+
+
 def _resolve_initial_active_state(
     *,
     layout: ActiveStateLayout,
     base_store: ParameterStore,
     init_cfg: dict[str, Any],
     truth_trace: ObsSubblockTrace | None = None,
+    config_path: Path | None = None,
 ) -> ActiveState:
     """Resolve the initial optimizer state from config and the assumed system.
 
@@ -902,6 +1002,12 @@ def _resolve_initial_active_state(
                 values.append(float(raw_value) + float(offsets.get(spec.canonical, 0.0)))
             rows.append(values)
         frame_matrix = np.asarray(rows, dtype=float)
+    elif frame_mode == "starting_guess_csv":
+        frame_matrix = _load_starting_guess_frame_matrix(
+            frame_init_cfg,
+            layout=layout,
+            config_path=config_path,
+        )
     elif frame_mode in {"explicit_table", "previous_block"}:
         raise ValueError(
             "experiment.inference.init.frame.mode "
@@ -3472,7 +3578,14 @@ def _validate_experiment_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
         "mode",
         path="experiment.inference.init.frame",
     )
-    if init_frame_mode not in {"shared_guess", "from_system", "explicit_table", "from_truth_trace", "previous_block"}:
+    if init_frame_mode not in {
+        "shared_guess",
+        "from_system",
+        "explicit_table",
+        "from_truth_trace",
+        "previous_block",
+        "starting_guess_csv",
+    }:
         raise ValueError(
             "Unsupported experiment.inference.init.frame.mode "
             f"{init_frame_mode!r}."
@@ -4109,6 +4222,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         base_store=base_store,
         init_cfg=inference_cfg["init"],
         truth_trace=truth_trace_for_values,
+        config_path=cfg_path,
     )
     theta0 = _pack_active_state(active_layout, initial_state)
     theta_labels = _theta_labels_for_layout(active_layout)
