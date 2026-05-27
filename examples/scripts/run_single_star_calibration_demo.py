@@ -66,6 +66,13 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.campaign_trace_sources import (
+    PreparedTraceSourcePlan,
+    PreparedTraceSubblock,
+    prepare_campaign_trace_source,
+    trace_subblock_command_flags,
+    validate_stored_trace_source_artifacts,
+)
 from dluxshera.utils.campaign_truth import (
     apply_truth_overrides_to_system_config,
     realize_campaign_truth,
@@ -128,6 +135,7 @@ class CalibrationPlan:
     truth_realization: dict[str, Any]
     truth_realization_rows: list[dict[str, Any]]
     status_rows: list[dict[str, Any]]
+    trace_source_plan: PreparedTraceSourcePlan
     case_scheduling: str = "grouped"
 
 
@@ -319,6 +327,40 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace | None) -
             subblocks[key] = value
     if getattr(args, "reference_init_mode", None) is not None:
         subblocks["reference_init_mode"] = args.reference_init_mode
+    trace_source = dict(subblocks.get("trace_source", {}) or {})
+    if getattr(args, "trace_source_mode", None) is not None:
+        trace_source["mode"] = args.trace_source_mode
+    if getattr(args, "trajectory_csv", None) is not None:
+        source_cfg = dict(trace_source.get("source", {}) or {})
+        source_cfg["kind"] = "airbus_csv"
+        source_cfg["path"] = str(args.trajectory_csv)
+        trace_source["source"] = source_cfg
+    window_cfg = dict(trace_source.get("window", {}) or {})
+    if getattr(args, "trajectory_start_s", None) is not None:
+        window_cfg["start_s"] = float(args.trajectory_start_s)
+    if getattr(args, "trajectory_duration_s", None) is not None:
+        window_cfg["duration_s"] = float(args.trajectory_duration_s)
+        window_cfg.pop("n_subblocks", None)
+    if getattr(args, "trajectory_n_subblocks", None) is not None:
+        window_cfg["n_subblocks"] = int(args.trajectory_n_subblocks)
+    if window_cfg:
+        trace_source["window"] = window_cfg
+    sampling_cfg = dict(trace_source.get("sampling", {}) or {})
+    if getattr(args, "trajectory_frame_dt_s", None) is not None:
+        sampling_cfg["frame_dt_s"] = float(args.trajectory_frame_dt_s)
+    if sampling_cfg:
+        trace_source["sampling"] = sampling_cfg
+    if getattr(args, "trajectory_output_keys", None) is not None:
+        trace_source["output_keys"] = [
+            part.strip()
+            for part in str(args.trajectory_output_keys).split(",")
+            if part.strip()
+        ]
+    if getattr(args, "trajectory_plan", None) is not None:
+        trace_source["mode"] = "external_plan"
+        trace_source["campaign_plan"] = str(args.trajectory_plan)
+    if trace_source:
+        subblocks["trace_source"] = trace_source
     if getattr(args, "case_scheduling", None) is not None:
         out["case_scheduling"] = args.case_scheduling
     out["subblocks"] = subblocks
@@ -766,6 +808,7 @@ def build_subblock_command(
     subblock_cfg: Mapping[str, Any],
     trace_seed: int,
     noise_seed: int,
+    trace_subblock: PreparedTraceSubblock | None = None,
 ) -> list[str]:
     """Build the image-backed Schur-summary command for one calibration block."""
 
@@ -829,6 +872,8 @@ def build_subblock_command(
         command.extend(["--theta-reference-offset", f"{label}={float(offset)}"])
     if bool(subblock_cfg.get("memory_diagnostics", False)):
         command.append("--memory-diagnostics")
+    if trace_subblock is not None:
+        command.extend(trace_subblock_command_flags(trace_subblock))
     return command
 
 
@@ -903,6 +948,23 @@ def build_calibration_plan(
     base_seed = int(seeding.get("base_seed", experiment_cfg.get("seed", 42)))
     n_subblocks = int(subblock_cfg.get("n_subblocks", 3))
     subblock_root = run_root / "subblock_runs"
+    trace_source_plan = prepare_campaign_trace_source(
+        trace_source_cfg=subblock_cfg.get("trace_source"),
+        run_root=run_root,
+        artifact_root=run_root / "trajectory",
+        source_kind="single_star",
+        active_frame_keys=ACTIVE_FRAME_KEYS,
+        n_subblocks=n_subblocks,
+        n_frames_per_subblock=int(subblock_cfg.get("n_frames", 20)),
+        frame_dt_s=float(subblock_cfg.get("exposure_time_s", 0.05)),
+        subblock_duration_s=float(
+            experiment_cfg.get("forecast", {}).get("subblock_duration_s", 1.0)
+        ),
+        default_output_keys=ACTIVE_FRAME_KEYS,
+        reuse_existing=bool(
+            args is not None and (getattr(args, "resume", False) or getattr(args, "aggregate_only", False))
+        ),
+    )
     commands: dict[str, list[list[str]]] = {}
     summary_paths: dict[str, list[Path]] = {}
     rows: list[dict[str, Any]] = []
@@ -931,9 +993,11 @@ def build_calibration_plan(
                 subblock_cfg=subblock_cfg,
                 trace_seed=seeds["trace_seed"],
                 noise_seed=seeds["noise_seed"],
+                trace_subblock=trace_source_plan.subblocks[subblock_index],
             )
             commands[case.case_name].append(command)
             summary_paths[case.case_name].append(summary_path)
+            trace_row = dict(trace_source_plan.rows[subblock_index])
             rows.append(
                 {
                     "case_name": case.case_name,
@@ -964,6 +1028,7 @@ def build_calibration_plan(
                     "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
                     "schur_diagnostics_path": str((subblock_root / subblock_name / "study" / "schur_summary" / "schur_diagnostics.json")),
                     "schur_memory_audit_path": str((subblock_root / subblock_name / "study" / "schur_summary" / "schur_summary_memory_audit.json")),
+                    **trace_row,
                 }
             )
     resolved_config = {"experiment": experiment_cfg, "system": system_cfg}
@@ -985,6 +1050,7 @@ def build_calibration_plan(
         truth_realization=dict(truth_realization.summary),
         truth_realization_rows=list(truth_realization.rows),
         status_rows=[],
+        trace_source_plan=trace_source_plan,
         case_scheduling=str(experiment_cfg.get("case_scheduling", "grouped")),
     )
 
@@ -1008,6 +1074,7 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
         "trace_varying_keys": list(trace_keys),
         "inactive_truth_keys": list(inactive_truth_keys),
         "single_star_pa_policy": pa_policy,
+        "trace_source": dict(plan.trace_source_plan.summary),
         "observation_theta_labels": list(plan.layout.labels),
         "theta_layout": plan.layout.to_dict(),
         "layout_metadata": plan.layout_metadata,
@@ -1032,6 +1099,7 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
         "notes": [
             "Calibration star photometry is an Alpha Cen A component placeholder.",
             "Single-star frame solve uses X/Y only; PA is optional inert truth-trace diagnostics.",
+            "Trajectory mode writes frame_truth.csv for render truth and starting_guess_prediction.csv for optimizer initialization only.",
             "Forecast-to-1800-subblocks is extrapolation, not a real image-backed 30-minute run.",
         ],
     }
@@ -1703,6 +1771,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--system-preset", default=None)
     parser.add_argument("--n-subblocks", type=int, default=None)
     parser.add_argument("--n-frames", type=int, default=None)
+    parser.add_argument("--trace-source-mode", choices=("iid_jitter", "trajectory", "external_plan"), default=None)
+    parser.add_argument("--trajectory-csv", type=Path, default=None)
+    parser.add_argument("--trajectory-start-s", type=float, default=None)
+    parser.add_argument("--trajectory-duration-s", type=float, default=None)
+    parser.add_argument("--trajectory-n-subblocks", type=int, default=None)
+    parser.add_argument("--trajectory-frame-dt-s", type=float, default=None)
+    parser.add_argument("--trajectory-output-keys", default=None)
+    parser.add_argument("--trajectory-plan", type=Path, default=None)
     parser.add_argument("--noise", choices=("enabled", "disabled", "inherit"), default=None)
     parser.add_argument("--phi-ref", choices=("recovered", "truth_when_available", "init"), default=None)
     parser.add_argument("--reference-init-mode", choices=("initial", "truth_when_available"), default=None)
@@ -1749,6 +1825,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     if args.aggregate_only:
         stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
         if stored_plan is not None:
+            validate_stored_trace_source_artifacts(stored_plan)
             skip_plan_rewrite = True
             stored_paths = stored_plan.get("summary_paths")
             if isinstance(stored_paths, Mapping):

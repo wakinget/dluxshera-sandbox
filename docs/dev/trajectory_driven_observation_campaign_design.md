@@ -127,6 +127,37 @@ Current limitations remain explicit:
 - the trajectory currently affects frame-level source registration truth and
   starting guesses only
 
+## Campaign Wrapper Integration
+
+The main campaign wrappers also support trajectory trace sources through
+`subblocks.trace_source.mode`:
+
+- `iid_jitter` preserves the legacy trace-template behavior and remains the
+  default
+- `trajectory` materializes Airbus-derived `frame_truth.csv` and
+  `starting_guess_prediction.csv` during campaign planning
+- `external_plan` reuses a previously prepared trajectory campaign
+  `campaign_plan.json` plus `subblock_plan.csv`
+
+Integrated wrappers:
+
+- `examples/scripts/run_single_star_calibration_demo.py`
+- `examples/scripts/run_observation_bias_campaign.py`
+
+Single-star trajectory mode defaults to X/Y active/output keys. Binary
+observation-bias mode defaults to X/Y/PA. In trajectory and external-plan modes,
+child commands pass:
+
+```text
+--external-frame-truth-csv <frame_truth.csv>
+--starting-guess-csv <starting_guess_prediction.csv>
+--starting-guess-mode starting_guess_csv
+```
+
+Aggregate-only flows load stored campaign/subblock plans and should not
+reinterpret a new trajectory configuration. Resume reuses already materialized
+trajectory artifacts and fails clearly if required files are missing.
+
 ## Purpose
 
 This note defines a near-term design for using a realistic pointing trajectory to

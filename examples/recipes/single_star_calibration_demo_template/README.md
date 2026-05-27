@@ -44,3 +44,17 @@ Important outputs include `campaign_plan.json`, `subblock_plan.csv`,
 `posterior_by_parameter.csv`, `posterior_history.csv`, and eigenmode CSVs under
 each case directory. Forecasts to 1800 sub-blocks are extrapolation diagnostics,
 not a replacement for a real 30-minute image-backed run.
+
+Trajectory-backed smoke:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_single_star_calibration_demo.py \
+  --config examples/recipes/single_star_calibration_demo_template/trajectory_airbus_smoke.yaml \
+  --results-root Results/single_star_calibration_demo \
+  --dry-run
+```
+
+`subblocks.trace_source.mode: trajectory` materializes per-subblock
+`frame_truth.csv` and `starting_guess_prediction.csv` files during planning.
+Single-star trajectory mode defaults to X/Y only; PA is not required. IID jitter
+remains the default when `trace_source` is omitted or set to `iid_jitter`.

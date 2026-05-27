@@ -56,3 +56,18 @@ Success is not recovering every M1/M2 coefficient independently. The useful
 signal is whether the campaign identifies constrained and weak optical
 combinations and whether the `source.separation_as` posterior moves as
 expected.
+
+Trajectory-backed smoke:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/trajectory_airbus_smoke.yaml \
+  --results-root Results/observation_bias_campaign \
+  --dry-run
+```
+
+`subblocks.trace_source.mode: trajectory` materializes shared Airbus-derived
+`frame_truth.csv` and `starting_guess_prediction.csv` artifacts for each
+subblock, then child commands pass those files to `run_obs_subblock_study.py`.
+Binary trajectory mode defaults to X/Y/PA. IID jitter remains the default when
+`trace_source` is omitted or set to `iid_jitter`.

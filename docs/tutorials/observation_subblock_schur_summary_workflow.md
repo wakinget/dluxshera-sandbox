@@ -23,6 +23,8 @@ trajectory into per-subblock `frame_truth.csv` files and
 files invoke this same `run_obs_subblock_study.py --mode schur_summary` path
 with `--external-frame-truth-csv` and `--starting-guess-csv`, so IID trace
 generation can be replaced without changing the render or Schur export logic.
+The single-star and observation-bias campaign wrappers expose the same path via
+`subblocks.trace_source.mode: trajectory`; `iid_jitter` remains their default.
 
 For campaign wrappers that consume these summaries, aggregate-only flows should
 reuse stored run plans/manifests from the original run root; do not rely on

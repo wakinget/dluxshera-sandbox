@@ -1,0 +1,49 @@
+experiment:
+  kind: single_star_calibration_demo
+  run_name: single_star_airbus_trajectory_smoke
+  subblocks:
+    n_subblocks: 2
+    n_frames: 20
+    noise: enabled
+    phi_ref: recovered
+    schur_curvature_method: structured_independent_frames
+    max_dense_dim: 40
+    summary_information_scale: summed_likelihood
+    exposure_time_s: 0.05
+    trace_source:
+      mode: trajectory
+      source:
+        kind: airbus_csv
+        path: src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv
+        sample_dt_s: 0.1
+      window:
+        start_s: 60.0
+        n_subblocks: 2
+      sampling:
+        frame_dt_s: 0.05
+        subblock_duration_s: 1.0
+        n_frames_per_subblock: 20
+      output_keys:
+        - source.x_position_as
+        - source.y_position_as
+      starting_guess:
+        kind: per_subblock_linear_fit
+  case_generation:
+    mode: explicit
+    cases:
+      - case_name: zero_bias_trajectory_smoke
+        theta_reference_offsets: {}
+  prior:
+    sigma:
+      source.log_flux_total:
+        kind: absolute
+        sigma: 1.0e-5
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 1.0
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 1.0

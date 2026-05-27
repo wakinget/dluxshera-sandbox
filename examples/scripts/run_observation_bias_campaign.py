@@ -69,6 +69,13 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.campaign_trace_sources import (
+    PreparedTraceSourcePlan,
+    PreparedTraceSubblock,
+    prepare_campaign_trace_source,
+    trace_subblock_command_flags,
+    validate_stored_trace_source_artifacts,
+)
 from dluxshera.utils.campaign_truth import realize_campaign_truth as _realize_campaign_truth
 from dluxshera.utils.obs_subblock_cli import (
     REFERENCE_EARLY_STOPPING_FLAG_MAP,
@@ -153,6 +160,7 @@ class CampaignPlan:
     case_generation: dict[str, Any]
     truth_realization: dict[str, Any]
     truth_realization_rows: list[dict[str, Any]]
+    trace_source_plan: PreparedTraceSourcePlan
 
 
 def _ensure_dir(path: Path) -> None:
@@ -616,6 +624,40 @@ def _apply_cli_overrides(experiment_cfg: dict[str, Any], args: argparse.Namespac
         value = getattr(args, arg_name, None)
         if value is not None:
             subblocks[key] = value
+    trace_source = dict(subblocks.get("trace_source", {}) or {})
+    if getattr(args, "trace_source_mode", None) is not None:
+        trace_source["mode"] = args.trace_source_mode
+    if getattr(args, "trajectory_csv", None) is not None:
+        source_cfg = dict(trace_source.get("source", {}) or {})
+        source_cfg["kind"] = "airbus_csv"
+        source_cfg["path"] = str(args.trajectory_csv)
+        trace_source["source"] = source_cfg
+    window_cfg = dict(trace_source.get("window", {}) or {})
+    if getattr(args, "trajectory_start_s", None) is not None:
+        window_cfg["start_s"] = float(args.trajectory_start_s)
+    if getattr(args, "trajectory_duration_s", None) is not None:
+        window_cfg["duration_s"] = float(args.trajectory_duration_s)
+        window_cfg.pop("n_subblocks", None)
+    if getattr(args, "trajectory_n_subblocks", None) is not None:
+        window_cfg["n_subblocks"] = int(args.trajectory_n_subblocks)
+    if window_cfg:
+        trace_source["window"] = window_cfg
+    sampling_cfg = dict(trace_source.get("sampling", {}) or {})
+    if getattr(args, "trajectory_frame_dt_s", None) is not None:
+        sampling_cfg["frame_dt_s"] = float(args.trajectory_frame_dt_s)
+    if sampling_cfg:
+        trace_source["sampling"] = sampling_cfg
+    if getattr(args, "trajectory_output_keys", None) is not None:
+        trace_source["output_keys"] = [
+            part.strip()
+            for part in str(args.trajectory_output_keys).split(",")
+            if part.strip()
+        ]
+    if getattr(args, "trajectory_plan", None) is not None:
+        trace_source["mode"] = "external_plan"
+        trace_source["campaign_plan"] = str(args.trajectory_plan)
+    if trace_source:
+        subblocks["trace_source"] = trace_source
     cfg["subblocks"] = subblocks
     if getattr(args, "seed_policy", None) is not None:
         seeding["seed_policy"] = args.seed_policy
@@ -997,6 +1039,7 @@ def build_subblock_command(
     subblock_cfg: Mapping[str, Any],
     trace_seed: int | None = None,
     noise_seed: int | None = None,
+    trace_subblock: PreparedTraceSubblock | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1058,6 +1101,8 @@ def build_subblock_command(
             command.extend([flag, _format_cli_value(command_options[key])])
     append_reference_optimizer_flags(command, command_options)
     append_schur_frame_quality_flags(command, command_options)
+    if trace_subblock is not None:
+        command.extend(trace_subblock_command_flags(trace_subblock))
     return command
 
 
@@ -1124,6 +1169,23 @@ def build_campaign_plan(
     if n_subblocks <= 0:
         raise ValueError("subblocks.n_subblocks must be positive.")
     subblock_root = run_root / "subblock_runs"
+    trace_source_plan = prepare_campaign_trace_source(
+        trace_source_cfg=subblock_cfg.get("trace_source"),
+        run_root=run_root,
+        artifact_root=run_root / "trajectory",
+        source_kind="binary",
+        active_frame_keys=DEFAULT_LOCAL_ELIMINATED_KEYS,
+        n_subblocks=n_subblocks,
+        n_frames_per_subblock=int(subblock_cfg.get("n_frames", 3)),
+        frame_dt_s=float(subblock_cfg.get("exposure_time_s", 0.05)),
+        subblock_duration_s=float(
+            experiment_cfg.get("forecast", {}).get("subblock_duration_s", 1.0)
+        ),
+        default_output_keys=DEFAULT_LOCAL_ELIMINATED_KEYS,
+        reuse_existing=bool(
+            args is not None and (getattr(args, "resume", False) or getattr(args, "aggregate_only", False))
+        ),
+    )
     commands: dict[str, list[list[str]]] = {}
     summary_paths: dict[str, list[Path]] = {}
     subblock_plans: dict[str, list[dict[str, Any]]] = {}
@@ -1156,6 +1218,7 @@ def build_campaign_plan(
                     subblock_cfg=subblock_cfg,
                     trace_seed=int(seeds["trace_seed"]),
                     noise_seed=int(seeds["noise_seed"]),
+                    trace_subblock=trace_source_plan.subblocks[subblock_index],
                 )
             )
             summary_paths[case.case_name].append(summary_path)
@@ -1164,6 +1227,7 @@ def build_campaign_plan(
                 for key, value in subblock_command_options.items()
                 if key != "forwarded_flags"
             }
+            trace_row = dict(trace_source_plan.rows[subblock_index])
             subblock_plans[case.case_name].append(
                 {
                     "case_name": case.case_name,
@@ -1184,6 +1248,7 @@ def build_campaign_plan(
                     ),
                     **plan_options,
                     **seeds,
+                    **trace_row,
                 }
             )
     resolved_config = {
@@ -1206,6 +1271,7 @@ def build_campaign_plan(
         case_generation=case_generation,
         truth_realization=dict(truth_realization.summary),
         truth_realization_rows=list(truth_realization.rows),
+        trace_source_plan=trace_source_plan,
     )
 
 
@@ -1231,6 +1297,7 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "state_partition": plan.partition,
         "case_generation": dict(plan.case_generation),
         "truth_realization": dict(plan.truth_realization),
+        "trace_source": dict(plan.trace_source_plan.summary),
         "subblock_command_options": dict(subblock_command_options),
         "seeding": _resolve_seeding_config(plan.config["experiment"]),
         "eigenbasis": {
@@ -1293,6 +1360,11 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "subblock_plan": {
             name: list(items) for name, items in plan.subblock_plans.items()
         },
+        "notes": [
+            "Trace-source mode iid_jitter preserves legacy trace-template behavior.",
+            "Trajectory mode writes frame_truth.csv for render truth and starting_guess_prediction.csv for optimizer initialization only.",
+            "Trajectory mode uses one pointing history shared across bias cases.",
+        ],
     }
 
 
@@ -3012,6 +3084,7 @@ def run_observation_bias_campaign(
     if aggregate_only:
         stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
         if stored_plan is not None:
+            validate_stored_trace_source_artifacts(stored_plan)
             skip_plan_rewrite = True
             stored_paths = stored_plan.get("summary_paths")
             if isinstance(stored_paths, Mapping):
@@ -3094,6 +3167,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--n-subblocks", type=int, default=None)
     parser.add_argument("--n-frames", type=int, default=None)
+    parser.add_argument("--trace-source-mode", choices=("iid_jitter", "trajectory", "external_plan"), default=None)
+    parser.add_argument("--trajectory-csv", type=Path, default=None)
+    parser.add_argument("--trajectory-start-s", type=float, default=None)
+    parser.add_argument("--trajectory-duration-s", type=float, default=None)
+    parser.add_argument("--trajectory-n-subblocks", type=int, default=None)
+    parser.add_argument("--trajectory-frame-dt-s", type=float, default=None)
+    parser.add_argument("--trajectory-output-keys", default=None)
+    parser.add_argument("--trajectory-plan", type=Path, default=None)
     parser.add_argument("--noise", choices=("inherit", "enabled", "disabled"), default=None)
     parser.add_argument("--phi-ref", choices=("truth_when_available", "recovered"), default=None)
     parser.add_argument("--max-dense-dim", type=int, default=None)
