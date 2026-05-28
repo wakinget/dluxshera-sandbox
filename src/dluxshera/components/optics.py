@@ -223,6 +223,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         strut_width: float = 0.002,
         strut_rotation_deg: float = -90.0,
         dp_design_wavel: float = 550e-9,
+        high_order_wfe_opd_m: Array | None = None,
     ):
         """Construct a Shera two-plane optical system.
 
@@ -334,7 +335,11 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
 
         mask = dll.AberratedLayer(dp_opd)
 
-        layers = [("aperture", aperture), ("pupil", mask)]
+        if high_order_wfe_opd_m is None:
+            high_order_wfe_opd_m = np.zeros((wf_npixels, wf_npixels))
+        high_order_wfe_layer = dll.AberratedLayer(np.array(high_order_wfe_opd_m))
+
+        layers = [("aperture", aperture), ("pupil", mask), ("high_order_wfe", high_order_wfe_layer)]
 
         # Propagator Properties
         psf_npixels = int(psf_npixels)
@@ -356,6 +361,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         wf *= self.aperture
         wf = wf.normalise()
         wf += self.pupil
+        wf += self.high_order_wfe
         return wf
 
 
@@ -618,6 +624,8 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         strut_width: float = 0.002,
         strut_rotation_deg: float = 45.0,
         dp_design_wavel: float | None = 550e-9,
+        m1_high_order_wfe_opd_m: Array | None = None,
+        m2_high_order_wfe_opd_m: Array | None = None,
     ):
         """Construct a Shera three-plane optical system.
 
@@ -771,8 +779,13 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
 
         dp_layer = dll.AberratedLayer(dp_opd)
 
-        p1_layers = [("m1_aperture", m1_aperture), ("dp", dp_layer)]
-        p2_layers = [("m2_aperture", m2_aperture)]
+        if m1_high_order_wfe_opd_m is None:
+            m1_high_order_wfe_opd_m = np.zeros((wf_npixels, wf_npixels))
+        if m2_high_order_wfe_opd_m is None:
+            m2_high_order_wfe_opd_m = np.zeros((wf_npixels, wf_npixels))
+
+        p1_layers = [("m1_aperture", m1_aperture), ("dp", dp_layer), ("high_order_wfe", dll.AberratedLayer(np.array(m1_high_order_wfe_opd_m)))]
+        p2_layers = [("m2_aperture", m2_aperture), ("high_order_wfe", dll.AberratedLayer(np.array(m2_high_order_wfe_opd_m)))]
         super().__init__(
             wf_npixels=wf_npixels,
             p1_diameter=p1_diameter,
@@ -792,6 +805,7 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         wf *= self.m1_aperture
         wf = wf.normalise()
         wf += self.dp
+        wf += self.high_order_wfe
         return wf
 
 # class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):

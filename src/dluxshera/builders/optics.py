@@ -22,6 +22,7 @@ from ..components.optics import (
 )
 from ..params.store import ParameterStore
 from ..params.spec import ParamField, ParamSpec
+from ..utils.high_order_wfe import realize_high_order_wfe_pair
 
 
 _THREEPLANE_CACHE: dict[str, SheraThreePlaneOptics] = {}
@@ -144,6 +145,23 @@ def _load_diffractive_pupil_mask(cfg: SheraTwoPlaneConfig) -> dll.AberratedLayer
     return dll.AberratedLayer(jnp.asarray(mask_array))
 
 
+def _surface_high_order_pair(optics_cfg: Mapping[str, Any], surface: str, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    how_cfg = optics_cfg.get("high_order_wfe") or {}
+    if not how_cfg.get("enabled", False):
+        z = np.zeros(shape)
+        return z, z
+    surf_cfg = how_cfg.get(surface) or {}
+    if not surf_cfg.get("enabled", False):
+        z = np.zeros(shape)
+        return z, z
+    real = realize_high_order_wfe_pair(
+        shape,
+        truth_cfg=surf_cfg.get("map") or surf_cfg,
+        knowledge_cfg=surf_cfg.get("knowledge_error") or None,
+    )
+    return real.truth_opd_nm, real.inference_opd_nm
+
+
 def _threeplane_cfg_map(cfg: Any) -> Mapping[str, Any]:
     if is_dataclass(cfg):
         cfg = asdict(cfg)
@@ -174,6 +192,9 @@ def build_shera_threeplane_optics(
         base_optics = _THREEPLANE_CACHE.get(struct_hash)
 
     if base_optics is None:
+        m1_truth_nm, m1_inf_nm = _surface_high_order_pair(optics_cfg, "primary", (optics_cfg["pupil_npix"], optics_cfg["pupil_npix"]))
+        m2_truth_nm, m2_inf_nm = _surface_high_order_pair(optics_cfg, "secondary", (optics_cfg["pupil_npix"], optics_cfg["pupil_npix"]))
+
         base_optics = SheraThreePlaneOptics(
             wf_npixels=optics_cfg["pupil_npix"],
             psf_npixels=optics_cfg["psf_npix"],
@@ -195,6 +216,7 @@ def build_shera_threeplane_optics(
             strut_width=optics_cfg["strut_width_m"],
             strut_rotation_deg=optics_cfg["strut_rotation_deg"],
             dp_design_wavel=optics_cfg["dp_design_wavelength_m"],
+            m1_high_order_wfe_opd_m=jnp.asarray(m1_inf_nm) * 1e-9,
         )
         if not cache_disabled:
             _THREEPLANE_CACHE[struct_hash] = base_optics
@@ -234,6 +256,8 @@ def build_shera_twoplane_optics(
         base_optics = _TWOPLANE_CACHE.get(struct_hash)
 
     if base_optics is None:
+        m1_truth_nm, m1_inf_nm = _surface_high_order_pair(optics_cfg, "primary", (optics_cfg["pupil_npix"], optics_cfg["pupil_npix"]))
+
         base_optics = SheraTwoPlaneOptics(
             wf_npixels=optics_cfg["pupil_npix"],
             psf_npixels=optics_cfg["psf_npix"],
@@ -246,6 +270,8 @@ def build_shera_twoplane_optics(
             strut_width=optics_cfg["strut_width_m"],
             strut_rotation_deg=optics_cfg["strut_rotation_deg"],
             dp_design_wavel=optics_cfg["dp_design_wavelength_m"],
+            m1_high_order_wfe_opd_m=jnp.asarray(m1_inf_nm) * 1e-9,
+            high_order_wfe_opd_m=jnp.asarray(m1_inf_nm) * 1e-9,
             noll_indices=jnp.asarray(optics_cfg.get("primary_noll_indices") or [])
             if optics_cfg.get("primary_noll_indices")
             else None,
