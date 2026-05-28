@@ -87,6 +87,29 @@ def test_starting_guess_csv_missing_active_key_mapping_fails(tmp_path):
         )
 
 
+def test_starting_guess_csv_inactive_column_mapping_fails(tmp_path):
+    recipe = _load_recipe_module()
+    csv_path = tmp_path / "starting_guess_prediction.csv"
+    csv_path.write_text(
+        "frame_index,source.x_position_as_linear_fit,source.position_angle_deg_linear_fit\n"
+        "0,1.0,2.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="keys not present in active.frame_keys"):
+        recipe._load_starting_guess_frame_matrix(
+            {
+                "path": "starting_guess_prediction.csv",
+                "columns": {
+                    "source.x_position_as": "source.x_position_as_linear_fit",
+                    "source.position_angle_deg": "source.position_angle_deg_linear_fit",
+                },
+            },
+            layout=_layout(recipe, ("source.x_position_as",), 1),
+            config_path=tmp_path / "inference_config.json",
+        )
+
+
 def test_starting_guess_csv_row_count_must_match_layout(tmp_path):
     recipe = _load_recipe_module()
     csv_path = tmp_path / "starting_guess_prediction.csv"

@@ -4074,6 +4074,49 @@ def _resolve_render_variance_artifact(manifest_path: Path | None) -> Path | None
     )
 
 
+def build_starting_guess_column_map(
+    *,
+    active_frame_keys: Sequence[str],
+    starting_guess_csv: Path,
+    suffix: str = "_linear_fit",
+    requested_columns: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return starting-guess CSV columns for active frame keys only."""
+
+    with starting_guess_csv.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration as exc:
+            raise ValueError(
+                f"Starting-guess CSV has no header row: {starting_guess_csv}"
+            ) from exc
+    available = {column.strip() for column in header if column is not None}
+    active_keys = tuple(str(key) for key in active_frame_keys)
+    requested = dict(requested_columns or {})
+    inactive_requested = sorted(set(requested) - set(active_keys))
+    if inactive_requested:
+        raise ValueError(
+            "starting_guess_csv requested columns include keys not present in "
+            "active.frame_keys: " + ", ".join(inactive_requested)
+        )
+
+    columns: dict[str, str] = {}
+    missing: list[str] = []
+    for key in active_keys:
+        column = str(requested.get(key, f"{key}{suffix}"))
+        if column in available:
+            columns[key] = column
+        else:
+            missing.append(f"{key} -> {column}")
+    if missing:
+        raise ValueError(
+            "Starting-guess CSV is missing required active-frame columns: "
+            + ", ".join(missing)
+        )
+    return columns
+
+
 def _build_study_inference_config(
     *,
     template_path: Path,
@@ -4175,8 +4218,19 @@ def _build_study_inference_config(
             starting_guess_csv.resolve(),
             config_dir=run_root,
         )
-        if starting_guess_columns is not None:
-            frame_init_cfg["columns"] = dict(starting_guess_columns)
+        active_cfg = case_module._ensure_mapping(
+            inference_cfg,
+            "active",
+            path="experiment.inference",
+        )
+        active_frame_keys = active_cfg.get("frame_keys", [])
+        if not isinstance(active_frame_keys, list):
+            raise ValueError("experiment.inference.active.frame_keys must be a list.")
+        frame_init_cfg["columns"] = build_starting_guess_column_map(
+            active_frame_keys=active_frame_keys,
+            starting_guess_csv=starting_guess_csv.resolve(),
+            requested_columns=starting_guess_columns,
+        )
     elif reference_init_mode not in {None, "initial"}:
         raise ValueError(
             "reference_init_mode must be initial, truth_when_available, or starting_guess_csv."
@@ -7698,11 +7752,7 @@ def run_obs_subblock_study(
         effective_reference_init_mode = "starting_guess_csv"
     elif starting_guess_mode not in {None, "starting_guess_csv"}:
         raise ValueError("starting_guess_mode must be 'starting_guess_csv' when provided.")
-    starting_guess_columns = {
-        "source.x_position_as": "source.x_position_as_linear_fit",
-        "source.y_position_as": "source.y_position_as_linear_fit",
-        "source.position_angle_deg": "source.position_angle_deg_linear_fit",
-    }
+    starting_guess_columns = None
     theta_reference_conflicts = sorted(
         set(theta_reference_offset_overrides) & set(theta_reference_value_overrides)
     )

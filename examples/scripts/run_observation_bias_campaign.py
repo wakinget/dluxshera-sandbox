@@ -1183,7 +1183,14 @@ def build_campaign_plan(
         ),
         default_output_keys=DEFAULT_LOCAL_ELIMINATED_KEYS,
         reuse_existing=bool(
-            args is not None and (getattr(args, "resume", False) or getattr(args, "aggregate_only", False))
+            args is not None
+            and (
+                getattr(args, "aggregate_only", False)
+                or (
+                    getattr(args, "resume", False)
+                    and (run_root / "campaign_plan.json").exists()
+                )
+            )
         ),
     )
     commands: dict[str, list[list[str]]] = {}

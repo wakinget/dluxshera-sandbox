@@ -1541,6 +1541,87 @@ def test_schur_summary_dry_run_writes_config_and_planned_artifacts(tmp_path: Pat
     assert (case_root / "study" / "schur_summary" / "summary.json").exists()
 
 
+def test_starting_guess_csv_patch_filters_to_single_star_active_xy(tmp_path: Path):
+    module = _load_script_module()
+    _trace_template_path, _render_template_path, inference_template = _write_templates(tmp_path)
+    inference_payload = _read_json(inference_template)
+    inference_payload["experiment"]["inference"]["active"]["frame_keys"] = [
+        "source.x_position_as",
+        "source.y_position_as",
+    ]
+    inference_payload["experiment"]["inference"]["init"]["frame"]["values"].pop(
+        "source.position_angle_deg"
+    )
+    _write_json(inference_template, inference_payload)
+    starting_guess = tmp_path / "starting_guess_prediction.csv"
+    starting_guess.write_text(
+        "frame_index,source.x_position_as_linear_fit,source.y_position_as_linear_fit,source.position_angle_deg_linear_fit\n"
+        "0,1.0,2.0,3.0\n",
+        encoding="utf-8",
+    )
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(tmp_path / "render" / "obs_subblock_cube.fits"),
+        truth_trace=_ResolvedInput(tmp_path / "render" / "frame_truth.csv"),
+        manifest=_ResolvedInput(tmp_path / "render" / "manifest.json"),
+    )
+
+    cfg = module._build_study_inference_config(
+        template_path=inference_template,
+        run_root=tmp_path / "summary_export",
+        render_inputs=render_inputs,
+        exposure_time_s=None,
+        candidate_key=None,
+        assumed_value=None,
+        force_truth_comparison=False,
+        disable_plots=True,
+        reference_init_mode="starting_guess_csv",
+        starting_guess_csv=starting_guess,
+    )
+
+    init_frame = cfg["experiment"]["inference"]["init"]["frame"]
+    assert init_frame["mode"] == "starting_guess_csv"
+    assert set(init_frame["columns"]) == {
+        "source.x_position_as",
+        "source.y_position_as",
+    }
+    assert "source.position_angle_deg" not in init_frame["columns"]
+
+
+def test_starting_guess_csv_patch_preserves_binary_xy_pa(tmp_path: Path):
+    module = _load_script_module()
+    _trace_template_path, _render_template_path, inference_template = _write_templates(tmp_path)
+    starting_guess = tmp_path / "starting_guess_prediction.csv"
+    starting_guess.write_text(
+        "frame_index,source.x_position_as_linear_fit,source.y_position_as_linear_fit,source.position_angle_deg_linear_fit\n"
+        "0,1.0,2.0,3.0\n",
+        encoding="utf-8",
+    )
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(tmp_path / "render" / "obs_subblock_cube.fits"),
+        truth_trace=_ResolvedInput(tmp_path / "render" / "frame_truth.csv"),
+        manifest=_ResolvedInput(tmp_path / "render" / "manifest.json"),
+    )
+
+    cfg = module._build_study_inference_config(
+        template_path=inference_template,
+        run_root=tmp_path / "summary_export",
+        render_inputs=render_inputs,
+        exposure_time_s=None,
+        candidate_key=None,
+        assumed_value=None,
+        force_truth_comparison=False,
+        disable_plots=True,
+        reference_init_mode="starting_guess_csv",
+        starting_guess_csv=starting_guess,
+    )
+
+    assert set(cfg["experiment"]["inference"]["init"]["frame"]["columns"]) == {
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.position_angle_deg",
+    }
+
+
 def test_build_schur_summary_plan_records_recovered_unpreconditioned_warning(tmp_path: Path):
     module = _load_script_module()
     trace_template, render_template, inference_template = _write_templates(tmp_path)
