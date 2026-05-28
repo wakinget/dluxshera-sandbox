@@ -9,7 +9,7 @@ import jax.random as jr
 
 from ..legacy.params import SheraThreePlaneParams, SheraTwoPlaneParams
 from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
-from ..utils.oneoverf import oneoverf_noise_2D, remove_PTT
+from ..utils.high_order_wfe import one_over_f_noise_2d as oneoverf_noise_2D, remove_plane as remove_PTT
 from ..utils.utils import nanrms, default_diffractive_pupil_path
 
 __all__ = [
