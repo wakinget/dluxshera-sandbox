@@ -16,6 +16,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
+from contextlib import contextmanager
 from statistics import mean, median
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -37,8 +38,10 @@ except ModuleNotFoundError:
     plt = None
     _HAVE_MATPLOTLIB = False
 
+import jax
 import numpy as np
 
+from dluxshera.builders.source import build_single_star_source
 from dluxshera.config.io import load_config_file
 from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.observation_belief import (
@@ -63,6 +66,7 @@ from dluxshera.inference.observation_summary import (
     validate_summary_information_scale,
 )
 from dluxshera.params.store import ParameterStore
+from dluxshera.params.transforms import ARCSEC_PER_RAD
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.campaigns import load_existing_campaign_plan
@@ -99,6 +103,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SUBBLOCK_SCRIPT = REPO_ROOT / "examples" / "scripts" / "run_obs_subblock_study.py"
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results" / "single_star_calibration_demo"
 SCHEMA_VERSION = "single_star_calibration_demo.v1"
+NEAR_ZERO_INJECTED_BIAS_ABS = 1.0e-6
 ACTIVE_FRAME_KEYS = (
     "source.x_position_as",
     "source.y_position_as",
@@ -166,6 +171,20 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+@contextmanager
+def _jax_x64_context():
+    """Enable x64 for campaign scalar consistency without leaking global state."""
+
+    previous = bool(jax.config.jax_enable_x64)
+    if not previous:
+        jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        if not previous:
+            jax.config.update("jax_enable_x64", False)
+
+
 def _default_experiment_config() -> dict[str, Any]:
     return {
         "kind": "single_star_calibration_demo",
@@ -188,6 +207,7 @@ def _default_experiment_config() -> dict[str, Any]:
             "max_dense_dim": 40,
             "schur_damping": 1.0e-8,
             "summary_information_scale": "summed_likelihood",
+            "use_render_variance": "auto",
             "exposure_time_s": 0.05,
             "reference_diagnostics_profile": "basic",
             "reference_optimizer_kind": "sgd",
@@ -465,6 +485,53 @@ def _safe_fraction(num: float, den: float) -> float:
     if not math.isfinite(den) or abs(den) <= 1.0e-30:
         return float("nan")
     return float(num / den)
+
+
+def _is_near_zero_injected_bias(value: float) -> bool:
+    return (not math.isfinite(value)) or abs(float(value)) < NEAR_ZERO_INJECTED_BIAS_ABS
+
+
+def _correction_fraction_or_nan(
+    *,
+    posterior_shift: float,
+    prior_error: float,
+) -> float:
+    if _is_near_zero_injected_bias(prior_error):
+        return float("nan")
+    return _safe_fraction(posterior_shift, -prior_error)
+
+
+def _residual_fraction_or_nan(
+    *,
+    posterior_error: float,
+    prior_error: float,
+) -> float:
+    if _is_near_zero_injected_bias(prior_error):
+        return float("nan")
+    return _safe_fraction(posterior_error, prior_error)
+
+
+def _moves_toward_truth_or_none(
+    *,
+    posterior_error: float,
+    prior_error: float,
+) -> bool | None:
+    if _is_near_zero_injected_bias(prior_error):
+        return None
+    return bool(abs(posterior_error) < abs(prior_error))
+
+
+def _single_star_use_render_variance(subblock_cfg: Mapping[str, Any]) -> bool:
+    """Return whether Schur summaries should use render variance artifacts."""
+
+    value = str(subblock_cfg.get("use_render_variance", "auto")).strip().lower()
+    if value == "auto":
+        return str(subblock_cfg.get("noise", "enabled")).strip().lower() == "enabled"
+    if value in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError("subblocks.use_render_variance must be true, false, or auto.")
 
 
 def select_active_truth_comparison_keys(
@@ -851,6 +918,8 @@ def build_subblock_command(
     ]
     if subblock_cfg.get("exposure_time_s") is not None:
         command.extend(["--exposure-time-s", str(float(subblock_cfg["exposure_time_s"]))])
+    if _single_star_use_render_variance(subblock_cfg):
+        command.append("--use-render-variance")
     append_reference_optimizer_flags(command, subblock_cfg)
     append_schur_frame_quality_flags(command, subblock_cfg)
     for flag_key, flag in (
@@ -878,6 +947,24 @@ def build_subblock_command(
 
 
 def build_calibration_plan(
+    *,
+    config_path: Path | None,
+    results_root: Path,
+    run_name: str | None,
+    system_preset: str | None,
+    args: argparse.Namespace | None = None,
+) -> CalibrationPlan:
+    with _jax_x64_context():
+        return _build_calibration_plan_impl(
+            config_path=config_path,
+            results_root=results_root,
+            run_name=run_name,
+            system_preset=system_preset,
+            args=args,
+        )
+
+
+def _build_calibration_plan_impl(
     *,
     config_path: Path | None,
     results_root: Path,
@@ -1030,6 +1117,7 @@ def build_calibration_plan(
                     "reference_early_stopping_loss_atol": subblock_cfg.get("reference_early_stopping_loss_atol"),
                     "reference_early_stopping_step_atol": subblock_cfg.get("reference_early_stopping_step_atol"),
                     "reference_early_stopping_grad_norm_atol": subblock_cfg.get("reference_early_stopping_grad_norm_atol"),
+                    "use_render_variance": _single_star_use_render_variance(subblock_cfg),
                     "command": " ".join(command),
                     "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
                     "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
@@ -1112,9 +1200,191 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
     }
 
 
+def _scalar_store_value(store: ParameterStore, key: str) -> float | None:
+    try:
+        return float(np.asarray(store.get(key)))
+    except Exception:
+        return None
+
+
+def _mapping_scalar_value(mapping: Mapping[str, Any], key: str) -> float | None:
+    current: Any = mapping
+    for part in key.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    try:
+        return float(current)
+    except Exception:
+        return None
+
+
+def _wavelength_summary_from_store(store: ParameterStore) -> dict[str, Any]:
+    center = _scalar_store_value(store, "source.wavelength_m")
+    bandwidth = _scalar_store_value(store, "source.bandwidth_m")
+    n_lambda = _scalar_store_value(store, "source.n_lambda")
+    if center is None or bandwidth is None or n_lambda is None:
+        return {"available": False}
+    count = int(n_lambda)
+    if count <= 0:
+        return {"available": False, "n_lambda": count}
+    grid = np.linspace(
+        center - 0.5 * bandwidth,
+        center + 0.5 * bandwidth,
+        count,
+        dtype=float,
+    )
+    return {
+        "available": True,
+        "n_lambda": count,
+        "min_m": float(np.min(grid)),
+        "max_m": float(np.max(grid)),
+        "center_m": float(center),
+        "bandwidth_m": float(bandwidth),
+    }
+
+
+def _refreshed_store_from_system_cfg(system_cfg: Mapping[str, Any]) -> ParameterStore:
+    with _jax_x64_context():
+        spec = compose_forward_spec(system_cfg)
+        return ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+
+
+def _single_star_consistency_diagnostics(
+    plan: CalibrationPlan,
+    *,
+    case_name: str | None = None,
+    truth: np.ndarray | None = None,
+    reference: np.ndarray | None = None,
+    summaries: Sequence[SubblockSummary] | None = None,
+    posterior_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return single-star scalar consistency diagnostics for auditability."""
+
+    store = _refreshed_store_from_system_cfg(plan.system_cfg)
+    labels = tuple(plan.layout.labels)
+    theta_ref_by_label: dict[str, float] = {}
+    if summaries:
+        theta_ref = np.asarray(summaries[0].theta_ref, dtype=float)
+        theta_ref_by_label = {
+            label: float(theta_ref[index])
+            for index, label in enumerate(labels)
+            if index < theta_ref.size
+        }
+
+    truth_by_label = (
+        {
+            label: float(np.asarray(truth, dtype=float)[index])
+            for index, label in enumerate(labels)
+        }
+        if truth is not None
+        else {
+            label: float(plan.truth_vector[index])
+            for index, label in enumerate(labels)
+        }
+    )
+    reference_by_label = (
+        {
+            label: float(np.asarray(reference, dtype=float)[index])
+            for index, label in enumerate(labels)
+        }
+        if reference is not None
+        else {}
+    )
+    posterior_table = {
+        str(row.get("theta_label")): {
+            "truth_value": row.get("truth_value"),
+            "prior_mean": row.get("prior_mean"),
+            "reference_value": row.get("reference_value"),
+            "injected_bias": row.get("injected_bias"),
+            "posterior_mean": row.get("posterior_mean"),
+            "posterior_error": row.get("posterior_error"),
+            "posterior_sigma": row.get("posterior_sigma"),
+        }
+        for row in (posterior_rows or [])
+        if row.get("theta_label") in {
+            "source.log_flux_total",
+            "optics.plate_scale_as_per_pix",
+        }
+    }
+
+    source_object_flux = None
+    spectral_weight_sum = None
+    try:
+        source = build_single_star_source(store, cfg=plan.system_cfg)
+        source_object_flux = float(np.asarray(getattr(source, "flux")))
+        spectral_weight_sum = float(np.sum(np.asarray(getattr(source, "weights"))))
+    except Exception:
+        pass
+
+    pixel_pitch = _scalar_store_value(store, "detector.pixel_pitch_m")
+    m1_f = _scalar_store_value(store, "optics.m1_focal_length_m")
+    m2_f = _scalar_store_value(store, "optics.m2_focal_length_m")
+    sep = _scalar_store_value(store, "optics.m1_m2_separation_m")
+    focal_length = None
+    expected_plate_scale = None
+    if None not in (pixel_pitch, m1_f, m2_f, sep):
+        focal_length = 1.0 / ((1.0 / m1_f) + (1.0 / m2_f) - sep / (m1_f * m2_f))
+        expected_plate_scale = pixel_pitch / focal_length * ARCSEC_PER_RAD
+
+    source_cfg = plan.system_cfg.get("source", {})
+    return {
+        "schema_version": "single_star_consistency_diagnostics.v1",
+        "case_name": case_name,
+        "source_kind": source_cfg.get("kind"),
+        "source_target": source_cfg.get("target"),
+        "calibration_source_mode": "alpha_cen_a_placeholder",
+        "photometry_is_placeholder": True,
+        "exposure_time_s": _scalar_store_value(store, "source.exposure_time_s"),
+        "wavelength_grid": _wavelength_summary_from_store(store),
+        "spectral_weight_sum": spectral_weight_sum,
+        "source.log_flux_total": {
+            "config": _mapping_scalar_value(plan.system_cfg, "source.log_flux_total"),
+            "refreshed_store": _scalar_store_value(store, "source.log_flux_total"),
+            "source_object_flux_field": source_object_flux,
+            "linear_total_flux_from_log10": (
+                None
+                if _scalar_store_value(store, "source.log_flux_total") is None
+                else float(10.0 ** _scalar_store_value(store, "source.log_flux_total"))
+            ),
+            "theta_ref": theta_ref_by_label.get("source.log_flux_total"),
+            "truth_value": truth_by_label.get("source.log_flux_total"),
+            "reference_value": reference_by_label.get("source.log_flux_total"),
+            "posterior_table": posterior_table.get("source.log_flux_total"),
+        },
+        "detector.pixel_pitch_m": pixel_pitch,
+        "optics.focal_length_m": focal_length,
+        "optics.plate_scale_as_per_pix": {
+            "config": _mapping_scalar_value(plan.system_cfg, "optics.plate_scale_as_per_pix"),
+            "expected_from_geometry": expected_plate_scale,
+            "refreshed_store": _scalar_store_value(store, "optics.plate_scale_as_per_pix"),
+            "theta_ref": theta_ref_by_label.get("optics.plate_scale_as_per_pix"),
+            "truth_value": truth_by_label.get("optics.plate_scale_as_per_pix"),
+            "reference_value": reference_by_label.get("optics.plate_scale_as_per_pix"),
+            "posterior_table": posterior_table.get("optics.plate_scale_as_per_pix"),
+        },
+        "theta_ref_values_exported_to_subblock_summary": theta_ref_by_label,
+        "posterior_table_values": posterior_table,
+        "policies": {
+            "use_render_variance": _single_star_use_render_variance(
+                plan.config["experiment"].get("subblocks", {}) or {}
+            ),
+            "near_zero_injected_bias_abs": NEAR_ZERO_INJECTED_BIAS_ABS,
+            "plate_scale_single_star_interpretation": (
+                "included when requested, but diagnostic/weak for centered "
+                "single-star data after X/Y registration"
+            ),
+        },
+    }
+
+
 def write_plan_artifacts(plan: CalibrationPlan) -> None:
     _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
     _write_json(plan.run_root / "resolved_config.json", plan.config)
+    _write_json(
+        plan.run_root / "single_star_consistency_diagnostics.json",
+        _single_star_consistency_diagnostics(plan),
+    )
     _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
     _write_csv(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
     _write_csv(plan.run_root / "subblock_plan.csv", plan.subblock_rows)
@@ -1221,9 +1491,18 @@ def _posterior_metric_rows(
                 "prior_sigma": float(prior_sigma[index]),
                 "posterior_sigma": float(posterior_sigma[index]),
                 "posterior_error_over_sigma": _safe_fraction(posterior_error, float(posterior_sigma[index])),
-                "correction_fraction": _safe_fraction(posterior_shift, -prior_error),
-                "residual_fraction": _safe_fraction(posterior_error, prior_error),
-                "moves_toward_truth": bool(abs(posterior_error) < abs(prior_error)),
+                "correction_fraction": _correction_fraction_or_nan(
+                    posterior_shift=posterior_shift,
+                    prior_error=prior_error,
+                ),
+                "residual_fraction": _residual_fraction_or_nan(
+                    posterior_error=posterior_error,
+                    prior_error=prior_error,
+                ),
+                "moves_toward_truth": _moves_toward_truth_or_none(
+                    posterior_error=posterior_error,
+                    prior_error=prior_error,
+                ),
                 "crosses_1nm_threshold": (None if not is_zernike else bool(crossed is not None)),
                 "time_to_1nm_s": (None if crossed is None else crossed[1]),
                 "n_subblocks_to_1nm": (None if crossed is None else crossed[0]),
@@ -1266,11 +1545,14 @@ def _history_rows(
                     "posterior_sigma": float(sigma[index]),
                     "posterior_error": posterior_error,
                     "posterior_error_over_sigma": _safe_fraction(posterior_error, float(sigma[index])),
-                    "correction_fraction": _safe_fraction(
-                        float(update.posterior.mean[index] - reference[index]),
-                        -prior_error,
+                    "correction_fraction": _correction_fraction_or_nan(
+                        posterior_shift=float(update.posterior.mean[index] - reference[index]),
+                        prior_error=prior_error,
                     ),
-                    "residual_fraction": _safe_fraction(posterior_error, prior_error),
+                    "residual_fraction": _residual_fraction_or_nan(
+                        posterior_error=posterior_error,
+                        prior_error=prior_error,
+                    ),
                 }
             )
     return rows
@@ -1382,9 +1664,13 @@ def _write_forecast_outputs(
                 "posterior_sigma_over_prior_sigma": _safe_fraction(float(sigma[index]), float(prior_sigma[index])),
                 "posterior_error": posterior_error,
                 "posterior_error_over_sigma": _safe_fraction(posterior_error, float(sigma[index])),
-                "correction_fraction": _safe_fraction(
-                    float(update.posterior.mean[index] - reference[index]),
-                    -prior_error,
+                "correction_fraction": _correction_fraction_or_nan(
+                    posterior_shift=float(update.posterior.mean[index] - reference[index]),
+                    prior_error=prior_error,
+                ),
+                "residual_fraction": _residual_fraction_or_nan(
+                    posterior_error=posterior_error,
+                    prior_error=prior_error,
                 ),
             }
             if trial_index is None:
@@ -1519,6 +1805,17 @@ def aggregate_case(
     )
     _write_csv(case_root / "posterior_by_parameter.csv", posterior_rows)
     _write_csv(case_root / "posterior_history.csv", history)
+    _write_json(
+        case_root / "single_star_consistency_diagnostics.json",
+        _single_star_consistency_diagnostics(
+            plan,
+            case_name=case.case_name,
+            truth=truth,
+            reference=reference,
+            summaries=summaries,
+            posterior_rows=posterior_rows,
+        ),
+    )
     _write_json(
         case_root / "case_summary.json",
         {

@@ -8639,6 +8639,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional inference noise-model variance floor override.",
     )
     parser.add_argument(
+        "--use-render-variance",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the render manifest variance_fits artifact as the inference "
+            "variance cube instead of deriving variance from the noisy data cube."
+        ),
+    )
+    parser.add_argument(
         "--summary-objective",
         choices=("data_only", "full_objective"),
         default="full_objective",
@@ -8870,6 +8879,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         schur_curvature_method=str(args.schur_curvature_method),
         phi_ref=str(args.phi_ref),
         variance_floor=args.variance_floor,
+        use_render_variance=bool(args.use_render_variance),
         summary_objective=str(args.summary_objective),
         summary_information_scale=str(args.summary_information_scale),
         validate_surrogate=bool(args.validate_surrogate),

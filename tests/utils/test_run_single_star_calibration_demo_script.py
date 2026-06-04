@@ -246,10 +246,67 @@ def test_single_star_forward_spec_does_not_require_binary_fields(tmp_path: Path)
         system_preset="SHERA_FLIGHT_3P",
     )
     spec = module.compose_forward_spec(plan.system_cfg)
-    store = module.ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+    store = module._refreshed_store_from_system_cfg(plan.system_cfg)
     assert store.get("source.log_flux_total") == plan.system_cfg["source"]["log_flux_total"]
     assert "source.separation_as" not in spec
     assert "source.contrast" not in spec
+
+
+def test_single_star_scalar_truth_matches_refreshed_store(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    store = module._refreshed_store_from_system_cfg(plan.system_cfg)
+    truth_by_label = {
+        label: float(plan.truth_vector[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+
+    assert truth_by_label["source.log_flux_total"] == pytest.approx(
+        float(store.get("source.log_flux_total")),
+        abs=0.0,
+    )
+    assert truth_by_label["optics.plate_scale_as_per_pix"] == pytest.approx(
+        float(store.get("optics.plate_scale_as_per_pix")),
+        abs=0.0,
+    )
+
+    pixel_pitch = float(store.get("detector.pixel_pitch_m"))
+    m1_f = float(store.get("optics.m1_focal_length_m"))
+    m2_f = float(store.get("optics.m2_focal_length_m"))
+    sep = float(store.get("optics.m1_m2_separation_m"))
+    focal_length = 1.0 / ((1.0 / m1_f) + (1.0 / m2_f) - sep / (m1_f * m2_f))
+    expected_plate_scale = pixel_pitch / focal_length * module.ARCSEC_PER_RAD
+    assert truth_by_label["optics.plate_scale_as_per_pix"] == pytest.approx(
+        expected_plate_scale,
+        rel=0.0,
+        abs=1.0e-15,
+    )
+
+
+def test_single_star_log_flux_matches_rendered_source_flux(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    spec = module.compose_forward_spec(plan.system_cfg)
+    store = module.ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+    source = module.build_single_star_source(store, cfg=plan.system_cfg)
+
+    expected_flux = 10.0 ** float(store.get("source.log_flux_total"))
+    assert float(np.asarray(source.flux)) == pytest.approx(expected_flux)
+    assert float(np.sum(np.asarray(source.weights))) == pytest.approx(1.0)
 
 
 def test_prior_draw_cases_are_reproducible_and_zero_bias_is_zero(tmp_path: Path) -> None:
@@ -457,6 +514,29 @@ def test_command_construction_uses_single_star_schur_summary(tmp_path: Path) -> 
     assert "source.contrast" not in joined
     assert "--phi-ref recovered" in joined
     assert "--schur-curvature-method structured_independent_frames" in joined
+    assert "--use-render-variance" not in joined
+
+
+def test_subblock_command_uses_render_variance_for_noisy_single_star_by_default(tmp_path: Path) -> None:
+    module = load_module()
+    template_paths = {
+        "trace": tmp_path / "trace.json",
+        "render": tmp_path / "render.json",
+        "inference": tmp_path / "inference.json",
+    }
+    command = module.build_subblock_command(
+        case_root_parent=tmp_path / "subblocks",
+        case_subblock_name="case/subblock_000000",
+        template_paths=template_paths,
+        theta_labels=("source.log_flux_total",),
+        layout_metadata={"primary_zernike_indices": [], "secondary_zernike_indices": []},
+        offsets={},
+        subblock_cfg={"noise": "enabled"},
+        trace_seed=1,
+        noise_seed=2,
+    )
+
+    assert "--use-render-variance" in command
 
 
 def test_cli_accepts_memory_diagnostics_flag() -> None:
@@ -685,6 +765,43 @@ def test_aggregate_math_does_not_assume_binary_labels(tmp_path: Path) -> None:
     assert "posterior_error_over_sigma" in rows[0]
     assert "source.separation_as" not in posterior_csv.read_text(encoding="utf-8")
     assert (plan.run_root / "cases" / case.case_name / "posterior_history.csv").exists()
+
+
+def test_zero_bias_posterior_metrics_mark_fractions_undefined(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "config.json"
+    write_config(config_path)
+    plan = module.build_calibration_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_cal",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    zero = next(case for case in plan.cases if case.case_origin == "zero_bias")
+    labels = plan.layout.labels
+    truth = np.asarray(plan.truth_vector, dtype=float)
+    write_summary(plan.summary_paths[zero.case_name][0], labels, truth, truth)
+
+    result = module.aggregate_case(plan, zero)
+    rows = _read_csv(Path(result["posterior_by_parameter_csv"]))
+    scalar_rows = [
+        row
+        for row in rows
+        if row["theta_label"]
+        in {"source.log_flux_total", "optics.plate_scale_as_per_pix"}
+    ]
+    assert scalar_rows
+    for row in scalar_rows:
+        assert abs(float(row["injected_bias"])) == pytest.approx(0.0)
+        assert np.isnan(float(row["correction_fraction"]))
+        assert np.isnan(float(row["residual_fraction"]))
+        assert row["moves_toward_truth"] == ""
+    assert (
+        plan.run_root
+        / "cases"
+        / zero.case_name
+        / "single_star_consistency_diagnostics.json"
+    ).exists()
 
 
 def test_subblock_command_forwards_reference_early_stopping_flags(tmp_path: Path) -> None:
