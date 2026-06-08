@@ -1186,10 +1186,11 @@ def test_prior_draw_rows_use_realized_truth_values(tmp_path: Path):
 def test_bias_parser_supports_resource_time_flags() -> None:
     module = load_module()
     parser = module._build_parser()
-    assert parser.parse_args(["--no-resource-time"]).resource_time is False
-    assert parser.parse_args(["--resource-time"]).resource_time is True
+    assert parser.parse_args(["--no-resource-time"]).resource_time == "disabled"
+    assert parser.parse_args(["--resource-time"]).resource_time == "enabled"
+    assert parser.parse_args(["--resource-time", "auto"]).resource_time == "auto"
     parsed = parser.parse_args(["--no-resource-time", "--dry-run"])
-    assert parsed.resource_time is False
+    assert parsed.resource_time == "disabled"
     assert parsed.dry_run is True
 
 
@@ -1206,7 +1207,7 @@ def test_aggregate_only_rejects_mismatched_existing_case_set(tmp_path: Path) -> 
     args = module._build_parser().parse_args(
         ["--config", str(config_path), "--run-name", "unit_campaign", "--aggregate-only"]
     )
-    with pytest.raises(ValueError, match="different case set"):
+    with pytest.raises(ValueError, match="stored plan validation failed"):
         module.run_observation_bias_campaign(
             config_path=config_path,
             results_root=tmp_path,

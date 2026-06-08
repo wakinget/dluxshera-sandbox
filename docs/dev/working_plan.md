@@ -895,3 +895,68 @@ Use this section as a quick in-doc ledger for active issues that are worth track
 - **Source parameters are treated as structural.** The `wavelength_m`, `bandwidth_m`, and `n_lambda` source settings are currently carried in the config object and are treated as structural in the structural parameter set. Because the AlphaCen source is built at model evaluation time and is not cached, the `forward_store` can carry these instead, which simplifies the call signature to `build_alpha_cen_source()`. If we eventually move to a more complicated source model, we may end up caching the source object and then re-defining a structural subset anyway, in which case we might end up where we started. Until then, though, I think it makes sense to consolidate these source settings into the forward_store with the other source settings ("binary.x_position_as", "binary.y_position_as", etc.) to reduce some mental overhead.
 - **`imaging.throughput` might not be modelled** We set a value in the store, but it's unclear if anything in the model actually applies the throughput.
 - **Profiles/IO consistency across workflows is incomplete.** Prescription/override flows are strong for experiment runners, but a unified YAML/JSON profile experience across all entry points is still pending.
+
+## Binary Iterative Observation Campaign Note
+
+`examples/scripts/run_observation_bias_campaign.py` now has an optional `experiment.iterative` mode for small binary-science validation campaigns. The first validation decision question is whether repeated observation-level updates move binary separation and the slow-state reference toward truth across windows.
+
+Implemented update mode: `physical_full` only, using the physical-label update
+`theta_ref_next = theta_ref_current + update_gain * (posterior_mean - theta_ref_current)`. Schema placeholders exist for future eigenbasis-aware modes, but damped/truncated eigen updates are not implemented.
+
+Output contract:
+
+- `campaign_plan.json`, `resolved_config.json`, `iterative_plan.csv`, and `expected_outputs.csv` store the resolved per-case/window/subblock contract.
+- Window outputs live under `cases/<case>/windows/window_XXX/`.
+- Aggregate-only reads stored run-root contracts and writes `analysis/output_inventory.csv`, `analysis/missing_outputs.csv`, `analysis/aggregate_status.json`, and `analysis/iterative_window_diagnostics.csv`.
+- The targeted validation trace source is `iid_jitter`; trajectory/external trace-source schemas remain available but need separate iterative validation.
+
+Smoke dry run:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/binary_iterative_smoke.yaml \
+  --results-root /tmp/dluxshera_binary_iterative_smoke \
+  --run-name binary_iterative_smoke \
+  --dry-run
+```
+
+### Binary Iterative Cluster Validation Readiness
+
+The hardened binary iterative path distinguishes two update vectors:
+
+- posterior update: `posterior_offsets - current_offsets`
+- applied update: `next_offsets - current_offsets`
+
+For `update_gain=1` these match. For damped physical updates they differ, so
+`analysis/iterative_window_diagnostics.csv` records both `posterior_*` and
+`applied_*` vector fields plus separation-specific microarcsecond fields.
+
+Aggregate-only treats stored run-root artifacts as authoritative when
+`campaign_plan.json` exists. It validates the current CLI/config shape against
+stored labels, cases, iterative shape, trace-source mode, summary scale, and
+expected-output counts, then writes
+`analysis/aggregate_only_plan_validation.json`. Output completeness is reported
+from `expected_outputs.csv` through `analysis/output_inventory.csv`,
+`analysis/missing_outputs.csv`, and `analysis/aggregate_status.json`.
+
+The first bounded cluster validation recipe is:
+
+```text
+examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.yaml
+```
+
+It uses IID jitter, `phi_ref: recovered`, 20 frames, two prior draws, three
+windows per draw, two subblocks per window, low-order M1/M2 Zernikes,
+`summed_likelihood` summaries, `physical_full` updates, and forecast disabled.
+The corresponding Gattaca2 submission helper is:
+
+```text
+examples/slurm/binary_iterative_cluster_validation.sbatch
+```
+
+Success criteria for the first validation are not full optical recovery. The
+primary pass/fail signal is whether separation and slow-state reference norms
+move toward truth across repeated windows without missing summaries, failed
+subblocks, or aggregate-only plan mismatches. Eigenbasis-aware update modes are
+reserved for a later update-control patch and intentionally raise
+`NotImplementedError` when enabled.

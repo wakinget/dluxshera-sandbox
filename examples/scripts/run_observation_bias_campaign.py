@@ -68,13 +68,25 @@ from dluxshera.inference.observation_summary import (
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
-from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.campaigns import (
+    format_shell_command,
+    load_existing_campaign_plan,
+    write_shell_command,
+)
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
     PreparedTraceSubblock,
     prepare_campaign_trace_source,
     trace_subblock_command_flags,
     validate_stored_trace_source_artifacts,
+)
+from dluxshera.utils.iterative_campaigns import (
+    apply_physical_reference_update,
+    posterior_float,
+    posterior_offsets_from_rows,
+    posterior_rows_by_label,
+    separation_update_diagnostics,
+    vector_update_diagnostics,
 )
 from dluxshera.utils.campaign_truth import realize_campaign_truth as _realize_campaign_truth
 from dluxshera.utils.obs_subblock_cli import (
@@ -123,6 +135,12 @@ SUPPORTED_REFERENCE_DIAGNOSTICS_PROFILES = ("none", "basic", "review", "full")
 SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES = ("warn", "mask", "reject")
 SUPPORTED_SCHUR_FRAME_QUALITY_MISSING = ("allow_all", "error")
 SUPPORTED_SCHUR_FRAME_MASK_DENOMINATORS = ("original", "kept")
+SUPPORTED_ITERATIVE_UPDATE_MODES = (
+    "physical_full",
+    "eigen_full",
+    "eigen_damped",
+    "eigen_truncated",
+)
 SUBBLOCK_OPTION_FLAG_MAP = {
     "summary_information_scale": "--summary-information-scale",
     "exposure_time_s": "--exposure-time-s",
@@ -161,6 +179,9 @@ class CampaignPlan:
     truth_realization: dict[str, Any]
     truth_realization_rows: list[dict[str, Any]]
     trace_source_plan: PreparedTraceSourcePlan
+    iterative: dict[str, Any]
+    iterative_plan_rows: list[dict[str, Any]]
+    expected_output_rows: list[dict[str, Any]]
 
 
 def _ensure_dir(path: Path) -> None:
@@ -189,6 +210,13 @@ def _write_csv_rows(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def _matrix_diagnostics(matrix: np.ndarray) -> MatrixDiagnostics:
@@ -718,6 +746,75 @@ def _derive_subblock_seeds(
     }
 
 
+def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    raw_cfg = experiment_cfg.get("iterative", {}) or {}
+    if not isinstance(raw_cfg, Mapping):
+        raise ValueError("experiment.iterative must be a mapping when provided.")
+    enabled = bool(raw_cfg.get("enabled", False))
+    windows_per_draw = int(raw_cfg.get("windows_per_draw", 1))
+    subblocks_per_window = int(
+        raw_cfg.get(
+            "subblocks_per_window",
+            experiment_cfg.get("subblocks", {}).get("n_subblocks", 1),
+        )
+    )
+    update_gain = float(raw_cfg.get("update_gain", 1.0))
+    update_mode = str(raw_cfg.get("update_mode", "physical_full"))
+    if update_mode not in SUPPORTED_ITERATIVE_UPDATE_MODES:
+        raise ValueError(
+            "experiment.iterative.update_mode must be one of "
+            + ", ".join(SUPPORTED_ITERATIVE_UPDATE_MODES)
+            + "."
+        )
+    if enabled and update_mode != "physical_full":
+        raise NotImplementedError(
+            "Only experiment.iterative.update_mode='physical_full' is implemented. "
+            f"{update_mode!r} is reserved for the next eigenbasis-aware "
+            "update-control patch."
+        )
+    if windows_per_draw <= 0:
+        raise ValueError("experiment.iterative.windows_per_draw must be positive.")
+    if subblocks_per_window <= 0:
+        raise ValueError("experiment.iterative.subblocks_per_window must be positive.")
+    if not math.isfinite(update_gain):
+        raise ValueError("experiment.iterative.update_gain must be finite.")
+    return {
+        "enabled": enabled,
+        "windows_per_draw": windows_per_draw,
+        "subblocks_per_window": subblocks_per_window,
+        "update_gain": update_gain,
+        "update_mode": update_mode,
+        "carry_prior_mean_with_reference": bool(
+            raw_cfg.get("carry_prior_mean_with_reference", True)
+        ),
+        "future_update_modes": [
+            mode for mode in SUPPORTED_ITERATIVE_UPDATE_MODES if mode != "physical_full"
+        ],
+    }
+
+
+def _case_draw_index(case: BiasCase) -> int | str:
+    if case.prior_draw_metadata and case.prior_draw_metadata.get("draw_index") is not None:
+        return int(case.prior_draw_metadata["draw_index"])
+    return ""
+
+
+def _iterative_subblock_name(
+    *,
+    case_name: str,
+    window_index: int,
+    subblock_index: int,
+) -> str:
+    return (
+        f"{case_name}/window_{int(window_index):03d}/"
+        f"subblock_{int(subblock_index):03d}"
+    )
+
+
+def _iterative_window_case_name(case_name: str, window_index: int) -> str:
+    return f"{case_name}/windows/window_{int(window_index):03d}"
+
+
 def _resolve_eigen_sources(eigen_cfg: Mapping[str, Any]) -> tuple[str, ...]:
     if "sources" in eigen_cfg:
         raw_sources = eigen_cfg.get("sources")
@@ -1164,9 +1261,15 @@ def build_campaign_plan(
     )
     subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
     subblock_command_options = resolve_subblock_command_options(subblock_cfg)
+    iterative_cfg = _resolve_iterative_config(experiment_cfg)
     seeding_cfg = _resolve_seeding_config(experiment_cfg)
-    n_subblocks = int(subblock_cfg.get("n_subblocks", 3))
-    if n_subblocks <= 0:
+    configured_n_subblocks = int(subblock_cfg.get("n_subblocks", 3))
+    n_subblocks = (
+        int(iterative_cfg["windows_per_draw"]) * int(iterative_cfg["subblocks_per_window"])
+        if bool(iterative_cfg["enabled"])
+        else configured_n_subblocks
+    )
+    if configured_n_subblocks <= 0 or n_subblocks <= 0:
         raise ValueError("subblocks.n_subblocks must be positive.")
     subblock_root = run_root / "subblock_runs"
     trace_source_plan = prepare_campaign_trace_source(
@@ -1196,12 +1299,32 @@ def build_campaign_plan(
     commands: dict[str, list[list[str]]] = {}
     summary_paths: dict[str, list[Path]] = {}
     subblock_plans: dict[str, list[dict[str, Any]]] = {}
+    iterative_plan_rows: list[dict[str, Any]] = []
+    expected_output_rows: list[dict[str, Any]] = []
     for case in cases:
         commands[case.case_name] = []
         summary_paths[case.case_name] = []
         subblock_plans[case.case_name] = []
         for subblock_index in range(n_subblocks):
-            subblock_name = f"{case.case_name}/subblock_{subblock_index:03d}"
+            window_index = (
+                int(subblock_index) // int(iterative_cfg["subblocks_per_window"])
+                if bool(iterative_cfg["enabled"])
+                else 0
+            )
+            window_subblock_index = (
+                int(subblock_index) % int(iterative_cfg["subblocks_per_window"])
+                if bool(iterative_cfg["enabled"])
+                else int(subblock_index)
+            )
+            subblock_name = (
+                _iterative_subblock_name(
+                    case_name=case.case_name,
+                    window_index=window_index,
+                    subblock_index=window_subblock_index,
+                )
+                if bool(iterative_cfg["enabled"])
+                else f"{case.case_name}/subblock_{subblock_index:03d}"
+            )
             seeds = _derive_subblock_seeds(
                 run_name=resolved_run_name,
                 case_name=case.case_name,
@@ -1235,10 +1358,13 @@ def build_campaign_plan(
                 if key != "forwarded_flags"
             }
             trace_row = dict(trace_source_plan.rows[subblock_index])
-            subblock_plans[case.case_name].append(
-                {
+            subblock_plan_row = {
                     "case_name": case.case_name,
                     "subblock_index": int(subblock_index),
+                    "window_index": int(window_index) if bool(iterative_cfg["enabled"]) else "",
+                    "window_subblock_index": int(window_subblock_index)
+                    if bool(iterative_cfg["enabled"])
+                    else "",
                     "subblock_name": subblock_name,
                     "summary_path": str(summary_path),
                     "case_origin": case.case_origin,
@@ -1257,7 +1383,78 @@ def build_campaign_plan(
                     **seeds,
                     **trace_row,
                 }
-            )
+            subblock_plans[case.case_name].append(subblock_plan_row)
+            if bool(iterative_cfg["enabled"]):
+                window_case_name = _iterative_window_case_name(
+                    case.case_name,
+                    int(window_index),
+                )
+                window_case_root = run_root / "cases" / window_case_name
+                posterior_path = window_case_root / "posterior_by_label.csv"
+                window_summary_path = window_case_root / "science_summary.csv"
+                reference_update_path = window_case_root / "iterative_reference_update.json"
+                window_diagnostic_path = window_case_root / "iterative_window_diagnostics.csv"
+                realized_command_path = (
+                    window_case_root
+                    / "commands"
+                    / f"subblock_{int(window_subblock_index):03d}.sh"
+                )
+                row = {
+                    **subblock_plan_row,
+                    "draw_index": _case_draw_index(case),
+                    "global_subblock_index": int(subblock_index),
+                    "case_posterior_path": str(posterior_path),
+                    "expected_case_posterior_path": str(posterior_path),
+                    "window_summary_path": str(window_summary_path),
+                    "iterative_reference_update_path": str(reference_update_path),
+                    "window_diagnostic_path": str(window_diagnostic_path),
+                    "window_case_name": window_case_name,
+                    "planned_command_template": " ".join(commands[case.case_name][-1]),
+                    "realized_command_path": str(realized_command_path),
+                    "realized_after_reference_update": True,
+                    "update_gain": float(iterative_cfg["update_gain"]),
+                    "update_mode": str(iterative_cfg["update_mode"]),
+                    "carry_prior_mean_with_reference": bool(
+                        iterative_cfg["carry_prior_mean_with_reference"]
+                    ),
+                    "summary_information_scale": str(
+                        subblock_cfg.get("summary_information_scale", "")
+                    ),
+                    "trace_source_mode": str(trace_source_plan.mode),
+                    "theta_reference_offsets_window0_json": json.dumps(
+                        dict(case.theta_reference_offsets), sort_keys=True
+                    )
+                    if int(window_index) == 0
+                    else "",
+                    "initial_truth_reference_provenance": "campaign_truth_plus_case_offsets",
+                }
+                iterative_plan_rows.append(row)
+                expected_output_rows.append(
+                    {
+                        "case_name": case.case_name,
+                        "case_origin": case.case_origin,
+                        "draw_index": _case_draw_index(case),
+                        "window_index": int(window_index),
+                        "subblock_index": int(window_subblock_index),
+                        "global_subblock_index": int(subblock_index),
+                        "summary_path": str(summary_path),
+                        "case_posterior_path": str(posterior_path),
+                        "window_summary_path": str(window_summary_path),
+                        "iterative_reference_update_path": str(reference_update_path),
+                        "window_diagnostic_path": str(window_diagnostic_path),
+                        "window_case_name": window_case_name,
+                        "realized_command_path": str(realized_command_path),
+                        "realized_after_reference_update": True,
+                        "update_gain": float(iterative_cfg["update_gain"]),
+                        "update_mode": str(iterative_cfg["update_mode"]),
+                        "summary_information_scale": str(
+                            subblock_cfg.get("summary_information_scale", "")
+                        ),
+                        "trace_source_mode": str(trace_source_plan.mode),
+                        "trace_seed": int(seeds["trace_seed"]),
+                        "noise_seed": int(seeds["noise_seed"]),
+                    }
+                )
     resolved_config = {
         **config,
         "experiment": experiment_cfg,
@@ -1279,6 +1476,9 @@ def build_campaign_plan(
         truth_realization=dict(truth_realization.summary),
         truth_realization_rows=list(truth_realization.rows),
         trace_source_plan=trace_source_plan,
+        iterative=iterative_cfg,
+        iterative_plan_rows=iterative_plan_rows,
+        expected_output_rows=expected_output_rows,
     )
 
 
@@ -1290,6 +1490,7 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
     max_dense_dim = int(subblock_cfg.get("max_dense_dim", 40))
     eigen_cfg = dict(plan.config["experiment"].get("eigenbasis", {}) or {})
     forecast_cfg = _forecast_config(plan.config["experiment"])
+    iterative_cfg = _resolve_iterative_config(plan.config["experiment"])
     actual_n_summaries = int(plan.config["experiment"].get("subblocks", {}).get("n_subblocks", 3))
     forecast_grid = parse_forecast_grid(
         forecast_cfg.get("n_subblocks_grid"),
@@ -1304,15 +1505,27 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "state_partition": plan.partition,
         "case_generation": dict(plan.case_generation),
         "truth_realization": dict(plan.truth_realization),
+        "prior_truth_by_label": {
+            label: float(plan.prior_truth[index])
+            for index, label in enumerate(plan.layout.labels)
+        },
         "trace_source": dict(plan.trace_source_plan.summary),
         "subblock_command_options": dict(subblock_command_options),
         "seeding": _resolve_seeding_config(plan.config["experiment"]),
+        "iterative": dict(plan.iterative),
         "eigenbasis": {
             **eigen_cfg,
             "resolved_sources": list(_resolve_eigen_sources(eigen_cfg)),
         },
         "forecast": {
             "enabled": bool(forecast_cfg.get("enabled", False)),
+            "iterative_warning": (
+                "forecast.enabled=true with iterative.enabled=true can be much heavier; "
+                "forecast is not needed for first iterative validation."
+                if bool(forecast_cfg.get("enabled", False))
+                and bool(iterative_cfg.get("enabled", False))
+                else ""
+            ),
             "modes": list(forecast_cfg.get("modes", [])),
             "n_subblocks_grid": list(forecast_grid),
             "single_observation_n_subblocks": int(
@@ -1367,10 +1580,13 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "subblock_plan": {
             name: list(items) for name, items in plan.subblock_plans.items()
         },
+        "iterative_plan": list(plan.iterative_plan_rows),
+        "expected_outputs": list(plan.expected_output_rows),
         "notes": [
             "Trace-source mode iid_jitter preserves legacy trace-template behavior.",
             "Trajectory mode writes frame_truth.csv for render truth and starting_guess_prediction.csv for optimizer initialization only.",
             "Trajectory mode uses one pointing history shared across bias cases.",
+            "Iterative physical_full mode stores later-window command templates at plan time and exact realized commands after each reference update.",
         ],
     }
 
@@ -3063,6 +3279,644 @@ def aggregate_campaign(
     return summary
 
 
+def _truth_by_label(plan: CampaignPlan) -> dict[str, float]:
+    return {
+        label: float(plan.prior_truth[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+
+
+def _rows_for_iterative_window(
+    plan: CampaignPlan,
+    *,
+    case_name: str,
+    window_index: int,
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in plan.iterative_plan_rows
+        if str(row.get("case_name")) == str(case_name)
+        and int(row.get("window_index", -1)) == int(window_index)
+    ]
+
+
+def _window_plan(
+    plan: CampaignPlan,
+    *,
+    case: BiasCase,
+    window_index: int,
+    current_offsets: Mapping[str, float],
+) -> tuple[CampaignPlan, BiasCase]:
+    rows = sorted(
+        _rows_for_iterative_window(plan, case_name=case.case_name, window_index=window_index),
+        key=lambda row: int(row["window_subblock_index"]),
+    )
+    if not rows:
+        raise RuntimeError(
+            f"Stored iterative plan has no rows for case={case.case_name!r} "
+            f"window={window_index}."
+        )
+    subblock_cfg = dict(plan.config["experiment"].get("subblocks", {}) or {})
+    commands: list[list[str]] = []
+    summary_paths: list[Path] = []
+    subblock_rows: list[dict[str, Any]] = []
+    subblock_root = plan.run_root / "subblock_runs"
+    for row in rows:
+        global_index = int(row["global_subblock_index"])
+        summary_path = Path(str(row["summary_path"]))
+        summary_paths.append(summary_path)
+        command = build_subblock_command(
+            case_root_parent=subblock_root,
+            case_subblock_name=str(row["subblock_name"]),
+            theta_labels=plan.layout.labels,
+            offsets=current_offsets,
+            subblock_cfg=subblock_cfg,
+            trace_seed=int(row["trace_seed"]),
+            noise_seed=int(row["noise_seed"]),
+            trace_subblock=plan.trace_source_plan.subblocks[global_index],
+        )
+        commands.append(command)
+        subblock_rows.append(
+            {
+                **row,
+                "theta_reference_offsets_realized_json": json.dumps(
+                    {str(k): float(v) for k, v in current_offsets.items()},
+                    sort_keys=True,
+                ),
+            }
+        )
+    window_case = BiasCase(
+        case_name=_iterative_window_case_name(case.case_name, window_index),
+        theta_reference_offsets={str(k): float(v) for k, v in current_offsets.items()},
+        case_origin=case.case_origin,
+        prior_sigma_by_label=case.prior_sigma_by_label,
+        prior_draw_metadata=case.prior_draw_metadata,
+    )
+    window_plan_obj = replace(
+        plan,
+        cases=(window_case,),
+        subblock_commands={window_case.case_name: commands},
+        summary_paths={window_case.case_name: summary_paths},
+        subblock_plans={window_case.case_name: subblock_rows},
+    )
+    return window_plan_obj, window_case
+
+
+def _write_realized_window_commands(
+    *,
+    window_plan_obj: CampaignPlan,
+    window_case: BiasCase,
+) -> list[dict[str, Any]]:
+    command_rows: list[dict[str, Any]] = []
+    rows = list(window_plan_obj.subblock_plans[window_case.case_name])
+    commands = list(window_plan_obj.subblock_commands[window_case.case_name])
+    for row, command in zip(rows, commands, strict=True):
+        command_path = Path(str(row.get("realized_command_path", "")))
+        if not str(command_path):
+            command_path = (
+                window_plan_obj.run_root
+                / "cases"
+                / window_case.case_name
+                / "commands"
+                / f"subblock_{int(row.get('window_subblock_index', row.get('subblock_index', 0))):03d}.sh"
+            )
+        write_shell_command(command_path, command)
+        command_rows.append(
+            {
+                "case_name": row.get("case_name", ""),
+                "window_case_name": window_case.case_name,
+                "window_index": row.get("window_index", ""),
+                "window_subblock_index": row.get("window_subblock_index", ""),
+                "global_subblock_index": row.get("global_subblock_index", row.get("subblock_index", "")),
+                "summary_path": row.get("summary_path", ""),
+                "command_path": str(command_path),
+                "command": format_shell_command(command),
+            }
+        )
+    _write_csv_rows(
+        window_plan_obj.run_root / "cases" / window_case.case_name / "commands" / "commands.csv",
+        command_rows,
+    )
+    return command_rows
+
+
+def _augment_iterative_status_rows(
+    *,
+    plan: CampaignPlan,
+    window_case: BiasCase,
+    command_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    command_by_summary = {str(row.get("summary_path", "")): row for row in command_rows}
+    status_rows = _read_csv_rows(plan.run_root / "subblock_status.csv")
+    out: list[dict[str, Any]] = []
+    for status in status_rows:
+        summary_path = str(status.get("summary_path", ""))
+        command_row = command_by_summary.get(summary_path, {})
+        if not command_row:
+            continue
+        row = {
+            **status,
+            "case_name": command_row.get("case_name", ""),
+            "window_case_name": window_case.case_name,
+            "window_index": command_row.get("window_index", ""),
+            "window_subblock_index": command_row.get("window_subblock_index", ""),
+            "global_subblock_index": command_row.get("global_subblock_index", ""),
+            "command_path": command_row.get("command_path", ""),
+            "failure_reason": status.get("failure_hint", ""),
+            "elapsed_seconds": "",
+        }
+        diag_path = Path(str(status.get("subprocess_diagnostics_path", "")))
+        if diag_path.exists():
+            try:
+                diag_payload = json.loads(diag_path.read_text(encoding="utf-8"))
+                row["elapsed_seconds"] = diag_payload.get("elapsed_seconds", "")
+            except Exception:
+                pass
+        out.append(row)
+    if out:
+        _write_csv_rows(
+            plan.run_root / "cases" / window_case.case_name / "subblock_status.csv",
+            out,
+        )
+    return out
+
+
+def _norm_for_prefix(labels: Sequence[str], offsets: Mapping[str, float], prefix: str) -> float:
+    values = [float(offsets.get(label, 0.0)) for label in labels if label.startswith(prefix)]
+    return float(np.linalg.norm(np.asarray(values, dtype=float))) if values else float("nan")
+
+
+def _binary_iterative_diagnostic_row(
+    *,
+    plan: CampaignPlan,
+    case: BiasCase,
+    window_index: int,
+    current_offsets: Mapping[str, float],
+    posterior_offsets: Mapping[str, float],
+    next_offsets: Mapping[str, float],
+    posterior_rows: Mapping[str, Mapping[str, Any]],
+    posterior_offset_status: Mapping[str, str],
+    previous_residual_norm: float | None,
+    previous_next_reference_norm: float | None,
+    n_subblocks: int,
+) -> dict[str, Any]:
+    labels = tuple(plan.layout.labels)
+    base = vector_update_diagnostics(
+        labels=labels,
+        current_offsets=current_offsets,
+        posterior_offsets=posterior_offsets,
+        next_offsets=next_offsets,
+        previous_residual_norm=previous_residual_norm,
+        previous_next_reference_norm=previous_next_reference_norm,
+    )
+    sep_label = "source.separation_as"
+    sep_sigma = float("nan")
+    if sep_label in posterior_rows:
+        sep_sigma = posterior_float(
+            posterior_rows[sep_label],
+            ("posterior_sigma", "sigma", "std"),
+        )
+    missing_labels = [
+        label for label in labels if posterior_offset_status.get(label) != "ok"
+    ]
+    return {
+        "case_name": case.case_name,
+        "case_origin": case.case_origin,
+        "draw_index": _case_draw_index(case),
+        "window_index": int(window_index),
+        "update_gain": float(plan.iterative["update_gain"]),
+        "update_mode": str(plan.iterative["update_mode"]),
+        "n_subblocks": int(n_subblocks),
+        **base,
+        **separation_update_diagnostics(
+            current_offsets=current_offsets,
+            posterior_offsets=posterior_offsets,
+            next_offsets=next_offsets,
+        ),
+        "posterior_sigma_separation_microas": sep_sigma * 1.0e6
+        if math.isfinite(sep_sigma)
+        else float("nan"),
+        "posterior_missing_label_count": int(len(missing_labels)),
+        "posterior_missing_labels": ",".join(missing_labels),
+        "posterior_offset_status_json": json.dumps(dict(posterior_offset_status), sort_keys=True),
+        "source_scalar_reference_error_norm_before": _norm_for_prefix(labels, current_offsets, "source."),
+        "source_scalar_posterior_error_norm_after": _norm_for_prefix(labels, posterior_offsets, "source."),
+        "plate_scale_reference_error_norm_before": abs(
+            float(current_offsets.get("optics.plate_scale_as_per_pix", 0.0))
+        )
+        if "optics.plate_scale_as_per_pix" in labels
+        else float("nan"),
+        "plate_scale_posterior_error_norm_after": abs(
+            float(posterior_offsets.get("optics.plate_scale_as_per_pix", 0.0))
+        )
+        if "optics.plate_scale_as_per_pix" in labels
+        else float("nan"),
+        "m1_zernike_reference_error_norm_before": _norm_for_prefix(
+            labels, current_offsets, "optics.primary.zernike_coeffs_nm"
+        ),
+        "m1_zernike_posterior_error_norm_after": _norm_for_prefix(
+            labels, posterior_offsets, "optics.primary.zernike_coeffs_nm"
+        ),
+        "m2_zernike_reference_error_norm_before": _norm_for_prefix(
+            labels, current_offsets, "optics.secondary.zernike_coeffs_nm"
+        ),
+        "m2_zernike_posterior_error_norm_after": _norm_for_prefix(
+            labels, posterior_offsets, "optics.secondary.zernike_coeffs_nm"
+        ),
+    }
+
+
+def execute_iterative_campaign(
+    plan: CampaignPlan,
+    *,
+    resume: bool,
+    max_workers: int,
+    fail_fast: bool,
+    quiet: bool,
+    prior_source: str,
+    allow_optimizer_scale_summaries: bool,
+    resource_time: bool | str | None,
+) -> dict[str, Any]:
+    summary_scale_policy = (
+        SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
+        if allow_optimizer_scale_summaries
+        else SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+    )
+    truth = _truth_by_label(plan)
+    diagnostics: list[dict[str, Any]] = []
+    current_offsets_by_case = {
+        case.case_name: dict(case.theta_reference_offsets) for case in plan.cases
+    }
+    previous_residual_by_case: dict[str, float] = {}
+    previous_next_reference_by_case: dict[str, float] = {}
+    previous_next_reference_by_case: dict[str, float] = {}
+    all_status_rows: list[dict[str, Any]] = _read_csv_rows(
+        plan.run_root / "subblock_status_iterative.csv"
+    )
+    for case in plan.cases:
+        for window_index in range(int(plan.iterative["windows_per_draw"])):
+            current_offsets = current_offsets_by_case[case.case_name]
+            window_plan_obj, window_case = _window_plan(
+                plan,
+                case=case,
+                window_index=window_index,
+                current_offsets=current_offsets,
+            )
+            command_rows = _write_realized_window_commands(
+                window_plan_obj=window_plan_obj,
+                window_case=window_case,
+            )
+            expected_posterior = (
+                window_plan_obj.run_root
+                / "cases"
+                / window_case.case_name
+                / "posterior_by_label.csv"
+            )
+            if not (resume and expected_posterior.exists()):
+                try:
+                    execute_subblocks(
+                        window_plan_obj,
+                        resume=resume,
+                        max_workers=max(1, int(max_workers)),
+                        fail_fast=fail_fast,
+                        quiet=quiet,
+                        resource_time=resource_time,
+                    )
+                finally:
+                    window_status = _augment_iterative_status_rows(
+                        plan=plan,
+                        window_case=window_case,
+                        command_rows=command_rows,
+                    )
+                    all_status_rows.extend(window_status)
+                    _write_csv_rows(
+                        plan.run_root / "subblock_status_iterative.csv",
+                        all_status_rows,
+                    )
+                aggregate_case(
+                    plan=window_plan_obj,
+                    case=window_case,
+                    prior_source=prior_source,
+                    summary_scale_policy=summary_scale_policy,
+                )
+            posterior_rows = posterior_rows_by_label(expected_posterior)
+            if not posterior_rows:
+                raise RuntimeError(
+                    f"Missing iterative window posterior: {expected_posterior}"
+                )
+            posterior_offsets, posterior_offset_status = posterior_offsets_from_rows(
+                labels=plan.layout.labels,
+                posterior_rows_by_label=posterior_rows,
+                truth_by_label=truth,
+                fallback_offsets=current_offsets,
+            )
+            next_offsets = apply_physical_reference_update(
+                current_offsets=current_offsets,
+                posterior_rows_by_label=posterior_rows,
+                truth_by_label=truth,
+                update_gain=float(plan.iterative["update_gain"]),
+            )
+            row = _binary_iterative_diagnostic_row(
+                plan=plan,
+                case=case,
+                window_index=window_index,
+                current_offsets=current_offsets,
+                posterior_offsets=posterior_offsets,
+                next_offsets=next_offsets,
+                posterior_rows=posterior_rows,
+                posterior_offset_status=posterior_offset_status,
+                previous_residual_norm=previous_residual_by_case.get(case.case_name),
+                previous_next_reference_norm=previous_next_reference_by_case.get(case.case_name),
+                n_subblocks=int(plan.iterative["subblocks_per_window"]),
+            )
+            diagnostics.append(row)
+            previous_residual_by_case[case.case_name] = float(
+                row["posterior_error_norm_after"]
+            )
+            previous_next_reference_by_case[case.case_name] = float(
+                row["next_reference_error_norm"]
+            )
+            realized_root = plan.run_root / "cases" / window_case.case_name
+            _write_csv_rows(realized_root / "iterative_window_diagnostics.csv", [row])
+            _write_json(
+                realized_root / "iterative_reference_update.json",
+                {
+                    "schema_version": "observation_bias_iterative_reference_update.v1",
+                    "case_name": case.case_name,
+                    "window_case_name": window_case.case_name,
+                    "window_index": int(window_index),
+                    "update_gain": float(plan.iterative["update_gain"]),
+                    "update_mode": str(plan.iterative["update_mode"]),
+                    "current_offsets": dict(current_offsets),
+                    "posterior_offsets": dict(posterior_offsets),
+                    "next_offsets": dict(next_offsets),
+                    "truth_by_label": dict(truth),
+                    "posterior_table_path": str(expected_posterior),
+                    "diagnostics": row,
+                    "posterior_offset_status": dict(posterior_offset_status),
+                    "created_at": now_iso_local_ms(),
+                    "status": "ok",
+                    "not_scientific_if_synthetic_inputs": False,
+                },
+            )
+            current_offsets_by_case[case.case_name] = next_offsets
+    analysis_root = plan.run_root / "analysis"
+    _write_csv_rows(analysis_root / "iterative_window_diagnostics.csv", diagnostics)
+    return aggregate_iterative_outputs(plan)
+
+
+def _iterative_inventory_rows(plan: CampaignPlan) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    inventory: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    path_fields = (
+        ("summary", "summary_path"),
+        ("case_posterior", "case_posterior_path"),
+        ("window_summary", "window_summary_path"),
+        ("iterative_reference_update", "iterative_reference_update_path"),
+        ("window_diagnostic", "window_diagnostic_path"),
+        ("realized_command", "realized_command_path"),
+    )
+    for row in plan.expected_output_rows:
+        for kind, field in path_fields:
+            value = str(row.get(field, ""))
+            if not value:
+                continue
+            path = Path(value)
+            exists = path.exists()
+            status = {
+                "kind": kind,
+                "path_field": field,
+                "path": str(path),
+                "exists": bool(exists),
+                "size_bytes": int(path.stat().st_size) if exists and path.is_file() else 0,
+                "case_name": row.get("case_name", ""),
+                "window_case_name": row.get("window_case_name", ""),
+                "window_index": row.get("window_index", ""),
+                "subblock_index": row.get("subblock_index", ""),
+                "global_subblock_index": row.get("global_subblock_index", ""),
+                "summary_path": row.get("summary_path", ""),
+                "case_posterior_path": row.get("case_posterior_path", ""),
+                "window_summary_path": row.get("window_summary_path", ""),
+            }
+            inventory.append(status)
+            if not exists:
+                missing.append(status)
+    return inventory, missing
+
+
+def _counts_by_kind(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        kind = str(row.get("kind", "unknown"))
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def _iterative_status_summary(plan: CampaignPlan) -> dict[str, Any]:
+    rows = _read_csv_rows(plan.run_root / "subblock_status_iterative.csv")
+    failed = [row for row in rows if str(row.get("status", "")) == "failed"]
+    completed = [row for row in rows if str(row.get("status", "")) == "ok"]
+    expected = len(plan.expected_output_rows)
+    windows: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row.get("case_name", "")), str(row.get("window_index", "")))
+        bucket = windows.setdefault(key, {"rows": 0, "failed": 0})
+        bucket["rows"] += 1
+        if str(row.get("status", "")) == "failed":
+            bucket["failed"] += 1
+    incomplete_windows = [
+        {"case_name": case_name, "window_index": window_index, **bucket}
+        for (case_name, window_index), bucket in windows.items()
+        if int(bucket["rows"]) < int(plan.iterative.get("subblocks_per_window", 0))
+        or int(bucket["failed"]) > 0
+    ]
+    return {
+        "status_rows": int(len(rows)),
+        "total_expected_subblocks": int(expected),
+        "completed_subblocks": int(len(completed)),
+        "failed_subblocks": int(len(failed)),
+        "incomplete_windows": incomplete_windows,
+        "incomplete_window_count": int(len(incomplete_windows)),
+        "first_failure": failed[0] if failed else None,
+    }
+
+
+def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
+    analysis_root = plan.run_root / "analysis"
+    inventory, missing = _iterative_inventory_rows(plan)
+    _write_csv_rows(analysis_root / "output_inventory.csv", inventory)
+    _write_csv_rows(analysis_root / "missing_outputs.csv", missing)
+    missing_by_kind = _counts_by_kind(missing)
+    existing_by_kind = _counts_by_kind([row for row in inventory if bool(row.get("exists"))])
+    status_summary = _iterative_status_summary(plan)
+    diagnostics: list[dict[str, Any]] = []
+    truth = _truth_by_label(plan)
+    current_offsets_by_case = {
+        case.case_name: dict(case.theta_reference_offsets) for case in plan.cases
+    }
+    previous_residual_by_case: dict[str, float] = {}
+    previous_next_reference_by_case: dict[str, float] = {}
+    cases_by_name = {case.case_name: case for case in plan.cases}
+    windows = sorted(
+        {
+            (str(row.get("case_name")), int(row.get("window_index", -1)))
+            for row in plan.expected_output_rows
+            if row.get("case_name") in cases_by_name and int(row.get("window_index", -1)) >= 0
+        },
+        key=lambda item: (item[0], item[1]),
+    )
+    for case_name, window_index in windows:
+        case = cases_by_name[case_name]
+        window_rows = _rows_for_iterative_window(
+            plan,
+            case_name=case_name,
+            window_index=window_index,
+        )
+        if not window_rows:
+            continue
+        posterior_path = Path(str(window_rows[0]["case_posterior_path"]))
+        if not posterior_path.exists():
+            continue
+        current_offsets = current_offsets_by_case[case_name]
+        posterior_rows = posterior_rows_by_label(posterior_path)
+        posterior_offsets, posterior_offset_status = posterior_offsets_from_rows(
+            labels=plan.layout.labels,
+            posterior_rows_by_label=posterior_rows,
+            truth_by_label=truth,
+            fallback_offsets=current_offsets,
+        )
+        next_offsets = apply_physical_reference_update(
+            current_offsets=current_offsets,
+            posterior_rows_by_label=posterior_rows,
+            truth_by_label=truth,
+            update_gain=float(plan.iterative["update_gain"]),
+        )
+        row = _binary_iterative_diagnostic_row(
+            plan=plan,
+            case=case,
+            window_index=window_index,
+            current_offsets=current_offsets,
+            posterior_offsets=posterior_offsets,
+            next_offsets=next_offsets,
+            posterior_rows=posterior_rows,
+            posterior_offset_status=posterior_offset_status,
+            previous_residual_norm=previous_residual_by_case.get(case_name),
+            previous_next_reference_norm=previous_next_reference_by_case.get(case_name),
+            n_subblocks=int(plan.iterative["subblocks_per_window"]),
+        )
+        diagnostics.append(row)
+        previous_residual_by_case[case_name] = float(row["posterior_error_norm_after"])
+        previous_next_reference_by_case[case_name] = float(row["next_reference_error_norm"])
+        current_offsets_by_case[case_name] = next_offsets
+    _write_csv_rows(analysis_root / "iterative_window_diagnostics.csv", diagnostics)
+    status = {
+        "schema_version": "observation_bias_iterative_aggregate_status.v1",
+        "created_at": now_iso_local_ms(),
+        "run_root": str(plan.run_root),
+        "used_stored_plan": True,
+        "iterative_enabled": bool(plan.iterative.get("enabled", False)),
+        "expected_output_rows": int(len(plan.expected_output_rows)),
+        "missing_output_rows": int(len(missing)),
+        "inventory_rows": int(len(inventory)),
+        "existing_outputs_by_kind": existing_by_kind,
+        "missing_outputs_by_kind": missing_by_kind,
+        "missing_summaries": int(missing_by_kind.get("summary", 0)),
+        "missing_posterior_tables": int(missing_by_kind.get("case_posterior", 0)),
+        "completed_subblocks": int(status_summary["completed_subblocks"]),
+        "failed_subblocks": int(status_summary["failed_subblocks"]),
+        "incomplete_windows": int(status_summary["incomplete_window_count"]),
+        "first_failure": status_summary["first_failure"],
+        "iterative_window_diagnostic_rows": int(len(diagnostics)),
+        "windows_per_draw": int(plan.iterative.get("windows_per_draw", 0)),
+        "subblocks_per_window": int(plan.iterative.get("subblocks_per_window", 0)),
+        "update_gain": float(plan.iterative.get("update_gain", 1.0)),
+        "update_mode": str(plan.iterative.get("update_mode", "")),
+    }
+    _write_json(analysis_root / "aggregate_status.json", status)
+    return status
+
+
+def _stored_layout_labels(stored_plan: Mapping[str, Any]) -> list[str]:
+    layout = stored_plan.get("theta_layout", {})
+    if isinstance(layout, Mapping):
+        labels = layout.get("labels", [])
+        if isinstance(labels, list):
+            return [str(label) for label in labels]
+    return []
+
+
+def _validate_aggregate_only_stored_plan(
+    *,
+    current_plan: CampaignPlan,
+    stored_plan: Mapping[str, Any],
+    stored_plan_path: Path,
+) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    validated: list[str] = []
+
+    def check(field: str, current: Any, stored: Any) -> None:
+        validated.append(field)
+        if current != stored:
+            mismatches.append({"field": field, "current": current, "stored": stored})
+
+    check("schema_version", CAMPAIGN_SCHEMA_VERSION, stored_plan.get("schema_version"))
+    check("run_root", str(current_plan.run_root), str(stored_plan.get("run_root", "")))
+    check(
+        "case_set",
+        sorted(current_plan.summary_paths.keys()),
+        sorted(str(key) for key in (stored_plan.get("summary_paths", {}) or {}).keys()),
+    )
+    stored_labels = _stored_layout_labels(stored_plan)
+    if stored_labels:
+        check("layout_labels", list(current_plan.layout.labels), stored_labels)
+    stored_iterative = stored_plan.get("iterative", {})
+    if isinstance(stored_iterative, Mapping):
+        check("iterative.enabled", bool(current_plan.iterative.get("enabled", False)), bool(stored_iterative.get("enabled", False)))
+        check("iterative.update_mode", str(current_plan.iterative.get("update_mode", "")), str(stored_iterative.get("update_mode", "")))
+        check("iterative.windows_per_draw", int(current_plan.iterative.get("windows_per_draw", 0)), int(stored_iterative.get("windows_per_draw", 0)))
+        check("iterative.subblocks_per_window", int(current_plan.iterative.get("subblocks_per_window", 0)), int(stored_iterative.get("subblocks_per_window", 0)))
+    stored_trace = stored_plan.get("trace_source", {})
+    if isinstance(stored_trace, Mapping):
+        check("trace_source.mode", str(current_plan.trace_source_plan.mode), str(stored_trace.get("mode", "")))
+    stored_options = stored_plan.get("subblock_command_options", {})
+    current_options = resolve_subblock_command_options(
+        current_plan.config["experiment"].get("subblocks", {}) or {}
+    )
+    if isinstance(stored_options, Mapping):
+        check(
+            "summary_information_scale",
+            str(current_options.get("summary_information_scale", "")),
+            str(stored_options.get("summary_information_scale", "")),
+        )
+    stored_expected = stored_plan.get("expected_outputs", [])
+    if isinstance(stored_expected, list):
+        check("expected_outputs_count", len(current_plan.expected_output_rows), len(stored_expected))
+    stored_iterative_plan = stored_plan.get("iterative_plan", [])
+    if isinstance(stored_iterative_plan, list):
+        check("iterative_plan_count", len(current_plan.iterative_plan_rows), len(stored_iterative_plan))
+    payload = {
+        "schema_version": "observation_bias_aggregate_only_plan_validation.v1",
+        "created_at": now_iso_local_ms(),
+        "stored_plan_used": True,
+        "stored_plan_path": str(stored_plan_path),
+        "validated_fields": validated,
+        "mismatches": mismatches,
+        "status": "ok" if not mismatches else "mismatch",
+    }
+    _write_json(current_plan.run_root / "analysis" / "aggregate_only_plan_validation.json", payload)
+    if mismatches:
+        raise ValueError(
+            "Aggregate-only stored plan validation failed. Run aggregate-only against "
+            "the original run root/config, or explicitly inspect the stored plan before "
+            "continuing. Mismatches: "
+            + "; ".join(
+                f"{m['field']}: current={m['current']!r} stored={m['stored']!r}"
+                for m in mismatches
+            )
+        )
+    return payload
+
+
 def run_observation_bias_campaign(
     *,
     config_path: Path | None,
@@ -3089,19 +3943,18 @@ def run_observation_bias_campaign(
     )
     skip_plan_rewrite = False
     if aggregate_only:
-        stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
+        stored_plan_path = plan.run_root / "campaign_plan.json"
+        stored_plan = load_existing_campaign_plan(stored_plan_path)
         if stored_plan is not None:
             validate_stored_trace_source_artifacts(stored_plan)
+            _validate_aggregate_only_stored_plan(
+                current_plan=plan,
+                stored_plan=stored_plan,
+                stored_plan_path=stored_plan_path,
+            )
             skip_plan_rewrite = True
             stored_paths = stored_plan.get("summary_paths")
             if isinstance(stored_paths, Mapping):
-                expected_cases = set(plan.summary_paths.keys())
-                stored_cases = set(str(k) for k in stored_paths.keys())
-                if expected_cases != stored_cases:
-                    raise ValueError(
-                        "Aggregate-only found an existing campaign_plan.json with a different case set. "
-                        "Use the same run shape (or regenerate the run root) before aggregating."
-                    )
                 summary_paths = {
                     str(case): [Path(str(path)) for path in paths]
                     for case, paths in stored_paths.items()
@@ -3125,11 +3978,51 @@ def run_observation_bias_campaign(
                     }
                 else:
                     subblock_plans = plan.subblock_plans
+                iterative_payload = stored_plan.get("iterative")
+                iterative = (
+                    dict(iterative_payload)
+                    if isinstance(iterative_payload, Mapping)
+                    else plan.iterative
+                )
+                iterative_plan_payload = stored_plan.get("iterative_plan")
+                iterative_plan_rows = (
+                    list(iterative_plan_payload)
+                    if isinstance(iterative_plan_payload, list)
+                    else plan.iterative_plan_rows
+                )
+                expected_payload = stored_plan.get("expected_outputs")
+                expected_output_rows = (
+                    list(expected_payload)
+                    if isinstance(expected_payload, list)
+                    else plan.expected_output_rows
+                )
+                stored_truth_by_label = stored_plan.get("prior_truth_by_label")
+                prior_truth = plan.prior_truth
+                if isinstance(stored_truth_by_label, Mapping):
+                    prior_truth = np.asarray(
+                        [
+                            float(
+                                stored_truth_by_label.get(
+                                    str(label),
+                                    plan.prior_truth[index],
+                                )
+                            )
+                            for index, label in enumerate(plan.layout.labels)
+                        ],
+                        dtype=float,
+                    )
                 plan = replace(
                     plan,
+                    prior_truth=prior_truth,
                     summary_paths=summary_paths,
                     subblock_commands=subblock_commands,
                     subblock_plans=subblock_plans,
+                    iterative=iterative,
+                    iterative_plan_rows=iterative_plan_rows,
+                    expected_output_rows=expected_output_rows,
+                    case_generation=dict(stored_plan.get("case_generation", plan.case_generation)),
+                    truth_realization=dict(stored_plan.get("truth_realization", plan.truth_realization)),
+                    partition=dict(stored_plan.get("state_partition", plan.partition)),
                 )
     _ensure_dir(plan.run_root)
     if not skip_plan_rewrite:
@@ -3138,6 +4031,8 @@ def run_observation_bias_campaign(
         _write_csv_rows(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
         _write_json(plan.run_root / "resolved_config.json", plan.config)
         _write_csv_rows(plan.run_root / "subblock_plan.csv", _flatten_subblock_plan_rows(plan))
+        _write_csv_rows(plan.run_root / "iterative_plan.csv", plan.iterative_plan_rows)
+        _write_csv_rows(plan.run_root / "expected_outputs.csv", plan.expected_output_rows)
         _write_csv_rows(plan.run_root / "bias_cases.csv", _bias_case_rows(plan))
         _write_csv_rows(plan.run_root / "prior_draws.csv", _flatten_prior_draw_rows(plan))
     if dry_run:
@@ -3146,6 +4041,17 @@ def run_observation_bias_campaign(
             print(json.dumps(payload, indent=2), flush=True)
         return payload
     if not aggregate_only:
+        if bool(plan.iterative.get("enabled", False)):
+            return execute_iterative_campaign(
+                plan,
+                resume=resume,
+                max_workers=max(1, int(max_workers)),
+                fail_fast=fail_fast,
+                quiet=quiet,
+                prior_source=prior_source,
+                allow_optimizer_scale_summaries=allow_optimizer_scale_summaries,
+                resource_time=resource_time,
+            )
         execute_subblocks(
             plan,
             resume=resume,
@@ -3154,6 +4060,8 @@ def run_observation_bias_campaign(
             quiet=quiet,
             resource_time=resource_time,
         )
+    if bool(plan.iterative.get("enabled", False)):
+        return aggregate_iterative_outputs(plan)
     return aggregate_campaign(
         plan,
         prior_source=prior_source,
@@ -3198,8 +4106,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed-policy", choices=SUPPORTED_SEED_POLICIES, default=None)
     parser.add_argument("--base-seed", type=int, default=None)
-    parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
-    parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")
+    parser.add_argument(
+        "--resource-time",
+        dest="resource_time",
+        nargs="?",
+        const="enabled",
+        choices=("auto", "enabled", "gnu", "disabled"),
+        default=None,
+    )
+    parser.add_argument("--no-resource-time", dest="resource_time", action="store_const", const="disabled")
     parser.add_argument("--system-preset", default=None)
     parser.add_argument(
         "--prior-source",
@@ -3225,7 +4140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         system_preset=args.system_preset,
         prior_source=str(args.prior_source),
         allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
-        resource_time="auto" if args.resource_time is None else ("enabled" if args.resource_time else "disabled"),
+        resource_time="auto" if args.resource_time is None else str(args.resource_time),
         args=args,
     )
     return 0

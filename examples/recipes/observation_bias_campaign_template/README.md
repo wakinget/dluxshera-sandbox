@@ -71,3 +71,57 @@ PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
 subblock, then child commands pass those files to `run_obs_subblock_study.py`.
 Binary trajectory mode defaults to X/Y/PA. IID jitter remains the default when
 `trace_source` is omitted or set to `iid_jitter`.
+
+## Binary Iterative Validation
+
+`binary_iterative_smoke.yaml` is a parser/orchestration smoke. It uses IID jitter,
+low-order WFE, physical-label summaries, and `iterative.update_mode:
+physical_full` with forecast disabled.
+
+`binary_iterative_cluster_validation.yaml` is the first bounded cluster
+validation recipe. It asks whether two biased binary prior draws improve over
+three repeated windows with two 20-frame subblocks per window. It keeps native
+state in physical labels and writes per-window reference-update artifacts.
+
+Dry-run before submitting:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.yaml \
+  --results-root "$DLUX_RESULTS" \
+  --run-name binary_iterative_cluster_validation_v1 \
+  --dry-run
+```
+
+Execute bounded validation:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.yaml \
+  --results-root "$DLUX_RESULTS" \
+  --run-name binary_iterative_cluster_validation_v1 \
+  --max-workers 1 \
+  --resource-time auto
+```
+
+Aggregate after completion:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.yaml \
+  --results-root "$DLUX_RESULTS" \
+  --run-name binary_iterative_cluster_validation_v1 \
+  --aggregate-only
+```
+
+Inspect `analysis/aggregate_status.json`, `analysis/output_inventory.csv`,
+`analysis/missing_outputs.csv`, `analysis/iterative_window_diagnostics.csv`, and
+per-window `cases/<case>/windows/window_XXX/iterative_reference_update.json`.
+Diagnostics distinguish the full posterior update from the applied reference
+update, which matters when `update_gain != 1`.
+
+A checked-in Gattaca2 sbatch template is available at:
+
+```text
+examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.sbatch
+```
