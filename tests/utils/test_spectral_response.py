@@ -15,9 +15,11 @@ from dluxshera.utils.spectral_response import (
     DEFAULT_FILTER_RESPONSE_PATH,
     DETECTOR_QE_PROXY_ASSUMPTION,
     build_effective_spectrum,
+    build_target_aware_spectral_deck,
     build_truth_inference_spectral_deck,
     interpolate_response_curve,
     load_response_curve_csv,
+    resolve_source_sed_components,
     resolve_response_curve_path,
     write_spectral_deck_artifacts,
 )
@@ -287,3 +289,85 @@ def test_default_render_smoke_sed_exists_in_packaged_target_seds() -> None:
     with resources.as_file(sed_ref) as sed_path:
         assert sed_path.name == "alfCenA_SED.dat"
         assert sed_path.is_file()
+
+
+def test_target_sed_resolver_uses_alpha_cen_component_seds() -> None:
+    resolved = resolve_source_sed_components(
+        {"kind": "alpha_cen", "target": "ALPHA_CEN"},
+        sed_mode="target",
+    )
+
+    assert resolved["target"] == "ALPHA_CEN"
+    assert resolved["shared_across_binary_components"] is False
+    assert resolved["component_specific"] is True
+    assert resolved["components"]["primary"]["sed_path"].endswith("alfCenA_SED.dat")
+    assert resolved["components"]["secondary"]["sed_path"].endswith("alfCenB_SED.dat")
+    assert resolved["components"]["primary"]["resolved_sed_path"] != resolved["components"]["secondary"]["resolved_sed_path"]
+
+
+def test_single_star_sed_resolver_uses_alpha_cen_a_placeholder() -> None:
+    resolved = resolve_source_sed_components({"kind": "single_star"}, sed_mode="target")
+
+    assert resolved["mode"] == "single_star_default"
+    assert resolved["shared_across_binary_components"] is False
+    assert list(resolved["components"]) == ["star"]
+    assert resolved["components"]["star"]["sed_path"].endswith("alfCenA_SED.dat")
+    assert "placeholder" in resolved["components"]["star"]["placeholder_note"]
+
+
+def test_generic_binary_requires_explicit_seds_without_smoke_fallback() -> None:
+    with pytest.raises(ValueError, match="Generic binary spectral SED resolution requires"):
+        resolve_source_sed_components({"kind": "binary"}, sed_mode="target")
+
+    resolved = resolve_source_sed_components(
+        {"kind": "binary"},
+        sed_mode="target",
+        generic_binary_fallback="alpha_cen",
+    )
+    assert resolved["mode"] == "smoke_alpha_cen_fallback"
+    assert resolved["components"]["primary"]["sed_path"].endswith("alfCenA_SED.dat")
+    assert resolved["components"]["secondary"]["sed_path"].endswith("alfCenB_SED.dat")
+
+
+def test_target_aware_deck_builds_distinct_alpha_cen_component_spectra() -> None:
+    deck = build_target_aware_spectral_deck(
+        source_cfg={"kind": "alpha_cen", "target": "ALPHA_CEN"},
+        truth_config={"n_lambda": 21, "wavelength_min_nm": 500.0, "wavelength_max_nm": 700.0},
+        inference_config={"n_lambda": 7, "wavelength_min_nm": 540.0, "wavelength_max_nm": 660.0},
+        detector_qe=_real_detector_qe(),
+        filter_response=_real_filter_response(),
+    )
+
+    assert set(deck.truth_by_component) == {"primary", "secondary"}
+    assert set(deck.inference_by_component) == {"primary", "secondary"}
+    primary = deck.truth_by_component["primary"]
+    secondary = deck.truth_by_component["secondary"]
+    np.testing.assert_allclose(primary.wavelengths_m, secondary.wavelengths_m)
+    assert np.isclose(primary.weights.sum(), 1.0)
+    assert np.isclose(secondary.weights.sum(), 1.0)
+    assert not np.allclose(primary.weights, secondary.weights)
+    assert primary.flux_factor > 0.0
+    assert secondary.flux_factor > 0.0
+    assert deck.provenance["sed_resolution"]["shared_across_binary_components"] is False
+    assert "primary" in deck.comparison_by_component
+    assert deck.combined_comparison["component_weights_differ_truth"] is True
+
+
+def test_component_deck_artifacts_preserve_component_rows(tmp_path: Path) -> None:
+    deck = build_target_aware_spectral_deck(
+        source_cfg={"kind": "alpha_cen", "target": "ALPHA_CEN"},
+        truth_config={"n_lambda": 9, "wavelength_min_nm": 500.0, "wavelength_max_nm": 700.0},
+        inference_config={"n_lambda": 5, "wavelength_min_nm": 540.0, "wavelength_max_nm": 660.0},
+        detector_qe=_flat_response("qe"),
+        filter_response=_flat_response("filter"),
+    )
+    paths = write_spectral_deck_artifacts(deck, tmp_path / "spectral")
+
+    with paths["truth_weights"].open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    labels = {row["component_label"] for row in rows}
+    assert labels == {"primary", "secondary"}
+    assert len(rows) == 2 * 9
+
+    comparison = json.loads(paths["spectral_comparison"].read_text())
+    assert set(comparison["comparison"]["by_component"]) == {"primary", "secondary"}

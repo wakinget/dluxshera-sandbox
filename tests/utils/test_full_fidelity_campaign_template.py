@@ -56,6 +56,12 @@ def test_full_fidelity_campaign_template_loads_and_keeps_design_contract() -> No
 
     spectral = experiment["spectral_model"]
     assert spectral["truth"]["n_lambda"] > spectral["inference"]["n_lambda"]
+    assert spectral["source_seds"]["mode"] == "target"
+    assert spectral["source_seds"]["single_star_default"]["sed_file"] == "alfCenA_SED.dat"
+    assert spectral["source_seds"]["binary_target"]["mode"] == "from_source_target"
+    assert "source.target" in spectral["source_seds"]["binary_target"]["note"]
+    assert spectral["source_seds"]["generic_binary"]["fallback_policy"] == "require_explicit_or_smoke_alpha_cen"
+    assert "shared" not in spectral["source_seds"]["binary_target"]["note"].lower()
 
     truth_components = spectral["truth"]["components"]
     detector_qe = truth_components["detector_qe"]

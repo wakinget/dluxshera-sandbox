@@ -63,6 +63,22 @@ experiment:
   spectral_model:
     enabled: true
     active_inference_parameters: []
+    source_seds:
+      mode: target
+      single_star_default:
+        target: ALPHA_CEN
+        component: primary
+        sed_file: alfCenA_SED.dat
+        note: Alpha Cen A is used as a placeholder calibration SED for single-star smoke/calibration configs.
+      binary_target:
+        mode: from_source_target
+        note: Binary target decks resolve component-specific SEDs from source.target.
+      generic_binary:
+        fallback_policy: require_explicit_or_smoke_alpha_cen
+        note: Generic binary library utilities require explicit component SED paths unless a smoke-only Alpha Cen fallback is requested.
+      explicit_paths:
+        primary: null
+        secondary: null
     truth:
       mode: effective_source_spectrum
       n_lambda: 30

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render a tiny truth/model PSF pair from a spectral throughput deck.
 
-This script is intentionally render-only. It builds a synthetic spectral deck,
+This script is intentionally render-only. It builds a spectral deck,
 patches one base system config into truth and inference source configs, renders
 one image from each, and writes lightweight artifacts for inspection.
 """
@@ -11,8 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from contextlib import ExitStack
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -31,20 +29,18 @@ from dluxshera.utils.spectral_response import (
     DEFAULT_DETECTOR_QE_PATH,
     DEFAULT_FILTER_RESPONSE_PATH,
     DETECTOR_QE_PROXY_ASSUMPTION,
-    build_truth_inference_spectral_deck,
+    build_target_aware_spectral_deck,
     resolve_response_curve_path,
     write_spectral_deck_artifacts,
 )
 from dluxshera.utils.spectral_source_config import (
     build_spectral_truth_inference_system_configs,
 )
-from dluxshera.utils.source_photometry import target_sed_root
 
 TEMPLATE_PATH = Path(
     "examples/recipes/full_fidelity_algorithm_campaign_template/"
     "full_fidelity_algorithm_campaign_v1.yaml"
 )
-DEFAULT_SED_FILE = "alfCenA_SED.dat"
 
 
 def _json_ready(value: Any) -> Any:
@@ -161,82 +157,7 @@ def _real_response_components(
     return detector, filt, selected
 
 
-def _resolve_sed_path(sed_path: Path | None) -> tuple[Path, dict[str, Any], ExitStack]:
-    stack = ExitStack()
-    if sed_path is not None:
-        raw = Path(sed_path).expanduser()
-        if raw.is_file() or raw.is_absolute():
-            resolved = raw
-        else:
-            candidate = Path.cwd() / raw
-            if candidate.is_file():
-                resolved = candidate
-            else:
-                resolved = raw
-        if not resolved.is_file():
-            stack.close()
-            raise FileNotFoundError(f"SED file does not exist: {resolved}")
-        provenance = {
-            "sed_mode": "real",
-            "sed_path": str(sed_path),
-            "resolved_sed_path": str(resolved),
-            "target_sed_label": resolved.name,
-            "shared_across_binary_components": True,
-            "input_kind": "photon_flux_density_per_nm",
-            "source": "user_path",
-        }
-        return resolved, provenance, stack
-
-    sed_ref = target_sed_root().joinpath(DEFAULT_SED_FILE)
-    resolved = Path(stack.enter_context(resources.as_file(sed_ref)))
-    provenance = {
-        "sed_mode": "real",
-        "sed_path": f"data/target_seds/{DEFAULT_SED_FILE}",
-        "resolved_sed_path": str(resolved),
-        "target_sed_label": "ALPHA_CEN_A",
-        "shared_across_binary_components": True,
-        "input_kind": "photon_flux_density_per_nm",
-        "source": "packaged_target_sed",
-        "note": (
-            "Render smoke v1 uses one effective component SED for the source-level "
-            "deck; binary-specific component SED mixtures are deferred."
-        ),
-    }
-    return resolved, provenance, stack
-
-
-def _sed_for_mode(
-    *,
-    sed_mode: str,
-    sed_path: Path | None,
-) -> tuple[Any, dict[str, Any], ExitStack | None]:
-    if sed_mode == "synthetic-ramp":
-        return (
-            lambda wavelengths_m: wavelengths_m * 1e9,
-            {
-                "sed_mode": "synthetic-ramp",
-                "sed_path": None,
-                "shared_across_binary_components": True,
-                "input_kind": "photon_flux_density_per_nm",
-            },
-            None,
-        )
-    if sed_mode == "flat":
-        return (
-            1.0,
-            {
-                "sed_mode": "flat",
-                "sed_path": None,
-                "shared_across_binary_components": True,
-                "input_kind": "photon_flux_density_per_nm",
-            },
-            None,
-        )
-    resolved, provenance, stack = _resolve_sed_path(sed_path)
-    return resolved, provenance, stack
-
-
-def _fast_system_config(*, source_kind: str) -> dict[str, Any]:
+def _fast_system_config(*, source_kind: str, target: str | None) -> dict[str, Any]:
     resolved = resolve_config({"system": {"preset": "SHERA_FLIGHT_3P_SIMPLE"}})
     system = resolved["system"]
     system["source"] = {
@@ -252,13 +173,13 @@ def _fast_system_config(*, source_kind: str) -> dict[str, Any]:
     if source_kind in {"binary", "binary_target", "alpha_cen"}:
         system["source"].update(
             {
-                "target": "ALPHA_CEN" if source_kind in {"binary_target", "alpha_cen"} else None,
+                "target": target if target is not None else ("ALPHA_CEN" if source_kind in {"binary_target", "alpha_cen"} else None),
                 "separation_as": 8.0,
                 "contrast": 3.0,
             }
         )
     if source_kind == "alpha_cen":
-        system["source"]["target"] = "ALPHA_CEN"
+        system["source"]["target"] = target or "ALPHA_CEN"
 
     system["optics"].update(
         {
@@ -296,6 +217,9 @@ def run(
     detector_qe: Path | None,
     sed_mode: str,
     sed_path: Path | None,
+    sed_a_path: Path | None,
+    sed_b_path: Path | None,
+    target: str | None,
 ) -> dict[str, Any]:
     spectral_model = _read_spectral_model(TEMPLATE_PATH)
     truth_cfg = dict(spectral_model["truth"])
@@ -319,27 +243,30 @@ def run(
             detector_qe=detector_qe,
         )
 
-    sed, sed_provenance, sed_stack = _sed_for_mode(sed_mode=sed_mode, sed_path=sed_path)
-    try:
-        deck = build_truth_inference_spectral_deck(
-            sed=sed,
-            truth_config=truth_cfg,
-            inference_config=inference_cfg,
-            detector_qe=detector_component,
-            filter_response=filter_component,
-            provenance={
-                "script": "examples/scripts/render_spectral_deck_smoke.py",
-                "selected_responses": selected_responses,
-                "selected_sed": sed_provenance,
-            },
-        )
-    finally:
-        if sed_stack is not None:
-            sed_stack.close()
-
     outdir.mkdir(parents=True, exist_ok=True)
+    base_system = _fast_system_config(source_kind=source_kind, target=target)
+    normalized_sed_mode = "target" if sed_mode == "real" else sed_mode
+    generic_fallback = "alpha_cen" if source_kind == "binary" and normalized_sed_mode == "target" else "require_explicit"
+    deck = build_target_aware_spectral_deck(
+        source_cfg=base_system["source"],
+        truth_config=truth_cfg,
+        inference_config=inference_cfg,
+        detector_qe=detector_component,
+        filter_response=filter_component,
+        sed_mode=normalized_sed_mode,
+        target=target,
+        sed_path=sed_path,
+        sed_a_path=sed_a_path,
+        sed_b_path=sed_b_path,
+        generic_binary_fallback=generic_fallback,
+        provenance={
+            "script": "examples/scripts/render_spectral_deck_smoke.py",
+            "selected_responses": selected_responses,
+            "selected_sed_mode": normalized_sed_mode,
+            "generic_binary_fallback": generic_fallback,
+        },
+    )
     spectral_paths = write_spectral_deck_artifacts(deck, outdir / "spectral")
-    base_system = _fast_system_config(source_kind=source_kind)
     truth_system, inference_system, spectral_provenance = build_spectral_truth_inference_system_configs(
         base_system_cfg=base_system,
         deck=deck,
@@ -358,10 +285,17 @@ def run(
     (outdir / "inference_system_config.json").write_text(
         json.dumps(_json_ready(inference_system), indent=2, sort_keys=True) + "\n"
     )
+    ref_component = "primary" if "primary" in deck.truth_by_component else next(iter(deck.truth_by_component))
+    truth_ref = deck.truth_by_component[ref_component]
+    inference_ref = deck.inference_by_component[ref_component]
+    comparison_ref = deck.comparison_by_component[ref_component]
+    truth_component_weights = np.asarray(truth_system["source"].get("component_weights", []), dtype=float)
+    inference_component_weights = np.asarray(inference_system["source"].get("component_weights", []), dtype=float)
 
     summary = {
         "schema_version": "spectral_deck_render_smoke.v1",
         "source_kind": source_kind,
+        "target": deck.target,
         "fast": bool(fast),
         "truth_shape": list(truth_image.shape),
         "inference_shape": list(inference_image.shape),
@@ -370,15 +304,35 @@ def run(
         "residual_l2": float(np.sqrt(np.sum(residual**2))),
         "images_identical": bool(np.allclose(truth_image, inference_image)),
         "selected_responses": selected_responses,
-        "selected_sed": sed_provenance,
-        "truth_lambda_eff_nm": deck.truth.diagnostics.get("lambda_eff_nm"),
-        "inference_lambda_eff_nm": deck.inference.diagnostics.get("lambda_eff_nm"),
-        "truth_out_of_inference_band_fraction": deck.comparison.get(
-            "truth_out_of_inference_band_fraction"
-        ),
-        "flux_factor_ratio_inference_over_truth": deck.comparison.get(
-            "flux_factor_ratio_inference_over_truth"
-        ),
+        "selected_sed": deck.provenance.get("sed_resolution"),
+        "truth_reference_component": ref_component,
+        "truth_lambda_eff_nm": truth_ref.diagnostics.get("lambda_eff_nm"),
+        "inference_lambda_eff_nm": inference_ref.diagnostics.get("lambda_eff_nm"),
+        "truth_out_of_inference_band_fraction": comparison_ref.get("truth_out_of_inference_band_fraction"),
+        "flux_factor_ratio_inference_over_truth": comparison_ref.get("flux_factor_ratio_inference_over_truth"),
+        "component_spectral_diagnostics": {
+            "truth": {
+                label: {
+                    "lambda_eff_nm": spec.diagnostics.get("lambda_eff_nm"),
+                    "flux_factor": spec.flux_factor,
+                    "out_of_band_fraction": spec.diagnostics.get("out_of_band_fraction"),
+                }
+                for label, spec in deck.truth_by_component.items()
+            },
+            "inference": {
+                label: {
+                    "lambda_eff_nm": spec.diagnostics.get("lambda_eff_nm"),
+                    "flux_factor": spec.flux_factor,
+                    "out_of_band_fraction": spec.diagnostics.get("out_of_band_fraction"),
+                }
+                for label, spec in deck.inference_by_component.items()
+            },
+        },
+        "component_weights_rows_differ": {
+            "truth": bool(truth_component_weights.shape[0] >= 2 and not np.allclose(truth_component_weights[0], truth_component_weights[1])),
+            "inference": bool(inference_component_weights.shape[0] >= 2 and not np.allclose(inference_component_weights[0], inference_component_weights[1])),
+        },
+        "combined_spectral_comparison": deck.combined_comparison,
         "spectral_provenance": spectral_provenance,
         "spectral_artifacts": {key: str(path) for key, path in spectral_paths.items()},
     }
@@ -417,15 +371,22 @@ def main() -> None:
     )
     parser.add_argument(
         "--sed-mode",
-        choices=("real", "synthetic-ramp", "flat"),
+        choices=("real", "target", "explicit", "shared", "synthetic-ramp", "flat"),
         default="real",
-        help="Use packaged real SED data by default, or a synthetic SED fallback.",
+        help="Use target-resolved packaged SED data by default, explicit paths, shared fallback, or synthetic SEDs.",
     )
     parser.add_argument(
         "--sed-path",
         type=Path,
         default=None,
-        help=f"Override SED path. Default is packaged target SED {DEFAULT_SED_FILE}.",
+        help="Single-star or shared binary SED path. Shared mode is a debug fallback.",
+    )
+    parser.add_argument("--sed-a-path", type=Path, default=None, help="Explicit primary/component A SED path.")
+    parser.add_argument("--sed-b-path", type=Path, default=None, help="Explicit secondary/component B SED path.")
+    parser.add_argument(
+        "--target",
+        default="ALPHA_CEN",
+        help="Target key used by target SED resolution. Defaults to ALPHA_CEN for smoke renders.",
     )
     args = parser.parse_args()
     summary = run(
@@ -437,6 +398,9 @@ def main() -> None:
         detector_qe=args.detector_qe,
         sed_mode=args.sed_mode,
         sed_path=args.sed_path,
+        sed_a_path=args.sed_a_path,
+        sed_b_path=args.sed_b_path,
+        target=args.target,
     )
     print(json.dumps(_json_ready(summary), indent=2, sort_keys=True))
 

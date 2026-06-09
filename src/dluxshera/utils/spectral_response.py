@@ -13,18 +13,21 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from importlib import resources
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .source_photometry import load_sed_photon_flux_density_per_nm
+from ..components.sources import get_target_spec
+from .source_photometry import load_sed_photon_flux_density_per_nm, target_sed_root
 
 __all__ = [
     "EffectiveSpectrum",
     "SpectralDeck",
     "SpectralComparison",
+    "SourceSpectralDeck",
     "DEFAULT_DETECTOR_QE_PATH",
     "DEFAULT_FILTER_RESPONSE_PATH",
     "resolve_response_curve_path",
@@ -32,6 +35,8 @@ __all__ = [
     "interpolate_response_curve",
     "build_effective_spectrum",
     "build_truth_inference_spectral_deck",
+    "resolve_source_sed_components",
+    "build_target_aware_spectral_deck",
     "write_spectral_deck_artifacts",
 ]
 
@@ -117,6 +122,27 @@ class SpectralDeck:
     truth: EffectiveSpectrum
     inference: EffectiveSpectrum
     comparison: dict[str, Any]
+    schema_version: str
+    provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SourceSpectralDeck:
+    """Represent source spectra by component for source-config integration.
+
+    This object is the component-aware counterpart to :class:`SpectralDeck`.
+    Single-star decks contain one ``"star"`` component. Binary-like decks
+    contain ``"primary"`` and ``"secondary"`` components built on shared truth
+    and inference wavelength grids so they can be applied to one dLux source
+    config as row-normalized component weights.
+    """
+
+    source_kind: str
+    target: str | None
+    truth_by_component: dict[str, EffectiveSpectrum]
+    inference_by_component: dict[str, EffectiveSpectrum]
+    comparison_by_component: dict[str, dict[str, Any]]
+    combined_comparison: dict[str, Any]
     schema_version: str
     provenance: dict[str, Any]
 
@@ -825,6 +851,259 @@ def build_truth_inference_spectral_deck(
     )
 
 
+def _target_sed_path(filename: str) -> Path:
+    ref = target_sed_root().joinpath(filename)
+    with resources.as_file(ref) as path:
+        resolved = Path(path)
+        if not resolved.is_file():
+            raise FileNotFoundError(f"Packaged target SED does not exist: {filename}")
+        return resolved
+
+
+def resolve_source_sed_components(
+    source_cfg: Mapping[str, Any],
+    *,
+    sed_mode: str = "target",
+    target: str | None = None,
+    sed_path: str | Path | None = None,
+    sed_a_path: str | Path | None = None,
+    sed_b_path: str | Path | None = None,
+    generic_binary_fallback: str = "require_explicit",
+) -> dict[str, Any]:
+    """Resolve source config into component SED paths and provenance.
+
+    Binary target and ``alpha_cen`` sources use the existing curated
+    ``TargetSpec`` registry. Generic binaries require explicit A/B SED paths by
+    default; the render smoke can opt into ``generic_binary_fallback="alpha_cen"``
+    for convenience with explicit provenance.
+    """
+
+    kind = str(source_cfg.get("kind", "binary_target")).lower()
+    resolved_target = target or source_cfg.get("target")
+    if kind == "alpha_cen" and not resolved_target:
+        resolved_target = "ALPHA_CEN"
+    if kind == "single_star" and not resolved_target:
+        resolved_target = "ALPHA_CEN"
+
+    if sed_mode in {"synthetic-ramp", "flat"}:
+        components = {"star": None} if kind == "single_star" else {"primary": None, "secondary": None}
+        return {
+            "mode": sed_mode,
+            "source_kind": kind,
+            "target": resolved_target,
+            "components": components,
+            "shared_across_binary_components": kind != "single_star",
+            "component_specific": False,
+            "input_kind": "photon_flux_density_per_nm",
+        }
+
+    if kind == "single_star":
+        path = Path(sed_path) if sed_path is not None else _target_sed_path("alfCenA_SED.dat")
+        return {
+            "mode": "single_star_default" if sed_path is None else "explicit",
+            "source_kind": kind,
+            "target": resolved_target,
+            "components": {
+                "star": {
+                    "sed_path": str(sed_path or "data/target_seds/alfCenA_SED.dat"),
+                    "resolved_sed_path": str(path),
+                    "target_sed_label": "ALPHA_CEN_A" if sed_path is None else path.name,
+                    "placeholder_note": "Alpha Cen A SED used as single-star calibration placeholder.",
+                }
+            },
+            "shared_across_binary_components": False,
+            "component_specific": False,
+            "input_kind": "photon_flux_density_per_nm",
+        }
+
+    if sed_mode == "shared":
+        if sed_path is None:
+            raise ValueError("sed_mode='shared' requires sed_path.")
+        path = Path(sed_path)
+        return {
+            "mode": "shared",
+            "source_kind": kind,
+            "target": resolved_target,
+            "components": {
+                "primary": {"sed_path": str(sed_path), "resolved_sed_path": str(path), "target_sed_label": path.name},
+                "secondary": {"sed_path": str(sed_path), "resolved_sed_path": str(path), "target_sed_label": path.name},
+            },
+            "shared_across_binary_components": True,
+            "component_specific": False,
+            "warning": "Shared SED fallback used for binary source; component-specific SEDs are preferred.",
+            "input_kind": "photon_flux_density_per_nm",
+        }
+
+    if sed_a_path is not None and sed_b_path is not None:
+        path_a = Path(sed_a_path)
+        path_b = Path(sed_b_path)
+        return {
+            "mode": "explicit",
+            "source_kind": kind,
+            "target": resolved_target,
+            "components": {
+                "primary": {"sed_path": str(sed_a_path), "resolved_sed_path": str(path_a), "target_sed_label": path_a.name},
+                "secondary": {"sed_path": str(sed_b_path), "resolved_sed_path": str(path_b), "target_sed_label": path_b.name},
+            },
+            "shared_across_binary_components": False,
+            "component_specific": True,
+            "input_kind": "photon_flux_density_per_nm",
+        }
+    if sed_mode == "explicit":
+        raise ValueError("sed_mode='explicit' requires sed_a_path and sed_b_path for binary-like sources.")
+
+    if kind == "binary" and not resolved_target:
+        if generic_binary_fallback == "alpha_cen":
+            resolved_target = "ALPHA_CEN"
+        else:
+            raise ValueError(
+                "Generic binary spectral SED resolution requires sed_a_path and "
+                "sed_b_path, or generic_binary_fallback='alpha_cen' for smoke use."
+            )
+
+    if not resolved_target:
+        raise ValueError("Target-aware binary SED resolution requires source.target or target.")
+
+    spec = get_target_spec(str(resolved_target))
+    if not spec.sed_a_file or not spec.sed_b_file:
+        raise ValueError(f"Target {resolved_target!r} does not define component SED files.")
+    path_a = _target_sed_path(spec.sed_a_file)
+    path_b = _target_sed_path(spec.sed_b_file)
+    return {
+        "mode": "target" if not (kind == "binary" and generic_binary_fallback == "alpha_cen") else "smoke_alpha_cen_fallback",
+        "source_kind": kind,
+        "target": spec.key,
+        "components": {
+            "primary": {
+                "sed_path": f"data/target_seds/{spec.sed_a_file}",
+                "resolved_sed_path": str(path_a),
+                "target_sed_label": f"{spec.key}:primary",
+            },
+            "secondary": {
+                "sed_path": f"data/target_seds/{spec.sed_b_file}",
+                "resolved_sed_path": str(path_b),
+                "target_sed_label": f"{spec.key}:secondary",
+            },
+        },
+        "shared_across_binary_components": False,
+        "component_specific": True,
+        "input_kind": "photon_flux_density_per_nm",
+    }
+
+
+def build_target_aware_spectral_deck(
+    *,
+    source_cfg: Mapping[str, Any],
+    truth_config: Mapping[str, Any] | None = None,
+    inference_config: Mapping[str, Any] | None = None,
+    detector_qe: Mapping[str, Any] | None = None,
+    filter_response: Mapping[str, Any] | None = None,
+    mirror_reflectance_components: Sequence[Mapping[str, Any]] | None = None,
+    response_components: Sequence[Mapping[str, Any]] | None = None,
+    inference_detector_qe: Mapping[str, Any] | None = None,
+    inference_filter_response: Mapping[str, Any] | None = None,
+    sed_mode: str = "target",
+    target: str | None = None,
+    sed_path: str | Path | None = None,
+    sed_a_path: str | Path | None = None,
+    sed_b_path: str | Path | None = None,
+    generic_binary_fallback: str = "require_explicit",
+    provenance: Mapping[str, Any] | None = None,
+) -> SourceSpectralDeck:
+    """Build truth/inference spectra for each source component."""
+
+    truth_cfg = _as_config(truth_config)
+    inference_cfg = _as_config(inference_config)
+    truth_wavelengths = _resolve_wavelength_grid(truth_cfg, default_min_nm=500.0, default_max_nm=700.0)
+    inference_wavelengths = _resolve_wavelength_grid(inference_cfg, default_min_nm=525.0, default_max_nm=675.0)
+    inference_band = (float(inference_wavelengths[0] * 1e9), float(inference_wavelengths[-1] * 1e9))
+    sed_resolution = resolve_source_sed_components(
+        source_cfg,
+        sed_mode=sed_mode,
+        target=target,
+        sed_path=sed_path,
+        sed_a_path=sed_a_path,
+        sed_b_path=sed_b_path,
+        generic_binary_fallback=generic_binary_fallback,
+    )
+
+    truth_by_component: dict[str, EffectiveSpectrum] = {}
+    inference_by_component: dict[str, EffectiveSpectrum] = {}
+    comparisons: dict[str, dict[str, Any]] = {}
+
+    components = sed_resolution["components"]
+    for label, sed_info in components.items():
+        if sed_resolution["mode"] == "synthetic-ramp":
+            sed: Any = lambda wavelengths_m: wavelengths_m * 1e9
+        elif sed_resolution["mode"] == "flat":
+            sed = 1.0
+        else:
+            sed = Path(sed_info["resolved_sed_path"])
+        truth = build_effective_spectrum(
+            label=f"truth_{label}",
+            wavelengths_m=truth_wavelengths,
+            sed=sed,
+            detector_qe=detector_qe,
+            filter_response=filter_response,
+            mirror_reflectance_components=mirror_reflectance_components,
+            response_components=response_components,
+            in_band_nm=inference_band,
+            provenance={"model_role": "truth", "component_label": label, "sed_component": _json_ready(sed_info)},
+        )
+        inference = build_effective_spectrum(
+            label=f"inference_{label}",
+            wavelengths_m=inference_wavelengths,
+            sed=sed,
+            detector_qe=inference_detector_qe if inference_detector_qe is not None else detector_qe,
+            filter_response=inference_filter_response if inference_filter_response is not None else filter_response,
+            mirror_reflectance_components=mirror_reflectance_components,
+            response_components=response_components,
+            in_band_nm=inference_band,
+            provenance={"model_role": "inference", "component_label": label, "sed_component": _json_ready(sed_info)},
+        )
+        truth_by_component[label] = truth
+        inference_by_component[label] = inference
+        comparisons[label] = compare_effective_spectra(truth, inference, inference_band_nm=inference_band)
+
+    combined: dict[str, Any] = {}
+    if {"primary", "secondary"}.issubset(truth_by_component):
+        p_truth = truth_by_component["primary"]
+        s_truth = truth_by_component["secondary"]
+        p_inf = inference_by_component["primary"]
+        s_inf = inference_by_component["secondary"]
+        combined = {
+            "truth_primary_minus_secondary_lambda_eff_nm": float(p_truth.diagnostics["lambda_eff_nm"] - s_truth.diagnostics["lambda_eff_nm"]),
+            "inference_primary_minus_secondary_lambda_eff_nm": float(p_inf.diagnostics["lambda_eff_nm"] - s_inf.diagnostics["lambda_eff_nm"]),
+            "truth_flux_factor_ratio_secondary_over_primary": float(s_truth.flux_factor / p_truth.flux_factor),
+            "inference_flux_factor_ratio_secondary_over_primary": float(s_inf.flux_factor / p_inf.flux_factor),
+            "component_weights_differ_truth": bool(not np.allclose(p_truth.weights, s_truth.weights)),
+            "component_weights_differ_inference": bool(not np.allclose(p_inf.weights, s_inf.weights)),
+        }
+
+    deck_provenance = {
+        "generated_by": "dluxshera.utils.spectral_response.build_target_aware_spectral_deck",
+        "generated_at": _now_iso(),
+        "sed_resolution": _json_ready(sed_resolution),
+        "active_inference_parameters": [],
+        "spectral_shape_active_inference_parameter": False,
+        "assumptions": {
+            "log_flux_total_and_contrast": "detected_post_response_band_integrated",
+            "component_flux_factors": "diagnostic_provenance_only",
+        },
+    }
+    deck_provenance.update(dict(provenance or {}))
+    return SourceSpectralDeck(
+        source_kind=str(source_cfg.get("kind", "binary_target")).lower(),
+        target=sed_resolution.get("target"),
+        truth_by_component=truth_by_component,
+        inference_by_component=inference_by_component,
+        comparison_by_component=comparisons,
+        combined_comparison=combined,
+        schema_version=SCHEMA_VERSION,
+        provenance=deck_provenance,
+    )
+
+
 def compare_effective_spectra(
     truth: EffectiveSpectrum,
     inference: EffectiveSpectrum,
@@ -873,7 +1152,7 @@ def compare_effective_spectra(
     return metrics
 
 
-def write_spectral_deck_artifacts(deck: SpectralDeck, outdir: str | Path) -> dict[str, Path]:
+def write_spectral_deck_artifacts(deck: SpectralDeck | SourceSpectralDeck, outdir: str | Path) -> dict[str, Path]:
     """Write CSV/JSON spectral deck artifacts under ``outdir``.
 
     The artifact contract is intentionally small and stable for v1:
@@ -884,9 +1163,7 @@ def write_spectral_deck_artifacts(deck: SpectralDeck, outdir: str | Path) -> dic
     root = Path(outdir)
     root.mkdir(parents=True, exist_ok=True)
 
-    def write_weights(path: Path, spectrum: EffectiveSpectrum) -> None:
-        in_min = spectrum.diagnostics.get("in_band_min_nm", None)
-        in_max = spectrum.diagnostics.get("in_band_max_nm", None)
+    def write_weights(path: Path, spectra: Mapping[str, EffectiveSpectrum]) -> None:
         with path.open("w", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
@@ -901,20 +1178,23 @@ def write_spectral_deck_artifacts(deck: SpectralDeck, outdir: str | Path) -> dic
                 ],
             )
             writer.writeheader()
-            for wavelength_m, weight, raw in zip(spectrum.wavelengths_m, spectrum.weights, spectrum.raw_response):
-                wavelength_nm = float(wavelength_m * 1e9)
-                in_band = True if in_min is None or in_max is None else bool(in_min <= wavelength_nm <= in_max)
-                writer.writerow(
-                    {
-                        "wavelength_m": f"{float(wavelength_m):.17g}",
-                        "wavelength_nm": f"{wavelength_nm:.17g}",
-                        "weight": f"{float(weight):.17g}",
-                        "raw_response": f"{float(raw):.17g}",
-                        "normalized_weight": f"{float(weight):.17g}",
-                        "in_band": str(in_band).lower(),
-                        "component_label": spectrum.label,
-                    }
-                )
+            for component_label, spectrum in spectra.items():
+                in_min = spectrum.diagnostics.get("in_band_min_nm", None)
+                in_max = spectrum.diagnostics.get("in_band_max_nm", None)
+                for wavelength_m, weight, raw in zip(spectrum.wavelengths_m, spectrum.weights, spectrum.raw_response):
+                    wavelength_nm = float(wavelength_m * 1e9)
+                    in_band = True if in_min is None or in_max is None else bool(in_min <= wavelength_nm <= in_max)
+                    writer.writerow(
+                        {
+                            "wavelength_m": f"{float(wavelength_m):.17g}",
+                            "wavelength_nm": f"{wavelength_nm:.17g}",
+                            "weight": f"{float(weight):.17g}",
+                            "raw_response": f"{float(raw):.17g}",
+                            "normalized_weight": f"{float(weight):.17g}",
+                            "in_band": str(in_band).lower(),
+                            "component_label": component_label,
+                        }
+                    )
 
     truth_weights = root / "truth_weights.csv"
     inference_weights = root / "inference_weights.csv"
@@ -922,21 +1202,41 @@ def write_spectral_deck_artifacts(deck: SpectralDeck, outdir: str | Path) -> dic
     comparison = root / "spectral_comparison.json"
     manifest = root / "spectral_deck_manifest.json"
 
-    write_weights(truth_weights, deck.truth)
-    write_weights(inference_weights, deck.inference)
+    if isinstance(deck, SourceSpectralDeck):
+        truth_spectra = deck.truth_by_component
+        inference_spectra = deck.inference_by_component
+        truth_diag = {label: spec.diagnostics for label, spec in truth_spectra.items()}
+        inference_diag = {label: spec.diagnostics for label, spec in inference_spectra.items()}
+        comparison_payload_value = {
+            "by_component": deck.comparison_by_component,
+            "combined": deck.combined_comparison,
+        }
+        manifest_truth = {label: _spectrum_to_record(spec) for label, spec in truth_spectra.items()}
+        manifest_inference = {label: _spectrum_to_record(spec) for label, spec in inference_spectra.items()}
+    else:
+        truth_spectra = {deck.truth.label: deck.truth}
+        inference_spectra = {deck.inference.label: deck.inference}
+        truth_diag = deck.truth.diagnostics
+        inference_diag = deck.inference.diagnostics
+        comparison_payload_value = deck.comparison
+        manifest_truth = _spectrum_to_record(deck.truth)
+        manifest_inference = _spectrum_to_record(deck.inference)
+
+    write_weights(truth_weights, truth_spectra)
+    write_weights(inference_weights, inference_spectra)
 
     generated_at = _now_iso()
     moments_payload = {
         "schema_version": deck.schema_version,
         "generated_at": generated_at,
-        "truth": deck.truth.diagnostics,
-        "inference": deck.inference.diagnostics,
+        "truth": truth_diag,
+        "inference": inference_diag,
         "note": "Spectral shape is not an active inference parameter in v1.",
     }
     comparison_payload = {
         "schema_version": deck.schema_version,
         "generated_at": generated_at,
-        "comparison": deck.comparison,
+        "comparison": comparison_payload_value,
     }
     manifest_payload = {
         "schema_version": deck.schema_version,
@@ -949,8 +1249,8 @@ def write_spectral_deck_artifacts(deck: SpectralDeck, outdir: str | Path) -> dic
             "spectral_deck_manifest_json": manifest.name,
         },
         "provenance": _json_ready(deck.provenance),
-        "truth": _spectrum_to_record(deck.truth),
-        "inference": _spectrum_to_record(deck.inference),
+        "truth": manifest_truth,
+        "inference": manifest_inference,
         "note": "source.log_flux_total and contrast are interpreted as detected post-response band-integrated quantities.",
     }
 

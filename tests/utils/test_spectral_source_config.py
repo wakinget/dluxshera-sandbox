@@ -9,6 +9,7 @@ import yaml
 
 from dluxshera.utils.spectral_response import (
     build_effective_spectrum,
+    build_target_aware_spectral_deck,
     build_truth_inference_spectral_deck,
 )
 from dluxshera.utils.spectral_source_config import (
@@ -179,3 +180,34 @@ def test_full_fidelity_template_spectral_model_can_patch_synthetic_system_config
 def test_unsupported_source_kind_raises_clear_error() -> None:
     with pytest.raises(ValueError, match="Unsupported source kind"):
         spectrum_to_source_spectral_config(_spectrum(), source_kind="planet")
+
+
+def test_component_spectral_deck_patches_binary_component_weights() -> None:
+    base_system = _base_system("alpha_cen")
+    base_system["source"]["target"] = "ALPHA_CEN"
+    deck = build_target_aware_spectral_deck(
+        source_cfg=base_system["source"],
+        truth_config={"n_lambda": 15, "wavelength_min_nm": 500.0, "wavelength_max_nm": 700.0},
+        inference_config={"n_lambda": 5, "wavelength_min_nm": 540.0, "wavelength_max_nm": 660.0},
+        detector_qe=_flat_response("qe"),
+        filter_response=_flat_response("filter"),
+    )
+
+    truth_cfg, inference_cfg, provenance = build_spectral_truth_inference_system_configs(
+        base_system_cfg=base_system,
+        deck=deck,
+    )
+
+    truth_weights = np.asarray(truth_cfg["source"]["component_weights"])
+    inference_weights = np.asarray(inference_cfg["source"]["component_weights"])
+    assert truth_weights.shape == (2, 15)
+    assert inference_weights.shape == (2, 5)
+    np.testing.assert_allclose(truth_weights.sum(axis=1), np.ones(2))
+    np.testing.assert_allclose(inference_weights.sum(axis=1), np.ones(2))
+    assert not np.allclose(truth_weights[0], truth_weights[1])
+    assert truth_cfg["source"]["contrast"] == base_system["source"]["contrast"]
+    assert truth_cfg["source"]["log_flux_total"] == base_system["source"]["log_flux_total"]
+    assert provenance["truth"]["sed_resolution"]["shared_across_binary_components"] is False
+    assert provenance["truth"]["sed_resolution"]["components"]["primary"]["sed_path"].endswith("alfCenA_SED.dat")
+    assert provenance["truth"]["sed_resolution"]["components"]["secondary"]["sed_path"].endswith("alfCenB_SED.dat")
+    assert provenance["combined_comparison"]["component_weights_differ_truth"] is True

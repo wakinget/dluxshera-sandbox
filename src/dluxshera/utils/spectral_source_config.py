@@ -13,12 +13,13 @@ from typing import Any
 
 import numpy as np
 
-from .spectral_response import EffectiveSpectrum, SpectralDeck
+from .spectral_response import EffectiveSpectrum, SourceSpectralDeck, SpectralDeck
 
 __all__ = [
     "spectrum_to_source_spectral_config",
     "apply_effective_spectrum_to_source_config",
     "apply_spectral_deck_to_system_configs",
+    "apply_source_spectral_deck_to_system_configs",
     "build_spectral_truth_inference_system_configs",
 ]
 
@@ -111,8 +112,9 @@ def spectrum_to_source_spectral_config(
     The returned mapping uses the existing source config block and adds explicit
     ``wavelengths_m`` plus normalized weights. Generic ``single_star`` sources
     receive one ``weights`` vector. Binary-like sources receive duplicated
-    ``component_weights`` rows so both components share the same effective
-    chromatic mixture in v1.
+    ``component_weights`` rows only for this single-spectrum compatibility path.
+    Target-aware binary decks should use ``SourceSpectralDeck`` so primary and
+    secondary rows can differ.
 
     Parameters
     ----------
@@ -159,6 +161,50 @@ def spectrum_to_source_spectral_config(
             f"{sorted(BINARY_SOURCE_KINDS | SINGLE_SOURCE_KINDS)}."
         )
     return patch
+
+
+def component_spectra_to_source_spectral_config(
+    spectra: Mapping[str, EffectiveSpectrum],
+    *,
+    source_kind: str,
+) -> dict[str, Any]:
+    """Return source-config spectral fields from component spectra."""
+
+    kind = str(source_kind).lower()
+    if kind in SINGLE_SOURCE_KINDS:
+        spectrum = spectra.get("star") or next(iter(spectra.values()))
+        return spectrum_to_source_spectral_config(spectrum, source_kind=kind)
+    if kind not in BINARY_SOURCE_KINDS:
+        raise ValueError(f"Unsupported source kind {source_kind!r}.")
+    if "primary" not in spectra or "secondary" not in spectra:
+        raise ValueError("Binary component spectra must contain primary and secondary.")
+    p_wavelengths, p_weights = _validate_spectrum(spectra["primary"])
+    s_wavelengths, s_weights = _validate_spectrum(spectra["secondary"])
+    if not np.allclose(p_wavelengths, s_wavelengths, rtol=0.0, atol=0.0):
+        raise ValueError("Binary component spectra must share one wavelength grid.")
+    wavelength_m, bandwidth_m, n_lambda = _wavelength_summary(p_wavelengths)
+    component_weights = np.vstack([p_weights, s_weights])
+    return {
+        "wavelength_m": wavelength_m,
+        "bandwidth_m": bandwidth_m,
+        "n_lambda": n_lambda,
+        "wavelengths_m": p_wavelengths.tolist(),
+        "component_weights": component_weights.tolist(),
+        "spectral_deck_label": "component_spectral_deck",
+        "spectral_deck_provenance": {
+            "source_kind": kind,
+            "component_labels": ["primary", "secondary"],
+            "n_lambda": n_lambda,
+            "component_spectra": {
+                label: _spectrum_provenance(spec, source_kind=kind, component_labels=(label,))
+                for label, spec in spectra.items()
+            },
+            "component_weights_differ": bool(not np.allclose(p_weights, s_weights)),
+            "weight_normalization": "row_sample_sum",
+            "flux_factor_usage": "diagnostic_provenance_only",
+            "spectral_shape_active_inference_parameter": False,
+        },
+    }
 
 
 def apply_effective_spectrum_to_source_config(
@@ -239,9 +285,48 @@ def _apply_to_system_config(
     return _repack_system_block(system_cfg, system, had_outer_system=had_outer), provenance
 
 
+def _apply_source_deck_to_system_config(
+    system_cfg: Mapping[str, Any],
+    spectra: Mapping[str, EffectiveSpectrum],
+    *,
+    deck: SourceSpectralDeck,
+    role: str,
+    preserve_flux_parameters: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    system, had_outer = _extract_system_block(system_cfg)
+    source = system.get("source")
+    if not isinstance(source, Mapping):
+        raise ValueError("system config must contain a mapping at system.source.")
+    patched_source = deepcopy(dict(source))
+    before_flux = {
+        key: deepcopy(patched_source[key])
+        for key in ("log_flux_total", "contrast")
+        if key in patched_source
+    }
+    patch = component_spectra_to_source_spectral_config(
+        spectra,
+        source_kind=str(patched_source.get("kind", deck.source_kind)),
+    )
+    patched_source.update(patch)
+    if preserve_flux_parameters:
+        patched_source.update(before_flux)
+    system["source"] = patched_source
+    provenance = {
+        "applied_to": "source",
+        "role": role,
+        "source_kind": str(patched_source.get("kind", deck.source_kind)).lower(),
+        "target": deck.target,
+        "spectrum": patch["spectral_deck_provenance"],
+        "sed_resolution": deck.provenance.get("sed_resolution"),
+        "preserve_flux_parameters": bool(preserve_flux_parameters),
+        "preserved_flux_parameters": sorted(before_flux),
+    }
+    return _repack_system_block(system_cfg, system, had_outer_system=had_outer), _as_jsonable(provenance)
+
+
 def apply_spectral_deck_to_system_configs(
     base_system_cfg: Mapping[str, Any],
-    deck: SpectralDeck,
+    deck: SpectralDeck | SourceSpectralDeck,
     *,
     truth_label: str = "truth",
     inference_label: str = "inference",
@@ -281,6 +366,41 @@ def apply_spectral_deck_to_system_configs(
     return truth_cfg, inference_cfg, _as_jsonable(provenance)
 
 
+def apply_source_spectral_deck_to_system_configs(
+    base_system_cfg: Mapping[str, Any],
+    deck: SourceSpectralDeck,
+    *,
+    preserve_flux_parameters: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Return truth/inference configs patched with component spectra."""
+
+    truth_cfg, truth_prov = _apply_source_deck_to_system_config(
+        base_system_cfg,
+        deck.truth_by_component,
+        deck=deck,
+        role="truth",
+        preserve_flux_parameters=preserve_flux_parameters,
+    )
+    inference_cfg, inference_prov = _apply_source_deck_to_system_config(
+        base_system_cfg,
+        deck.inference_by_component,
+        deck=deck,
+        role="inference",
+        preserve_flux_parameters=preserve_flux_parameters,
+    )
+    provenance = {
+        "schema_version": "spectral_source_config.v1",
+        "truth": truth_prov,
+        "inference": inference_prov,
+        "deck_schema_version": deck.schema_version,
+        "comparison_by_component": _as_jsonable(deck.comparison_by_component),
+        "combined_comparison": _as_jsonable(deck.combined_comparison),
+        "active_inference_parameters_added": [],
+        "preserve_flux_parameters": bool(preserve_flux_parameters),
+    }
+    return truth_cfg, inference_cfg, _as_jsonable(provenance)
+
+
 def build_spectral_truth_inference_system_configs(
     *,
     base_system_cfg: Mapping[str, Any],
@@ -295,6 +415,13 @@ def build_spectral_truth_inference_system_configs(
     call site readable when the surrounding code is already constructing truth
     and knowledge/inference decks.
     """
+
+    if isinstance(deck, SourceSpectralDeck):
+        return apply_source_spectral_deck_to_system_configs(
+            base_system_cfg,
+            deck,
+            preserve_flux_parameters=preserve_flux_parameters,
+        )
 
     return apply_spectral_deck_to_system_configs(
         base_system_cfg,

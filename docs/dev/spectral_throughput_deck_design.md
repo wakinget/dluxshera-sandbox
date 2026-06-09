@@ -10,7 +10,7 @@ The config integration helper writes:
 - `source.n_lambda`: number of spectral samples,
 - `source.wavelengths_m`: explicit wavelength grid in meters,
 - `source.weights`: normalized weights for `single_star`,
-- `source.component_weights`: duplicated normalized rows for binary-like sources,
+- `source.component_weights`: one normalized row per binary component,
 - `source.spectral_deck_label`: applied spectrum label,
 - `source.spectral_deck_provenance`: JSON-friendly diagnostics and assumptions.
 
@@ -46,13 +46,19 @@ effective wavelengths, and deck comparison metrics.
 No active inference parameters are added. Spectral shape remains nuisance
 realism in this integration layer.
 
+For target-aware source decks, `SourceSpectralDeck` stores truth and inference
+spectra by component. Single-star decks contain a `star` component. Binary-like
+decks contain `primary` and `secondary` components built on the same wavelength
+grid so the source config can carry distinct component rows without exposing
+spectral shape as an optimizer-visible parameter.
+
 ## Render-Only Smoke
 
 `examples/scripts/render_spectral_deck_smoke.py` demonstrates the integration by:
 
 1. reading `experiment.spectral_model` from the full-fidelity template,
-2. building a truth/inference spectral deck using a packaged Alpha Cen A SED by default,
-3. patching one fast two-plane system config into truth and inference configs,
+2. building a target-aware truth/inference spectral deck from packaged SEDs,
+3. patching one fast three-plane simple system config into truth and inference configs,
 4. rendering one PSF/image for each config,
 5. writing spectral artifacts, patched configs, `*.npy` images, and
    `render_summary.json`.
@@ -137,20 +143,37 @@ not run inference, Schur summaries, observation updates, campaign execution, or
 HPC workflows.
 
 
-## Render-Smoke SED Default
+## Target-Aware SEDs
 
-The render-only smoke uses packaged target SED data by default. The default SED
-is `data/target_seds/alfCenA_SED.dat`, resolved through the existing
-`target_sed_root()` package-data helper. The SED loader convention is the
-existing source-photometry convention: input files contain wavelength in nm and
-energy flux density in `W / m^2 / nm`, which the shared utility converts to
-photon spectral flux density per nm on the requested model grid.
+The render-only smoke and source spectral deck use packaged target SED data by
+default. SED files are resolved through the existing `target_sed_root()`
+package-data helper. The SED loader convention is the existing
+source-photometry convention: input files contain wavelength in nm and energy
+flux density in `W / m^2 / nm`, which the shared utility converts to photon
+spectral flux density per nm on the requested model grid.
 
-For binary smoke renders, v1 uses this single effective SED for the source-level
-spectral deck and applies the resulting chromatic weights to both binary
-components. Distinct component SED mixtures are deferred to a later source-deck
-task. The smoke records this limitation in `render_summary.json` under
-`selected_sed.shared_across_binary_components`.
+Single-star smoke/calibration configs default to Alpha Cen A as a placeholder:
+`data/target_seds/alfCenA_SED.dat`. This is a calibration convenience, not a
+claim that all single-star calibrators have Alpha Cen A spectra.
+
+Binary target configs resolve component-specific SED files from `source.target`.
+The Alpha Cen mapping is:
+
+- primary: `data/target_seds/alfCenA_SED.dat`
+- secondary: `data/target_seds/alfCenB_SED.dat`
+
+The target registry also contains explicit A/B mappings for other packaged
+binary targets when their SED filenames are unambiguous, including 61 Cyg,
+70 Oph, 36 Oph, xi Boo, p Eri, and HR 2667/2668. Generic `binary` configs must
+provide explicit component SED paths unless a smoke-only Alpha Cen fallback is
+requested. Shared-SED binary rows are now a debug fallback only and are marked in
+provenance with `shared_across_binary_components: true`.
+
+For component-specific binary decks, `source.component_weights[0, :]` receives
+the primary weights and `source.component_weights[1, :]` receives the secondary
+weights. Each row is normalized independently. Component flux factors are
+diagnostics/provenance only and do not silently rewrite `source.contrast`, which
+remains detected, post-response, and band-integrated.
 
 Synthetic SED fallbacks remain available for debugging:
 
