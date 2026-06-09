@@ -405,6 +405,7 @@ def _resolve_system_store(
     *,
     config: Mapping[str, Any],
     system_preset: str | None,
+    exposure_time_s: float | None = None,
 ) -> tuple[ParameterStore, dict[str, Any], dict[str, Any]]:
     user_cfg = dict(config)
     preset = DEFAULT_SYSTEM_PRESET if system_preset is None else system_preset
@@ -413,6 +414,15 @@ def _resolve_system_store(
     elif system_preset is not None:
         system_cfg = dict(user_cfg["system"])
         system_cfg["preset"] = system_preset
+        user_cfg["system"] = system_cfg
+    if exposure_time_s is not None:
+        exposure = float(exposure_time_s)
+        if exposure <= 0.0 or not math.isfinite(exposure):
+            raise ValueError("experiment.subblocks.exposure_time_s must be positive.")
+        system_cfg = dict(user_cfg.get("system", {}) or {})
+        source_cfg = dict(system_cfg.get("source", {}) or {})
+        source_cfg["exposure_time_s"] = exposure
+        system_cfg["source"] = source_cfg
         user_cfg["system"] = system_cfg
     resolved_cfg = resolve_config(user_cfg)
     system_cfg = resolved_cfg.get("system")
@@ -428,6 +438,16 @@ def _resolve_system_store(
         "detector_model": system_cfg.get("detector", {}).get("model"),
     }
     return store, dict(system_cfg), provenance
+
+
+def _subblock_exposure_time_s(experiment_cfg: Mapping[str, Any]) -> float | None:
+    subblock_cfg = experiment_cfg.get("subblocks", {}) or {}
+    if not isinstance(subblock_cfg, Mapping) or subblock_cfg.get("exposure_time_s") is None:
+        return None
+    exposure = float(subblock_cfg["exposure_time_s"])
+    if exposure <= 0.0 or not math.isfinite(exposure):
+        raise ValueError("experiment.subblocks.exposure_time_s must be positive.")
+    return exposure
 
 
 def _validate_partition_config(partition_cfg: Mapping[str, Any] | None, layout: ObservationThetaLayout) -> dict[str, Any]:
@@ -1220,9 +1240,11 @@ def build_campaign_plan(
     resolved_run_name = str(experiment_cfg.get("run_name") or f"observation_bias_campaign_{timestamp_tag()}")
     run_root = Path(results_root).resolve() / resolved_run_name
     effective_system_preset = system_preset or experiment_cfg.get("system_preset")
+    subblock_exposure_time_s = _subblock_exposure_time_s(experiment_cfg)
     system_store, system_cfg, system_provenance = _resolve_system_store(
         config=config,
         system_preset=effective_system_preset,
+        exposure_time_s=subblock_exposure_time_s,
     )
     observation_theta_cfg = experiment_cfg.get("observation_theta", {}) or {}
     layout, layout_metadata = build_system_observation_theta_layout(
@@ -3526,6 +3548,144 @@ def _binary_iterative_diagnostic_row(
     }
 
 
+def _scalar_nested_value(payload: Mapping[str, Any], path: Sequence[str]) -> float | None:
+    value: Any = payload
+    for key in path:
+        if not isinstance(value, Mapping) or key not in value:
+            return None
+        value = value[key]
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError):
+        return None
+    return scalar if math.isfinite(scalar) else None
+
+
+def _summary_exposure_context_values(summary_paths: Sequence[Path]) -> list[float]:
+    values: list[float] = []
+    candidate_paths = (
+        ("metadata", "prior_context", "effective_store_values", "source.exposure_time_s"),
+        ("prior_context", "effective_store_values", "source.exposure_time_s"),
+        ("metadata", "system", "resolved_config", "source", "exposure_time_s"),
+        ("system", "resolved_config", "source", "exposure_time_s"),
+    )
+    for path in summary_paths:
+        try:
+            payload = load_subblock_summary_artifact_payload(path)
+        except Exception:
+            continue
+        for candidate in candidate_paths:
+            value = _scalar_nested_value(payload, candidate)
+            if value is not None:
+                values.append(value)
+                break
+    return values
+
+
+def _truth_or_prior_store_exposure_time_s(plan: CampaignPlan) -> float | None:
+    for payload in (plan.layout_metadata, plan.config):
+        value = _scalar_nested_value(payload, ("resolved_system", "source", "exposure_time_s"))
+        if value is not None:
+            return value
+        value = _scalar_nested_value(payload, ("system", "source", "exposure_time_s"))
+        if value is not None:
+            return value
+    return None
+
+
+def _campaign_exposure_time_s(plan: CampaignPlan) -> float | None:
+    value = _subblock_exposure_time_s(plan.config.get("experiment", {}) or {})
+    if value is not None:
+        return value
+    return _truth_or_prior_store_exposure_time_s(plan)
+
+
+def _exposure_values_consistent(
+    *,
+    campaign: float | None,
+    summary_values: Sequence[float],
+    truth_or_prior_store: float | None,
+    expected_summary_count: int,
+) -> bool:
+    if campaign is None or truth_or_prior_store is None:
+        return False
+    if len(summary_values) != int(expected_summary_count):
+        return False
+    values = [value for value in [campaign, truth_or_prior_store] if value is not None]
+    values.extend(float(value) for value in summary_values)
+    reference = values[0]
+    return all(math.isclose(reference, value, rel_tol=1.0e-12, abs_tol=1.0e-15) for value in values)
+
+
+def iterative_context_diagnostics(
+    *,
+    plan: CampaignPlan,
+    summary_paths: Sequence[Path],
+) -> dict[str, Any]:
+    campaign_exposure = _campaign_exposure_time_s(plan)
+    summary_values = _summary_exposure_context_values(summary_paths)
+    truth_or_prior_store = _truth_or_prior_store_exposure_time_s(plan)
+    source_diag: dict[str, Any] = {
+        "campaign": campaign_exposure,
+        "summary_values": summary_values,
+        "summary_count": int(len(summary_paths)),
+        "summary_values_count": int(len(summary_values)),
+        "has_all_summary_values": bool(len(summary_values) == len(summary_paths)),
+        "truth_or_prior_store": truth_or_prior_store,
+        "consistent": _exposure_values_consistent(
+            campaign=campaign_exposure,
+            summary_values=summary_values,
+            truth_or_prior_store=truth_or_prior_store,
+            expected_summary_count=len(summary_paths),
+        ),
+    }
+    log_flux_diag: dict[str, Any] = {"base": "log10"}
+    if campaign_exposure is not None and truth_or_prior_store is not None:
+        log_flux_diag[
+            "expected_log10_offset_if_truth_or_prior_vs_campaign"
+        ] = float(math.log10(truth_or_prior_store / campaign_exposure))
+    log_flux_diag[
+        "expected_log10_offset_if_1800s_vs_0p05s"
+    ] = float(math.log10(1800.0 / 0.05))
+    return {
+        "source.exposure_time_s": source_diag,
+        "source.log_flux_total": log_flux_diag,
+    }
+
+
+def validate_iterative_log_flux_exposure_context(
+    *,
+    plan: CampaignPlan,
+    context_diagnostics: Mapping[str, Any],
+) -> None:
+    if "source.log_flux_total" not in set(plan.layout.labels):
+        return
+    exposure_diag = context_diagnostics.get("source.exposure_time_s", {})
+    if not isinstance(exposure_diag, Mapping) or not bool(exposure_diag.get("consistent", False)):
+        raise RuntimeError(
+            "source.log_flux_total iterative update requires consistent exposure context "
+            "across campaign, subblock summaries, and truth/prior store. "
+            f"Diagnostics: {json.dumps(exposure_diag, sort_keys=True)}"
+        )
+
+
+def _posterior_truth_by_label(
+    *,
+    labels: Sequence[str],
+    posterior_rows: Mapping[str, Mapping[str, Any]],
+    fallback_truth: Mapping[str, float],
+) -> dict[str, float]:
+    truth = {str(label): float(fallback_truth[label]) for label in labels if label in fallback_truth}
+    for label in labels:
+        row = posterior_rows.get(label)
+        if row is None:
+            continue
+        value = posterior_float(row, ("truth_value",))
+        if math.isfinite(value):
+            truth[str(label)] = float(value)
+    return truth
+
+
 def execute_iterative_campaign(
     plan: CampaignPlan,
     *,
@@ -3604,16 +3764,29 @@ def execute_iterative_campaign(
                 raise RuntimeError(
                     f"Missing iterative window posterior: {expected_posterior}"
                 )
+            context_diagnostics = iterative_context_diagnostics(
+                plan=plan,
+                summary_paths=window_plan_obj.summary_paths[window_case.case_name],
+            )
+            validate_iterative_log_flux_exposure_context(
+                plan=plan,
+                context_diagnostics=context_diagnostics,
+            )
+            posterior_truth = _posterior_truth_by_label(
+                labels=plan.layout.labels,
+                posterior_rows=posterior_rows,
+                fallback_truth=truth,
+            )
             posterior_offsets, posterior_offset_status = posterior_offsets_from_rows(
                 labels=plan.layout.labels,
                 posterior_rows_by_label=posterior_rows,
-                truth_by_label=truth,
+                truth_by_label=posterior_truth,
                 fallback_offsets=current_offsets,
             )
             next_offsets = apply_physical_reference_update(
                 current_offsets=current_offsets,
                 posterior_rows_by_label=posterior_rows,
-                truth_by_label=truth,
+                truth_by_label=posterior_truth,
                 update_gain=float(plan.iterative["update_gain"]),
             )
             row = _binary_iterative_diagnostic_row(
@@ -3650,9 +3823,10 @@ def execute_iterative_campaign(
                     "current_offsets": dict(current_offsets),
                     "posterior_offsets": dict(posterior_offsets),
                     "next_offsets": dict(next_offsets),
-                    "truth_by_label": dict(truth),
+                    "truth_by_label": dict(posterior_truth),
                     "posterior_table_path": str(expected_posterior),
                     "diagnostics": row,
+                    "context_diagnostics": context_diagnostics,
                     "posterior_offset_status": dict(posterior_offset_status),
                     "created_at": now_iso_local_ms(),
                     "status": "ok",
@@ -3779,16 +3953,29 @@ def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
             continue
         current_offsets = current_offsets_by_case[case_name]
         posterior_rows = posterior_rows_by_label(posterior_path)
+        context_diagnostics = iterative_context_diagnostics(
+            plan=plan,
+            summary_paths=[Path(str(row["summary_path"])) for row in window_rows],
+        )
+        validate_iterative_log_flux_exposure_context(
+            plan=plan,
+            context_diagnostics=context_diagnostics,
+        )
+        posterior_truth = _posterior_truth_by_label(
+            labels=plan.layout.labels,
+            posterior_rows=posterior_rows,
+            fallback_truth=truth,
+        )
         posterior_offsets, posterior_offset_status = posterior_offsets_from_rows(
             labels=plan.layout.labels,
             posterior_rows_by_label=posterior_rows,
-            truth_by_label=truth,
+            truth_by_label=posterior_truth,
             fallback_offsets=current_offsets,
         )
         next_offsets = apply_physical_reference_update(
             current_offsets=current_offsets,
             posterior_rows_by_label=posterior_rows,
-            truth_by_label=truth,
+            truth_by_label=posterior_truth,
             update_gain=float(plan.iterative["update_gain"]),
         )
         row = _binary_iterative_diagnostic_row(

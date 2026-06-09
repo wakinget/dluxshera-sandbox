@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -127,13 +128,22 @@ def enable_forecast(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def write_summary(path: Path, labels: tuple[str, ...], theta_ref: np.ndarray, truth: np.ndarray) -> None:
+def write_summary(
+    path: Path,
+    labels: tuple[str, ...],
+    theta_ref: np.ndarray,
+    truth: np.ndarray,
+    *,
+    exposure_time_s: float | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     n = len(labels)
     info = np.eye(n, dtype=float)
     if n >= 3:
-        common = np.array([0.0, 1.0, 1.0]) / np.sqrt(2.0)
-        differential = np.array([0.0, 1.0, -1.0]) / np.sqrt(2.0)
+        common = np.zeros((n,), dtype=float)
+        differential = np.zeros((n,), dtype=float)
+        common[1:3] = np.array([1.0, 1.0]) / np.sqrt(2.0)
+        differential[1:3] = np.array([1.0, -1.0]) / np.sqrt(2.0)
         info += 4.0 * np.outer(common, common)
         info += 0.01 * np.outer(differential, differential)
     score = info @ (theta_ref - truth)
@@ -152,6 +162,19 @@ def write_summary(path: Path, labels: tuple[str, ...], theta_ref: np.ndarray, tr
             "summary_subblock_reduce": "sum",
         },
     }
+    if exposure_time_s is not None:
+        payload["metadata"] = {
+            "prior_context": {
+                "effective_store_values": {
+                    "source.exposure_time_s": float(exposure_time_s),
+                }
+            },
+            "system": {
+                "resolved_config": {
+                    "source": {"exposure_time_s": float(exposure_time_s)}
+                }
+            },
+        }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -423,6 +446,145 @@ def test_subblock_plan_records_forwarded_command_options(tmp_path: Path):
     assert payload["subblock_command_options"]["exposure_time_s"] == pytest.approx(0.05)
     assert "--exposure-time-s" in payload["subblock_command_options"]["forwarded_flags"]
     assert "--reference-early-stopping" in payload["subblock_command_options"]["forwarded_flags"]
+
+
+def test_campaign_truth_context_uses_subblock_exposure_for_log_flux(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["subblocks"]["exposure_time_s"] = 0.05
+    payload["experiment"]["observation_theta"]["source"]["log_flux_total"] = True
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="flux_exposure",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+
+    assert plan.config["system"]["source"]["exposure_time_s"] == pytest.approx(0.05)
+    assert plan.layout_metadata["resolved_system"]["source"]["exposure_time_s"] == pytest.approx(0.05)
+    command = plan.subblock_commands["matched_pair"][0]
+    assert command[command.index("--exposure-time-s") + 1] == "0.05"
+    log_flux_index = plan.layout.labels.index("source.log_flux_total")
+    truth_log_flux = float(plan.prior_truth[log_flux_index])
+    assert truth_log_flux < 8.0
+    assert truth_log_flux + math.log10(1800.0 / 0.05) > 11.0
+
+
+def test_iterative_log_flux_offsets_use_posterior_table_truth_values():
+    module = load_module()
+    labels = ("source.log_flux_total",)
+    stale_campaign_truth = {"source.log_flux_total": 11.571953773498535}
+    posterior_rows = {
+        "source.log_flux_total": {
+            "truth_value": "7.01565177202808",
+            "posterior_mean": "7.0133428774766475",
+        }
+    }
+
+    posterior_truth = module._posterior_truth_by_label(
+        labels=labels,
+        posterior_rows=posterior_rows,
+        fallback_truth=stale_campaign_truth,
+    )
+    offsets, status = module.posterior_offsets_from_rows(
+        labels=labels,
+        posterior_rows_by_label=posterior_rows,
+        truth_by_label=posterior_truth,
+    )
+
+    assert posterior_truth["source.log_flux_total"] == pytest.approx(7.01565177202808)
+    assert offsets["source.log_flux_total"] == pytest.approx(-0.002308894551432239)
+    assert status["source.log_flux_total"] == "ok"
+
+
+def test_iterative_exposure_context_diagnostics_and_guard(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["subblocks"]["exposure_time_s"] = 0.05
+    payload["experiment"]["observation_theta"]["source"]["log_flux_total"] = True
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="flux_guard",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    case = plan.cases[0]
+    labels = plan.layout.labels
+    truth = plan.prior_truth.copy()
+    for path in plan.summary_paths[case.case_name]:
+        write_summary(path, labels, truth.copy(), truth, exposure_time_s=0.05)
+
+    diagnostics = module.iterative_context_diagnostics(
+        plan=plan,
+        summary_paths=plan.summary_paths[case.case_name],
+    )
+    assert diagnostics["source.exposure_time_s"]["consistent"] is True
+    assert diagnostics["source.exposure_time_s"]["campaign"] == pytest.approx(0.05)
+    assert diagnostics["source.exposure_time_s"]["summary_values"] == [0.05, 0.05]
+    assert diagnostics["source.exposure_time_s"]["truth_or_prior_store"] == pytest.approx(0.05)
+    module.validate_iterative_log_flux_exposure_context(
+        plan=plan,
+        context_diagnostics=diagnostics,
+    )
+
+    bad_system = json.loads(json.dumps(plan.config["system"]))
+    bad_system["source"]["exposure_time_s"] = 1800.0
+    bad_metadata = json.loads(json.dumps(plan.layout_metadata))
+    bad_metadata["resolved_system"]["source"]["exposure_time_s"] = 1800.0
+    bad_plan = module.replace(
+        plan,
+        config={**plan.config, "system": bad_system},
+        layout_metadata=bad_metadata,
+    )
+    bad_diagnostics = module.iterative_context_diagnostics(
+        plan=bad_plan,
+        summary_paths=plan.summary_paths[case.case_name],
+    )
+    assert bad_diagnostics["source.exposure_time_s"]["consistent"] is False
+    assert bad_diagnostics["source.log_flux_total"][
+        "expected_log10_offset_if_truth_or_prior_vs_campaign"
+    ] == pytest.approx(math.log10(1800.0 / 0.05))
+    with pytest.raises(RuntimeError, match="consistent exposure context"):
+        module.validate_iterative_log_flux_exposure_context(
+            plan=bad_plan,
+            context_diagnostics=bad_diagnostics,
+        )
+
+
+def test_imported_binary_iterative_failure_bundle_has_exposure_ratio_signature():
+    bundle = (
+        Path(__file__).resolve().parents[2]
+        / "Results"
+        / "hpc_imports"
+        / "binary_iterative_cluster_validation_v1_failure_context_20260609_141255"
+    )
+    update_path = (
+        bundle
+        / "cases"
+        / "binary_iter_validation_draw_000"
+        / "windows"
+        / "window_000"
+        / "iterative_reference_update.json"
+    )
+    if not update_path.exists():
+        pytest.skip("Imported binary iterative failure bundle is not available.")
+
+    update = json.loads(update_path.read_text(encoding="utf-8"))
+    observed = float(update["posterior_offsets"]["source.log_flux_total"])
+    expected_context_delta = -math.log10(1800.0 / 0.05)
+
+    assert observed == pytest.approx(expected_context_delta, abs=3.0e-3)
+    assert update["current_offsets"]["source.log_flux_total"] == pytest.approx(
+        0.0,
+        abs=1.0e-6,
+    )
 
 
 def _prior_draw_only_payload(*, include_implicit_zero_bias: bool | None) -> dict[str, Any]:

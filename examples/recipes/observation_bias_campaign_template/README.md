@@ -120,6 +120,11 @@ per-window `cases/<case>/windows/window_XXX/iterative_reference_update.json`.
 Diagnostics distinguish the full posterior update from the applied reference
 update, which matters when `update_gain != 1`.
 
+For binary iterative validations with `exposure_time_s: 0.05`, a healthy run
+should not produce a `source.log_flux_total` iterative update near
+`-log10(1800 / 0.05)`. Such an update indicates that campaign-level
+truth/prior context and image-backed subblock exposure context have diverged.
+
 A checked-in Gattaca2 sbatch template is available at:
 
 ```text
