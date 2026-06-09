@@ -91,8 +91,8 @@ experiment:
           label: SHERA_Notch_Filter_V2
           wavelength_column: Wavelength (nm)
           wavelength_unit: nm
-          response_column: T (%)
-          response_unit: percent_transmission
+          response_column: R (%)
+          response_unit: percent_reflection
           response_scale: 0.01
         mirror_reflectance:
           enabled: false

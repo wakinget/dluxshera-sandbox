@@ -51,7 +51,7 @@ realism in this integration layer.
 `examples/scripts/render_spectral_deck_smoke.py` demonstrates the integration by:
 
 1. reading `experiment.spectral_model` from the full-fidelity template,
-2. building a synthetic truth/inference spectral deck,
+2. building a truth/inference spectral deck using a packaged Alpha Cen A SED by default,
 3. patching one fast two-plane system config into truth and inference configs,
 4. rendering one PSF/image for each config,
 5. writing spectral artifacts, patched configs, `*.npy` images, and
@@ -83,8 +83,9 @@ The filter files contain metadata rows before the data header. The configured
 columns are explicit:
 
 - wavelength column: `Wavelength (nm)`
-- filter response column: `T (%)`
-- filter response scale: `0.01`, converting percent transmission to a
+- filter response column: `R (%)`
+- filter response unit: percent reflection
+- filter response scale: `0.01`, converting percent reflectance to a
   dimensionless throughput
 
 The detector QE file uses:
@@ -126,7 +127,34 @@ python3 examples/scripts/render_spectral_deck_smoke.py \
   --detector-qe data/detector_qe/LTN4323_QE.csv
 ```
 
+Because the notch filter is a reflective M2 filter, the deck uses reflected
+light from `R (%)`. The transmissive `T (%)` column is not the correct baseline
+for the flight-like reflective-filter model.
+
 Real response curves make the render-only smoke more representative of the
 future full-fidelity campaign, but the smoke remains only a wiring check. It does
 not run inference, Schur summaries, observation updates, campaign execution, or
 HPC workflows.
+
+
+## Render-Smoke SED Default
+
+The render-only smoke uses packaged target SED data by default. The default SED
+is `data/target_seds/alfCenA_SED.dat`, resolved through the existing
+`target_sed_root()` package-data helper. The SED loader convention is the
+existing source-photometry convention: input files contain wavelength in nm and
+energy flux density in `W / m^2 / nm`, which the shared utility converts to
+photon spectral flux density per nm on the requested model grid.
+
+For binary smoke renders, v1 uses this single effective SED for the source-level
+spectral deck and applies the resulting chromatic weights to both binary
+components. Distinct component SED mixtures are deferred to a later source-deck
+task. The smoke records this limitation in `render_summary.json` under
+`selected_sed.shared_across_binary_components`.
+
+Synthetic SED fallbacks remain available for debugging:
+
+```bash
+python3 examples/scripts/render_spectral_deck_smoke.py --sed-mode synthetic-ramp
+python3 examples/scripts/render_spectral_deck_smoke.py --sed-mode flat
+```

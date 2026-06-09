@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from contextlib import ExitStack
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +38,13 @@ from dluxshera.utils.spectral_response import (
 from dluxshera.utils.spectral_source_config import (
     build_spectral_truth_inference_system_configs,
 )
+from dluxshera.utils.source_photometry import target_sed_root
 
 TEMPLATE_PATH = Path(
     "examples/recipes/full_fidelity_algorithm_campaign_template/"
     "full_fidelity_algorithm_campaign_v1.yaml"
 )
+DEFAULT_SED_FILE = "alfCenA_SED.dat"
 
 
 def _json_ready(value: Any) -> Any:
@@ -123,8 +127,8 @@ def _real_response_components(
             "label": "SHERA_Notch_Filter_V2",
             "wavelength_column": "Wavelength (nm)",
             "wavelength_unit": "nm",
-            "response_column": "T (%)",
-            "response_unit": "percent_transmission",
+            "response_column": "R (%)",
+            "response_unit": "percent_reflection",
             "response_scale": 0.01,
         },
     )
@@ -155,6 +159,81 @@ def _real_response_components(
         },
     }
     return detector, filt, selected
+
+
+def _resolve_sed_path(sed_path: Path | None) -> tuple[Path, dict[str, Any], ExitStack]:
+    stack = ExitStack()
+    if sed_path is not None:
+        raw = Path(sed_path).expanduser()
+        if raw.is_file() or raw.is_absolute():
+            resolved = raw
+        else:
+            candidate = Path.cwd() / raw
+            if candidate.is_file():
+                resolved = candidate
+            else:
+                resolved = raw
+        if not resolved.is_file():
+            stack.close()
+            raise FileNotFoundError(f"SED file does not exist: {resolved}")
+        provenance = {
+            "sed_mode": "real",
+            "sed_path": str(sed_path),
+            "resolved_sed_path": str(resolved),
+            "target_sed_label": resolved.name,
+            "shared_across_binary_components": True,
+            "input_kind": "photon_flux_density_per_nm",
+            "source": "user_path",
+        }
+        return resolved, provenance, stack
+
+    sed_ref = target_sed_root().joinpath(DEFAULT_SED_FILE)
+    resolved = Path(stack.enter_context(resources.as_file(sed_ref)))
+    provenance = {
+        "sed_mode": "real",
+        "sed_path": f"data/target_seds/{DEFAULT_SED_FILE}",
+        "resolved_sed_path": str(resolved),
+        "target_sed_label": "ALPHA_CEN_A",
+        "shared_across_binary_components": True,
+        "input_kind": "photon_flux_density_per_nm",
+        "source": "packaged_target_sed",
+        "note": (
+            "Render smoke v1 uses one effective component SED for the source-level "
+            "deck; binary-specific component SED mixtures are deferred."
+        ),
+    }
+    return resolved, provenance, stack
+
+
+def _sed_for_mode(
+    *,
+    sed_mode: str,
+    sed_path: Path | None,
+) -> tuple[Any, dict[str, Any], ExitStack | None]:
+    if sed_mode == "synthetic-ramp":
+        return (
+            lambda wavelengths_m: wavelengths_m * 1e9,
+            {
+                "sed_mode": "synthetic-ramp",
+                "sed_path": None,
+                "shared_across_binary_components": True,
+                "input_kind": "photon_flux_density_per_nm",
+            },
+            None,
+        )
+    if sed_mode == "flat":
+        return (
+            1.0,
+            {
+                "sed_mode": "flat",
+                "sed_path": None,
+                "shared_across_binary_components": True,
+                "input_kind": "photon_flux_density_per_nm",
+            },
+            None,
+        )
+    resolved, provenance, stack = _resolve_sed_path(sed_path)
+    return resolved, provenance, stack
 
 
 def _fast_system_config(*, source_kind: str) -> dict[str, Any]:
@@ -215,6 +294,8 @@ def run(
     response_mode: str,
     filter_response: Path | None,
     detector_qe: Path | None,
+    sed_mode: str,
+    sed_path: Path | None,
 ) -> dict[str, Any]:
     spectral_model = _read_spectral_model(TEMPLATE_PATH)
     truth_cfg = dict(spectral_model["truth"])
@@ -238,17 +319,23 @@ def run(
             detector_qe=detector_qe,
         )
 
-    deck = build_truth_inference_spectral_deck(
-        sed=lambda wavelengths_m: wavelengths_m * 1e9,
-        truth_config=truth_cfg,
-        inference_config=inference_cfg,
-        detector_qe=detector_component,
-        filter_response=filter_component,
-        provenance={
-            "script": "examples/scripts/render_spectral_deck_smoke.py",
-            "selected_responses": selected_responses,
-        },
-    )
+    sed, sed_provenance, sed_stack = _sed_for_mode(sed_mode=sed_mode, sed_path=sed_path)
+    try:
+        deck = build_truth_inference_spectral_deck(
+            sed=sed,
+            truth_config=truth_cfg,
+            inference_config=inference_cfg,
+            detector_qe=detector_component,
+            filter_response=filter_component,
+            provenance={
+                "script": "examples/scripts/render_spectral_deck_smoke.py",
+                "selected_responses": selected_responses,
+                "selected_sed": sed_provenance,
+            },
+        )
+    finally:
+        if sed_stack is not None:
+            sed_stack.close()
 
     outdir.mkdir(parents=True, exist_ok=True)
     spectral_paths = write_spectral_deck_artifacts(deck, outdir / "spectral")
@@ -283,6 +370,7 @@ def run(
         "residual_l2": float(np.sqrt(np.sum(residual**2))),
         "images_identical": bool(np.allclose(truth_image, inference_image)),
         "selected_responses": selected_responses,
+        "selected_sed": sed_provenance,
         "truth_lambda_eff_nm": deck.truth.diagnostics.get("lambda_eff_nm"),
         "inference_lambda_eff_nm": deck.inference.diagnostics.get("lambda_eff_nm"),
         "truth_out_of_inference_band_fraction": deck.comparison.get(
@@ -327,6 +415,18 @@ def main() -> None:
         default=None,
         help=f"Override detector QE CSV path. Default comes from template or {DEFAULT_DETECTOR_QE_PATH}.",
     )
+    parser.add_argument(
+        "--sed-mode",
+        choices=("real", "synthetic-ramp", "flat"),
+        default="real",
+        help="Use packaged real SED data by default, or a synthetic SED fallback.",
+    )
+    parser.add_argument(
+        "--sed-path",
+        type=Path,
+        default=None,
+        help=f"Override SED path. Default is packaged target SED {DEFAULT_SED_FILE}.",
+    )
     args = parser.parse_args()
     summary = run(
         outdir=args.outdir,
@@ -335,6 +435,8 @@ def main() -> None:
         response_mode=args.response_mode,
         filter_response=args.filter_response,
         detector_qe=args.detector_qe,
+        sed_mode=args.sed_mode,
+        sed_path=args.sed_path,
     )
     print(json.dumps(_json_ready(summary), indent=2, sort_keys=True))
 

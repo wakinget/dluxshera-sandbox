@@ -3,11 +3,13 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from importlib import resources
 
 import numpy as np
 import pytest
 import yaml
 
+from dluxshera.utils.source_photometry import target_sed_root
 from dluxshera.utils.spectral_response import (
     DEFAULT_DETECTOR_QE_PATH,
     DEFAULT_FILTER_RESPONSE_PATH,
@@ -24,6 +26,7 @@ TEMPLATE_PATH = Path(
     "examples/recipes/full_fidelity_algorithm_campaign_template/"
     "full_fidelity_algorithm_campaign_v1.yaml"
 )
+DOC_PATH = Path("docs/dev/spectral_throughput_deck_design.md")
 
 
 def _real_detector_qe() -> dict[str, object]:
@@ -46,8 +49,8 @@ def _real_filter_response() -> dict[str, object]:
         "path": DEFAULT_FILTER_RESPONSE_PATH,
         "wavelength_column": "Wavelength (nm)",
         "wavelength_unit": "nm",
-        "response_column": "T (%)",
-        "response_unit": "percent_transmission",
+        "response_column": "R (%)",
+        "response_unit": "percent_reflection",
         "response_scale": 0.01,
     }
 
@@ -220,7 +223,7 @@ def test_real_filter_and_detector_qe_csvs_load_and_interpolate() -> None:
     filter_wavelengths, filter_response = load_response_curve_csv(
         DEFAULT_FILTER_RESPONSE_PATH,
         wavelength_column="Wavelength (nm)",
-        response_column="T (%)",
+        response_column="R (%)",
         wavelength_unit="nm",
         response_scale=0.01,
     )
@@ -237,6 +240,8 @@ def test_real_filter_and_detector_qe_csvs_load_and_interpolate() -> None:
     assert np.all(np.isfinite(qe_response))
     assert np.min(filter_response) >= 0.0
     assert np.max(filter_response) <= 1.0
+    assert np.min(filter_response) < 0.01
+    assert np.max(filter_response) > 0.9
     assert np.min(qe_response) >= 0.0
     assert np.max(qe_response) <= 1.0
 
@@ -266,5 +271,19 @@ def test_real_response_curves_build_normalized_spectral_deck() -> None:
     assert np.isfinite(deck.inference.diagnostics["lambda_eff_nm"])
     truth_components = deck.truth.provenance["response_components"]
     assert any(component.get("label") == "LTN4323_QE_proxy_for_HWK4123" for component in truth_components)
-    assert any(component.get("response_column") == "T (%)" for component in truth_components)
+    assert any(component.get("response_column") == "R (%)" for component in truth_components)
     assert any(component.get("detector_model_proxy_for") == "HWK4123" for component in truth_components)
+
+
+def test_spectral_docs_describe_reflective_filter_not_transmission_default() -> None:
+    text = DOC_PATH.read_text()
+    assert "filter response column: `R (%)`" in text
+    assert "percent reflection" in text
+    assert "transmissive `T (%)` column is not the correct baseline" in text
+
+
+def test_default_render_smoke_sed_exists_in_packaged_target_seds() -> None:
+    sed_ref = target_sed_root().joinpath("alfCenA_SED.dat")
+    with resources.as_file(sed_ref) as sed_path:
+        assert sed_path.name == "alfCenA_SED.dat"
+        assert sed_path.is_file()
