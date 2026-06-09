@@ -9,10 +9,14 @@ import pytest
 import yaml
 
 from dluxshera.utils.spectral_response import (
+    DEFAULT_DETECTOR_QE_PATH,
+    DEFAULT_FILTER_RESPONSE_PATH,
+    DETECTOR_QE_PROXY_ASSUMPTION,
     build_effective_spectrum,
     build_truth_inference_spectral_deck,
     interpolate_response_curve,
     load_response_curve_csv,
+    resolve_response_curve_path,
     write_spectral_deck_artifacts,
 )
 
@@ -20,6 +24,32 @@ TEMPLATE_PATH = Path(
     "examples/recipes/full_fidelity_algorithm_campaign_template/"
     "full_fidelity_algorithm_campaign_v1.yaml"
 )
+
+
+def _real_detector_qe() -> dict[str, object]:
+    return {
+        "label": "LTN4323_QE_proxy_for_HWK4123",
+        "path": DEFAULT_DETECTOR_QE_PATH,
+        "wavelength_column": "Wavelength (nm)",
+        "wavelength_unit": "nm",
+        "response_column": "QE",
+        "response_unit": "dimensionless",
+        "response_scale": 1.0,
+        "detector_model_proxy_for": "HWK4123",
+        "assumption": DETECTOR_QE_PROXY_ASSUMPTION,
+    }
+
+
+def _real_filter_response() -> dict[str, object]:
+    return {
+        "label": "SHERA_Notch_Filter_V2",
+        "path": DEFAULT_FILTER_RESPONSE_PATH,
+        "wavelength_column": "Wavelength (nm)",
+        "wavelength_unit": "nm",
+        "response_column": "T (%)",
+        "response_unit": "percent_transmission",
+        "response_scale": 0.01,
+    }
 
 
 def _flat_response(label: str = "flat") -> dict[str, object]:
@@ -174,3 +204,67 @@ def test_full_fidelity_template_spectral_model_is_consumable() -> None:
     assert np.isclose(deck.truth.weights.sum(), 1.0)
     assert np.isclose(deck.inference.weights.sum(), 1.0)
     assert deck.schema_version == "spectral_throughput_deck.v1"
+
+
+def test_real_response_curve_paths_resolve_to_packaged_data() -> None:
+    filter_path = resolve_response_curve_path(DEFAULT_FILTER_RESPONSE_PATH)
+    qe_path = resolve_response_curve_path(DEFAULT_DETECTOR_QE_PATH)
+
+    assert str(filter_path).endswith("src/dluxshera/data/filter_response/SHERA Notch Filter V2.csv")
+    assert str(qe_path).endswith("src/dluxshera/data/detector_qe/LTN4323_QE.csv")
+    assert filter_path.is_file()
+    assert qe_path.is_file()
+
+
+def test_real_filter_and_detector_qe_csvs_load_and_interpolate() -> None:
+    filter_wavelengths, filter_response = load_response_curve_csv(
+        DEFAULT_FILTER_RESPONSE_PATH,
+        wavelength_column="Wavelength (nm)",
+        response_column="T (%)",
+        wavelength_unit="nm",
+        response_scale=0.01,
+    )
+    qe_wavelengths, qe_response = load_response_curve_csv(
+        DEFAULT_DETECTOR_QE_PATH,
+        wavelength_column="Wavelength (nm)",
+        response_column="QE",
+        wavelength_unit="nm",
+    )
+
+    assert filter_wavelengths.size > 10
+    assert qe_wavelengths.size > 10
+    assert np.all(np.isfinite(filter_response))
+    assert np.all(np.isfinite(qe_response))
+    assert np.min(filter_response) >= 0.0
+    assert np.max(filter_response) <= 1.0
+    assert np.min(qe_response) >= 0.0
+    assert np.max(qe_response) <= 1.0
+
+    target = np.linspace(500.0, 700.0, 9) * 1e-9
+    interp_filter = interpolate_response_curve(target, filter_wavelengths, filter_response)
+    interp_qe = interpolate_response_curve(target, qe_wavelengths, qe_response)
+    assert np.all(np.isfinite(interp_filter))
+    assert np.all(np.isfinite(interp_qe))
+    assert np.all(interp_filter >= 0.0)
+    assert np.all(interp_qe >= 0.0)
+
+
+def test_real_response_curves_build_normalized_spectral_deck() -> None:
+    deck = build_truth_inference_spectral_deck(
+        sed=lambda wavelengths_m: wavelengths_m * 1e9,
+        truth_config={"n_lambda": 30, "wavelength_min_nm": 500.0, "wavelength_max_nm": 700.0},
+        inference_config={"n_lambda": 7, "wavelength_min_nm": 540.0, "wavelength_max_nm": 660.0},
+        detector_qe=_real_detector_qe(),
+        filter_response=_real_filter_response(),
+    )
+
+    assert deck.truth.flux_factor > 0.0
+    assert deck.inference.flux_factor > 0.0
+    assert np.isclose(deck.truth.weights.sum(), 1.0)
+    assert np.isclose(deck.inference.weights.sum(), 1.0)
+    assert np.isfinite(deck.truth.diagnostics["lambda_eff_nm"])
+    assert np.isfinite(deck.inference.diagnostics["lambda_eff_nm"])
+    truth_components = deck.truth.provenance["response_components"]
+    assert any(component.get("label") == "LTN4323_QE_proxy_for_HWK4123" for component in truth_components)
+    assert any(component.get("response_column") == "T (%)" for component in truth_components)
+    assert any(component.get("detector_model_proxy_for") == "HWK4123" for component in truth_components)

@@ -25,6 +25,9 @@ __all__ = [
     "EffectiveSpectrum",
     "SpectralDeck",
     "SpectralComparison",
+    "DEFAULT_DETECTOR_QE_PATH",
+    "DEFAULT_FILTER_RESPONSE_PATH",
+    "resolve_response_curve_path",
     "load_response_curve_csv",
     "interpolate_response_curve",
     "build_effective_spectrum",
@@ -33,6 +36,13 @@ __all__ = [
 ]
 
 SCHEMA_VERSION = "spectral_throughput_deck.v1"
+DEFAULT_FILTER_RESPONSE_PATH = "data/filter_response/SHERA Notch Filter V2.csv"
+DEFAULT_FILTER_RESPONSE_V1_PATH = "data/filter_response/SHERA Notch Filter V1.csv"
+DEFAULT_DETECTOR_QE_PATH = "data/detector_qe/LTN4323_QE.csv"
+DETECTOR_QE_PROXY_ASSUMPTION = (
+    "LTN4323 QE curve used as near-term proxy for HWK4123 detector QE because "
+    "the detector models are nearly identical in relevant specifications."
+)
 WAVELENGTH_UNIT_TO_M = {
     "m": 1.0,
     "meter": 1.0,
@@ -127,6 +137,40 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _repo_root() -> Path:
+    """Return the source-tree repository root when running from checkout."""
+
+    return Path(__file__).resolve().parents[3]
+
+
+def resolve_response_curve_path(path: str | Path) -> Path:
+    """Resolve response-curve paths used by spectral deck configs.
+
+    The resolver accepts absolute paths, paths relative to the current working
+    directory, and template-facing ``data/...`` paths. In this checkout the
+    response CSVs live under ``src/dluxshera/data``; ``data/...`` is therefore
+    treated as an auditable shorthand for package data.
+    """
+
+    raw = Path(path).expanduser()
+    if raw.is_absolute():
+        return raw
+    if raw.is_file():
+        return raw
+
+    repo_candidate = _repo_root() / raw
+    if repo_candidate.is_file():
+        return repo_candidate
+
+    parts = raw.parts
+    if parts and parts[0] == "data":
+        package_candidate = Path(__file__).resolve().parents[1] / raw
+        if package_candidate.is_file():
+            return package_candidate
+
+    return raw
+
+
 def _unit_scale(wavelength_unit: str) -> float:
     key = str(wavelength_unit).strip().lower()
     if key not in WAVELENGTH_UNIT_TO_M:
@@ -188,12 +232,14 @@ def _resolve_sampled_curve(spec: Mapping[str, Any], *, wavelengths_m: np.ndarray
     allow_above_one = bool(spec.get("allow_above_one", False))
 
     if "path" in spec and spec.get("path") is not None:
-        path = Path(spec["path"])
+        configured_path = Path(spec["path"])
+        path = resolve_response_curve_path(configured_path)
         curve_wavelengths, curve_values = load_response_curve_csv(
             path,
             wavelength_column=str(spec.get("wavelength_column", "wavelength")),
             response_column=str(spec.get("response_column", "response")),
             wavelength_unit=str(spec.get("wavelength_unit", "nm")),
+            response_scale=float(spec.get("response_scale", 1.0)),
             clip_negative=clip_negative,
             allow_above_one=allow_above_one,
         )
@@ -209,11 +255,20 @@ def _resolve_sampled_curve(spec: Mapping[str, Any], *, wavelengths_m: np.ndarray
         provenance = {
             "label": label,
             "kind": kind,
-            "path": str(path),
+            "path": str(configured_path),
+            "resolved_path": str(path),
             "sha256": _sha256_file(path) if path.is_file() else None,
+            "wavelength_column": spec.get("wavelength_column", "wavelength"),
+            "response_column": spec.get("response_column", "response"),
             "wavelength_unit": spec.get("wavelength_unit", "nm"),
+            "response_unit": spec.get("response_unit", "dimensionless"),
+            "response_scale": float(spec.get("response_scale", 1.0)),
             "fill_value": fill_value,
         }
+        if "assumption" in spec:
+            provenance["assumption"] = spec["assumption"]
+        if "detector_model_proxy_for" in spec:
+            provenance["detector_model_proxy_for"] = spec["detector_model_proxy_for"]
         return values, provenance
 
     if "callable" in spec and spec.get("callable") is not None:
@@ -412,6 +467,7 @@ def load_response_curve_csv(
     wavelength_column: str = "wavelength",
     response_column: str = "response",
     wavelength_unit: str = "nm",
+    response_scale: float = 1.0,
     clip_negative: bool = False,
     allow_above_one: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -434,6 +490,9 @@ def load_response_curve_csv(
         Name of the response column for headered CSV files.
     wavelength_unit:
         Explicit wavelength unit: ``m``, ``um``, ``nm``, or ``angstrom``.
+    response_scale:
+        Multiplicative scale applied after parsing. Use ``0.01`` for percent
+        transmission columns such as ``T (%)``.
     clip_negative:
         If true, negative response samples are clipped to zero. By default they
         raise a ``ValueError``.
@@ -448,34 +507,58 @@ def load_response_curve_csv(
         Sorted ``(wavelengths_m, response)`` arrays.
     """
 
-    csv_path = Path(path)
+    csv_path = resolve_response_curve_path(path)
     if not csv_path.is_file():
         raise FileNotFoundError(f"Response curve CSV does not exist: {csv_path}")
 
     wavelengths: list[float] = []
     responses: list[float] = []
-    with csv_path.open("r", newline="") as handle:
-        sample = handle.read(2048)
-        handle.seek(0)
-        has_header = csv.Sniffer().has_header(sample) if sample.strip() else False
-        if has_header:
-            reader = csv.DictReader(handle)
-            if reader.fieldnames is None or wavelength_column not in reader.fieldnames or response_column not in reader.fieldnames:
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.reader(handle))
+
+    def _clean(cell: str) -> str:
+        return str(cell).strip().lstrip("\ufeff")
+
+    header_index = None
+    wavelength_index = None
+    response_index = None
+    for idx, row in enumerate(rows):
+        cleaned = [_clean(cell) for cell in row]
+        if wavelength_column in cleaned and response_column in cleaned:
+            header_index = idx
+            wavelength_index = cleaned.index(wavelength_column)
+            response_index = cleaned.index(response_column)
+            break
+
+    if header_index is not None:
+        assert wavelength_index is not None
+        assert response_index is not None
+        for row in rows[header_index + 1 :]:
+            if not row or not any(_clean(cell) for cell in row):
+                continue
+            if len(row) <= max(wavelength_index, response_index):
+                continue
+            wavelength_cell = _clean(row[wavelength_index])
+            response_cell = _clean(row[response_index])
+            if not wavelength_cell or not response_cell or wavelength_cell.startswith("#"):
+                continue
+            wavelengths.append(float(wavelength_cell))
+            responses.append(float(response_cell) * float(response_scale))
+    else:
+        # Backward-compatible headerless two-column format.
+        for row in rows:
+            if not row or row[0].strip().startswith("#"):
+                continue
+            if len(row) < 2:
+                raise ValueError(f"Headerless response CSV {csv_path} must have at least two columns.")
+            try:
+                wavelengths.append(float(_clean(row[0])))
+                responses.append(float(_clean(row[1])) * float(response_scale))
+            except ValueError as exc:
                 raise ValueError(
-                    f"Response CSV {csv_path} must contain columns {wavelength_column!r} and {response_column!r}."
-                )
-            for row in reader:
-                wavelengths.append(float(row[wavelength_column]))
-                responses.append(float(row[response_column]))
-        else:
-            reader = csv.reader(handle)
-            for row in reader:
-                if not row or row[0].strip().startswith("#"):
-                    continue
-                if len(row) < 2:
-                    raise ValueError(f"Headerless response CSV {csv_path} must have at least two columns.")
-                wavelengths.append(float(row[0]))
-                responses.append(float(row[1]))
+                    f"Response CSV {csv_path} must contain columns "
+                    f"{wavelength_column!r} and {response_column!r}."
+                ) from exc
 
     wavelength_arr = _as_1d_float_array(wavelengths, name="response wavelengths") * _unit_scale(wavelength_unit)
     response_arr = _as_1d_float_array(responses, name="response values")

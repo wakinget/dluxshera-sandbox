@@ -71,8 +71,31 @@ experiment:
       include_out_of_band_response: true
       components:
         stellar_sed: true
-        detector_qe: true
-        m2_filter_response: true
+        detector_qe:
+          enabled: true
+          path: data/detector_qe/LTN4323_QE.csv
+          label: LTN4323_QE_proxy_for_HWK4123
+          wavelength_column: Wavelength (nm)
+          wavelength_unit: nm
+          response_column: QE
+          response_unit: dimensionless
+          response_scale: 1.0
+          detector_model_proxy_for: HWK4123
+          assumption: >-
+            LTN4323 QE curve used as near-term proxy for HWK4123 detector QE
+            because the detector models are nearly identical in relevant
+            specifications.
+        m2_filter_response:
+          enabled: true
+          path: data/filter_response/SHERA Notch Filter V2.csv
+          label: SHERA_Notch_Filter_V2
+          wavelength_column: Wavelength (nm)
+          wavelength_unit: nm
+          response_column: T (%)
+          response_unit: percent_transmission
+          response_scale: 0.01
+        mirror_reflectance:
+          enabled: false
     inference:
       mode: truncated_effective_source_spectrum
       n_lambda: 7
@@ -80,6 +103,11 @@ experiment:
       wavelength_max_nm: null
       out_of_band_response: zero
       renormalize_weights: true
+      components:
+        detector_qe:
+          mode: same_as_truth
+        m2_filter_response:
+          mode: same_as_truth
     diagnostics:
       write_weight_tables: true
       write_spectral_moments: true

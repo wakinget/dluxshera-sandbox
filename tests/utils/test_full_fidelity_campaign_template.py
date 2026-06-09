@@ -56,3 +56,17 @@ def test_full_fidelity_campaign_template_loads_and_keeps_design_contract() -> No
 
     spectral = experiment["spectral_model"]
     assert spectral["truth"]["n_lambda"] > spectral["inference"]["n_lambda"]
+
+    truth_components = spectral["truth"]["components"]
+    detector_qe = truth_components["detector_qe"]
+    m2_filter = truth_components["m2_filter_response"]
+    assert detector_qe["path"] == "data/detector_qe/LTN4323_QE.csv"
+    assert detector_qe["response_column"] == "QE"
+    assert detector_qe["wavelength_column"] == "Wavelength (nm)"
+    assert detector_qe["detector_model_proxy_for"] == "HWK4123"
+    assert "near-term proxy for HWK4123" in detector_qe["assumption"]
+    assert m2_filter["path"] == "data/filter_response/SHERA Notch Filter V2.csv"
+    assert m2_filter["response_column"] == "T (%)"
+    assert m2_filter["response_scale"] == 0.01
+    assert spectral["inference"]["components"]["detector_qe"]["mode"] == "same_as_truth"
+    assert spectral["inference"]["components"]["m2_filter_response"]["mode"] == "same_as_truth"

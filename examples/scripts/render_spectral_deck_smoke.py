@@ -26,7 +26,11 @@ from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.systems.two_plane import SHERA_TWOPLANE_SYSTEM_ID
 from dluxshera.utils.spectral_response import (
+    DEFAULT_DETECTOR_QE_PATH,
+    DEFAULT_FILTER_RESPONSE_PATH,
+    DETECTOR_QE_PROXY_ASSUMPTION,
     build_truth_inference_spectral_deck,
+    resolve_response_curve_path,
     write_spectral_deck_artifacts,
 )
 from dluxshera.utils.spectral_source_config import (
@@ -57,6 +61,100 @@ def _json_ready(value: Any) -> Any:
 def _read_spectral_model(path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(path.read_text())
     return dict(payload["experiment"]["spectral_model"])
+
+
+def _enabled_component(component: Any) -> dict[str, Any] | None:
+    if isinstance(component, dict):
+        if component.get("enabled", True) is False:
+            return None
+        if component.get("mode") == "same_as_truth":
+            return None
+        return dict(component)
+    if component is True:
+        return {}
+    return None
+
+
+def _component_from_template(
+    spectral_model: dict[str, Any],
+    name: str,
+    *,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    truth_components = spectral_model.get("truth", {}).get("components", {})
+    if not isinstance(truth_components, dict):
+        return dict(fallback)
+    component = _enabled_component(truth_components.get(name))
+    if component is None:
+        return dict(fallback)
+    resolved = dict(fallback)
+    resolved.update(component)
+    return resolved
+
+
+def _real_response_components(
+    spectral_model: dict[str, Any],
+    *,
+    filter_response: Path | None,
+    detector_qe: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    detector = _component_from_template(
+        spectral_model,
+        "detector_qe",
+        fallback={
+            "enabled": True,
+            "path": DEFAULT_DETECTOR_QE_PATH,
+            "label": "LTN4323_QE_proxy_for_HWK4123",
+            "wavelength_column": "Wavelength (nm)",
+            "wavelength_unit": "nm",
+            "response_column": "QE",
+            "response_unit": "dimensionless",
+            "response_scale": 1.0,
+            "detector_model_proxy_for": "HWK4123",
+            "assumption": DETECTOR_QE_PROXY_ASSUMPTION,
+        },
+    )
+    filt = _component_from_template(
+        spectral_model,
+        "m2_filter_response",
+        fallback={
+            "enabled": True,
+            "path": DEFAULT_FILTER_RESPONSE_PATH,
+            "label": "SHERA_Notch_Filter_V2",
+            "wavelength_column": "Wavelength (nm)",
+            "wavelength_unit": "nm",
+            "response_column": "T (%)",
+            "response_unit": "percent_transmission",
+            "response_scale": 0.01,
+        },
+    )
+    if detector_qe is not None:
+        detector["path"] = str(detector_qe)
+    if filter_response is not None:
+        filt["path"] = str(filter_response)
+
+    selected = {
+        "response_mode": "real",
+        "detector_qe": {
+            "path": detector["path"],
+            "resolved_path": str(resolve_response_curve_path(detector["path"])),
+            "label": detector.get("label"),
+            "response_column": detector.get("response_column"),
+            "wavelength_unit": detector.get("wavelength_unit"),
+            "response_scale": detector.get("response_scale", 1.0),
+            "assumption": detector.get("assumption"),
+            "detector_model_proxy_for": detector.get("detector_model_proxy_for"),
+        },
+        "filter_response": {
+            "path": filt["path"],
+            "resolved_path": str(resolve_response_curve_path(filt["path"])),
+            "label": filt.get("label"),
+            "response_column": filt.get("response_column"),
+            "wavelength_unit": filt.get("wavelength_unit"),
+            "response_scale": filt.get("response_scale", 1.0),
+        },
+    }
+    return detector, filt, selected
 
 
 def _fast_system_config(*, source_kind: str) -> dict[str, Any]:
@@ -109,7 +207,15 @@ def _render(system_cfg: dict[str, Any]) -> np.ndarray:
     return np.asarray(binder.model(binder.strip_structural(store)))
 
 
-def run(*, outdir: Path, source_kind: str, fast: bool) -> dict[str, Any]:
+def run(
+    *,
+    outdir: Path,
+    source_kind: str,
+    fast: bool,
+    response_mode: str,
+    filter_response: Path | None,
+    detector_qe: Path | None,
+) -> dict[str, Any]:
     spectral_model = _read_spectral_model(TEMPLATE_PATH)
     truth_cfg = dict(spectral_model["truth"])
     inference_cfg = dict(spectral_model["inference"])
@@ -117,13 +223,31 @@ def run(*, outdir: Path, source_kind: str, fast: bool) -> dict[str, Any]:
         truth_cfg["n_lambda"] = min(int(truth_cfg.get("n_lambda", 30)), 11)
         inference_cfg["n_lambda"] = min(int(inference_cfg.get("n_lambda", 7)), 5)
 
+    if response_mode == "synthetic-flat":
+        detector_component = {"label": "synthetic_flat_qe", "response": 1.0}
+        filter_component = {"label": "synthetic_flat_filter", "response": 1.0}
+        selected_responses = {
+            "response_mode": "synthetic-flat",
+            "detector_qe": {"label": "synthetic_flat_qe", "path": None},
+            "filter_response": {"label": "synthetic_flat_filter", "path": None},
+        }
+    else:
+        detector_component, filter_component, selected_responses = _real_response_components(
+            spectral_model,
+            filter_response=filter_response,
+            detector_qe=detector_qe,
+        )
+
     deck = build_truth_inference_spectral_deck(
         sed=lambda wavelengths_m: wavelengths_m * 1e9,
         truth_config=truth_cfg,
         inference_config=inference_cfg,
-        detector_qe={"label": "synthetic_flat_qe", "response": 1.0},
-        filter_response={"label": "synthetic_flat_filter", "response": 1.0},
-        provenance={"script": "examples/scripts/render_spectral_deck_smoke.py"},
+        detector_qe=detector_component,
+        filter_response=filter_component,
+        provenance={
+            "script": "examples/scripts/render_spectral_deck_smoke.py",
+            "selected_responses": selected_responses,
+        },
     )
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -158,6 +282,15 @@ def run(*, outdir: Path, source_kind: str, fast: bool) -> dict[str, Any]:
         "inference_sum": float(np.sum(inference_image)),
         "residual_l2": float(np.sqrt(np.sum(residual**2))),
         "images_identical": bool(np.allclose(truth_image, inference_image)),
+        "selected_responses": selected_responses,
+        "truth_lambda_eff_nm": deck.truth.diagnostics.get("lambda_eff_nm"),
+        "inference_lambda_eff_nm": deck.inference.diagnostics.get("lambda_eff_nm"),
+        "truth_out_of_inference_band_fraction": deck.comparison.get(
+            "truth_out_of_inference_band_fraction"
+        ),
+        "flux_factor_ratio_inference_over_truth": deck.comparison.get(
+            "flux_factor_ratio_inference_over_truth"
+        ),
         "spectral_provenance": spectral_provenance,
         "spectral_artifacts": {key: str(path) for key, path in spectral_paths.items()},
     }
@@ -176,8 +309,33 @@ def main() -> None:
         default="binary",
     )
     parser.add_argument("--fast", action="store_true", help="Use smaller wavelength counts for quick smoke renders.")
+    parser.add_argument(
+        "--response-mode",
+        choices=("real", "synthetic-flat"),
+        default="real",
+        help="Use real configured response CSVs or synthetic flat responses.",
+    )
+    parser.add_argument(
+        "--filter-response",
+        type=Path,
+        default=None,
+        help=f"Override filter response CSV path. Default comes from template or {DEFAULT_FILTER_RESPONSE_PATH}.",
+    )
+    parser.add_argument(
+        "--detector-qe",
+        type=Path,
+        default=None,
+        help=f"Override detector QE CSV path. Default comes from template or {DEFAULT_DETECTOR_QE_PATH}.",
+    )
     args = parser.parse_args()
-    summary = run(outdir=args.outdir, source_kind=args.source_kind, fast=args.fast)
+    summary = run(
+        outdir=args.outdir,
+        source_kind=args.source_kind,
+        fast=args.fast,
+        response_mode=args.response_mode,
+        filter_response=args.filter_response,
+        detector_qe=args.detector_qe,
+    )
     print(json.dumps(_json_ready(summary), indent=2, sort_keys=True))
 
 

@@ -60,3 +60,73 @@ realism in this integration layer.
 The smoke should be interpreted only as a wiring check. It does not run
 sub-block inference, Schur summaries, iterative updates, campaigns, optimized
 quadrature, or HPC workflows.
+
+## Default Response Data
+
+The full-fidelity spectral template now references real response curves by
+default:
+
+- `data/filter_response/SHERA Notch Filter V2.csv`
+- `data/detector_qe/LTN4323_QE.csv`
+
+The V2 notch filter is the baseline SHERA filter response. The V1 design may be
+used by explicitly overriding the filter response path, but it is not the
+baseline.
+
+In the current checkout these files are stored as package data under
+`src/dluxshera/data/...`. The spectral response resolver accepts template-facing
+`data/...` paths and resolves them to the packaged files when running from the
+source tree. Absolute paths and paths relative to the current working directory
+are also accepted.
+
+The filter files contain metadata rows before the data header. The configured
+columns are explicit:
+
+- wavelength column: `Wavelength (nm)`
+- filter response column: `T (%)`
+- filter response scale: `0.01`, converting percent transmission to a
+  dimensionless throughput
+
+The detector QE file uses:
+
+- wavelength column: `Wavelength (nm)`
+- QE response column: `QE`
+- QE response scale: `1.0`
+
+No clipping or special negative-value handling is expected. Response values are
+validated to be finite, non-negative, and not above one after scaling.
+
+## Detector QE Proxy
+
+`LTN4323_QE.csv` is used as the current detector QE curve even when the rendered
+system config uses the `HWK4123` detector model. This is a near-term proxy:
+LTN4323 and HWK4123 are close enough in the relevant specifications for the
+first spectral deck and render-smoke studies.
+
+The proxy assumption is recorded in the full-fidelity template, spectral deck
+provenance, and render-smoke summary. This task does not add a new LTN4323
+detector model or change detector-layer behavior; it only changes the effective
+source-level spectral weighting.
+
+## Response Overrides
+
+`examples/scripts/render_spectral_deck_smoke.py` defaults to real response
+curves from the template. It also supports:
+
+```bash
+python3 examples/scripts/render_spectral_deck_smoke.py \
+  --response-mode synthetic-flat
+```
+
+and explicit response CSV overrides:
+
+```bash
+python3 examples/scripts/render_spectral_deck_smoke.py \
+  --filter-response "data/filter_response/SHERA Notch Filter V2.csv" \
+  --detector-qe data/detector_qe/LTN4323_QE.csv
+```
+
+Real response curves make the render-only smoke more representative of the
+future full-fidelity campaign, but the smoke remains only a wiring check. It does
+not run inference, Schur summaries, observation updates, campaign execution, or
+HPC workflows.
