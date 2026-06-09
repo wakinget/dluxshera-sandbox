@@ -119,6 +119,8 @@ experiment:
         enabled: true
         truth:
           mode: generated_power_law_opd
+          npix: 128
+          mask_mode: circular_fallback
           rms_opd_nm: 20.0
           power_law_alpha: 2.5
           remove_ptt: true
@@ -127,12 +129,15 @@ experiment:
         knowledge:
           low_order_sigma_nm_per_coeff: 2.0
           high_order_error_rms_nm: 0.3
+          high_order_error_power_law_alpha: 2.5
           high_order_error_mode: additive_correlated
     secondary:
       wfe:
         enabled: true
         truth:
           mode: generated_power_law_opd
+          npix: 128
+          mask_mode: circular_fallback
           rms_opd_nm: 20.0
           power_law_alpha: 2.5
           remove_ptt: true
@@ -141,6 +146,7 @@ experiment:
         knowledge:
           low_order_sigma_nm_per_coeff: 2.0
           high_order_error_rms_nm: 0.3
+          high_order_error_power_law_alpha: 2.5
           high_order_error_mode: additive_correlated
   
   detector:
