@@ -1,0 +1,216 @@
+# Full-fidelity algorithm campaign schema skeleton.
+# This file is intentionally not consumed by a runner yet. It records the v1
+# architecture contract future implementation tasks should build against.
+experiment:
+  kind: full_fidelity_algorithm_campaign
+  schema_version: full_fidelity_algorithm_campaign.v1
+  run_name: full_fidelity_algorithm_campaign_smoke
+  seed: 42
+  notes: >-
+    Design skeleton for a future full-fidelity SHERA end-to-end algorithm
+    demonstration. This is not yet an executable campaign prescription.
+  campaign_goal:
+    decision_question: >-
+      Does the recovered binary separation move toward the fixed truth state
+      when realistic instrument/model knowledge errors are present?
+    primary_metric: source.separation_as
+    proposal_claim_target: >-
+      Demonstrate observation-level convergence and 30-minute projected
+      precision under a versioned full-fidelity truth/knowledge mismatch.
+
+  target:
+    science_target:
+      mode: alpha_cen_binary
+      source_kind: binary
+      astrometry_prior_profile: tbd_team_ephemeris_prior
+    calibration_targets:
+      - mode: alpha_cen_a_placeholder
+        source_kind: single_star
+      - mode: tau_ceti_placeholder
+        source_kind: single_star
+        enabled: false
+  
+  observation:
+    duration_s: 60.0
+    full_observation_duration_s: 1800.0
+    frame_dt_s: 0.05
+    exposure_time_s: 0.05
+    n_frames_per_subblock: 20
+    windows:
+      n_windows: 4
+      subblocks_per_window: 5
+  
+  trajectory:
+    mode: trajectory
+    provider: airbus_example
+    path: src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv
+    high_pass:
+      enabled: true
+      timescale_s: 15.0
+    knowledge_error:
+      enabled: true
+      x_y_sigma_as: 0.01
+      pa_sigma_deg: null
+  
+  smear:
+    enabled: false
+    truth:
+      mode: line_kernel_from_trajectory
+    inference:
+      mode: none
+    notes: "Schema placeholder; implementation deferred."
+  
+  spectral_model:
+    enabled: true
+    active_inference_parameters: []
+    truth:
+      mode: effective_source_spectrum
+      n_lambda: 30
+      wavelength_min_nm: null
+      wavelength_max_nm: null
+      include_out_of_band_response: true
+      components:
+        stellar_sed: true
+        detector_qe: true
+        m2_filter_response: true
+    inference:
+      mode: truncated_effective_source_spectrum
+      n_lambda: 7
+      wavelength_min_nm: null
+      wavelength_max_nm: null
+      out_of_band_response: zero
+      renormalize_weights: true
+    diagnostics:
+      write_weight_tables: true
+      write_spectral_moments: true
+      plot_truth_vs_inference_weights: true
+  
+  optics:
+    primary:
+      wfe:
+        enabled: true
+        truth:
+          mode: generated_power_law_opd
+          rms_opd_nm: 20.0
+          power_law_alpha: 2.5
+          remove_ptt: true
+          fit_low_order_zernikes: [4, 5, 6, 7, 8, 9, 10, 11]
+          residual_high_order_map: true
+        knowledge:
+          low_order_sigma_nm_per_coeff: 2.0
+          high_order_error_rms_nm: 0.3
+          high_order_error_mode: additive_correlated
+    secondary:
+      wfe:
+        enabled: true
+        truth:
+          mode: generated_power_law_opd
+          rms_opd_nm: 20.0
+          power_law_alpha: 2.5
+          remove_ptt: true
+          fit_low_order_zernikes: [4, 5, 6, 7, 8, 9, 10, 11]
+          residual_high_order_map: true
+        knowledge:
+          low_order_sigma_nm_per_coeff: 2.0
+          high_order_error_rms_nm: 0.3
+          high_order_error_mode: additive_correlated
+  
+  detector:
+    pixel_offsets:
+      enabled: true
+      truth:
+        mode: generated_or_measured_map
+      knowledge_error:
+        enabled: true
+        rms_pixel: 0.001
+        requirement_label: "0.1% pixel-position calibration requirement"
+    flat_field:
+      enabled: true
+      truth:
+        mode: generated_or_measured_map
+      knowledge_error:
+        enabled: true
+        rms_fractional_response: 0.001
+        requirement_label: "0.1% flat-field calibration requirement"
+    qe:
+      enabled: true
+      truth_curve_path: null
+      inference_curve_path: null
+    nonlinearity:
+      enabled: false
+      notes: "Deferred."
+    dark_current:
+      enabled: false
+      notes: "Deferred."
+  
+  noise:
+    shot_noise:
+      enabled: true
+    read_noise:
+      enabled: true
+    dark_current:
+      enabled: false
+  
+  active_state:
+    local_frame_keys:
+      binary:
+        - source.x_position_as
+        - source.y_position_as
+        - source.position_angle_deg
+      single_star:
+        - source.x_position_as
+        - source.y_position_as
+    observation_theta:
+      - source.separation_as
+      - source.log_flux_total
+      - source.contrast
+      - optics.plate_scale_as_per_pix
+      - optics.primary.zernike_coeffs_nm[0:8]
+      - optics.secondary.zernike_coeffs_nm[0:8]
+    nuisance_not_solved:
+      - spectral_shape
+      - high_order_wfe_maps
+      - detector_pixel_offset_map
+      - detector_flat_field_map
+      - intra_frame_smear
+  
+  iterative_update:
+    enabled: true
+    update_modes:
+      - physical_full
+      - eigen_full
+      - eigen_damped
+      - eigen_truncated
+    default_update_mode: physical_full
+    update_gain: 1.0
+    summary_information_scale: summed_likelihood
+  
+  knockdowns:
+    - name: perfect_knowledge
+      description: "All knowledge-error amplitudes set to zero."
+    - name: no_detector_error
+      description: "Detector pixel-offset and flat-field knowledge errors disabled."
+    - name: no_spectral_error
+      description: "Inference spectral grid/weights match truth."
+    - name: no_high_order_wfe_error
+      description: "Inference high-order WFE maps match truth."
+    - name: no_read_noise
+      description: "Read noise disabled; shot noise remains configurable."
+    - name: low_order_ground_calibrated_0p1nm
+      description: "Low-order WFE knowledge error set to 0.1 nm/coeff."
+    - name: low_order_postlaunch_nominal_2nm
+      description: "Low-order WFE knowledge error set to 2.0 nm/coeff."
+    - name: detector_ke_0p05pct
+      description: "Detector pixel-offset and flat-field knowledge errors set to 0.0005."
+    - name: detector_ke_0p1pct
+      description: "Detector pixel-offset and flat-field knowledge errors set to 0.001."
+    - name: detector_ke_0p3pct
+      description: "Detector pixel-offset and flat-field knowledge errors set to 0.003."
+  
+  outputs:
+    outdir: Results/full_fidelity_algorithm_campaign
+    write_truth_deck: true
+    write_knowledge_deck: true
+    write_deck_diff: true
+    write_plots: true
+    write_campaign_ledger: true

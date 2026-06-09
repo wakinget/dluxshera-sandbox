@@ -201,7 +201,48 @@ def _build_flat_spectrum(
     cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
     source_cfg: Mapping[str, Any],
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Return wavelength grid and unit-normalized flat weights."""
+    """Return wavelength grid and normalized single-component weights."""
+
+    explicit_wavelengths = _store_or_cfg(
+        store,
+        "source.wavelengths_m",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    explicit_weights = _store_or_cfg(
+        store,
+        "source.weights",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    if explicit_wavelengths is not None:
+        wavelengths = np.asarray(explicit_wavelengths, dtype=float).reshape(-1)
+        if wavelengths.size == 0:
+            raise ValueError("source.wavelengths_m must contain at least one sample.")
+        if np.any(wavelengths <= 0.0):
+            raise ValueError("source.wavelengths_m must be strictly positive.")
+        if wavelengths.size > 1 and np.any(np.diff(wavelengths) <= 0.0):
+            raise ValueError("source.wavelengths_m must be strictly increasing.")
+
+        if explicit_weights is None:
+            weights = np.full(
+                (wavelengths.size,),
+                1.0 / float(wavelengths.size),
+                dtype=float,
+            )
+        else:
+            weights = np.asarray(explicit_weights, dtype=float).reshape(-1)
+            if weights.shape != wavelengths.shape:
+                raise ValueError(
+                    "source.weights must have the same length as source.wavelengths_m."
+                )
+            total = float(np.sum(weights))
+            if not (total > 0.0):
+                raise ValueError("source.weights must have a positive sum.")
+            weights = weights / total
+        return jnp.asarray(wavelengths), jnp.asarray(weights)
 
     wavelength_m = _store_or_cfg(
         store,
@@ -237,6 +278,39 @@ def _build_flat_spectrum(
     )
     weights = np.full((int(n_lambda),), 1.0 / float(n_lambda), dtype=float)
     return jnp.asarray(wavelengths), jnp.asarray(weights)
+
+
+def _build_component_spectrum_weights(
+    store: ParameterStore,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig,
+    source_cfg: Mapping[str, Any],
+    *,
+    n_components: int,
+    n_lambda: int,
+) -> jnp.ndarray | None:
+    """Return explicit component weights when supplied in source config."""
+
+    explicit_component_weights = _store_or_cfg(
+        store,
+        "source.component_weights",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
+    )
+    if explicit_component_weights is None:
+        return None
+
+    weights = np.asarray(explicit_component_weights, dtype=float)
+    if weights.shape != (int(n_components), int(n_lambda)):
+        raise ValueError(
+            "source.component_weights must have shape "
+            f"({int(n_components)}, {int(n_lambda)}); got {weights.shape}."
+        )
+    row_sums = np.sum(weights, axis=1)
+    if np.any(row_sums <= 0.0):
+        raise ValueError("Each source.component_weights row must have a positive sum.")
+    weights = weights / row_sums[:, None]
+    return jnp.asarray(weights)
 
 
 def _source_position_from_store_or_cfg(
@@ -416,7 +490,18 @@ def build_binary_source(
         default=0.0,
     )
 
-    weights = jnp.stack((flat_weights, flat_weights), axis=0)
+    explicit_weights = _build_component_spectrum_weights(
+        store,
+        cfg,
+        source_cfg,
+        n_components=2,
+        n_lambda=int(wavelengths.shape[0]),
+    )
+    weights = (
+        explicit_weights
+        if explicit_weights is not None
+        else jnp.stack((flat_weights, flat_weights), axis=0)
+    )
     mean_flux = binary_mean_flux_from_total_and_contrast(total_flux, contrast)
 
     return dl.BinarySource(
@@ -557,11 +642,23 @@ def build_binary_target_source(
         center_nm + bandwidth_nm / 2,
     )
 
-    model_wavelengths_m = build_wavelength_grid_m(
-        wavelength_m=float(wavelength_m),
-        bandwidth_m=float(bandwidth_m),
-        n_lambda=int(n_lambda),
+    explicit_wavelengths = _store_or_cfg(
+        store,
+        "source.wavelengths_m",
+        cfg=cfg,
+        source_cfg=source_cfg,
+        default=None,
     )
+    if explicit_wavelengths is not None:
+        model_wavelengths_m = np.asarray(explicit_wavelengths, dtype=float).reshape(-1)
+        if model_wavelengths_m.size != int(n_lambda):
+            raise ValueError("source.wavelengths_m length must match source.n_lambda.")
+    else:
+        model_wavelengths_m = build_wavelength_grid_m(
+            wavelength_m=float(wavelength_m),
+            bandwidth_m=float(bandwidth_m),
+            n_lambda=int(n_lambda),
+        )
     collecting_area_m2 = float(np.pi * (float(m1_diameter_m) / 2.0) ** 2)
 
     nominal_photometry = None
@@ -611,7 +708,16 @@ def build_binary_target_source(
             f"{nominal_error}"
         ) from nominal_error
 
-    if nominal_photometry is not None:
+    explicit_weights = _build_component_spectrum_weights(
+        store,
+        cfg,
+        source_cfg,
+        n_components=2,
+        n_lambda=int(n_lambda),
+    )
+    if explicit_weights is not None:
+        weights = explicit_weights
+    elif nominal_photometry is not None:
         weights = jnp.asarray(nominal_photometry.weights)
     else:
         # If nominal photometry is unavailable but explicit flux parameters
