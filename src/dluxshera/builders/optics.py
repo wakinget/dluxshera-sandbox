@@ -106,6 +106,7 @@ def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
     payload = {
         "optics_kind": "three_plane",
         "structural": _structural_subset_from_contract(cfg, contract),
+        "high_order_wfe": _normalize_json_value(cfg.get("high_order_wfe", {})),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -118,6 +119,7 @@ def structural_hash_for_twoplane(cfg: SheraTwoPlaneConfig) -> str:
     payload = {
         "optics_kind": "two_plane",
         "structural": _structural_subset_from_contract(cfg, contract),
+        "high_order_wfe": _normalize_json_value(cfg.get("high_order_wfe", {})),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -217,6 +219,7 @@ def build_shera_threeplane_optics(
             strut_rotation_deg=optics_cfg["strut_rotation_deg"],
             dp_design_wavel=optics_cfg["dp_design_wavelength_m"],
             m1_high_order_wfe_opd_m=jnp.asarray(m1_inf_nm) * 1e-9,
+            m2_high_order_wfe_opd_m=jnp.asarray(m2_inf_nm) * 1e-9,
         )
         if not cache_disabled:
             _THREEPLANE_CACHE[struct_hash] = base_optics

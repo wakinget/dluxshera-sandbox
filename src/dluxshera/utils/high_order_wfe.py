@@ -11,6 +11,8 @@ import numpy as np
 import dLux.utils as dlu
 from astropy.io import fits
 
+from .utils import scale_array
+
 SCHEMA_VERSION = "high_order_wfe_deck.v1"
 DEFAULT_LOW_ORDER_NOLL_INDICES = (4, 5, 6, 7, 8, 9, 10, 11)
 PTT_NOLL_INDICES = (1, 2, 3)
@@ -129,6 +131,18 @@ def _wfe_map(label: str, opd_nm: np.ndarray, mask: np.ndarray, *, diagnostics: M
         diagnostics=dict(diagnostics or {}),
         provenance=dict(provenance or {}),
     )
+
+
+def _resize_precomputed_opd_nm(opd_nm: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    arr = np.asarray(opd_nm, dtype=float)
+    shape = _as_shape(shape)
+    if arr.shape == shape:
+        return arr
+    if arr.ndim != 2 or shape[0] != shape[1]:
+        raise ValueError(
+            f"Can only resample square 2D precomputed OPD maps; got {arr.shape} -> {shape}."
+        )
+    return np.asarray(scale_array(arr, shape[0], order=1), dtype=float)
 
 
 def white_noise_2d(shape: tuple[int, int], seed: int | None = None) -> np.ndarray:
@@ -502,13 +516,47 @@ def write_high_order_wfe_deck_artifacts(deck: HighOrderWfeDeck, outdir: str | Pa
 
 def realize_high_order_wfe_pair(shape: tuple[int, int], truth_cfg: Mapping[str, Any] | None, knowledge_cfg: Mapping[str, Any] | None, mask: np.ndarray | None = None) -> HighOrderWFERealization:
     truth_cfg = truth_cfg or {}
-    truth, truth_meta = generate_high_order_wfe_map(shape, kind=str(truth_cfg.get("kind", truth_cfg.get("spectrum", "one_over_f"))), alpha=float(truth_cfg.get("alpha", truth_cfg.get("power_law_alpha", 2.0))), rms_nm=float(truth_cfg.get("rms_nm", truth_cfg.get("rms_opd_nm", 0.0))), seed=truth_cfg.get("seed"), remove_zernike_noll=truth_cfg.get("remove_zernike_noll"), mask=mask)
+    truth_kind = str(truth_cfg.get("kind", truth_cfg.get("spectrum", "one_over_f")))
+    if truth_kind == "precomputed_array_nm":
+        if "array_path" in truth_cfg:
+            truth = np.asarray(np.load(truth_cfg["array_path"]), dtype=float)
+        else:
+            truth = np.asarray(truth_cfg["array_nm"], dtype=float)
+        truth = _resize_precomputed_opd_nm(truth, _as_shape(shape))
+        valid = _valid_mask(mask, _as_shape(shape))
+        truth_meta = {
+            "shape": tuple(truth.shape),
+            "units": "nm",
+            "kind": truth_kind,
+            "seed": truth_cfg.get("seed"),
+            "target_rms_nm": float(truth_cfg.get("rms_nm", 0.0)),
+            "measured_rms_nm": float(np.sqrt(np.mean(np.square(truth[valid])))),
+        }
+    else:
+        truth, truth_meta = generate_high_order_wfe_map(shape, kind=truth_kind, alpha=float(truth_cfg.get("alpha", truth_cfg.get("power_law_alpha", 2.0))), rms_nm=float(truth_cfg.get("rms_nm", truth_cfg.get("rms_opd_nm", 0.0))), seed=truth_cfg.get("seed"), remove_zernike_noll=truth_cfg.get("remove_zernike_noll"), mask=mask)
     knowledge_cfg = knowledge_cfg or {}
     if not knowledge_cfg.get("enabled", False):
         resid = np.zeros(_as_shape(shape))
         kmeta = {"enabled": False, "target_rms_nm": 0.0, "measured_rms_nm": 0.0}
     else:
-        resid, kmeta = generate_high_order_wfe_map(shape, kind=str(knowledge_cfg.get("kind", "white")), alpha=float(knowledge_cfg.get("alpha", 2.0)), rms_nm=float(knowledge_cfg.get("rms_nm", 0.0)), seed=knowledge_cfg.get("seed"), remove_zernike_noll=knowledge_cfg.get("remove_zernike_noll"), mask=mask)
+        knowledge_kind = str(knowledge_cfg.get("kind", "white"))
+        if knowledge_kind == "precomputed_array_nm":
+            if "array_path" in knowledge_cfg:
+                resid = np.asarray(np.load(knowledge_cfg["array_path"]), dtype=float)
+            else:
+                resid = np.asarray(knowledge_cfg["array_nm"], dtype=float)
+            resid = _resize_precomputed_opd_nm(resid, _as_shape(shape))
+            valid = _valid_mask(mask, _as_shape(shape))
+            kmeta = {
+                "shape": tuple(resid.shape),
+                "units": "nm",
+                "kind": knowledge_kind,
+                "seed": knowledge_cfg.get("seed"),
+                "target_rms_nm": float(knowledge_cfg.get("rms_nm", 0.0)),
+                "measured_rms_nm": float(np.sqrt(np.mean(np.square(resid[valid])))),
+            }
+        else:
+            resid, kmeta = generate_high_order_wfe_map(shape, kind=knowledge_kind, alpha=float(knowledge_cfg.get("alpha", 2.0)), rms_nm=float(knowledge_cfg.get("rms_nm", 0.0)), seed=knowledge_cfg.get("seed"), remove_zernike_noll=knowledge_cfg.get("remove_zernike_noll"), mask=mask)
         kmeta["enabled"] = True
     return HighOrderWFERealization(truth_opd_nm=truth, inference_opd_nm=truth + resid, truth_metadata=truth_meta, knowledge_metadata=kmeta)
 

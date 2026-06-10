@@ -70,6 +70,9 @@ from dluxshera.params.transforms import ARCSEC_PER_RAD
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.campaign_high_order_wfe import (
+    apply_high_order_wfe_campaign_config,
+)
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
     PreparedTraceSubblock,
@@ -726,7 +729,9 @@ def _template_payloads(
     system_cfg: Mapping[str, Any],
     *,
     experiment_cfg: Mapping[str, Any],
+    inference_system_cfg: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    inference_system_cfg = inference_system_cfg or system_cfg
     trace_keys, _inactive_truth_keys, _pa_policy = _trace_key_policy(experiment_cfg)
     trace_plan: dict[str, Any] = {
         "source.x_position_as": {
@@ -772,7 +777,7 @@ def _template_payloads(
             },
         },
         "inference": {
-            "system": system_cfg,
+            "system": inference_system_cfg,
             "experiment": {
                 "kind": "subblock_inference",
                 "inference": {
@@ -825,11 +830,16 @@ def write_single_star_templates(
     system_cfg: Mapping[str, Any],
     *,
     experiment_cfg: Mapping[str, Any],
+    inference_system_cfg: Mapping[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Write run-local JSON templates consumed by ``run_obs_subblock_study.py``."""
 
     template_root = run_root / "templates"
-    payloads = _template_payloads(system_cfg, experiment_cfg=experiment_cfg)
+    payloads = _template_payloads(
+        system_cfg,
+        experiment_cfg=experiment_cfg,
+        inference_system_cfg=inference_system_cfg,
+    )
     paths: dict[str, Path] = {}
     for name, payload in payloads.items():
         path = template_root / f"{name}_template.json"
@@ -1013,6 +1023,31 @@ def _build_calibration_plan_impl(
             truth_realization.truth_overrides_by_label,
         )
         metadata["resolved_system"] = system_cfg
+    high_order_wfe = apply_high_order_wfe_campaign_config(
+        system_cfg=system_cfg,
+        high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
+        seed_context={
+            "wrapper": "single_star_calibration_demo",
+            "run_name": resolved_run_name,
+            "base_seed": int(experiment_cfg.get("seed", 42)),
+        },
+        artifact_root=run_root / "high_order_wfe",
+        write_artifacts=not bool(
+            args is not None
+            and (
+                getattr(args, "aggregate_only", False)
+                or (
+                    getattr(args, "resume", False)
+                    and (run_root / "campaign_plan.json").exists()
+                )
+            )
+        ),
+    )
+    system_cfg = high_order_wfe.truth_system_cfg
+    reference_system_cfg = high_order_wfe.inference_system_cfg
+    metadata["resolved_system"] = system_cfg
+    metadata["reference_system"] = reference_system_cfg
+    metadata["high_order_wfe"] = high_order_wfe.to_dict()
     cases, prior_draw_rows = generate_calibration_cases(
         experiment_cfg=experiment_cfg,
         labels=layout.labels,
@@ -1022,6 +1057,7 @@ def _build_calibration_plan_impl(
         run_root,
         system_cfg,
         experiment_cfg=experiment_cfg,
+        inference_system_cfg=reference_system_cfg,
     )
     subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
     schur_settings = _schur_settings_for_single_star_config(subblock_cfg)
@@ -1118,6 +1154,8 @@ def _build_calibration_plan_impl(
                     "reference_early_stopping_step_atol": subblock_cfg.get("reference_early_stopping_step_atol"),
                     "reference_early_stopping_grad_norm_atol": subblock_cfg.get("reference_early_stopping_grad_norm_atol"),
                     "use_render_variance": _single_star_use_render_variance(subblock_cfg),
+                    "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
+                    "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
                     "command": " ".join(command),
                     "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
                     "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
@@ -1126,10 +1164,15 @@ def _build_calibration_plan_impl(
                     **trace_row,
                 }
             )
-    resolved_config = {"experiment": experiment_cfg, "system": system_cfg}
+    resolved_config = {
+        "experiment": experiment_cfg,
+        "system": system_cfg,
+        "reference_system": reference_system_cfg,
+    }
     resolved_config["experiment"]["truth_realization_summary"] = dict(
         truth_realization.summary
     )
+    resolved_config["experiment"]["high_order_wfe_summary"] = high_order_wfe.to_dict()
     return CalibrationPlan(
         run_root=run_root,
         layout=layout,
@@ -1170,6 +1213,9 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
         "inactive_truth_keys": list(inactive_truth_keys),
         "single_star_pa_policy": pa_policy,
         "trace_source": dict(plan.trace_source_plan.summary),
+        "high_order_wfe": dict(
+            plan.config["experiment"].get("high_order_wfe_summary", {})
+        ),
         "observation_theta_labels": list(plan.layout.labels),
         "theta_layout": plan.layout.to_dict(),
         "layout_metadata": plan.layout_metadata,
@@ -2140,6 +2186,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                         "Aggregate-only found an existing campaign_plan.json with a different case set. "
                         "Use the same run shape (or regenerate the run root) before aggregating."
                     )
+                stored_wfe = stored_plan.get("high_order_wfe", {})
+                current_wfe = plan.config["experiment"].get("high_order_wfe_summary", {})
+                if isinstance(stored_wfe, Mapping) and isinstance(current_wfe, Mapping):
+                    if (
+                        bool(current_wfe.get("provenance", {}).get("enabled", False))
+                        != bool(stored_wfe.get("provenance", {}).get("enabled", False))
+                        or current_wfe.get("provenance", {}).get("truth_seed")
+                        != stored_wfe.get("provenance", {}).get("truth_seed")
+                    ):
+                        raise ValueError(
+                            "Aggregate-only found an existing campaign_plan.json with "
+                            "different high-order WFE provenance. Use the original "
+                            "config/run root or regenerate the run."
+                        )
                 plan = replace(
                     plan,
                     summary_paths={

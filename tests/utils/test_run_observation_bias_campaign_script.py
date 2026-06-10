@@ -1377,3 +1377,50 @@ def test_aggregate_only_rejects_mismatched_existing_case_set(tmp_path: Path) -> 
             aggregate_only=True,
             args=args,
         )
+
+
+def test_observation_bias_plan_includes_high_order_wfe_templates_and_provenance(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign_high_order.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["high_order_wfe"] = {
+        "enabled": True,
+        "truth": {
+            "enabled": True,
+            "mirrors": ["primary", "secondary"],
+            "mode": "synthetic",
+            "npix": 16,
+            "amplitude_nm_rms": 1.0,
+            "pairing": "independent",
+        },
+        "inference": {
+            "enabled": True,
+            "mode": "knowledge_error",
+            "knowledge_error": {"enabled": True, "amplitude_nm_rms": 0.3},
+        },
+        "artifacts": {"write_maps": False, "write_summary_json": True},
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_campaign_howfe",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    plan_payload = module._plan_payload(plan)
+    first_command = plan.subblock_commands["zero_bias_full_zernike"][0]
+
+    assert plan_payload["high_order_wfe"]["provenance"]["enabled"] is True
+    assert plan.subblock_plans["zero_bias_full_zernike"][0]["high_order_wfe_enabled"] is True
+    assert "--render-template" in first_command
+    assert str(plan.run_root / "templates" / "render_template.json") in first_command
+    render_template = json.loads(
+        (plan.run_root / "templates" / "render_template.json").read_text(encoding="utf-8")
+    )
+    inference_template = json.loads(
+        (plan.run_root / "templates" / "inference_template.json").read_text(encoding="utf-8")
+    )
+    assert render_template["system"]["optics"]["high_order_wfe"]["enabled"] is True
+    assert inference_template["system"] != render_template["system"]

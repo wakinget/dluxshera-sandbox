@@ -73,6 +73,9 @@ from dluxshera.utils.campaigns import (
     load_existing_campaign_plan,
     write_shell_command,
 )
+from dluxshera.utils.campaign_high_order_wfe import (
+    apply_high_order_wfe_campaign_config,
+)
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
     PreparedTraceSubblock,
@@ -112,6 +115,27 @@ from dluxshera.utils.subprocess_diagnostics import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results" / "observation_bias_campaign"
 SUBBLOCK_SCRIPT = REPO_ROOT / "examples" / "scripts" / "run_obs_subblock_study.py"
+DEFAULT_SCHUR_TRACE_TEMPLATE = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "observation_subblock_trace_template"
+    / "subblock_trace_registration_iid_prescription.yaml"
+)
+DEFAULT_RENDER_TEMPLATE = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "observation_subblock_template"
+    / "subblock_generation_prescription.yaml"
+)
+DEFAULT_INFERENCE_TEMPLATE = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "observation_subblock_inference_template"
+    / "subblock_inference_prescription.yaml"
+)
 CAMPAIGN_SCHEMA_VERSION = "observation_bias_campaign.v1"
 DEFAULT_LOCAL_ELIMINATED_KEYS = (
     "source.x_position_as",
@@ -217,6 +241,29 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _write_observation_bias_templates(
+    run_root: Path,
+    *,
+    truth_system_cfg: Mapping[str, Any],
+    inference_system_cfg: Mapping[str, Any],
+) -> dict[str, Path]:
+    template_root = run_root / "templates"
+    payloads = {
+        "trace": load_config_file(DEFAULT_SCHUR_TRACE_TEMPLATE),
+        "render": load_config_file(DEFAULT_RENDER_TEMPLATE),
+        "inference": load_config_file(DEFAULT_INFERENCE_TEMPLATE),
+    }
+    payloads["trace"]["system"] = dict(truth_system_cfg)
+    payloads["render"]["system"] = dict(truth_system_cfg)
+    payloads["inference"]["system"] = dict(inference_system_cfg)
+    paths: dict[str, Path] = {}
+    for name, payload in payloads.items():
+        path = template_root / f"{name}_template.json"
+        _write_json(path, payload)
+        paths[name] = path
+    return paths
 
 
 def _matrix_diagnostics(matrix: np.ndarray) -> MatrixDiagnostics:
@@ -1157,6 +1204,7 @@ def build_subblock_command(
     trace_seed: int | None = None,
     noise_seed: int | None = None,
     trace_subblock: PreparedTraceSubblock | None = None,
+    template_paths: Mapping[str, Path] | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1167,6 +1215,12 @@ def build_subblock_command(
         case_subblock_name,
         "--mode",
         "schur_summary",
+        "--trace-template",
+        str((template_paths or {}).get("trace", DEFAULT_SCHUR_TRACE_TEMPLATE)),
+        "--render-template",
+        str((template_paths or {}).get("render", DEFAULT_RENDER_TEMPLATE)),
+        "--inference-template",
+        str((template_paths or {}).get("inference", DEFAULT_INFERENCE_TEMPLATE)),
         "--n-frames",
         str(int(subblock_cfg.get("n_frames", 3))),
         "--noise",
@@ -1266,6 +1320,36 @@ def build_campaign_plan(
     truth_by_label = dict(base_truth_by_label)
     truth_by_label.update(truth_realization.truth_overrides_by_label)
     prior_truth = np.asarray([truth_by_label[label] for label in layout.labels], dtype=float)
+    high_order_wfe = apply_high_order_wfe_campaign_config(
+        system_cfg=system_cfg,
+        high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
+        seed_context={
+            "wrapper": "observation_bias_campaign",
+            "run_name": resolved_run_name,
+            "base_seed": int(experiment_cfg.get("seed", 42)),
+        },
+        artifact_root=run_root / "high_order_wfe",
+        write_artifacts=not bool(
+            args is not None
+            and (
+                getattr(args, "aggregate_only", False)
+                or (
+                    getattr(args, "resume", False)
+                    and (run_root / "campaign_plan.json").exists()
+                )
+            )
+        ),
+    )
+    system_cfg = high_order_wfe.truth_system_cfg
+    reference_system_cfg = high_order_wfe.inference_system_cfg
+    layout_metadata["resolved_system"] = system_cfg
+    layout_metadata["reference_system"] = reference_system_cfg
+    layout_metadata["high_order_wfe"] = high_order_wfe.to_dict()
+    template_paths = _write_observation_bias_templates(
+        run_root,
+        truth_system_cfg=system_cfg,
+        inference_system_cfg=reference_system_cfg,
+    )
     configured_cases = _parse_bias_cases(
         experiment_cfg,
         layout=layout,
@@ -1371,6 +1455,7 @@ def build_campaign_plan(
                     trace_seed=int(seeds["trace_seed"]),
                     noise_seed=int(seeds["noise_seed"]),
                     trace_subblock=trace_source_plan.subblocks[subblock_index],
+                    template_paths=template_paths,
                 )
             )
             summary_paths[case.case_name].append(summary_path)
@@ -1401,6 +1486,8 @@ def build_campaign_plan(
                     "forwarded_flags": ",".join(
                         str(flag) for flag in subblock_command_options["forwarded_flags"]
                     ),
+                    "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
+                    "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
                     **plan_options,
                     **seeds,
                     **trace_row,
@@ -1443,6 +1530,8 @@ def build_campaign_plan(
                         subblock_cfg.get("summary_information_scale", "")
                     ),
                     "trace_source_mode": str(trace_source_plan.mode),
+                    "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
+                    "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
                     "theta_reference_offsets_window0_json": json.dumps(
                         dict(case.theta_reference_offsets), sort_keys=True
                     )
@@ -1473,6 +1562,8 @@ def build_campaign_plan(
                             subblock_cfg.get("summary_information_scale", "")
                         ),
                         "trace_source_mode": str(trace_source_plan.mode),
+                        "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
+                        "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
                         "trace_seed": int(seeds["trace_seed"]),
                         "noise_seed": int(seeds["noise_seed"]),
                     }
@@ -1481,7 +1572,9 @@ def build_campaign_plan(
         **config,
         "experiment": experiment_cfg,
         "system": system_cfg,
+        "reference_system": reference_system_cfg,
     }
+    resolved_config["experiment"]["high_order_wfe_summary"] = high_order_wfe.to_dict()
     return CampaignPlan(
         run_root=run_root,
         layout=layout,
@@ -1532,6 +1625,9 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
             for index, label in enumerate(plan.layout.labels)
         },
         "trace_source": dict(plan.trace_source_plan.summary),
+        "high_order_wfe": dict(
+            plan.config["experiment"].get("high_order_wfe_summary", {})
+        ),
         "subblock_command_options": dict(subblock_command_options),
         "seeding": _resolve_seeding_config(plan.config["experiment"]),
         "iterative": dict(plan.iterative),
@@ -4065,6 +4161,12 @@ def _validate_aggregate_only_stored_plan(
     stored_trace = stored_plan.get("trace_source", {})
     if isinstance(stored_trace, Mapping):
         check("trace_source.mode", str(current_plan.trace_source_plan.mode), str(stored_trace.get("mode", "")))
+    stored_wfe = stored_plan.get("high_order_wfe", {})
+    current_wfe = current_plan.config["experiment"].get("high_order_wfe_summary", {})
+    if isinstance(stored_wfe, Mapping) and isinstance(current_wfe, Mapping):
+        check("high_order_wfe.enabled", bool(current_wfe.get("provenance", {}).get("enabled", False)), bool(stored_wfe.get("provenance", {}).get("enabled", False)))
+        check("high_order_wfe.truth_seed", current_wfe.get("provenance", {}).get("truth_seed"), stored_wfe.get("provenance", {}).get("truth_seed"))
+        check("high_order_wfe.mirrors", current_wfe.get("provenance", {}).get("mirrors", []), stored_wfe.get("provenance", {}).get("mirrors", []))
     stored_options = stored_plan.get("subblock_command_options", {})
     current_options = resolve_subblock_command_options(
         current_plan.config["experiment"].get("subblocks", {}) or {}

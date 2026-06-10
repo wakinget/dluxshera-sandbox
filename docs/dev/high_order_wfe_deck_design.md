@@ -109,3 +109,86 @@ inference, HPC workflows, or a full optical refactor.
 The current optics builder has only a partial high-order map hook. Full wiring of
 truth/knowledge low-order coefficients plus primary and secondary high-order OPD
 maps into renderable system configs is deferred to the next focused task.
+
+## Campaign Wrapper Wiring
+
+Small smoke campaigns can enable high-order WFE with
+`experiment.high_order_wfe`. The block is disabled by default; absent or
+`enabled: false` preserves existing low-order Zernike sweeps and scalar
+slow-state inference.
+
+The wrapper-level helper is
+`dluxshera.utils.campaign_high_order_wfe.apply_high_order_wfe_campaign_config`.
+It takes one resolved system config and returns:
+
+- a truth/render system config with static high-order OPD maps inserted;
+- an inference/reference system config with the intended knowledge-error maps;
+- JSON-friendly provenance with seeds, RMS values, mirror status, and artifact
+  paths;
+- optional summary/map artifacts under the run root.
+
+The high-order maps are static system truth/reference mismatches. They do not
+expand observation-level theta into map pixels. Single-star registration remains
+X/Y-only unless separately configured; binary observation-bias theta keeps its
+existing scalar/low-order layout.
+
+First-pass campaign schema:
+
+```yaml
+experiment:
+  high_order_wfe:
+    enabled: false
+    truth:
+      enabled: true
+      mirrors: [primary, secondary]
+      mode: synthetic
+      npix: 16
+      amplitude_nm_rms: 1.0
+      seed: null
+      seed_policy: derive_from_campaign_case
+      pairing: independent
+      remove_low_order_zernikes: true
+      remove_zernike_modes: from_observation_theta_or_default
+    inference:
+      enabled: true
+      mode: knowledge_error
+      use_truth_common_map: true
+      knowledge_error:
+        enabled: true
+        amplitude_nm_rms: 0.3
+        seed: null
+        seed_policy: derive_from_campaign_case
+        realization_policy: fixed_per_case
+    artifacts:
+      write_maps: true
+      write_png_quicklooks: false
+      write_summary_json: true
+    validation:
+      require_nonzero_difference_when_enabled: false
+      max_abs_low_order_projection_nm: null
+```
+
+The v1 campaign helper supports independent M1/M2 maps. Matched and
+differential pairing are reserved for a later case-generation task.
+
+Tiny dry-runs:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_single_star_calibration_demo.py \
+  --config examples/recipes/single_star_calibration_demo_template/high_order_wfe_smoke.yaml \
+  --run-name single_star_high_order_wfe_smoke_dryrun \
+  --dry-run \
+  --no-resource-time
+
+PYTHONPATH=src python examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/high_order_wfe_smoke.yaml \
+  --run-name observation_bias_high_order_wfe_smoke_dryrun \
+  --dry-run \
+  --no-resource-time
+```
+
+Trajectory mode remains compatible because high-order WFE is inserted into the
+static render/reference system templates while frame-level X/Y/PA truth and
+starting guesses still come from the existing trace-source artifacts. High-pass
+filtering of raw trajectory data and intra-frame smear via a line-kernel
+`ApplyConvolution` layer are follow-on work, not part of this wiring patch.
