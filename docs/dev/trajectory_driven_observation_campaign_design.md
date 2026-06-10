@@ -785,3 +785,23 @@ a reproducible, well-documented sequence of explicit per-subblock traces and
 manifests. Rendering, inference, aggregation, shared-parameter inference, and
 mission-scale planet-detection studies can then build on that campaign scaffold
 incrementally.
+
+## Trajectory-Derived Smear Sidecars
+
+Trajectory campaigns can optionally derive within-exposure smear from the same resolved trajectory used for frame-center truth. This is controlled by `subblocks.trajectory_processing.smear` in wrapper recipes, or by a trajectory-processing config passed to `run_trajectory_subblock_campaign.py`.
+
+The existing trajectory files keep their original meanings:
+
+- `frame_truth.csv` is frame-center truth for the renderer.
+- `starting_guess_prediction.csv` is optimizer initialization only.
+- `frame_smear_truth.csv` and `frame_smear_model.csv` are explicit within-exposure smear sidecars.
+- `smear_provenance.json` records source trajectory hash, exposure convention, interpolation policy, plate scale, mismatch policy, and render policy.
+
+When smear is enabled, the default model/inference smear is `matched`, so the model sidecar has minimal knowledge error relative to truth. Mismatch is opt-in through `inference.mode`, currently including `matched`, `scaled`, `angle_offset`, `constant`, and `disabled`.
+
+Render handling has two deliberately scoped modes:
+
+- `metadata_only` writes sidecars and plan summary fields without modifying detector layers.
+- `subblock_constant_layer` computes one representative per-subblock line kernel and injects an existing `ApplyConvolution` detector layer in standalone trajectory render configs.
+
+Per-frame dynamic convolution kernels, dynamic crop / ROI-origin realism, high-order WFE coupling, spectral/WFE/trajectory combined smokes, and production trajectory campaigns are deferred.

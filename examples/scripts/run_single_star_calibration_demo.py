@@ -1094,6 +1094,8 @@ def _build_calibration_plan_impl(
                 )
             )
         ),
+        trajectory_processing_cfg=subblock_cfg.get("trajectory_processing"),
+        plate_scale_as_per_pix=_scalar_store_value(store, "optics.plate_scale_as_per_pix"),
     )
     commands: dict[str, list[list[str]]] = {}
     summary_paths: dict[str, list[Path]] = {}

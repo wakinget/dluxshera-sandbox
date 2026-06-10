@@ -58,3 +58,9 @@ PYTHONPATH=src python examples/scripts/run_single_star_calibration_demo.py \
 `frame_truth.csv` and `starting_guess_prediction.csv` files during planning.
 Single-star trajectory mode defaults to X/Y only; PA is not required. IID jitter
 remains the default when `trace_source` is omitted or set to `iid_jitter`.
+
+### Trajectory Smear Smoke
+
+`trajectory_smear_smoke.yaml` enables trajectory-derived smear in `metadata_only` mode. It writes `frame_smear_truth.csv`, `frame_smear_model.csv`, and `smear_provenance.json` alongside the existing trajectory `frame_truth.csv` and `starting_guess_prediction.csv`. The default model smear is matched to truth; mismatch policies are opt-in.
+
+This smoke does not enable per-frame dynamic kernels, dynamic crop / ROI realism, high-order WFE coupling, or production-scale trajectory execution.

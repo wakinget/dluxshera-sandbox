@@ -497,6 +497,13 @@ def _subblock_exposure_time_s(experiment_cfg: Mapping[str, Any]) -> float | None
     return exposure
 
 
+def _store_scalar_value(store: ParameterStore, key: str) -> float | None:
+    try:
+        return float(np.asarray(store.get(key)))
+    except Exception:
+        return None
+
+
 def _validate_partition_config(partition_cfg: Mapping[str, Any] | None, layout: ObservationThetaLayout) -> dict[str, Any]:
     cfg = dict(partition_cfg or {})
     local_eliminated = tuple(cfg.get("local_eliminated_keys", DEFAULT_LOCAL_ELIMINATED_KEYS))
@@ -1400,6 +1407,11 @@ def build_campaign_plan(
                     and (run_root / "campaign_plan.json").exists()
                 )
             )
+        ),
+        trajectory_processing_cfg=subblock_cfg.get("trajectory_processing"),
+        plate_scale_as_per_pix=_store_scalar_value(
+            system_store,
+            "optics.plate_scale_as_per_pix",
         ),
     )
     commands: dict[str, list[list[str]]] = {}

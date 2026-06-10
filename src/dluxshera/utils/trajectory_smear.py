@@ -1,0 +1,470 @@
+"""Trajectory-derived within-exposure smear sidecar helpers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+
+from .obs_subblock_trajectory import CanonicalTrajectory, SubblockTrajectory, write_rows_csv
+
+SMEAR_TRUTH_FILENAME = "frame_smear_truth.csv"
+SMEAR_MODEL_FILENAME = "frame_smear_model.csv"
+SMEAR_PROVENANCE_FILENAME = "smear_provenance.json"
+SMEAR_FIELDNAMES: tuple[str, ...] = (
+    "frame_index",
+    "time_s",
+    "exposure_start_s",
+    "exposure_mid_s",
+    "exposure_end_s",
+    "smear_dx_as",
+    "smear_dy_as",
+    "smear_length_as",
+    "smear_length_detector_pix",
+    "smear_theta_deg",
+    "smear_sigma_perp_detector_pix",
+    "smear_kernel_size",
+    "smear_enabled",
+    "smear_source",
+    "smear_policy",
+    "notes",
+)
+
+
+@dataclass(frozen=True)
+class SmearConfig:
+    """Validated trajectory-smear configuration.
+
+    Parameters
+    ----------
+    enabled
+        Whether smear sidecars should be derived and written.
+    exposure_time_s
+        Exposure duration in seconds.
+    exposure_interval
+        Exposure alignment convention: ``centered``, ``start_aligned``, or
+        ``end_aligned``. ``smear_theta_deg`` is measured counter-clockwise from
+        detector +X toward detector +Y using the trajectory X/Y convention.
+    edge_policy
+        Out-of-domain exposure handling policy: ``error``, ``clamp``, or
+        ``drop``.
+    plate_scale_as_per_pix
+        Detector plate scale used to convert arcseconds to detector pixels.
+    """
+
+    enabled: bool = False
+    exposure_time_s: float = 0.05
+    exposure_interval: str = "centered"
+    edge_policy: str = "error"
+    plate_scale_as_per_pix: float | None = None
+    truth_sigma_perp_detector_pix: float = 0.25
+    truth_kernel_size: int = 9
+    inference_mode: str = "matched"
+    inference_length_scale: float = 1.0
+    inference_theta_offset_deg: float = 0.0
+    inference_min_length_detector_pix: float = 0.0
+    inference_constant_length_detector_pix: float | None = None
+    inference_constant_theta_deg: float | None = None
+    render_mode: str = "metadata_only"
+    render_representative: str = "median"
+    render_layer_name: str = "trajectory_smear"
+    render_apply_to: str = "truth"
+    render_model_layer_policy: str = "from_inference_smear"
+    source: str = "resolved_trajectory"
+    angle_convention: str = "image_x_to_y_deg"
+    raw_config: Mapping[str, Any] | None = None
+
+    def validate(self) -> None:
+        if self.exposure_time_s < 0.0 or not math.isfinite(self.exposure_time_s):
+            raise ValueError("trajectory_processing.smear.exposure.time_s must be finite and non-negative.")
+        if self.exposure_interval not in {"centered", "start_aligned", "end_aligned"}:
+            raise ValueError("trajectory_processing.smear.exposure.interval is unsupported.")
+        if self.edge_policy not in {"error", "clamp", "drop"}:
+            raise ValueError("trajectory_processing.smear.exposure.edge_policy must be error, clamp, or drop.")
+        if self.angle_convention != "image_x_to_y_deg":
+            raise ValueError("Only angle_convention='image_x_to_y_deg' is supported.")
+        if self.enabled and (self.plate_scale_as_per_pix is None or self.plate_scale_as_per_pix <= 0.0):
+            raise ValueError("Smear detector-pixel conversion requires a positive plate_scale_as_per_pix.")
+        if self.truth_sigma_perp_detector_pix <= 0.0:
+            raise ValueError("smear.truth.sigma_perp_detector_pix must be positive.")
+        if self.truth_kernel_size <= 0 or self.truth_kernel_size % 2 == 0:
+            raise ValueError("smear.truth.kernel_size must be a positive odd integer.")
+        if self.inference_mode not in {"matched", "scaled", "angle_offset", "disabled", "constant"}:
+            raise ValueError("Unsupported smear.inference.mode.")
+        if self.render_mode not in {"metadata_only", "subblock_constant_layer"}:
+            raise ValueError("smear.render.mode must be metadata_only or subblock_constant_layer.")
+        if self.render_representative not in {"median", "mean", "rms", "max"}:
+            raise ValueError("Unsupported smear.render.representative.")
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def parse_smear_config(
+    cfg: Mapping[str, Any] | None,
+    *,
+    exposure_time_s: float,
+    plate_scale_as_per_pix: float | None,
+) -> SmearConfig:
+    """Return a validated smear configuration from a trajectory-processing block."""
+
+    root = _as_mapping(cfg)
+    high_pass = _as_mapping(root.get("high_pass_filter"))
+    if bool(high_pass.get("enabled", False)):
+        raise ValueError("trajectory_processing.high_pass_filter.enabled=true is reserved but not implemented.")
+    smear = _as_mapping(root.get("smear"))
+    exposure = _as_mapping(smear.get("exposure"))
+    truth = _as_mapping(smear.get("truth"))
+    inference = _as_mapping(smear.get("inference"))
+    conversion = _as_mapping(smear.get("coordinate_conversion"))
+    render = _as_mapping(smear.get("render"))
+    raw_time = exposure.get("time_s", "from_subblocks")
+    resolved_exposure = float(exposure_time_s if raw_time in (None, "from_subblocks") else raw_time)
+    parsed = SmearConfig(
+        enabled=bool(smear.get("enabled", False)),
+        exposure_time_s=resolved_exposure,
+        exposure_interval=str(exposure.get("interval", "centered")),
+        edge_policy=str(exposure.get("edge_policy", "error")),
+        plate_scale_as_per_pix=plate_scale_as_per_pix,
+        truth_sigma_perp_detector_pix=float(truth.get("sigma_perp_detector_pix", 0.25)),
+        truth_kernel_size=int(truth.get("kernel_size", 9)),
+        inference_mode=str(inference.get("mode", "matched")),
+        inference_length_scale=float(inference.get("length_scale", 1.0)),
+        inference_theta_offset_deg=float(inference.get("theta_offset_deg", 0.0)),
+        inference_min_length_detector_pix=float(inference.get("min_length_detector_pix", 0.0)),
+        inference_constant_length_detector_pix=(
+            None if inference.get("constant_length_detector_pix") is None else float(inference["constant_length_detector_pix"])
+        ),
+        inference_constant_theta_deg=(
+            None if inference.get("constant_theta_deg") is None else float(inference["constant_theta_deg"])
+        ),
+        render_mode=str(render.get("mode", "metadata_only")),
+        render_representative=str(render.get("representative", "median")),
+        render_layer_name=str(render.get("layer_name", "trajectory_smear")),
+        render_apply_to=str(render.get("apply_to", "truth")),
+        render_model_layer_policy=str(render.get("model_layer_policy", "from_inference_smear")),
+        source=str(truth.get("source", "resolved_trajectory")),
+        angle_convention=str(conversion.get("angle_convention", "image_x_to_y_deg")),
+        raw_config=root,
+    )
+    parsed.validate()
+    return parsed
+
+
+def _file_sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _exposure_bounds(time_s: float, cfg: SmearConfig) -> tuple[float, float]:
+    dt = float(cfg.exposure_time_s)
+    if cfg.exposure_interval == "centered":
+        return float(time_s - 0.5 * dt), float(time_s + 0.5 * dt)
+    if cfg.exposure_interval == "start_aligned":
+        return float(time_s), float(time_s + dt)
+    return float(time_s - dt), float(time_s)
+
+
+def _apply_edge_policy(start: float, end: float, domain: tuple[float, float], cfg: SmearConfig) -> tuple[float, float] | None:
+    lo, hi = domain
+    if start >= lo - 1.0e-12 and end <= hi + 1.0e-12:
+        return start, end
+    if cfg.edge_policy == "drop":
+        return None
+    if cfg.edge_policy == "clamp":
+        return max(start, lo), min(end, hi)
+    raise ValueError(
+        "Exposure interval falls outside trajectory domain: "
+        f"exposure=[{start}, {end}], domain=[{lo}, {hi}]."
+    )
+
+
+def derive_truth_smear_rows(
+    trajectory: CanonicalTrajectory,
+    block: SubblockTrajectory,
+    cfg: SmearConfig,
+) -> list[dict[str, Any]]:
+    """Derive per-frame truth smear rows from the resolved trajectory.
+
+    The X/Y displacement is end-minus-start in arcseconds. The detector line
+    angle is counter-clockwise from +X toward +Y in degrees.
+    """
+
+    if "source.x_position_as" not in trajectory.values or "source.y_position_as" not in trajectory.values:
+        raise ValueError("Trajectory smear requires source.x_position_as and source.y_position_as.")
+    if np.any(np.diff(np.asarray(trajectory.time_s, dtype=float)) <= 0.0):
+        raise ValueError("Trajectory times must be strictly increasing for smear derivation.")
+    cfg.validate()
+    rows: list[dict[str, Any]] = []
+    domain = (float(trajectory.time_s[0]), float(trajectory.time_s[-1]))
+    x = np.asarray(trajectory.values["source.x_position_as"], dtype=float)
+    y = np.asarray(trajectory.values["source.y_position_as"], dtype=float)
+    assert cfg.plate_scale_as_per_pix is not None
+    for frame_index, mid in enumerate(np.asarray(block.frame_times_s, dtype=float)):
+        start, end = _exposure_bounds(float(mid), cfg)
+        bounded = _apply_edge_policy(start, end, domain, cfg)
+        if bounded is None:
+            rows.append(_disabled_row(frame_index, float(mid), start, end, cfg, "edge_policy_drop"))
+            continue
+        start_eval, end_eval = bounded
+        x_start = float(np.interp(start_eval, trajectory.time_s, x))
+        x_end = float(np.interp(end_eval, trajectory.time_s, x))
+        y_start = float(np.interp(start_eval, trajectory.time_s, y))
+        y_end = float(np.interp(end_eval, trajectory.time_s, y))
+        dx = x_end - x_start
+        dy = y_end - y_start
+        length_as = float(math.hypot(dx, dy))
+        length_pix = length_as / float(cfg.plate_scale_as_per_pix)
+        theta = 0.0 if length_as == 0.0 else float(math.degrees(math.atan2(dy, dx)))
+        rows.append(
+            {
+                "frame_index": int(frame_index),
+                "time_s": float(mid),
+                "exposure_start_s": float(start_eval),
+                "exposure_mid_s": float(mid),
+                "exposure_end_s": float(end_eval),
+                "smear_dx_as": float(dx),
+                "smear_dy_as": float(dy),
+                "smear_length_as": length_as,
+                "smear_length_detector_pix": float(length_pix),
+                "smear_theta_deg": theta,
+                "smear_sigma_perp_detector_pix": float(cfg.truth_sigma_perp_detector_pix),
+                "smear_kernel_size": int(cfg.truth_kernel_size),
+                "smear_enabled": True,
+                "smear_source": cfg.source,
+                "smear_policy": "truth",
+                "notes": "",
+            }
+        )
+    return rows
+
+
+def _disabled_row(frame_index: int, mid: float, start: float, end: float, cfg: SmearConfig, note: str) -> dict[str, Any]:
+    return {
+        "frame_index": int(frame_index),
+        "time_s": float(mid),
+        "exposure_start_s": float(start),
+        "exposure_mid_s": float(mid),
+        "exposure_end_s": float(end),
+        "smear_dx_as": 0.0,
+        "smear_dy_as": 0.0,
+        "smear_length_as": 0.0,
+        "smear_length_detector_pix": 0.0,
+        "smear_theta_deg": 0.0,
+        "smear_sigma_perp_detector_pix": float(cfg.truth_sigma_perp_detector_pix),
+        "smear_kernel_size": int(cfg.truth_kernel_size),
+        "smear_enabled": False,
+        "smear_source": cfg.source,
+        "smear_policy": "disabled",
+        "notes": note,
+    }
+
+
+def derive_model_smear_rows(truth_rows: Sequence[Mapping[str, Any]], cfg: SmearConfig) -> list[dict[str, Any]]:
+    """Derive model/inference smear rows from truth rows and mismatch policy."""
+
+    rows: list[dict[str, Any]] = []
+    for row in truth_rows:
+        model = dict(row)
+        if cfg.inference_mode == "disabled":
+            model.update(
+                {
+                    "smear_dx_as": 0.0,
+                    "smear_dy_as": 0.0,
+                    "smear_length_as": 0.0,
+                    "smear_length_detector_pix": 0.0,
+                    "smear_enabled": False,
+                    "smear_policy": "inference_disabled",
+                    "notes": "model smear disabled/unmodeled",
+                }
+            )
+        elif cfg.inference_mode == "matched":
+            model["smear_policy"] = "inference_matched"
+        else:
+            length_pix = float(model["smear_length_detector_pix"])
+            theta = float(model["smear_theta_deg"])
+            if cfg.inference_mode == "scaled":
+                length_pix *= float(cfg.inference_length_scale)
+            elif cfg.inference_mode == "angle_offset":
+                theta += float(cfg.inference_theta_offset_deg)
+            elif cfg.inference_mode == "constant":
+                if cfg.inference_constant_length_detector_pix is None or cfg.inference_constant_theta_deg is None:
+                    raise ValueError("smear.inference.constant requires constant length and theta.")
+                length_pix = float(cfg.inference_constant_length_detector_pix)
+                theta = float(cfg.inference_constant_theta_deg)
+            length_pix = max(length_pix, float(cfg.inference_min_length_detector_pix))
+            length_as = length_pix * float(cfg.plate_scale_as_per_pix or 1.0)
+            radians = math.radians(theta)
+            model.update(
+                {
+                    "smear_dx_as": float(length_as * math.cos(radians)),
+                    "smear_dy_as": float(length_as * math.sin(radians)),
+                    "smear_length_as": float(length_as),
+                    "smear_length_detector_pix": float(length_pix),
+                    "smear_theta_deg": float(theta),
+                    "smear_policy": f"inference_{cfg.inference_mode}",
+                    "notes": "model smear mismatch applied",
+                }
+            )
+        rows.append(model)
+    return rows
+
+
+def summarize_smear_rows(rows: Sequence[Mapping[str, Any]], *, prefix: str) -> dict[str, Any]:
+    lengths = np.asarray([float(row.get("smear_length_detector_pix", 0.0)) for row in rows], dtype=float)
+    enabled = np.asarray([str(row.get("smear_enabled", "")).lower() == "true" or row.get("smear_enabled") is True for row in rows])
+    nonzero = lengths[lengths > 0.0]
+    return {
+        f"{prefix}_length_pix_median": float(np.median(nonzero)) if nonzero.size else 0.0,
+        f"{prefix}_length_pix_max": float(np.max(lengths)) if lengths.size else 0.0,
+        f"{prefix}_enabled_frame_count": int(np.count_nonzero(enabled)),
+    }
+
+
+def representative_line_kernel(rows: Sequence[Mapping[str, Any]], *, representative: str = "median") -> dict[str, Any]:
+    """Return a deterministic representative line-kernel config for a subblock."""
+
+    if not rows:
+        raise ValueError("Cannot derive representative smear kernel from empty rows.")
+    lengths_all = np.asarray([float(row.get("smear_length_detector_pix", 0.0)) for row in rows], dtype=float)
+    lengths = lengths_all[lengths_all > 0.0]
+    if lengths.size == 0:
+        length = 1.0e-12
+    elif representative == "mean":
+        length = float(np.mean(lengths))
+    elif representative == "rms":
+        length = float(np.sqrt(np.mean(np.square(lengths))))
+    elif representative == "max":
+        length = float(np.max(lengths))
+    else:
+        length = float(np.median(lengths))
+    angles = np.asarray([float(row.get("smear_theta_deg", 0.0)) for row in rows if float(row.get("smear_length_detector_pix", 0.0)) > 0.0], dtype=float)
+    if angles.size:
+        theta = float(math.degrees(math.atan2(np.mean(np.sin(np.deg2rad(angles))), np.mean(np.cos(np.deg2rad(angles))))))
+    else:
+        theta = 0.0
+    first = rows[0]
+    return {
+        "kind": "line",
+        "length": float(length),
+        "sigma_perp": float(first.get("smear_sigma_perp_detector_pix", 0.25)),
+        "theta_deg": theta,
+        "kernel_size": int(first.get("smear_kernel_size", 9)),
+        "units": "detector_pix",
+        "representative": representative,
+    }
+
+
+def write_smear_sidecars(
+    *,
+    outdir: Path,
+    trajectory: CanonicalTrajectory,
+    block: SubblockTrajectory,
+    cfg: SmearConfig,
+    processing_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write truth/model smear sidecars and provenance for one subblock."""
+
+    truth_rows = derive_truth_smear_rows(trajectory, block, cfg)
+    model_rows = derive_model_smear_rows(truth_rows, cfg)
+    truth_path = (outdir / SMEAR_TRUTH_FILENAME).resolve()
+    model_path = (outdir / SMEAR_MODEL_FILENAME).resolve()
+    provenance_path = (outdir / SMEAR_PROVENANCE_FILENAME).resolve()
+    write_rows_csv(truth_path, truth_rows, SMEAR_FIELDNAMES)
+    write_rows_csv(model_path, model_rows, SMEAR_FIELDNAMES)
+    representative = representative_line_kernel(truth_rows, representative=cfg.render_representative)
+    provenance = {
+        "schema_version": "trajectory_smear_provenance.v1",
+        "subblock_index": int(block.subblock_index),
+        "source_trajectory_path": str(trajectory.raw.source_path),
+        "source_trajectory_sha256": _file_sha256(trajectory.raw.source_path),
+        "source_kind": trajectory.raw.source_kind,
+        "processing_mode": "resolved_trajectory_sidecar",
+        "exposure": {
+            "time_s": float(cfg.exposure_time_s),
+            "interval": cfg.exposure_interval,
+            "edge_policy": cfg.edge_policy,
+        },
+        "interpolation_policy": "linear",
+        "plate_scale": {
+            "source": "system_config_or_geometry",
+            "key": "optics.plate_scale_as_per_pix",
+            "as_per_pix": cfg.plate_scale_as_per_pix,
+        },
+        "mismatch_policy": {"mode": cfg.inference_mode},
+        "render": {
+            "mode": cfg.render_mode,
+            "representative": cfg.render_representative,
+            "layer_name": cfg.render_layer_name,
+            "representative_kernel": representative,
+            "per_frame_dynamic_kernels_deferred": True,
+        },
+        "truth_summary": summarize_smear_rows(truth_rows, prefix="smear_truth"),
+        "model_summary": summarize_smear_rows(model_rows, prefix="smear_model"),
+        "config": dict(cfg.raw_config or {}),
+        "processing_context": dict(processing_context or {}),
+    }
+    outdir.mkdir(parents=True, exist_ok=True)
+    provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "smear_truth_csv": truth_path,
+        "smear_model_csv": model_path,
+        "smear_provenance_json": provenance_path,
+        "truth_rows": truth_rows,
+        "model_rows": model_rows,
+        "representative_kernel": representative,
+        "provenance": provenance,
+        **summarize_smear_rows(truth_rows, prefix="smear_truth"),
+        **summarize_smear_rows(model_rows, prefix="smear_model"),
+    }
+
+
+def inject_subblock_smear_layer(render_cfg: dict[str, Any], *, cfg: SmearConfig, representative_kernel: Mapping[str, Any]) -> dict[str, Any]:
+    """Insert a representative ``ApplyConvolution`` line layer into a render config."""
+
+    system = render_cfg.setdefault("system", {})
+    detector = system.setdefault("detector", {})
+    layers = detector.setdefault("layers", [])
+    if not isinstance(layers, list):
+        raise ValueError("render config system.detector.layers must be a list to inject smear layer.")
+    layer = {
+        "name": cfg.render_layer_name,
+        "kind": "ApplyConvolution",
+        "kernel": {
+            "kind": "line",
+            "length": float(representative_kernel["length"]),
+            "sigma_perp": float(representative_kernel["sigma_perp"]),
+            "theta_deg": float(representative_kernel["theta_deg"]),
+            "kernel_size": int(representative_kernel["kernel_size"]),
+            "units": "detector_pix",
+        },
+    }
+    layers[:] = [item for item in layers if not (isinstance(item, Mapping) and item.get("name") == cfg.render_layer_name)]
+    layers.append(layer)
+    return render_cfg
+
+
+__all__ = [
+    "SMEAR_MODEL_FILENAME",
+    "SMEAR_PROVENANCE_FILENAME",
+    "SMEAR_TRUTH_FILENAME",
+    "SmearConfig",
+    "derive_model_smear_rows",
+    "derive_truth_smear_rows",
+    "inject_subblock_smear_layer",
+    "parse_smear_config",
+    "representative_line_kernel",
+    "summarize_smear_rows",
+    "write_smear_sidecars",
+]

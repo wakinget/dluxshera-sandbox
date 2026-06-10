@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from dluxshera.config.io import load_config_file
+from dluxshera.config.resolver import resolve_config
+from dluxshera.params.store import ParameterStore
+from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.campaigns import write_csv_rows, write_json, write_shell_command
 from dluxshera.utils.obs_subblock_cli import append_reference_optimizer_flags
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
@@ -20,6 +23,11 @@ from dluxshera.utils.obs_subblock_trajectory import (
     TRAJECTORY_NOTES,
     prepare_airbus_subblocks,
     write_subblock_artifacts,
+)
+from dluxshera.utils.trajectory_smear import (
+    inject_subblock_smear_layer,
+    parse_smear_config,
+    write_smear_sidecars,
 )
 
 
@@ -221,11 +229,50 @@ def _parse_output_keys(raw: str) -> tuple[str, ...]:
     return keys
 
 
+def _plate_scale_from_system_preset(system_preset: str) -> float | None:
+    try:
+        resolved = resolve_config({"system": {"preset": system_preset}})
+        system_cfg = resolved.get("system", {})
+        spec = compose_forward_spec(system_cfg)
+        store = ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+        return float(store.get("optics.plate_scale_as_per_pix"))
+    except Exception:
+        return None
+
+
+def _trajectory_processing_config(args: argparse.Namespace) -> dict[str, Any]:
+    cfg: dict[str, Any] = {}
+    if args.trajectory_processing_config is not None:
+        loaded = load_config_file(args.trajectory_processing_config)
+        if "trajectory_processing" in loaded:
+            cfg = dict(loaded["trajectory_processing"] or {})
+        elif "smear" in loaded:
+            cfg = {"smear": dict(loaded["smear"] or {})}
+        else:
+            cfg = dict(loaded or {})
+    if bool(args.smear_enabled):
+        smear = dict(cfg.get("smear", {}) or {})
+        smear["enabled"] = True
+        render = dict(smear.get("render", {}) or {})
+        if args.smear_render_mode is not None:
+            render["mode"] = args.smear_render_mode
+        if render:
+            smear["render"] = render
+        cfg["smear"] = smear
+    return cfg
+
+
 def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]:
     run_root = (args.results_root / args.run_name).resolve()
     subblocks_root = run_root / "subblocks"
     output_keys = _parse_output_keys(args.output_keys)
     active_frame_keys = tuple(args.active_frame_keys or _default_active_frame_keys(args.source_kind, output_keys))
+    trajectory_processing_cfg = _trajectory_processing_config(args)
+    smear_cfg = parse_smear_config(
+        trajectory_processing_cfg,
+        exposure_time_s=float(args.frame_dt_s),
+        plate_scale_as_per_pix=_plate_scale_from_system_preset(args.system_preset),
+    )
 
     trajectory, frame_times, blocks = prepare_airbus_subblocks(
         path=args.trajectory_csv,
@@ -274,6 +321,7 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
                 "time_origin": "subblock_start",
             },
         },
+        "trajectory_processing": trajectory_processing_cfg,
         "subblock": {
             "source_kind": args.source_kind,
             "system_preset": args.system_preset,
@@ -298,6 +346,11 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         "selected_time_span_s": [float(frame_times[0]), float(frame_times[-1])],
         "mapping": trajectory.mapping,
         "output_keys": list(output_keys),
+        "smear": {
+            "enabled": bool(smear_cfg.enabled),
+            "render_mode": smear_cfg.render_mode if smear_cfg.enabled else "disabled",
+            "inference_mode": smear_cfg.inference_mode if smear_cfg.enabled else "disabled",
+        },
     }
     write_json(run_root / "trajectory_ingest_summary.json", ingest_summary)
 
@@ -309,12 +362,23 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         artifacts = write_subblock_artifacts(block, outdir=subblock_dir, output_keys=output_keys)
         frame_truth_path = artifacts["frame_truth_csv"]
         starting_guess_path = artifacts["starting_guess_prediction_csv"]
+        smear_artifacts: dict[str, Any] = {}
+        if smear_cfg.enabled:
+            smear_artifacts = write_smear_sidecars(
+                outdir=subblock_dir,
+                trajectory=trajectory,
+                block=block,
+                cfg=smear_cfg,
+                processing_context={"caller": "run_trajectory_subblock_campaign"},
+            )
 
         trace_config = {
             "schema_version": "trajectory_external_frame_truth.v1",
             "kind": "external_frame_truth_csv",
             "frame_truth_csv": str(frame_truth_path),
             "source": "trajectory_subblock_campaign",
+            "smear_truth_csv": str(smear_artifacts.get("smear_truth_csv", "")),
+            "smear_model_csv": str(smear_artifacts.get("smear_model_csv", "")),
         }
         _write_local_json(subblock_dir / "trace_config.json", trace_config)
 
@@ -328,6 +392,12 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
             render_seed=args.seed + block.subblock_index,
         )
         render_cfg.setdefault("system", {})["preset"] = args.system_preset
+        if smear_cfg.enabled and smear_cfg.render_mode == "subblock_constant_layer":
+            render_cfg = inject_subblock_smear_layer(
+                render_cfg,
+                cfg=smear_cfg,
+                representative_kernel=smear_artifacts["representative_kernel"],
+            )
         _write_local_json(subblock_dir / "render_config.json", render_cfg)
 
         inference_cfg = _patch_inference_config(
@@ -367,6 +437,16 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
             "command_path": str(command_path.resolve()),
             "expected_summary_json": str(expected_summary.resolve()),
             "status": "planned",
+            "smear_enabled": bool(smear_cfg.enabled),
+            "smear_truth_csv": str(smear_artifacts.get("smear_truth_csv", "")),
+            "smear_model_csv": str(smear_artifacts.get("smear_model_csv", "")),
+            "smear_provenance_json": str(smear_artifacts.get("smear_provenance_json", "")),
+            "smear_truth_length_pix_median": smear_artifacts.get("smear_truth_length_pix_median", ""),
+            "smear_truth_length_pix_max": smear_artifacts.get("smear_truth_length_pix_max", ""),
+            "smear_model_length_pix_median": smear_artifacts.get("smear_model_length_pix_median", ""),
+            "smear_model_policy": smear_cfg.inference_mode if smear_cfg.enabled else "",
+            "smear_render_mode": smear_cfg.render_mode if smear_cfg.enabled else "",
+            "smear_layer_name": smear_cfg.render_layer_name if smear_cfg.enabled else "",
         }
         for key, diag in block.diagnostics.items():
             row[f"rms_{key}_residual"] = diag["rms_residual"]
@@ -395,6 +475,24 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
                 break
 
     write_csv_rows(run_root / "subblock_plan.csv", subblock_rows)
+    smear_summary = {
+        "schema_version": "trajectory_smear_summary.v1",
+        "enabled": bool(smear_cfg.enabled),
+        "render_mode": smear_cfg.render_mode if smear_cfg.enabled else "disabled",
+        "inference_mode": smear_cfg.inference_mode if smear_cfg.enabled else "disabled",
+        "subblocks": [
+            {
+                "subblock_index": row["subblock_index"],
+                "smear_truth_csv": row.get("smear_truth_csv", ""),
+                "smear_model_csv": row.get("smear_model_csv", ""),
+                "smear_provenance_json": row.get("smear_provenance_json", ""),
+                "smear_truth_length_pix_median": row.get("smear_truth_length_pix_median", ""),
+                "smear_truth_length_pix_max": row.get("smear_truth_length_pix_max", ""),
+            }
+            for row in subblock_rows
+        ],
+    }
+    write_json(run_root / "smear_summary.json", smear_summary)
     campaign_plan = {
         "schema_version": "trajectory_subblock_campaign_plan.v1",
         "created_at": now_iso_local_ms(),
@@ -413,6 +511,7 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         "active_frame_keys": list(active_frame_keys),
         "source_mode": args.source_kind,
         "subblocks": subblock_rows,
+        "smear": smear_summary,
         "notes": list(TRAJECTORY_NOTES),
         "child_results": child_results,
     }
@@ -461,6 +560,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--run-children", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-workers", type=int, default=1)
+    parser.add_argument("--trajectory-processing-config", type=Path, default=None)
+    parser.add_argument("--smear-enabled", action="store_true")
+    parser.add_argument(
+        "--smear-render-mode",
+        choices=("metadata_only", "subblock_constant_layer"),
+        default=None,
+    )
     parser.set_defaults(
         reference_optimizer={
             "kind": "sgd",

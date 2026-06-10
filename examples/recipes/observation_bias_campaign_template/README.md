@@ -130,3 +130,9 @@ A checked-in Gattaca2 sbatch template is available at:
 ```text
 examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.sbatch
 ```
+
+### Trajectory Smear Smoke
+
+`trajectory_smear_smoke.yaml` enables trajectory-derived smear in `metadata_only` mode. Smear is stored in explicit truth/model sidecars and plan fields; `frame_truth.csv` remains frame-center truth and `starting_guess_prediction.csv` remains optimizer initialization.
+
+Use `render.mode: subblock_constant_layer` only when auditing the first representative `ApplyConvolution` line-kernel render integration. Per-frame kernels, dynamic crop / ROI realism, high-order WFE coupling, and production trajectory campaigns are deferred.

@@ -216,6 +216,61 @@ def test_bias_case_parsing_validates_layout_keys(tmp_path: Path):
         )
 
 
+def test_trajectory_smear_dry_run_records_sidecars(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    airbus = tmp_path / "airbus.csv"
+    airbus.write_text(
+        "\n".join(
+            [
+                "0.0,0.0,0.0,0.0",
+                "0.1,0.1,0.2,0.0",
+                "0.2,0.2,0.4,0.0",
+                "0.3,0.3,0.6,0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    subblocks = payload["experiment"]["subblocks"]
+    subblocks["n_subblocks"] = 1
+    subblocks["n_frames"] = 2
+    subblocks["exposure_time_s"] = 0.05
+    subblocks["trace_source"] = {
+        "mode": "trajectory",
+        "source": {"kind": "airbus_csv", "path": str(airbus), "sample_dt_s": 0.1},
+        "window": {"start_s": 0.05, "n_subblocks": 1},
+        "sampling": {
+            "frame_dt_s": 0.05,
+            "subblock_duration_s": 1.0,
+            "n_frames_per_subblock": 2,
+        },
+        "output_keys": [
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ],
+    }
+    subblocks["trajectory_processing"] = {"smear": {"enabled": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="bias_smear",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+
+    row = next(iter(plan.subblock_plans.values()))[0]
+    assert row["smear_enabled"] is True
+    assert Path(row["smear_truth_csv"]).exists()
+    assert Path(row["smear_model_csv"]).exists()
+    assert Path(row["smear_provenance_json"]).exists()
+    assert plan.trace_source_plan.summary["smear"]["enabled"] is True
+
+
 def test_command_construction_includes_schur_summary_arguments(tmp_path: Path):
     module = load_module()
     command = module.build_subblock_command(

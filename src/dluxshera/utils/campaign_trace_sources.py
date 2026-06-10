@@ -13,6 +13,10 @@ from .obs_subblock_trajectory import (
     prepare_airbus_subblocks,
     write_subblock_artifacts,
 )
+from .trajectory_smear import (
+    parse_smear_config,
+    write_smear_sidecars,
+)
 
 
 TRACE_SOURCE_MODE_IID = "iid_jitter"
@@ -30,6 +34,9 @@ class PreparedTraceSubblock:
     subblock_index: int
     frame_truth_path: Path | None
     starting_guess_prediction_path: Path | None
+    smear_truth_path: Path | None
+    smear_model_path: Path | None
+    smear_provenance_path: Path | None
     trace_source_mode: str
     time_start_s: float | None
     time_end_s: float | None
@@ -107,6 +114,9 @@ def _iid_plan(
                 subblock_index=index,
                 frame_truth_path=None,
                 starting_guess_prediction_path=None,
+                smear_truth_path=None,
+                smear_model_path=None,
+                smear_provenance_path=None,
                 trace_source_mode=TRACE_SOURCE_MODE_IID,
                 time_start_s=None,
                 time_end_s=None,
@@ -147,6 +157,8 @@ def _trajectory_plan(
     subblock_duration_s: float,
     default_output_keys: Sequence[str],
     reuse_existing: bool,
+    trajectory_processing_cfg: Mapping[str, Any] | None,
+    plate_scale_as_per_pix: float | None,
 ) -> PreparedTraceSourcePlan:
     source_cfg = dict(trace_source_cfg.get("source", {}) or {})
     if str(source_cfg.get("kind", "airbus_csv")) != "airbus_csv":
@@ -199,6 +211,11 @@ def _trajectory_plan(
         )
     if abs(resolved_frame_dt_s - float(frame_dt_s)) > 1.0e-12:
         raise ValueError("trace_source sampling.frame_dt_s must match subblock frame cadence.")
+    smear_cfg = parse_smear_config(
+        trajectory_processing_cfg,
+        exposure_time_s=float(frame_dt_s),
+        plate_scale_as_per_pix=plate_scale_as_per_pix,
+    )
 
     trajectory_root = artifact_root
     if reuse_existing:
@@ -208,13 +225,22 @@ def _trajectory_plan(
                 path = trajectory_root / f"subblock_{index:06d}" / filename
                 if not path.exists():
                     missing.append(path)
+            if smear_cfg.enabled:
+                for filename in (
+                    "frame_smear_truth.csv",
+                    "frame_smear_model.csv",
+                    "smear_provenance.json",
+                ):
+                    path = trajectory_root / f"subblock_{index:06d}" / filename
+                    if not path.exists():
+                        missing.append(path)
         if missing:
             raise FileNotFoundError(
                 "Stored trajectory trace-source artifacts are missing: "
                 + ", ".join(str(path) for path in missing[:5])
             )
 
-    _, frame_times, blocks = prepare_airbus_subblocks(
+    trajectory, frame_times, blocks = prepare_airbus_subblocks(
         path=source_path,
         start_s=start_s,
         duration_s=window_cfg.get("duration_s"),
@@ -238,8 +264,23 @@ def _trajectory_plan(
                 outdir / "starting_guess_prediction.csv"
             ).resolve(),
         }
+        smear_artifacts: dict[str, Any] = {}
         if not reuse_existing:
             paths = write_subblock_artifacts(block, outdir=outdir, output_keys=output_keys)
+            if smear_cfg.enabled:
+                smear_artifacts = write_smear_sidecars(
+                    outdir=outdir,
+                    trajectory=trajectory,
+                    block=block,
+                    cfg=smear_cfg,
+                    processing_context={"caller": "campaign_trace_sources"},
+                )
+        elif smear_cfg.enabled:
+            smear_artifacts = {
+                "smear_truth_csv": (outdir / "frame_smear_truth.csv").resolve(),
+                "smear_model_csv": (outdir / "frame_smear_model.csv").resolve(),
+                "smear_provenance_json": (outdir / "smear_provenance.json").resolve(),
+            }
         diagnostics: dict[str, Any] = {}
         row: dict[str, Any] = {
             "trace_source_mode": TRACE_SOURCE_MODE_TRAJECTORY,
@@ -255,6 +296,16 @@ def _trajectory_plan(
             "trajectory_output_keys": ",".join(output_keys),
             "trajectory_active_frame_keys": ",".join(active_frame_keys),
             "trajectory_window_policy": "shared_across_cases",
+            "smear_enabled": bool(smear_cfg.enabled),
+            "smear_truth_csv": str(smear_artifacts.get("smear_truth_csv", "")),
+            "smear_model_csv": str(smear_artifacts.get("smear_model_csv", "")),
+            "smear_provenance_json": str(smear_artifacts.get("smear_provenance_json", "")),
+            "smear_truth_length_pix_median": smear_artifacts.get("smear_truth_length_pix_median", ""),
+            "smear_truth_length_pix_max": smear_artifacts.get("smear_truth_length_pix_max", ""),
+            "smear_model_length_pix_median": smear_artifacts.get("smear_model_length_pix_median", ""),
+            "smear_model_policy": smear_cfg.inference_mode if smear_cfg.enabled else "",
+            "smear_render_mode": smear_cfg.render_mode if smear_cfg.enabled else "",
+            "smear_layer_name": smear_cfg.render_layer_name if smear_cfg.enabled else "",
         }
         for key, diag in block.diagnostics.items():
             diagnostics[key] = dict(diag)
@@ -266,6 +317,9 @@ def _trajectory_plan(
                 subblock_index=int(block.subblock_index),
                 frame_truth_path=paths["frame_truth_csv"],
                 starting_guess_prediction_path=paths["starting_guess_prediction_csv"],
+                smear_truth_path=smear_artifacts.get("smear_truth_csv"),
+                smear_model_path=smear_artifacts.get("smear_model_csv"),
+                smear_provenance_path=smear_artifacts.get("smear_provenance_json"),
                 trace_source_mode=TRACE_SOURCE_MODE_TRAJECTORY,
                 time_start_s=block.time_start_s,
                 time_end_s=block.time_end_s,
@@ -298,6 +352,11 @@ def _trajectory_plan(
             "output_keys": list(output_keys),
             "active_frame_keys": list(active_frame_keys),
             "trajectory_window_policy": "shared_across_cases",
+            "smear": {
+                "enabled": bool(smear_cfg.enabled),
+                "render_mode": smear_cfg.render_mode if smear_cfg.enabled else "disabled",
+                "inference_mode": smear_cfg.inference_mode if smear_cfg.enabled else "disabled",
+            },
             "notes": list(TRAJECTORY_NOTES),
         },
         rows=tuple(rows),
@@ -319,6 +378,8 @@ def _external_plan(
     n_frames_per_subblock: int,
     frame_dt_s: float,
     default_output_keys: Sequence[str],
+    trajectory_processing_cfg: Mapping[str, Any] | None,
+    plate_scale_as_per_pix: float | None,
 ) -> PreparedTraceSourcePlan:
     campaign_plan_path = _resolve_path(
         trace_source_cfg.get("campaign_plan") or trace_source_cfg.get("trajectory_plan"),
@@ -340,6 +401,11 @@ def _external_plan(
         default=default_output_keys,
         field_name="subblocks.trace_source.output_keys",
     )
+    smear_cfg = parse_smear_config(
+        trajectory_processing_cfg,
+        exposure_time_s=float(frame_dt_s),
+        plate_scale_as_per_pix=plate_scale_as_per_pix,
+    )
     rows: list[dict[str, Any]] = []
     subblocks: list[PreparedTraceSubblock] = []
     for index, source_row in enumerate(rows_in[: int(n_subblocks)]):
@@ -349,7 +415,32 @@ def _external_plan(
             frame_truth = (subblock_plan_path.parent / frame_truth).resolve()
         if not guess.is_absolute():
             guess = (subblock_plan_path.parent / guess).resolve()
-        missing = [path for path in (frame_truth, guess) if not path.exists()]
+        smear_truth: Path | None = None
+        smear_model: Path | None = None
+        smear_provenance: Path | None = None
+        if smear_cfg.enabled:
+            for key, target in (
+                ("smear_truth_csv", "truth"),
+                ("smear_model_csv", "model"),
+                ("smear_provenance_json", "provenance"),
+            ):
+                raw = str(source_row.get(key, "")).strip()
+                if not raw:
+                    raise ValueError(f"External trace-source plan is missing required {key}.")
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    path = (subblock_plan_path.parent / path).resolve()
+                if target == "truth":
+                    smear_truth = path
+                elif target == "model":
+                    smear_model = path
+                else:
+                    smear_provenance = path
+        missing = [
+            path
+            for path in (frame_truth, guess, smear_truth, smear_model, smear_provenance)
+            if path is not None and not path.exists()
+        ]
         if missing:
             raise FileNotFoundError(
                 "External trace-source artifact missing: "
@@ -360,6 +451,12 @@ def _external_plan(
             "trace_source_mode": TRACE_SOURCE_MODE_EXTERNAL_PLAN,
             "frame_truth_path": str(frame_truth),
             "starting_guess_prediction_path": str(guess),
+            "smear_enabled": bool(smear_cfg.enabled),
+            "smear_truth_csv": str(smear_truth or source_row.get("smear_truth_csv", "")),
+            "smear_model_csv": str(smear_model or source_row.get("smear_model_csv", "")),
+            "smear_provenance_json": str(
+                smear_provenance or source_row.get("smear_provenance_json", "")
+            ),
             "trajectory_subblock_index": int(source_row.get("subblock_index", index)),
             "trajectory_active_frame_keys": ",".join(active_frame_keys),
         }
@@ -369,6 +466,9 @@ def _external_plan(
                 subblock_index=index,
                 frame_truth_path=frame_truth,
                 starting_guess_prediction_path=guess,
+                smear_truth_path=smear_truth,
+                smear_model_path=smear_model,
+                smear_provenance_path=smear_provenance,
                 trace_source_mode=TRACE_SOURCE_MODE_EXTERNAL_PLAN,
                 time_start_s=(
                     float(source_row["time_start_s"])
@@ -403,6 +503,11 @@ def _external_plan(
             "output_keys": list(output_keys),
             "active_frame_keys": list(active_frame_keys),
             "notes": list(TRAJECTORY_NOTES),
+            "smear": {
+                "enabled": bool(smear_cfg.enabled),
+                "render_mode": smear_cfg.render_mode if smear_cfg.enabled else "disabled",
+                "inference_mode": smear_cfg.inference_mode if smear_cfg.enabled else "disabled",
+            },
         },
         rows=tuple(rows),
     )
@@ -421,6 +526,8 @@ def prepare_campaign_trace_source(
     subblock_duration_s: float,
     default_output_keys: Sequence[str] = DEFAULT_OUTPUT_KEYS,
     reuse_existing: bool = False,
+    trajectory_processing_cfg: Mapping[str, Any] | None = None,
+    plate_scale_as_per_pix: float | None = None,
 ) -> PreparedTraceSourcePlan:
     """Prepare a materialized trace source plan for campaign wrappers."""
 
@@ -456,6 +563,8 @@ def prepare_campaign_trace_source(
             subblock_duration_s=subblock_duration_s,
             default_output_keys=default_output_keys,
             reuse_existing=reuse_existing,
+            trajectory_processing_cfg=trajectory_processing_cfg,
+            plate_scale_as_per_pix=plate_scale_as_per_pix,
         )
     return _external_plan(
         trace_source_cfg=cfg,
@@ -466,6 +575,8 @@ def prepare_campaign_trace_source(
         n_frames_per_subblock=n_frames_per_subblock,
         frame_dt_s=frame_dt_s,
         default_output_keys=default_output_keys,
+        trajectory_processing_cfg=trajectory_processing_cfg,
+        plate_scale_as_per_pix=plate_scale_as_per_pix,
     )
 
 
@@ -511,7 +622,10 @@ def validate_stored_trace_source_artifacts(stored_plan: Mapping[str, Any]) -> No
         row_mode = str(row.get("trace_source_mode", mode))
         if row_mode == TRACE_SOURCE_MODE_IID:
             continue
-        for key in ("frame_truth_path", "starting_guess_prediction_path"):
+        keys = ["frame_truth_path", "starting_guess_prediction_path"]
+        if str(row.get("smear_enabled", "")).lower() in {"true", "1"}:
+            keys.extend(["smear_truth_csv", "smear_model_csv", "smear_provenance_json"])
+        for key in keys:
             value = row.get(key)
             if not isinstance(value, str) or not value.strip():
                 missing.append(Path(f"<missing {key}>"))
