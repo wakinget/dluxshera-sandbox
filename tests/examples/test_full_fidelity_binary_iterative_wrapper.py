@@ -16,6 +16,13 @@ CONFIG_PATH = (
     / "full_fidelity_algorithm_campaign_template"
     / "full_fidelity_binary_iterative_smoke.yaml"
 )
+SKELETON_PATH = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "full_fidelity_algorithm_campaign_template"
+    / "full_fidelity_algorithm_campaign_v1.yaml"
+)
 
 
 def load_module() -> Any:
@@ -65,6 +72,31 @@ def test_config_translation_rejects_unsupported_kind() -> None:
         raise AssertionError("unsupported kind was accepted")
 
 
+def test_config_translation_rejects_future_skeleton_helpfully() -> None:
+    module = load_module()
+    raw = module.load_config_file(SKELETON_PATH)
+
+    try:
+        module._full_fidelity_to_observation_bias(raw, run_name=None)
+    except ValueError as exc:
+        text = str(exc)
+        assert "full_fidelity_algorithm_campaign" in text
+        assert "non-executable" in text
+        assert "full_fidelity_binary_iterative_smoke.yaml" in text
+    else:
+        raise AssertionError("future skeleton was accepted")
+
+
+def test_wrapper_validation_warns_about_spectral_fast() -> None:
+    module = load_module()
+    raw = module.load_config_file(CONFIG_PATH)
+
+    warnings = module.validate_full_fidelity_smoke_config(raw)
+
+    assert any("spectral_model.fast" in warning for warning in warnings)
+    assert any("truth<=7" in warning and "inference<=5" in warning for warning in warnings)
+
+
 def test_wrapper_help_works() -> None:
     completed = subprocess.run(
         [sys.executable, str(SCRIPT_PATH), "--help"],
@@ -78,3 +110,4 @@ def test_wrapper_help_works() -> None:
     assert completed.returncode == 0
     assert "--config" in completed.stdout
     assert "--aggregate-only" in completed.stdout
+    assert "full_fidelity_algorithm_campaign" in completed.stdout

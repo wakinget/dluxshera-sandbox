@@ -18,9 +18,9 @@ experiment:
       generic_binary_fallback: alpha_cen
     truth:
       label: truth_fast_alpha_cen
-      n_lambda: 5
-      wavelength_min_nm: 500.0
-      wavelength_max_nm: 700.0
+      n_lambda: 51
+      wavelength_min_nm: 350.0
+      wavelength_max_nm: 850.0
       components:
         detector_qe:
           enabled: false

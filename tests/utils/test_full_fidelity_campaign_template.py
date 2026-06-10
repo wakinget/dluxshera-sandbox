@@ -13,14 +13,21 @@ SMOKE_TEMPLATE_PATH = Path(
     "examples/recipes/full_fidelity_algorithm_campaign_template/"
     "full_fidelity_binary_iterative_smoke.yaml"
 )
+README_PATH = Path("examples/recipes/full_fidelity_algorithm_campaign_template/README.md")
+ANNOTATED_SMOKE_PATH = Path(
+    "examples/recipes/full_fidelity_algorithm_campaign_template/"
+    "full_fidelity_binary_iterative_smoke.annotated.yaml"
+)
 
 
 def test_full_fidelity_campaign_template_loads_and_keeps_design_contract() -> None:
     payload = yaml.safe_load(TEMPLATE_PATH.read_text())
     experiment = payload["experiment"]
+    header = "\n".join(TEMPLATE_PATH.read_text(encoding="utf-8").splitlines()[:5])
 
     assert set(payload) == {"experiment"}
     assert experiment["kind"] == "full_fidelity_algorithm_campaign"
+    assert "NOT EXECUTABLE BY CURRENT RUNNER" in header
     assert (
         experiment["schema_version"]
         == "full_fidelity_algorithm_campaign.v1"
@@ -100,3 +107,28 @@ def test_full_fidelity_binary_iterative_smoke_template_is_tiny_executable_smoke(
     assert experiment["iterative"]["update_safety"]["posterior_sigma_inflation"] == 10.0
     assert experiment["spectral_model"]["truth"]["n_lambda"] > experiment["spectral_model"]["inference"]["n_lambda"]
     assert experiment["high_order_wfe"]["truth"]["npix"] == 16
+
+
+def test_full_fidelity_template_readme_references_executable_and_skeleton_configs() -> None:
+    text = README_PATH.read_text(encoding="utf-8")
+
+    assert "full_fidelity_binary_iterative_smoke.yaml" in text
+    assert "full_fidelity_algorithm_campaign_v1.yaml" in text
+    assert "design skeleton" in text
+    assert "not runner-ready" in text
+    assert "audit_full_fidelity_config.py" in text
+
+
+def test_annotated_smoke_config_documents_non_obvious_blocks() -> None:
+    text = ANNOTATED_SMOKE_PATH.read_text(encoding="utf-8")
+    payload = yaml.safe_load(text)
+
+    assert payload["experiment"]["kind"] == "full_fidelity_binary_iterative_smoke"
+    for needle in (
+        "spectral_model.fast",
+        "high_order_wfe",
+        "subblocks",
+        "iterative",
+        "observation_theta",
+    ):
+        assert needle in text

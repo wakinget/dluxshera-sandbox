@@ -1,0 +1,296 @@
+# Annotated companion for full_fidelity_binary_iterative_smoke.yaml.
+# This file is for review. The default runner input remains the unannotated YAML.
+# Comments explain active fields, consumers, effects, smoke-only shortcuts, next
+# less-tiny values, and whether omission is safe.
+experiment:
+  # kind: Required. Consumed by the full-fidelity wrapper to select the narrow
+  # smoke translator. Runtime: selects code path. Fidelity: none. Provenance:
+  # identifies executable smoke schema. Smoke-only: yes. Next-step: unchanged.
+  # Safe to omit: no.
+  kind: full_fidelity_binary_iterative_smoke
+
+  # schema_version: Required review/provenance label. The wrapper forwards a
+  # translated schema_version into observation-bias. Runtime/fidelity: none.
+  # Next-step: update only when schema semantics change. Safe to omit: no.
+  schema_version: full_fidelity_binary_iterative_smoke.v1
+
+  # run_name: Output identity. Consumed by wrapper unless CLI --run-name is set.
+  # Runtime: output path only. Fidelity: none. Provenance: yes. Safe to omit:
+  # yes, wrapper has a default.
+  run_name: full_fidelity_binary_iterative_smoke
+
+  # seed: Base deterministic seed. Consumed by wrapper defaults, seeding, and
+  # observation-bias campaign. Runtime: reproducibility. Fidelity: changes the
+  # sampled realization but not the model class. Next-step: keep fixed for A/B
+  # reviews. Safe to omit: yes, defaults to 42.
+  seed: 42
+
+  # source_kind/target: Consumed by the wrapper and model-split helper to build
+  # the SHERA source and target-aware SED deck. Runtime: SED/source lookup.
+  # Fidelity: physical target/source semantics. Next-step: unchanged unless
+  # testing a different target. Safe to omit: yes, defaults are binary_target and
+  # ALPHA_CEN.
+  source_kind: binary_target
+  target: ALPHA_CEN
+
+  # n_cases: Wrapper fallback case count when prior_draws is omitted. The active
+  # smoke uses prior_draws.n_cases below. Runtime: case count if fallback path is
+  # used. Fidelity: none. Next-step: 2-4. Safe to omit: yes.
+  n_cases: 1
+
+  # n_draws: Smoke-only label retained for reviewer intent. It is not consumed by
+  # the wrapper today; prior_draws.n_cases controls generated cases. Runtime and
+  # fidelity: none. Safe to omit: yes.
+  n_draws: 1
+
+  # system_preset: Consumed by wrapper as observation-bias system.preset.
+  # Runtime: resolver choice. Fidelity: selects instrument preset. Next-step:
+  # unchanged. Safe to omit: yes, wrapper defaults to SHERA_FLIGHT_3P.
+  system_preset: SHERA_FLIGHT_3P
+
+  # spectral_model: Forwarded unchanged to observation-bias, then consumed by
+  # dluxshera.utils.campaign_model_split. It creates truth and inference spectral
+  # decks. Runtime cost is mainly n_lambda, wavelength range, and response
+  # components. Fidelity is the truth/reference spectral split.
+  spectral_model:
+    # enabled: Enables spectral deck composition. Safe to omit: yes, disabled.
+    enabled: true
+
+    # spectral_model.fast: Consumed by campaign_model_split._build_spectral_deck.
+    # When true it clamps effective truth n_lambda to <=7 and inference n_lambda
+    # to <=5 before deck construction. It is a smoke cost reducer and fidelity
+    # reducer, not a substitute for explicit n_lambda, wavelength range, or
+    # response settings. Next-step: set false after explicitly choosing modest
+    # grids. Safe to omit: yes, explicit grid values then control cost.
+    fast: true
+
+    # preserve_flux_parameters: Keeps source flux parameters as explicit scalar
+    # parameters while spectral weights are inserted into system configs.
+    # Runtime: negligible. Fidelity/provenance: spectral/source bookkeeping.
+    # Safe to omit: yes, model-split defaults to true.
+    preserve_flux_parameters: true
+
+    # source_seds: Target-aware SED selection for binary components. Consumed by
+    # the spectral resolver. Runtime: file/library lookup. Fidelity: source SED
+    # realism. generic_binary_fallback is a smoke convenience for Alpha Cen.
+    # Next-step: require explicit SED paths for non-Alpha-Cen validation.
+    source_seds:
+      mode: target
+      generic_binary_fallback: alpha_cen
+
+    # truth: Data-render spectral deck. n_lambda/range affect runtime and truth
+    # physical fidelity, but fast:true clamps the effective n_lambda to <=7.
+    truth:
+      # label: Provenance only. Safe to omit: yes.
+      label: truth_fast_alpha_cen
+      # n_lambda/range: Truth spectral sampling. Next-step: 15-31 with fast:false.
+      n_lambda: 51
+      wavelength_min_nm: 350.0
+      wavelength_max_nm: 850.0
+      components:
+        # detector_qe/m2_filter_response: Disabled smoke shortcuts. Enabling adds
+        # response realism and table handling; safe to omit for smoke.
+        detector_qe:
+          enabled: false
+        m2_filter_response:
+          enabled: false
+
+    # inference: Reference/inference spectral deck. The deliberate mismatch with
+    # truth is part of the smoke's Data/Inference split. fast:true clamps
+    # effective n_lambda to <=5. Next-step: 5-7 with fast:false.
+    inference:
+      label: inference_fast_alpha_cen
+      n_lambda: 3
+      wavelength_min_nm: 525.0
+      wavelength_max_nm: 675.0
+      # out_of_band_response/renormalize_weights: Consumed by spectral deck.
+      # Fidelity: how truncated inference weights are handled. Safe to omit only
+      # if resolver defaults are acceptable.
+      out_of_band_response: zero
+      renormalize_weights: true
+      components:
+        # same_as_truth means the response component choice follows truth. Since
+        # truth disables these components in smoke, no extra response realism is
+        # introduced here.
+        detector_qe:
+          mode: same_as_truth
+        m2_filter_response:
+          mode: same_as_truth
+
+  # high_order_wfe: Forwarded unchanged to observation-bias and consumed by the
+  # model-split helper. It creates static high-order OPD maps in truth/reference
+  # system configs. High-order map pixels are not optimizer-visible parameters.
+  high_order_wfe:
+    # enabled: Enables WFE map deck. Runtime: map generation and optics arrays.
+    # Fidelity: high-order optical truth/reference mismatch. Safe to omit: yes.
+    enabled: true
+    truth:
+      # truth block: Synthetic primary/secondary maps. npix and amplitude affect
+      # cost/fidelity. npix=16 is smoke-only; next-step is 32 or 64.
+      enabled: true
+      mirrors: [primary, secondary]
+      mode: synthetic
+      npix: 16
+      amplitude_nm_rms: 0.3
+      seed: 20260610
+      pairing: independent
+      remove_low_order_zernikes: true
+    inference:
+      # knowledge_error: Builds an imperfect reference map. This introduces the
+      # active truth/reference high-order mismatch. Safe to omit only if a matched
+      # reference is intended.
+      enabled: true
+      mode: knowledge_error
+      knowledge_error:
+        enabled: true
+        amplitude_nm_rms: 0.1
+    artifacts:
+      # Artifact toggles affect I/O/provenance, not physics. Maps/PNGs are false
+      # to keep smoke output small; summary JSON remains useful for review.
+      write_maps: false
+      write_png_quicklooks: false
+      write_summary_json: true
+    validation:
+      # Guard that catches accidental matched truth/reference maps when the smoke
+      # expects a knowledge error. Safe to omit: no for this smoke's intent.
+      require_nonzero_difference_when_enabled: true
+
+  # subblocks: Forwarded to observation-bias. These are the primary runtime-cost
+  # controls for dry-run/execution: n_subblocks, n_frames, optimizer iterations,
+  # dense matrix cap, and trajectory processing.
+  subblocks:
+    # Tiny smoke scale. Next-step: n_subblocks 3-5 and n_frames 5-10.
+    n_subblocks: 2
+    n_frames: 3
+    # noise disabled makes the smoke deterministic/cheap. Enabling noise changes
+    # physical realism and stochastic runtime diagnostics.
+    noise: disabled
+    # phi_ref/reference settings control Schur/reference solve behavior.
+    phi_ref: truth_when_available
+    schur_curvature_method: auto
+    max_dense_dim: 40
+    schur_damping: 1.0e-8
+    exposure_time_s: 0.05
+    reference_diagnostics_profile: none
+    reference_optimizer_kind: sgd
+    reference_base_lr: 0.4
+    reference_n_iter: 3
+    variance_floor: 1.0
+    summary_information_scale: summed_likelihood
+    # trace_source: Uses a real trajectory file but only a two-subblock window.
+    # Runtime: trace extraction. Fidelity: trajectory-based frame centers.
+    trace_source:
+      mode: trajectory
+      source:
+        kind: airbus_csv
+        path: src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv
+      window:
+        start_s: 60.0
+        n_subblocks: 2
+    trajectory_processing:
+      smear:
+        enabled: true
+        render:
+          # metadata_only records smear sidecar/provenance but does not render
+          # per-frame dynamic smear kernels. Dynamic modes are deferred and warn.
+          mode: metadata_only
+    # trace_jitter: Small frame-center/PA perturbations. Runtime: negligible.
+    # Fidelity: trajectory knowledge perturbation. Safe to omit if no jitter is
+    # desired.
+    trace_jitter:
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+
+  # iterative: Forwarded to observation-bias. Controls tiny physical-basis update
+  # windows. Runtime scales with windows/subblocks; update_gain and safety affect
+  # stability, not rendering cost.
+  iterative:
+    enabled: true
+    windows_per_draw: 2
+    subblocks_per_window: 1
+    # physical_full is the only active smoke update mode. Eigenbasis modes are
+    # future/deferred for this wrapper.
+    update_mode: physical_full
+    update_gain: 0.25
+    carry_prior_mean_with_reference: true
+    update_safety:
+      enabled: true
+      # Large inflation is a conservative smoke shortcut. Next-step: reduce only
+      # after reviewing posterior stability.
+      posterior_sigma_inflation: 10.0
+      min_sigma_by_label: null
+      max_abs_update_by_label: null
+      reject_on_bad_frame_quality: true
+      reject_on_nonfinite_posterior: true
+
+  # seeding: Forwarded to observation-bias. Initialization/reproducibility only;
+  # does not change physical model class. Safe to omit: yes, wrapper provides a
+  # default based on experiment.seed.
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 42
+
+  # observation_theta: Forwarded to observation-bias layout builder. It selects
+  # active observation-level scalar parameters. Runtime cost follows state
+  # dimension. High-order map pixels are intentionally not supported here.
+  observation_theta:
+    source:
+      separation_as: true
+      log_flux_total: true
+      contrast: true
+    optics:
+      plate_scale_as_per_pix: true
+      primary_zernikes:
+        enabled: true
+        # [0] is smoke-tiny. Next-step: include more low-order indices or
+        # from_system. Safe to omit: yes if defaults are acceptable.
+        indices: [0]
+      secondary_zernikes:
+        enabled: true
+        indices: [0]
+
+  # prior_draws: Forwarded to observation-bias. Controls initialization offsets
+  # around truth; not a physical fidelity term. Runtime cost follows n_cases.
+  prior_draws:
+    enabled: true
+    n_cases: 1
+    center: truth
+    distribution: normal
+    draw_seed: 12345
+    case_name_template: full_fidelity_smoke_draw_{draw_index:03d}
+    sigmas:
+      # Sigmas define draw width by label. These are intentionally tiny for the
+      # smoke. Next-step: modestly larger offsets after checking stability.
+      source.separation_as:
+        kind: absolute
+        sigma: 2.0e-6
+        unit: arcsec
+      source.log_flux_total:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: log_flux
+      source.contrast:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.1
+        unit: nm
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.1
+        unit: nm
+
+  # Deferred/disabled blocks forwarded to observation-bias as explicit off
+  # switches. They are safe to omit; retaining them makes intent auditable.
+  truth_realization:
+    enabled: false
+  eigenbasis:
+    enabled: false
+  forecast:
+    enabled: false
+    plots: false

@@ -1,9 +1,15 @@
-"""Thin full-fidelity binary iterative smoke wrapper.
+"""Run the executable full-fidelity binary iterative smoke campaign.
 
-This wrapper intentionally delegates execution to run_observation_bias_campaign.py.
-It only translates the narrow smoke schema into the existing campaign schema and
-keeps the Data/Inference model split auditable through the shared split helper
-used by that campaign.
+This is a thin smoke wrapper, not a new campaign framework. It accepts the
+small ``full_fidelity_binary_iterative_smoke`` schema, translates it into the
+existing ``observation_bias_campaign`` schema, and delegates execution to
+``run_observation_bias_campaign.py``. Already translated
+``observation_bias_campaign`` configs are also accepted for replay/debugging.
+
+The future ``full_fidelity_algorithm_campaign`` schema skeleton is intentionally
+not accepted here. Use dry-run first when reviewing this wrapper because dry-run
+writes the translated campaign plan and model-split artifacts without launching
+sub-block inference.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,12 +29,127 @@ from run_observation_bias_campaign import (  # type: ignore
 )
 
 
+ACCEPTED_CONFIG_KINDS = ("full_fidelity_binary_iterative_smoke", "observation_bias_campaign")
+FUTURE_SKELETON_KIND = "full_fidelity_algorithm_campaign"
+FUTURE_ONLY_SMOKE_BLOCKS = (
+    "detector",
+    "observation",
+    "trajectory",
+    "smear",
+    "optics",
+    "noise",
+    "active_state",
+    "iterative_update",
+    "knockdowns",
+    "outputs",
+)
+
+
 def _as_mapping(value: Any, *, name: str) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be a mapping.")
     return dict(value)
+
+
+def _warn(message: str, *, emit: bool) -> None:
+    if emit:
+        warnings.warn(message, UserWarning, stacklevel=3)
+
+
+def validate_full_fidelity_smoke_config(
+    config: Mapping[str, Any],
+    *,
+    emit_warnings: bool = False,
+) -> list[str]:
+    """Return actionable smoke-wrapper warnings without rejecting loose fields."""
+
+    warnings_out: list[str] = []
+    experiment = _as_mapping(config.get("experiment", config), name="experiment")
+    kind = str(experiment.get("kind", ""))
+
+    def add(message: str) -> None:
+        warnings_out.append(message)
+        _warn(message, emit=emit_warnings)
+
+    if kind == FUTURE_SKELETON_KIND:
+        add(
+            "experiment.kind='full_fidelity_algorithm_campaign' is the future schema skeleton "
+            "and is not executable by this smoke wrapper. Use "
+            "full_fidelity_binary_iterative_smoke.yaml for current validation."
+        )
+        return warnings_out
+    if kind not in ACCEPTED_CONFIG_KINDS:
+        add(
+            "Unsupported experiment.kind for the full-fidelity smoke wrapper. Accepted kinds are "
+            "'full_fidelity_binary_iterative_smoke' and 'observation_bias_campaign'."
+        )
+        return warnings_out
+    if kind == "observation_bias_campaign":
+        return warnings_out
+
+    spectral = _as_mapping(experiment.get("spectral_model"), name="experiment.spectral_model")
+    if "fast" in spectral:
+        if bool(spectral.get("fast")):
+            add(
+                "spectral_model.fast is consumed by the model-split helper and clamps effective "
+                "spectral grids to truth<=7 and inference<=5 wavelengths. It is not a substitute "
+                "for explicit n_lambda, wavelength range, or response-component settings."
+            )
+        else:
+            add(
+                "spectral_model.fast=false leaves explicit spectral grid settings in control; "
+                "runtime still depends on n_lambda, wavelength range, and enabled response components."
+            )
+
+    future_blocks = [key for key in FUTURE_ONLY_SMOKE_BLOCKS if key in experiment]
+    if future_blocks:
+        add(
+            "Future-schema blocks are present in the smoke config but are not consumed by the "
+            f"smoke wrapper: {', '.join(future_blocks)}. Do not copy skeleton blocks into the "
+            "executable smoke config unless wrapper support is added."
+        )
+
+    subblocks = _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
+    trajectory_processing = subblocks.get("trajectory_processing")
+    smear = (
+        trajectory_processing.get("smear", {})
+        if isinstance(trajectory_processing, Mapping)
+        else {}
+    )
+    render = smear.get("render", {}) if isinstance(smear, Mapping) else {}
+    smear_enabled = bool(smear.get("enabled", False)) if isinstance(smear, Mapping) else False
+    render_mode = (
+        str(render.get("mode", "metadata_only" if smear_enabled else "none"))
+        if isinstance(render, Mapping)
+        else "none"
+    )
+    if render_mode not in {"none", "metadata_only"}:
+        add(
+            "subblocks.trajectory_processing.smear.render.mode requests dynamic/per-frame smear "
+            f"mode {render_mode!r}, but the smoke wrapper only wires metadata_only sidecars today."
+        )
+
+    if isinstance(experiment.get("detector"), Mapping):
+        detector = experiment["detector"]
+        for key in ("pixel_offsets", "flat_field"):
+            if key in detector:
+                add(
+                    f"detector.{key} is present but detector calibration decks are deferred and "
+                    "not wired into the executable smoke wrapper."
+                )
+
+    observation_theta = _as_mapping(experiment.get("observation_theta"), name="experiment.observation_theta")
+    optics_theta = observation_theta.get("optics", {}) if isinstance(observation_theta.get("optics"), Mapping) else {}
+    high_order_requests = [key for key in ("high_order_wfe", "high_order_map", "high_order_map_pixels") if key in optics_theta]
+    if high_order_requests:
+        add(
+            "observation_theta requests high-order map pixels "
+            f"({', '.join(high_order_requests)}), but only source scalars, plate scale, and "
+            "low-order Zernike coefficients are optimizer-visible today."
+        )
+    return warnings_out
 
 
 def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: str | None) -> dict[str, Any]:
@@ -38,9 +160,16 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
             out["experiment"]["run_name"] = run_name
         return out
     if str(experiment.get("kind")) != "full_fidelity_binary_iterative_smoke":
+        if str(experiment.get("kind")) == FUTURE_SKELETON_KIND:
+            raise ValueError(
+                "experiment.kind='full_fidelity_algorithm_campaign' is a non-executable "
+                "schema/design skeleton. Use full_fidelity_binary_iterative_smoke.yaml "
+                "with this wrapper, or implement a future runner for that schema."
+            )
         raise ValueError(
             "Full-fidelity wrapper expects experiment.kind='full_fidelity_binary_iterative_smoke' "
-            "or an already translated observation_bias_campaign config."
+            "or an already translated observation_bias_campaign config. "
+            "experiment.kind='full_fidelity_algorithm_campaign' is not accepted."
         )
 
     subblocks = _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
@@ -138,6 +267,7 @@ def run_full_fidelity_binary_iterative_campaign(
     resource_time: bool | str | None,
 ) -> dict[str, Any]:
     raw = load_config_file(config_path)
+    validate_full_fidelity_smoke_config(raw, emit_warnings=True)
     translated_path = _write_translated_config(raw, run_name=run_name)
     return run_observation_bias_campaign(
         config_path=translated_path,
@@ -176,12 +306,19 @@ def run_full_fidelity_binary_iterative_campaign(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the full-fidelity binary iterative smoke wrapper.")
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
-    parser.add_argument("--run-name", default=None)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--aggregate-only", action="store_true")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Translate and run the thin full-fidelity binary iterative smoke wrapper. "
+            "Accepted experiment.kind values are 'full_fidelity_binary_iterative_smoke' "
+            "and 'observation_bias_campaign'; the future 'full_fidelity_algorithm_campaign' "
+            "skeleton is not executable here. Start with --dry-run."
+        )
+    )
+    parser.add_argument("--config", type=Path, required=True, help="Smoke YAML or already translated observation-bias config.")
+    parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT, help="Directory that will contain the campaign run root.")
+    parser.add_argument("--run-name", default=None, help="Override experiment.run_name.")
+    parser.add_argument("--dry-run", action="store_true", help="Write translated plan/artifacts without running sub-block inference.")
+    parser.add_argument("--aggregate-only", action="store_true", help="Replay aggregation from an existing dry-run/execution run root.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--fail-fast", action=argparse.BooleanOptionalAction, default=True)

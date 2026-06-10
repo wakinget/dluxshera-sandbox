@@ -1,0 +1,301 @@
+[
+  {
+    "field_path": "experiment.kind",
+    "required": true,
+    "consumed_by": "wrapper",
+    "runtime_effect": "selects translator",
+    "fidelity_effect": "none",
+    "provenance_effect": "records source schema",
+    "safe_to_omit": false,
+    "notes": "Must be full_fidelity_binary_iterative_smoke for executable smoke configs.",
+    "example_value": "full_fidelity_binary_iterative_smoke"
+  },
+  {
+    "field_path": "experiment.schema_version",
+    "required": true,
+    "consumed_by": "wrapper/provenance",
+    "runtime_effect": "none",
+    "fidelity_effect": "none",
+    "provenance_effect": "schema label",
+    "safe_to_omit": false,
+    "notes": "Used by reviewers to distinguish the smoke schema from the future skeleton.",
+    "example_value": "full_fidelity_binary_iterative_smoke.v1"
+  },
+  {
+    "field_path": "experiment.run_name",
+    "required": false,
+    "consumed_by": "wrapper",
+    "runtime_effect": "output path only",
+    "fidelity_effect": "none",
+    "provenance_effect": "run identity",
+    "safe_to_omit": true,
+    "notes": "CLI --run-name overrides this value.",
+    "example_value": "full_fidelity_binary_iterative_smoke"
+  },
+  {
+    "field_path": "experiment.seed",
+    "required": false,
+    "consumed_by": "wrapper/observation-bias",
+    "runtime_effect": "deterministic seeding",
+    "fidelity_effect": "changes random realization",
+    "provenance_effect": "base seed",
+    "safe_to_omit": true,
+    "notes": "Default is 42 in the wrapper.",
+    "example_value": 42
+  },
+  {
+    "field_path": "experiment.source_kind",
+    "required": false,
+    "consumed_by": "wrapper",
+    "runtime_effect": "source resolver choice",
+    "fidelity_effect": "selects binary target source semantics",
+    "provenance_effect": "source label",
+    "safe_to_omit": true,
+    "notes": "Defaults to binary_target.",
+    "example_value": "binary_target"
+  },
+  {
+    "field_path": "experiment.target",
+    "required": false,
+    "consumed_by": "wrapper/model-split",
+    "runtime_effect": "SED/source lookup",
+    "fidelity_effect": "target-aware spectral deck",
+    "provenance_effect": "science target",
+    "safe_to_omit": true,
+    "notes": "Defaults to ALPHA_CEN.",
+    "example_value": "ALPHA_CEN"
+  },
+  {
+    "field_path": "experiment.n_cases",
+    "required": false,
+    "consumed_by": "wrapper",
+    "runtime_effect": "case count when prior_draws omitted",
+    "fidelity_effect": "none",
+    "provenance_effect": "smoke scale",
+    "safe_to_omit": true,
+    "notes": "Keep 1 for smoke; use 2-4 for a less tiny validation.",
+    "example_value": 1
+  },
+  {
+    "field_path": "experiment.n_draws",
+    "required": false,
+    "consumed_by": "smoke label only",
+    "runtime_effect": "none today",
+    "fidelity_effect": "none",
+    "provenance_effect": "documents intended tiny draw count",
+    "safe_to_omit": true,
+    "notes": "prior_draws.n_cases controls generated prior cases.",
+    "example_value": 1
+  },
+  {
+    "field_path": "experiment.system_preset",
+    "required": false,
+    "consumed_by": "wrapper",
+    "runtime_effect": "system resolver",
+    "fidelity_effect": "selects SHERA preset",
+    "provenance_effect": "system label",
+    "safe_to_omit": true,
+    "notes": "Defaults to SHERA_FLIGHT_3P.",
+    "example_value": "SHERA_FLIGHT_3P"
+  },
+  {
+    "field_path": "experiment.spectral_model.enabled",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "enables spectral deck",
+    "fidelity_effect": "truth/reference spectral mismatch possible",
+    "provenance_effect": "component summary",
+    "safe_to_omit": true,
+    "notes": "If false/omitted, spectral model split is disabled.",
+    "example_value": true
+  },
+  {
+    "field_path": "experiment.spectral_model.fast",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "clamps truth<=7 and inference<=5 wavelengths",
+    "fidelity_effect": "reduces spectral sampling fidelity",
+    "provenance_effect": "smoke shortcut",
+    "safe_to_omit": true,
+    "notes": "Not a substitute for explicit n_lambda/range/response settings.",
+    "example_value": true
+  },
+  {
+    "field_path": "experiment.spectral_model.preserve_flux_parameters",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "none significant",
+    "fidelity_effect": "keeps scalar flux parameters separate from spectral weights",
+    "provenance_effect": "spectral config",
+    "safe_to_omit": true,
+    "notes": "Default is true in model-split composition.",
+    "example_value": true
+  },
+  {
+    "field_path": "experiment.spectral_model.source_seds.mode",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "SED lookup",
+    "fidelity_effect": "target-aware SED selection",
+    "provenance_effect": "spectral source mode",
+    "safe_to_omit": true,
+    "notes": "target is the current smoke path.",
+    "example_value": "target"
+  },
+  {
+    "field_path": "experiment.spectral_model.truth.n_lambda",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "truth wavelength grid cost",
+    "fidelity_effect": "truth spectral sampling",
+    "provenance_effect": "truth deck",
+    "safe_to_omit": true,
+    "notes": "With fast=true the effective value is clamped to <=7.",
+    "example_value": 51
+  },
+  {
+    "field_path": "experiment.spectral_model.truth.components.detector_qe.enabled",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "response-table work if enabled",
+    "fidelity_effect": "detector QE realism",
+    "provenance_effect": "truth component",
+    "safe_to_omit": true,
+    "notes": "Disabled in smoke to keep dependencies/cost small.",
+    "example_value": false
+  },
+  {
+    "field_path": "experiment.spectral_model.truth.components.m2_filter_response.enabled",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "response-table work if enabled",
+    "fidelity_effect": "filter response realism",
+    "provenance_effect": "truth component",
+    "safe_to_omit": true,
+    "notes": "Disabled in smoke to keep dependencies/cost small.",
+    "example_value": false
+  },
+  {
+    "field_path": "experiment.spectral_model.inference.n_lambda",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "inference/reference spectral grid cost",
+    "fidelity_effect": "reference spectral sampling",
+    "provenance_effect": "inference deck",
+    "safe_to_omit": true,
+    "notes": "Use 5-7 for a less tiny validation; fast=true clamps to <=5.",
+    "example_value": 3
+  },
+  {
+    "field_path": "experiment.high_order_wfe.truth.npix",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "WFE map generation and optics array size",
+    "fidelity_effect": "high-order spatial sampling",
+    "provenance_effect": "truth WFE deck",
+    "safe_to_omit": true,
+    "notes": "16 is smoke scale; 32 or 64 is a next-step validation value.",
+    "example_value": 16
+  },
+  {
+    "field_path": "experiment.high_order_wfe.truth.amplitude_nm_rms",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "none significant",
+    "fidelity_effect": "truth high-order WFE amplitude",
+    "provenance_effect": "truth WFE deck",
+    "safe_to_omit": true,
+    "notes": "Controls physical truth/reference mismatch when knowledge_error is nonzero.",
+    "example_value": 0.3
+  },
+  {
+    "field_path": "experiment.high_order_wfe.artifacts.write_maps",
+    "required": false,
+    "consumed_by": "model-split helper",
+    "runtime_effect": "artifact I/O",
+    "fidelity_effect": "none",
+    "provenance_effect": "debug artifact availability",
+    "safe_to_omit": true,
+    "notes": "False keeps smoke artifacts small.",
+    "example_value": false
+  },
+  {
+    "field_path": "experiment.subblocks.n_frames",
+    "required": false,
+    "consumed_by": "observation-bias campaign",
+    "runtime_effect": "linear-ish render/inference cost",
+    "fidelity_effect": "temporal sampling",
+    "provenance_effect": "plan scale",
+    "safe_to_omit": true,
+    "notes": "3 is smoke scale; 5-10 is a less tiny validation.",
+    "example_value": 3
+  },
+  {
+    "field_path": "experiment.subblocks.reference_n_iter",
+    "required": false,
+    "consumed_by": "observation-bias campaign",
+    "runtime_effect": "optimizer iterations",
+    "fidelity_effect": "reference-solve convergence",
+    "provenance_effect": "optimizer config",
+    "safe_to_omit": true,
+    "notes": "3 is deliberately tiny.",
+    "example_value": 3
+  },
+  {
+    "field_path": "experiment.subblocks.trajectory_processing.smear.render.mode",
+    "required": false,
+    "consumed_by": "model-split metadata",
+    "runtime_effect": "metadata_only avoids dynamic smear rendering",
+    "fidelity_effect": "dynamic smear not active",
+    "provenance_effect": "smear sidecar mode",
+    "safe_to_omit": true,
+    "notes": "Only none/metadata_only are wired in the smoke wrapper.",
+    "example_value": "metadata_only"
+  },
+  {
+    "field_path": "experiment.iterative.update_gain",
+    "required": false,
+    "consumed_by": "observation-bias iterative update",
+    "runtime_effect": "none significant",
+    "fidelity_effect": "update damping/stability",
+    "provenance_effect": "iterative plan",
+    "safe_to_omit": true,
+    "notes": "0.25 is conservative for smoke.",
+    "example_value": 0.25
+  },
+  {
+    "field_path": "experiment.iterative.update_safety.posterior_sigma_inflation",
+    "required": false,
+    "consumed_by": "observation-bias iterative update",
+    "runtime_effect": "none significant",
+    "fidelity_effect": "conservative posterior uncertainty",
+    "provenance_effect": "update safety",
+    "safe_to_omit": true,
+    "notes": "10.0 is a smoke safety guard.",
+    "example_value": 10.0
+  },
+  {
+    "field_path": "experiment.observation_theta.optics.primary_zernikes.indices",
+    "required": false,
+    "consumed_by": "observation theta layout",
+    "runtime_effect": "state dimension",
+    "fidelity_effect": "active low-order optical parameters",
+    "provenance_effect": "theta layout",
+    "safe_to_omit": true,
+    "notes": "[0] is tiny; from_system or more indices increases state dimension.",
+    "example_value": [
+      0
+    ]
+  },
+  {
+    "field_path": "experiment.prior_draws.sigmas.*",
+    "required": false,
+    "consumed_by": "observation-bias campaign",
+    "runtime_effect": "prior draw generation",
+    "fidelity_effect": "initial offset size",
+    "provenance_effect": "prior draw table",
+    "safe_to_omit": true,
+    "notes": "Initialization only; does not add physical realism terms.",
+    "example_value": null
+  }
+]

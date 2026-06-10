@@ -1,6 +1,10 @@
-# Full-fidelity algorithm campaign schema skeleton.
-# This file is intentionally not consumed by a runner yet. It records the v1
-# architecture contract future implementation tasks should build against.
+# NOT EXECUTABLE BY CURRENT RUNNER.
+# SCHEMA SKELETON / DESIGN TARGET.
+# Use full_fidelity_binary_iterative_smoke.yaml for current validation.
+#
+# Full-fidelity algorithm campaign schema skeleton. This file is intentionally
+# not consumed by a runner yet. It records the v1 architecture contract future
+# implementation tasks should build against.
 experiment:
   kind: full_fidelity_algorithm_campaign
   schema_version: full_fidelity_algorithm_campaign.v1
