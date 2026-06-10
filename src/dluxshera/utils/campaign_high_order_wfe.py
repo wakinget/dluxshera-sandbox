@@ -54,11 +54,12 @@ def _stable_seed(seed_context: Mapping[str, Any], explicit_seed: Any = None) -> 
     return int(digest[:8], 16)
 
 
-def _array_ref(array: np.ndarray, *, path: Path | None) -> dict[str, Any]:
+def _array_ref(array: np.ndarray, *, path: Path | None, write_array: bool = True) -> dict[str, Any]:
     if path is None:
         return {"array_nm": np.asarray(array, dtype=float).tolist()}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(path, np.asarray(array, dtype=float))
+    if write_array:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, np.asarray(array, dtype=float))
     return {"array_path": str(path)}
 
 
@@ -68,6 +69,7 @@ def _map_cfg_from_mirror(
     truth: bool,
     knowledge_enabled: bool,
     config_map_root: Path | None = None,
+    write_config_maps: bool = True,
 ) -> dict[str, Any]:
     # The optics builder currently consumes this legacy realization shape. Use
     # deterministic precomputed arrays to avoid regenerating maps in child runs.
@@ -82,6 +84,7 @@ def _map_cfg_from_mirror(
                 path=None
                 if config_map_root is None
                 else config_map_root / f"{mirror.mirror}_high_order_truth_opd_nm.npy",
+                write_array=write_config_maps,
             ),
         },
         "knowledge_error": {"enabled": False},
@@ -97,6 +100,7 @@ def _map_cfg_from_mirror(
                 path=None
                 if config_map_root is None
                 else config_map_root / f"{mirror.mirror}_high_order_error_opd_nm.npy",
+                write_array=write_config_maps,
             ),
         }
     return base
@@ -109,6 +113,7 @@ def _deck_cfg_to_optics_block(
     truth: bool,
     knowledge_enabled: bool,
     config_map_root: Path | None = None,
+    write_config_maps: bool = True,
 ) -> dict[str, Any]:
     block: dict[str, Any] = {"enabled": bool(mirrors), "schema_version": SCHEMA_VERSION}
     if "primary" in mirrors:
@@ -117,6 +122,7 @@ def _deck_cfg_to_optics_block(
             truth=truth,
             knowledge_enabled=knowledge_enabled,
             config_map_root=config_map_root,
+            write_config_maps=write_config_maps,
         )
     if "secondary" in mirrors:
         block["secondary"] = _map_cfg_from_mirror(
@@ -124,6 +130,7 @@ def _deck_cfg_to_optics_block(
             truth=truth,
             knowledge_enabled=knowledge_enabled,
             config_map_root=config_map_root,
+            write_config_maps=write_config_maps,
         )
     return block
 
@@ -238,6 +245,7 @@ def apply_high_order_wfe_campaign_config(
         truth=True,
         knowledge_enabled=False,
         config_map_root=config_map_root,
+        write_config_maps=write_artifacts,
     )
     inference_optics["high_order_wfe"] = _deck_cfg_to_optics_block(
         deck,
@@ -245,6 +253,7 @@ def apply_high_order_wfe_campaign_config(
         truth=False,
         knowledge_enabled=knowledge_enabled,
         config_map_root=config_map_root,
+        write_config_maps=write_artifacts,
     )
     truth_system["optics"] = truth_optics
     inference_system["optics"] = inference_optics

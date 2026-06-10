@@ -805,3 +805,9 @@ Render handling has two deliberately scoped modes:
 - `subblock_constant_layer` computes one representative per-subblock line kernel and injects an existing `ApplyConvolution` detector layer in standalone trajectory render configs.
 
 Per-frame dynamic convolution kernels, dynamic crop / ROI-origin realism, high-order WFE coupling, spectral/WFE/trajectory combined smokes, and production trajectory campaigns are deferred.
+
+## Model-Split Provenance
+
+Observation-bias and full-fidelity smoke plans now reference the shared `campaign_model_split.v1` contract. Trajectory mode still preserves the existing file semantics: `frame_truth.csv` is frame-center render truth, `starting_guess_prediction.csv` is optimizer initialization only, and smear truth/model sidecars remain separate artifacts.
+
+When trajectory smear is enabled in the full-fidelity smoke, the model split records `trajectory_smear.enabled=true` and `mode=metadata_only`. This is provenance only for the first smoke; dynamic crop/ROI handling and per-frame dynamic smear kernels remain deferred.

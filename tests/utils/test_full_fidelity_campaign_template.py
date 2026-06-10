@@ -9,6 +9,10 @@ TEMPLATE_PATH = Path(
     "examples/recipes/full_fidelity_algorithm_campaign_template/"
     "full_fidelity_algorithm_campaign_v1.yaml"
 )
+SMOKE_TEMPLATE_PATH = Path(
+    "examples/recipes/full_fidelity_algorithm_campaign_template/"
+    "full_fidelity_binary_iterative_smoke.yaml"
+)
 
 
 def test_full_fidelity_campaign_template_loads_and_keeps_design_contract() -> None:
@@ -77,3 +81,22 @@ def test_full_fidelity_campaign_template_loads_and_keeps_design_contract() -> No
     assert m2_filter["response_scale"] == 0.01
     assert spectral["inference"]["components"]["detector_qe"]["mode"] == "same_as_truth"
     assert spectral["inference"]["components"]["m2_filter_response"]["mode"] == "same_as_truth"
+
+
+def test_full_fidelity_binary_iterative_smoke_template_is_tiny_executable_smoke() -> None:
+    payload = yaml.safe_load(SMOKE_TEMPLATE_PATH.read_text())
+    experiment = payload["experiment"]
+
+    assert experiment["kind"] == "full_fidelity_binary_iterative_smoke"
+    assert experiment["source_kind"] == "binary_target"
+    assert experiment["target"] == "ALPHA_CEN"
+    assert experiment["n_cases"] == 1
+    assert experiment["subblocks"]["n_frames"] == 3
+    assert experiment["subblocks"]["trace_source"]["mode"] == "trajectory"
+    assert experiment["subblocks"]["trajectory_processing"]["smear"]["render"]["mode"] == "metadata_only"
+    assert experiment["iterative"]["enabled"] is True
+    assert experiment["iterative"]["windows_per_draw"] == 2
+    assert experiment["iterative"]["subblocks_per_window"] == 1
+    assert experiment["iterative"]["update_safety"]["posterior_sigma_inflation"] == 10.0
+    assert experiment["spectral_model"]["truth"]["n_lambda"] > experiment["spectral_model"]["inference"]["n_lambda"]
+    assert experiment["high_order_wfe"]["truth"]["npix"] == 16

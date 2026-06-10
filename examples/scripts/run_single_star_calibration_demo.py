@@ -70,8 +70,11 @@ from dluxshera.params.transforms import ARCSEC_PER_RAD
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
 from dluxshera.utils.campaigns import load_existing_campaign_plan
-from dluxshera.utils.campaign_high_order_wfe import (
-    apply_high_order_wfe_campaign_config,
+from dluxshera.utils.campaign_model_split import (
+    build_campaign_model_split,
+    template_hash_row,
+    validate_campaign_model_split_artifacts,
+    write_campaign_model_split_templates,
 )
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
@@ -831,6 +834,7 @@ def write_single_star_templates(
     *,
     experiment_cfg: Mapping[str, Any],
     inference_system_cfg: Mapping[str, Any] | None = None,
+    model_split: Any | None = None,
 ) -> dict[str, Path]:
     """Write run-local JSON templates consumed by ``run_obs_subblock_study.py``."""
 
@@ -840,6 +844,14 @@ def write_single_star_templates(
         experiment_cfg=experiment_cfg,
         inference_system_cfg=inference_system_cfg,
     )
+    if model_split is not None:
+        return write_campaign_model_split_templates(
+            template_root=template_root,
+            trace_payload=payloads["trace"],
+            render_payload=payloads["render"],
+            inference_payload=payloads["inference"],
+            split=model_split,
+        )
     paths: dict[str, Path] = {}
     for name, payload in payloads.items():
         path = template_root / f"{name}_template.json"
@@ -1023,31 +1035,50 @@ def _build_calibration_plan_impl(
             truth_realization.truth_overrides_by_label,
         )
         metadata["resolved_system"] = system_cfg
-    high_order_wfe = apply_high_order_wfe_campaign_config(
-        system_cfg=system_cfg,
+    subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
+    reuse_existing_artifacts = bool(
+        args is not None
+        and (
+            getattr(args, "aggregate_only", False)
+            or (
+                getattr(args, "resume", False)
+                and (run_root / "campaign_plan.json").exists()
+            )
+        )
+    )
+    source_cfg = system_cfg.get("source", {}) if isinstance(system_cfg.get("source"), Mapping) else {}
+    smear_cfg = (
+        subblock_cfg.get("trajectory_processing", {}).get("smear", {})
+        if isinstance(subblock_cfg.get("trajectory_processing"), Mapping)
+        else {}
+    )
+    model_split = build_campaign_model_split(
+        base_system_cfg=system_cfg,
+        spectral_model_cfg=experiment_cfg.get("spectral_model"),
         high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
+        scalar_reference_offsets=truth_realization.truth_overrides_by_label,
+        detector_noise_metadata={
+            "enabled": str(subblock_cfg.get("noise", "disabled")) != "disabled",
+            "noise_mode": str(subblock_cfg.get("noise", "disabled")),
+        },
+        run_root=run_root,
+        artifact_root=run_root / "model_split",
         seed_context={
             "wrapper": "single_star_calibration_demo",
             "run_name": resolved_run_name,
             "base_seed": int(experiment_cfg.get("seed", 42)),
         },
-        artifact_root=run_root / "high_order_wfe",
-        write_artifacts=not bool(
-            args is not None
-            and (
-                getattr(args, "aggregate_only", False)
-                or (
-                    getattr(args, "resume", False)
-                    and (run_root / "campaign_plan.json").exists()
-                )
-            )
-        ),
+        source_kind=str(source_cfg.get("kind", "single_star")),
+        target=source_cfg.get("target"),
+        write_artifacts=not reuse_existing_artifacts,
+        trajectory_smear_metadata=smear_cfg if isinstance(smear_cfg, Mapping) else None,
     )
-    system_cfg = high_order_wfe.truth_system_cfg
-    reference_system_cfg = high_order_wfe.inference_system_cfg
+    system_cfg = model_split.truth_system_cfg
+    reference_system_cfg = model_split.inference_system_cfg
     metadata["resolved_system"] = system_cfg
     metadata["reference_system"] = reference_system_cfg
-    metadata["high_order_wfe"] = high_order_wfe.to_dict()
+    metadata["model_split"] = model_split.to_dict()
+    metadata["high_order_wfe"] = model_split.provenance.get("high_order_wfe", {})
     cases, prior_draw_rows = generate_calibration_cases(
         experiment_cfg=experiment_cfg,
         labels=layout.labels,
@@ -1058,8 +1089,9 @@ def _build_calibration_plan_impl(
         system_cfg,
         experiment_cfg=experiment_cfg,
         inference_system_cfg=reference_system_cfg,
+        model_split=model_split,
     )
-    subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
+    template_hashes = template_hash_row(template_paths, model_split)
     schur_settings = _schur_settings_for_single_star_config(subblock_cfg)
     subblock_cfg["schur_curvature_method"] = schur_settings["schur_curvature_method_requested"]
     if args is not None and bool(getattr(args, "memory_diagnostics", False)):
@@ -1156,8 +1188,9 @@ def _build_calibration_plan_impl(
                     "reference_early_stopping_step_atol": subblock_cfg.get("reference_early_stopping_step_atol"),
                     "reference_early_stopping_grad_norm_atol": subblock_cfg.get("reference_early_stopping_grad_norm_atol"),
                     "use_render_variance": _single_star_use_render_variance(subblock_cfg),
-                    "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
-                    "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
+                    "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
+                    "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
+                    **template_hashes,
                     "command": " ".join(command),
                     "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
                     "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
@@ -1174,7 +1207,9 @@ def _build_calibration_plan_impl(
     resolved_config["experiment"]["truth_realization_summary"] = dict(
         truth_realization.summary
     )
-    resolved_config["experiment"]["high_order_wfe_summary"] = high_order_wfe.to_dict()
+    resolved_config["experiment"]["high_order_wfe_summary"] = model_split.provenance.get("high_order_wfe", {})
+    resolved_config["experiment"]["model_split"] = model_split.to_dict()
+    resolved_config["experiment"]["template_hashes"] = [template_hashes]
     return CalibrationPlan(
         run_root=run_root,
         layout=layout,
@@ -1215,6 +1250,12 @@ def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
         "inactive_truth_keys": list(inactive_truth_keys),
         "single_star_pa_policy": pa_policy,
         "trace_source": dict(plan.trace_source_plan.summary),
+        "model_split": dict(
+            plan.config["experiment"].get("model_split", {})
+        ),
+        "template_hashes": list(
+            plan.config["experiment"].get("template_hashes", [])
+        ),
         "high_order_wfe": dict(
             plan.config["experiment"].get("high_order_wfe_summary", {})
         ),
@@ -1428,6 +1469,17 @@ def _single_star_consistency_diagnostics(
 
 def write_plan_artifacts(plan: CalibrationPlan) -> None:
     _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
+    _write_json(plan.run_root / "model_split.json", plan.config["experiment"].get("model_split", {}))
+    _write_json(
+        plan.run_root / "model_split_summary.json",
+        {
+            "schema_version": "campaign_model_split.v1.run_root_summary",
+            "truth_config_hash": plan.config["experiment"].get("model_split", {}).get("truth_config_hash"),
+            "inference_config_hash": plan.config["experiment"].get("model_split", {}).get("inference_config_hash"),
+            "components": plan.config["experiment"].get("model_split", {}).get("components", {}),
+            "artifact_paths": plan.config["experiment"].get("model_split", {}).get("artifact_paths", {}),
+        },
+    )
     _write_json(plan.run_root / "resolved_config.json", plan.config)
     _write_json(
         plan.run_root / "single_star_consistency_diagnostics.json",
@@ -1436,6 +1488,7 @@ def write_plan_artifacts(plan: CalibrationPlan) -> None:
     _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
     _write_csv(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
     _write_csv(plan.run_root / "subblock_plan.csv", plan.subblock_rows)
+    _write_csv(plan.run_root / "template_hashes.csv", plan.config["experiment"].get("template_hashes", []))
     _write_csv(
         plan.run_root / "calibration_cases.csv",
         [
@@ -2178,6 +2231,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
         if stored_plan is not None:
             validate_stored_trace_source_artifacts(stored_plan)
+            validate_campaign_model_split_artifacts(stored_plan)
             skip_plan_rewrite = True
             stored_paths = stored_plan.get("summary_paths")
             if isinstance(stored_paths, Mapping):
@@ -2190,6 +2244,19 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     )
                 stored_wfe = stored_plan.get("high_order_wfe", {})
                 current_wfe = plan.config["experiment"].get("high_order_wfe_summary", {})
+                stored_split = stored_plan.get("model_split", {})
+                current_split = plan.config["experiment"].get("model_split", {})
+                if isinstance(stored_split, Mapping) and isinstance(current_split, Mapping):
+                    mismatches = []
+                    for key in ("truth_config_hash", "inference_config_hash", "components"):
+                        if current_split.get(key) != stored_split.get(key):
+                            mismatches.append(key)
+                    if mismatches:
+                        raise ValueError(
+                            "Aggregate-only found an existing campaign_plan.json with "
+                            "different model-split provenance. Use the original "
+                            f"config/run root or regenerate the run. Mismatches: {mismatches}"
+                        )
                 if isinstance(stored_wfe, Mapping) and isinstance(current_wfe, Mapping):
                     if (
                         bool(current_wfe.get("provenance", {}).get("enabled", False))

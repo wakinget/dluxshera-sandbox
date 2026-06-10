@@ -73,8 +73,11 @@ from dluxshera.utils.campaigns import (
     load_existing_campaign_plan,
     write_shell_command,
 )
-from dluxshera.utils.campaign_high_order_wfe import (
-    apply_high_order_wfe_campaign_config,
+from dluxshera.utils.campaign_model_split import (
+    build_campaign_model_split,
+    template_hash_row,
+    validate_campaign_model_split_artifacts,
+    write_campaign_model_split_templates,
 )
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
@@ -246,8 +249,7 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
 def _write_observation_bias_templates(
     run_root: Path,
     *,
-    truth_system_cfg: Mapping[str, Any],
-    inference_system_cfg: Mapping[str, Any],
+    model_split: Any,
 ) -> dict[str, Path]:
     template_root = run_root / "templates"
     payloads = {
@@ -255,15 +257,13 @@ def _write_observation_bias_templates(
         "render": load_config_file(DEFAULT_RENDER_TEMPLATE),
         "inference": load_config_file(DEFAULT_INFERENCE_TEMPLATE),
     }
-    payloads["trace"]["system"] = dict(truth_system_cfg)
-    payloads["render"]["system"] = dict(truth_system_cfg)
-    payloads["inference"]["system"] = dict(inference_system_cfg)
-    paths: dict[str, Path] = {}
-    for name, payload in payloads.items():
-        path = template_root / f"{name}_template.json"
-        _write_json(path, payload)
-        paths[name] = path
-    return paths
+    return write_campaign_model_split_templates(
+        template_root=template_root,
+        trace_payload=payloads["trace"],
+        render_payload=payloads["render"],
+        inference_payload=payloads["inference"],
+        split=model_split,
+    )
 
 
 def _matrix_diagnostics(matrix: np.ndarray) -> MatrixDiagnostics:
@@ -833,7 +833,10 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
         )
     )
     update_gain = float(raw_cfg.get("update_gain", 1.0))
+    safety_cfg = dict(raw_cfg.get("update_safety", raw_cfg.get("safety", {})) or {})
     update_mode = str(raw_cfg.get("update_mode", "physical_full"))
+    min_sigma_by_label = safety_cfg.get("min_sigma_by_label")
+    max_abs_update_by_label = safety_cfg.get("max_abs_update_by_label")
     if update_mode not in SUPPORTED_ITERATIVE_UPDATE_MODES:
         raise ValueError(
             "experiment.iterative.update_mode must be one of "
@@ -861,6 +864,17 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
         "carry_prior_mean_with_reference": bool(
             raw_cfg.get("carry_prior_mean_with_reference", True)
         ),
+        "update_safety": {
+            "enabled": bool(safety_cfg.get("enabled", False)),
+            "posterior_sigma_inflation": float(
+                safety_cfg.get("posterior_sigma_inflation", safety_cfg.get("inflation_factor", 1.0))
+            ),
+            "min_sigma_by_label": dict(min_sigma_by_label or {}),
+            "max_abs_update_by_label": dict(max_abs_update_by_label or {}),
+            "reject_on_bad_frame_quality": bool(safety_cfg.get("reject_on_bad_frame_quality", True)),
+            "reject_on_nonfinite_posterior": bool(safety_cfg.get("reject_on_nonfinite_posterior", True)),
+            "policy_note": "Plan-time conservative update audit only; physical_full update remains the existing bounded implementation.",
+        },
         "future_update_modes": [
             mode for mode in SUPPORTED_ITERATIVE_UPDATE_MODES if mode != "physical_full"
         ],
@@ -1327,36 +1341,55 @@ def build_campaign_plan(
     truth_by_label = dict(base_truth_by_label)
     truth_by_label.update(truth_realization.truth_overrides_by_label)
     prior_truth = np.asarray([truth_by_label[label] for label in layout.labels], dtype=float)
-    high_order_wfe = apply_high_order_wfe_campaign_config(
-        system_cfg=system_cfg,
+    subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
+    reuse_existing_artifacts = bool(
+        args is not None
+        and (
+            getattr(args, "aggregate_only", False)
+            or (
+                getattr(args, "resume", False)
+                and (run_root / "campaign_plan.json").exists()
+            )
+        )
+    )
+    source_cfg = system_cfg.get("source", {}) if isinstance(system_cfg.get("source"), Mapping) else {}
+    smear_cfg = (
+        subblock_cfg.get("trajectory_processing", {}).get("smear", {})
+        if isinstance(subblock_cfg.get("trajectory_processing"), Mapping)
+        else {}
+    )
+    model_split = build_campaign_model_split(
+        base_system_cfg=system_cfg,
+        spectral_model_cfg=experiment_cfg.get("spectral_model"),
         high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
+        scalar_reference_offsets=truth_realization.truth_overrides_by_label,
+        detector_noise_metadata={
+            "enabled": str(subblock_cfg.get("noise", "disabled")) != "disabled",
+            "noise_mode": str(subblock_cfg.get("noise", "disabled")),
+        },
+        run_root=run_root,
+        artifact_root=run_root / "model_split",
         seed_context={
             "wrapper": "observation_bias_campaign",
             "run_name": resolved_run_name,
             "base_seed": int(experiment_cfg.get("seed", 42)),
         },
-        artifact_root=run_root / "high_order_wfe",
-        write_artifacts=not bool(
-            args is not None
-            and (
-                getattr(args, "aggregate_only", False)
-                or (
-                    getattr(args, "resume", False)
-                    and (run_root / "campaign_plan.json").exists()
-                )
-            )
-        ),
+        source_kind=str(source_cfg.get("kind", "binary")),
+        target=source_cfg.get("target"),
+        write_artifacts=not reuse_existing_artifacts,
+        trajectory_smear_metadata=smear_cfg if isinstance(smear_cfg, Mapping) else None,
     )
-    system_cfg = high_order_wfe.truth_system_cfg
-    reference_system_cfg = high_order_wfe.inference_system_cfg
+    system_cfg = model_split.truth_system_cfg
+    reference_system_cfg = model_split.inference_system_cfg
     layout_metadata["resolved_system"] = system_cfg
     layout_metadata["reference_system"] = reference_system_cfg
-    layout_metadata["high_order_wfe"] = high_order_wfe.to_dict()
+    layout_metadata["model_split"] = model_split.to_dict()
+    layout_metadata["high_order_wfe"] = model_split.provenance.get("high_order_wfe", {})
     template_paths = _write_observation_bias_templates(
         run_root,
-        truth_system_cfg=system_cfg,
-        inference_system_cfg=reference_system_cfg,
+        model_split=model_split,
     )
+    template_hashes = template_hash_row(template_paths, model_split)
     configured_cases = _parse_bias_cases(
         experiment_cfg,
         layout=layout,
@@ -1372,7 +1405,6 @@ def build_campaign_plan(
         parsed_cases=configured_cases,
         prior_draw_cases=prior_draw_cases,
     )
-    subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
     subblock_command_options = resolve_subblock_command_options(subblock_cfg)
     iterative_cfg = _resolve_iterative_config(experiment_cfg)
     seeding_cfg = _resolve_seeding_config(experiment_cfg)
@@ -1498,8 +1530,9 @@ def build_campaign_plan(
                     "forwarded_flags": ",".join(
                         str(flag) for flag in subblock_command_options["forwarded_flags"]
                     ),
-                    "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
-                    "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
+                    "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
+                    "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
+                    **template_hashes,
                     **plan_options,
                     **seeds,
                     **trace_row,
@@ -1535,6 +1568,9 @@ def build_campaign_plan(
                     "realized_after_reference_update": True,
                     "update_gain": float(iterative_cfg["update_gain"]),
                     "update_mode": str(iterative_cfg["update_mode"]),
+                    "update_safety_json": json.dumps(
+                        iterative_cfg.get("update_safety", {}), sort_keys=True
+                    ),
                     "carry_prior_mean_with_reference": bool(
                         iterative_cfg["carry_prior_mean_with_reference"]
                     ),
@@ -1542,8 +1578,9 @@ def build_campaign_plan(
                         subblock_cfg.get("summary_information_scale", "")
                     ),
                     "trace_source_mode": str(trace_source_plan.mode),
-                    "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
-                    "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
+                    "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
+                    "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
+                    **template_hashes,
                     "theta_reference_offsets_window0_json": json.dumps(
                         dict(case.theta_reference_offsets), sort_keys=True
                     )
@@ -1570,12 +1607,16 @@ def build_campaign_plan(
                         "realized_after_reference_update": True,
                         "update_gain": float(iterative_cfg["update_gain"]),
                         "update_mode": str(iterative_cfg["update_mode"]),
+                        "update_safety_json": json.dumps(
+                            iterative_cfg.get("update_safety", {}), sort_keys=True
+                        ),
                         "summary_information_scale": str(
                             subblock_cfg.get("summary_information_scale", "")
                         ),
                         "trace_source_mode": str(trace_source_plan.mode),
-                        "high_order_wfe_enabled": bool(high_order_wfe.provenance.get("enabled", False)),
-                        "high_order_wfe_summary_json": high_order_wfe.artifact_paths.get("high_order_wfe_summary_json", ""),
+                        "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
+                        "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
+                        **template_hashes,
                         "trace_seed": int(seeds["trace_seed"]),
                         "noise_seed": int(seeds["noise_seed"]),
                     }
@@ -1586,7 +1627,9 @@ def build_campaign_plan(
         "system": system_cfg,
         "reference_system": reference_system_cfg,
     }
-    resolved_config["experiment"]["high_order_wfe_summary"] = high_order_wfe.to_dict()
+    resolved_config["experiment"]["high_order_wfe_summary"] = model_split.provenance.get("high_order_wfe", {})
+    resolved_config["experiment"]["model_split"] = model_split.to_dict()
+    resolved_config["experiment"]["template_hashes"] = [template_hashes]
     return CampaignPlan(
         run_root=run_root,
         layout=layout,
@@ -1637,6 +1680,12 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
             for index, label in enumerate(plan.layout.labels)
         },
         "trace_source": dict(plan.trace_source_plan.summary),
+        "model_split": dict(
+            plan.config["experiment"].get("model_split", {})
+        ),
+        "template_hashes": list(
+            plan.config["experiment"].get("template_hashes", [])
+        ),
         "high_order_wfe": dict(
             plan.config["experiment"].get("high_order_wfe_summary", {})
         ),
@@ -4173,6 +4222,12 @@ def _validate_aggregate_only_stored_plan(
     stored_trace = stored_plan.get("trace_source", {})
     if isinstance(stored_trace, Mapping):
         check("trace_source.mode", str(current_plan.trace_source_plan.mode), str(stored_trace.get("mode", "")))
+    stored_split = stored_plan.get("model_split", {})
+    current_split = current_plan.config["experiment"].get("model_split", {})
+    if isinstance(stored_split, Mapping) and isinstance(current_split, Mapping):
+        check("model_split.truth_config_hash", current_split.get("truth_config_hash"), stored_split.get("truth_config_hash"))
+        check("model_split.inference_config_hash", current_split.get("inference_config_hash"), stored_split.get("inference_config_hash"))
+        check("model_split.components", current_split.get("components", {}), stored_split.get("components", {}))
     stored_wfe = stored_plan.get("high_order_wfe", {})
     current_wfe = current_plan.config["experiment"].get("high_order_wfe_summary", {})
     if isinstance(stored_wfe, Mapping) and isinstance(current_wfe, Mapping):
@@ -4235,12 +4290,36 @@ def run_observation_bias_campaign(
     resource_time: bool | str | None = None,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
+    plan_args = args
+    if plan_args is None:
+        plan_args = argparse.Namespace(
+            aggregate_only=aggregate_only,
+            resume=resume,
+            run_name=None,
+            n_subblocks=None,
+            n_frames=None,
+            trace_source_mode=None,
+            trajectory_csv=None,
+            trajectory_start_s=None,
+            trajectory_duration_s=None,
+            trajectory_n_subblocks=None,
+            trajectory_frame_dt_s=None,
+            trajectory_output_keys=None,
+            trajectory_plan=None,
+            noise=None,
+            phi_ref=None,
+            max_dense_dim=None,
+            schur_curvature_method=None,
+            summary_information_scale=None,
+            seed_policy=None,
+            base_seed=None,
+        )
     plan = build_campaign_plan(
         config_path=config_path,
         results_root=results_root,
         run_name=run_name,
         system_preset=system_preset,
-        args=args,
+        args=plan_args,
     )
     skip_plan_rewrite = False
     if aggregate_only:
@@ -4248,6 +4327,7 @@ def run_observation_bias_campaign(
         stored_plan = load_existing_campaign_plan(stored_plan_path)
         if stored_plan is not None:
             validate_stored_trace_source_artifacts(stored_plan)
+            validate_campaign_model_split_artifacts(stored_plan)
             _validate_aggregate_only_stored_plan(
                 current_plan=plan,
                 stored_plan=stored_plan,
@@ -4328,11 +4408,23 @@ def run_observation_bias_campaign(
     _ensure_dir(plan.run_root)
     if not skip_plan_rewrite:
         _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
+        _write_json(plan.run_root / "model_split.json", plan.config["experiment"].get("model_split", {}))
+        _write_json(
+            plan.run_root / "model_split_summary.json",
+            {
+                "schema_version": "campaign_model_split.v1.run_root_summary",
+                "truth_config_hash": plan.config["experiment"].get("model_split", {}).get("truth_config_hash"),
+                "inference_config_hash": plan.config["experiment"].get("model_split", {}).get("inference_config_hash"),
+                "components": plan.config["experiment"].get("model_split", {}).get("components", {}),
+                "artifact_paths": plan.config["experiment"].get("model_split", {}).get("artifact_paths", {}),
+            },
+        )
         _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
         _write_csv_rows(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
         _write_json(plan.run_root / "resolved_config.json", plan.config)
         _write_csv_rows(plan.run_root / "subblock_plan.csv", _flatten_subblock_plan_rows(plan))
         _write_csv_rows(plan.run_root / "iterative_plan.csv", plan.iterative_plan_rows)
+        _write_csv_rows(plan.run_root / "template_hashes.csv", plan.config["experiment"].get("template_hashes", []))
         _write_csv_rows(plan.run_root / "expected_outputs.csv", plan.expected_output_rows)
         _write_csv_rows(plan.run_root / "bias_cases.csv", _bias_case_rows(plan))
         _write_csv_rows(plan.run_root / "prior_draws.csv", _flatten_prior_draw_rows(plan))

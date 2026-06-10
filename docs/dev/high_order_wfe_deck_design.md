@@ -192,3 +192,9 @@ static render/reference system templates while frame-level X/Y/PA truth and
 starting guesses still come from the existing trace-source artifacts. High-pass
 filtering of raw trajectory data and intra-frame smear via a line-kernel
 `ApplyConvolution` layer are follow-on work, not part of this wiring patch.
+
+## Campaign Model-Split Wiring
+
+The shared `dluxshera.utils.campaign_model_split` helper now composes high-order WFE after any spectral truth/reference split. Truth/render configs receive static high-order OPD maps. Inference/reference configs receive the corresponding knowledge-error maps while preserving earlier inference-side source patches such as spectral weights.
+
+Plans and templates record `truth_config_hash`, `inference_config_hash`, component provenance, and high-order WFE artifact paths. High-order map pixels remain static nuisance realism and are not added to observation theta.

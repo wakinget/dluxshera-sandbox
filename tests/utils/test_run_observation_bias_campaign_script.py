@@ -1479,3 +1479,37 @@ def test_observation_bias_plan_includes_high_order_wfe_templates_and_provenance(
     )
     assert render_template["system"]["optics"]["high_order_wfe"]["enabled"] is True
     assert inference_template["system"] != render_template["system"]
+
+
+def test_aggregate_only_requires_stored_model_split_artifacts(tmp_path: Path) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+
+    module.run_observation_bias_campaign(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="unit_campaign",
+        dry_run=True,
+        aggregate_only=False,
+        resume=False,
+        max_workers=1,
+        quiet=True,
+        resource_time="disabled",
+    )
+    run_root = tmp_path / "unit_campaign"
+    missing = run_root / "model_split" / "model_split.json"
+    missing.unlink()
+
+    with pytest.raises(FileNotFoundError, match="stored model-split artifacts"):
+        module.run_observation_bias_campaign(
+            config_path=config_path,
+            results_root=tmp_path,
+            run_name="unit_campaign",
+            dry_run=False,
+            aggregate_only=True,
+            resume=False,
+            max_workers=1,
+            quiet=True,
+            resource_time="disabled",
+        )

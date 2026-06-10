@@ -33,3 +33,47 @@ Follow-on tasks should implement the schema blocks incrementally:
 3. detector pixel-offset and flat-field deck;
 4. trajectory-derived smear model;
 5. full binary iterative campaign wrapper and proposal-facing diagnostics.
+
+## Tiny Binary Iterative Smoke
+
+`full_fidelity_binary_iterative_smoke.yaml` is the first executable, intentionally tiny wrapper recipe. It is not the production full-fidelity campaign. The wrapper at `examples/scripts/run_full_fidelity_binary_iterative_campaign.py` translates this narrow schema into the existing observation-bias campaign runner.
+
+It composes:
+
+- binary/Alpha Cen target source config;
+- target-aware spectral truth/reference grids with component-specific SEDs;
+- high-order WFE truth maps and reference knowledge-error maps;
+- trajectory frame-center truth plus smear sidecars in `metadata_only` mode;
+- conservative physical iterative windows.
+
+The Data/Inference split contract is written under the run root as:
+
+- `model_split/model_split.json`
+- `model_split/model_split_summary.json`
+- `template_hashes.csv`
+- `campaign_plan.json` top-level `model_split` and `template_hashes`
+- per-row hash/path columns in `subblock_plan.csv`, `expected_outputs.csv`, and `iterative_plan.csv`
+
+Trace and render templates use the truth system config. Inference templates use the reference/inference system config. Spectral shape and high-order map pixels are not optimizer-visible parameters.
+
+Dry-run:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_full_fidelity_binary_iterative_campaign.py \
+  --config examples/recipes/full_fidelity_algorithm_campaign_template/full_fidelity_binary_iterative_smoke.yaml \
+  --run-name full_fidelity_binary_iterative_smoke_dryrun \
+  --dry-run \
+  --no-resource-time
+```
+
+Optional tiny execution should remain opt-in and local-scale:
+
+```bash
+PYTHONPATH=src python examples/scripts/run_full_fidelity_binary_iterative_campaign.py \
+  --config examples/recipes/full_fidelity_algorithm_campaign_template/full_fidelity_binary_iterative_smoke.yaml \
+  --run-name full_fidelity_binary_iterative_smoke_exec \
+  --max-workers 1 \
+  --no-resource-time
+```
+
+Deferred: production-scale campaigns, dynamic crop/ROI-origin realism, per-frame dynamic smear kernels, active high-order map inference, spectral-shape inference, and full Bayesian recursive filtering.

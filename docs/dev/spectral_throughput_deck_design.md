@@ -181,3 +181,9 @@ Synthetic SED fallbacks remain available for debugging:
 python3 examples/scripts/render_spectral_deck_smoke.py --sed-mode synthetic-ramp
 python3 examples/scripts/render_spectral_deck_smoke.py --sed-mode flat
 ```
+
+## Campaign Model-Split Wiring
+
+The spectral deck is now consumed by the shared campaign model-split helper, not only by the render smoke. Binary target configs use target-aware component SEDs; `source.log_flux_total` and `source.contrast` remain detected, post-response, band-integrated flux parameters. The spectral deck records wavelength counts, effective wavelengths, flux factors, and comparison metrics in model-split provenance.
+
+Campaign templates and plan tables carry stable truth/reference hashes so later Schur summaries can be audited against the truth model that generated data and the reference model used for inference. Spectral shape is still not optimizer-visible.
