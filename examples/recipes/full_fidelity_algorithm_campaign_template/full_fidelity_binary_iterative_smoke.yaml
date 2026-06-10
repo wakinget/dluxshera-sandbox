@@ -69,7 +69,7 @@ experiment:
     noise: disabled
     phi_ref: truth_when_available
     schur_curvature_method: auto
-    max_dense_dim: 80
+    max_dense_dim: 40
     schur_damping: 1.0e-8
     exposure_time_s: 0.05
     reference_diagnostics_profile: none

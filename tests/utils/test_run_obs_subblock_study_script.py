@@ -1580,6 +1580,8 @@ def test_starting_guess_csv_patch_filters_to_single_star_active_xy(tmp_path: Pat
 
     init_frame = cfg["experiment"]["inference"]["init"]["frame"]
     assert init_frame["mode"] == "starting_guess_csv"
+    assert Path(init_frame["path"]).is_absolute()
+    assert Path(init_frame["path"]) == starting_guess.resolve()
     assert set(init_frame["columns"]) == {
         "source.x_position_as",
         "source.y_position_as",
@@ -1615,7 +1617,10 @@ def test_starting_guess_csv_patch_preserves_binary_xy_pa(tmp_path: Path):
         starting_guess_csv=starting_guess,
     )
 
-    assert set(cfg["experiment"]["inference"]["init"]["frame"]["columns"]) == {
+    init_frame = cfg["experiment"]["inference"]["init"]["frame"]
+    assert Path(init_frame["path"]).is_absolute()
+    assert Path(init_frame["path"]) == starting_guess.resolve()
+    assert set(init_frame["columns"]) == {
         "source.x_position_as",
         "source.y_position_as",
         "source.position_angle_deg",

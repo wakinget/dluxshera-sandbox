@@ -1385,10 +1385,32 @@ def build_campaign_plan(
     layout_metadata["reference_system"] = reference_system_cfg
     layout_metadata["model_split"] = model_split.to_dict()
     layout_metadata["high_order_wfe"] = model_split.provenance.get("high_order_wfe", {})
-    template_paths = _write_observation_bias_templates(
-        run_root,
-        model_split=model_split,
-    )
+    if reuse_existing_artifacts:
+        template_paths = {
+            "trace": run_root / "templates" / "trace_template.json",
+            "render": run_root / "templates" / "render_template.json",
+            "inference": run_root / "templates" / "inference_template.json",
+        }
+        missing_templates = [
+            str(path) for path in template_paths.values() if not Path(path).exists()
+        ]
+        if missing_templates:
+            if bool(getattr(args, "aggregate_only", False)):
+                template_paths = {
+                    "trace": DEFAULT_SCHUR_TRACE_TEMPLATE,
+                    "render": DEFAULT_RENDER_TEMPLATE,
+                    "inference": DEFAULT_INFERENCE_TEMPLATE,
+                }
+            else:
+                raise FileNotFoundError(
+                    "Stored campaign template artifacts are required for resume; missing: "
+                    + ", ".join(missing_templates)
+                )
+    else:
+        template_paths = _write_observation_bias_templates(
+            run_root,
+            model_split=model_split,
+        )
     template_hashes = template_hash_row(template_paths, model_split)
     configured_cases = _parse_bias_cases(
         experiment_cfg,
@@ -3513,6 +3535,11 @@ def _window_plan(
             trace_seed=int(row["trace_seed"]),
             noise_seed=int(row["noise_seed"]),
             trace_subblock=plan.trace_source_plan.subblocks[global_index],
+            template_paths={
+                "trace": Path(str(row["trace_template_path"])),
+                "render": Path(str(row["render_template_path"])),
+                "inference": Path(str(row["inference_template_path"])),
+            },
         )
         commands.append(command)
         subblock_rows.append(

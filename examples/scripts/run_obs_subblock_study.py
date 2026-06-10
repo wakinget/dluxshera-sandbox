@@ -4214,10 +4214,7 @@ def _build_study_inference_config(
         )
         frame_init_cfg.clear()
         frame_init_cfg["mode"] = "starting_guess_csv"
-        frame_init_cfg["path"] = case_module._path_for_config(
-            starting_guess_csv.resolve(),
-            config_dir=run_root,
-        )
+        frame_init_cfg["path"] = str(starting_guess_csv.resolve())
         active_cfg = case_module._ensure_mapping(
             inference_cfg,
             "active",
