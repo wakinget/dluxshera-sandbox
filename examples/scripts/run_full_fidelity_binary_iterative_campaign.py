@@ -1,7 +1,8 @@
-"""Run the executable full-fidelity binary iterative smoke campaign.
+"""Run executable full-fidelity binary iterative review/smoke campaigns.
 
-This is a thin smoke wrapper, not a new campaign framework. It accepts the
-small ``full_fidelity_binary_iterative_smoke`` schema, translates it into the
+This is a thin wrapper, not a new campaign framework. It accepts the
+``full_fidelity_binary_iterative_review`` and
+``full_fidelity_binary_iterative_smoke`` schemas, translates them into the
 existing ``observation_bias_campaign`` schema, and delegates execution to
 ``run_observation_bias_campaign.py``. Already translated
 ``observation_bias_campaign`` configs are also accepted for replay/debugging.
@@ -29,7 +30,11 @@ from run_observation_bias_campaign import (  # type: ignore
 )
 
 
-ACCEPTED_CONFIG_KINDS = ("full_fidelity_binary_iterative_smoke", "observation_bias_campaign")
+FULL_FIDELITY_EXECUTABLE_KINDS = (
+    "full_fidelity_binary_iterative_smoke",
+    "full_fidelity_binary_iterative_review",
+)
+ACCEPTED_CONFIG_KINDS = (*FULL_FIDELITY_EXECUTABLE_KINDS, "observation_bias_campaign")
 FUTURE_SKELETON_KIND = "full_fidelity_algorithm_campaign"
 FUTURE_ONLY_SMOKE_BLOCKS = (
     "detector",
@@ -76,14 +81,16 @@ def validate_full_fidelity_smoke_config(
     if kind == FUTURE_SKELETON_KIND:
         add(
             "experiment.kind='full_fidelity_algorithm_campaign' is the future schema skeleton "
-            "and is not executable by this smoke wrapper. Use "
-            "full_fidelity_binary_iterative_smoke.yaml for current validation."
+            "and is not executable by this wrapper. Use "
+            "full_fidelity_binary_iterative_review.yaml for resolved-system review "
+            "or full_fidelity_binary_iterative_smoke.yaml for tiny wiring validation."
         )
         return warnings_out
     if kind not in ACCEPTED_CONFIG_KINDS:
         add(
-            "Unsupported experiment.kind for the full-fidelity smoke wrapper. Accepted kinds are "
-            "'full_fidelity_binary_iterative_smoke' and 'observation_bias_campaign'."
+            "Unsupported experiment.kind for the full-fidelity wrapper. Accepted kinds are "
+            "'full_fidelity_binary_iterative_review', 'full_fidelity_binary_iterative_smoke', "
+            "and 'observation_bias_campaign'."
         )
         return warnings_out
     if kind == "observation_bias_campaign":
@@ -102,6 +109,11 @@ def validate_full_fidelity_smoke_config(
                 "spectral_model.fast=false leaves explicit spectral grid settings in control; "
                 "runtime still depends on n_lambda, wavelength range, and enabled response components."
             )
+    if kind == "full_fidelity_binary_iterative_review" and "fast" in spectral:
+        add(
+            "spectral_model.fast is smoke-only and should be absent from the review config; "
+            "use explicit spectral grids instead."
+        )
 
     future_blocks = [key for key in FUTURE_ONLY_SMOKE_BLOCKS if key in experiment]
     if future_blocks:
@@ -112,6 +124,12 @@ def validate_full_fidelity_smoke_config(
         )
 
     subblocks = _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
+    if isinstance(subblocks.get("noise"), Mapping):
+        add(
+            "subblocks.noise uses the structured review schema. The current subblock runner "
+            "receives only a legacy enabled/disabled noise flag; individual shot/read/dark "
+            "terms are recorded in provenance but not separately controlled yet."
+        )
     trajectory_processing = subblocks.get("trajectory_processing")
     smear = (
         trajectory_processing.get("smear", {})
@@ -152,6 +170,34 @@ def validate_full_fidelity_smoke_config(
     return warnings_out
 
 
+def _normalize_subblock_noise_for_observation_bias(subblocks: Mapping[str, Any]) -> dict[str, Any]:
+    """Map structured review noise requests onto the current legacy runner flag.
+
+    The subblock runner currently accepts only ``--noise enabled|disabled|inherit``.
+    Keep the detailed per-term request in metadata so audits/review notebooks can
+    report which terms are requested and which are not separately controllable.
+    """
+
+    out = dict(subblocks)
+    noise = out.get("noise")
+    if isinstance(noise, Mapping):
+        noise_cfg = dict(noise)
+        enabled = bool(noise_cfg.get("enabled", False))
+        out["noise_model"] = {
+            "schema_version": "structured_noise_request.v1",
+            "requested": noise_cfg,
+            "legacy_runner_flag": "enabled" if enabled else "disabled",
+            "separate_term_control": False,
+            "warning": (
+                "Structured shot/read/dark-current settings are translated to the "
+                "legacy subblock --noise enabled/disabled flag; separate per-term "
+                "runner controls are not implemented yet."
+            ),
+        }
+        out["noise"] = "enabled" if enabled else "disabled"
+    return out
+
+
 def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: str | None) -> dict[str, Any]:
     experiment = _as_mapping(config.get("experiment", config), name="experiment")
     if str(experiment.get("kind", "")) == "observation_bias_campaign":
@@ -159,20 +205,25 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
         if run_name is not None:
             out["experiment"]["run_name"] = run_name
         return out
-    if str(experiment.get("kind")) != "full_fidelity_binary_iterative_smoke":
+    kind = str(experiment.get("kind"))
+    if kind not in FULL_FIDELITY_EXECUTABLE_KINDS:
         if str(experiment.get("kind")) == FUTURE_SKELETON_KIND:
             raise ValueError(
                 "experiment.kind='full_fidelity_algorithm_campaign' is a non-executable "
-                "schema/design skeleton. Use full_fidelity_binary_iterative_smoke.yaml "
+                "schema/design skeleton. Use full_fidelity_binary_iterative_review.yaml "
+                "or full_fidelity_binary_iterative_smoke.yaml "
                 "with this wrapper, or implement a future runner for that schema."
             )
         raise ValueError(
-            "Full-fidelity wrapper expects experiment.kind='full_fidelity_binary_iterative_smoke' "
-            "or an already translated observation_bias_campaign config. "
+            "Full-fidelity wrapper expects experiment.kind='full_fidelity_binary_iterative_review', "
+            "'full_fidelity_binary_iterative_smoke', or an already translated "
+            "observation_bias_campaign config. "
             "experiment.kind='full_fidelity_algorithm_campaign' is not accepted."
         )
 
-    subblocks = _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
+    subblocks = _normalize_subblock_noise_for_observation_bias(
+        _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
+    )
     iterative = _as_mapping(experiment.get("iterative"), name="experiment.iterative")
     source_kind = str(experiment.get("source_kind", "binary_target"))
     target = experiment.get("target", "ALPHA_CEN")
@@ -206,10 +257,10 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
     translated = {
         "experiment": {
             "kind": "observation_bias_campaign",
-            "source_campaign_kind": "full_fidelity_binary_iterative_smoke",
-            "schema_version": "full_fidelity_binary_iterative_smoke.translated.v1",
+            "source_campaign_kind": kind,
+            "schema_version": f"{kind}.translated.v1",
             "seed": int(experiment.get("seed", 42)),
-            "run_name": run_name or experiment.get("run_name", "full_fidelity_binary_iterative_smoke"),
+            "run_name": run_name or experiment.get("run_name", kind),
             "system": {
                 "preset": experiment.get("system_preset", "SHERA_FLIGHT_3P"),
                 "source": {"kind": source_kind, "target": target},
@@ -308,13 +359,14 @@ def run_full_fidelity_binary_iterative_campaign(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Translate and run the thin full-fidelity binary iterative smoke wrapper. "
-            "Accepted experiment.kind values are 'full_fidelity_binary_iterative_smoke' "
-            "and 'observation_bias_campaign'; the future 'full_fidelity_algorithm_campaign' "
-            "skeleton is not executable here. Start with --dry-run."
+            "Translate and run the thin full-fidelity binary iterative wrapper. "
+            "Accepted experiment.kind values are 'full_fidelity_binary_iterative_review', "
+            "'full_fidelity_binary_iterative_smoke', and 'observation_bias_campaign'; "
+            "the future 'full_fidelity_algorithm_campaign' skeleton is not executable here. "
+            "Start with --dry-run."
         )
     )
-    parser.add_argument("--config", type=Path, required=True, help="Smoke YAML or already translated observation-bias config.")
+    parser.add_argument("--config", type=Path, required=True, help="Review/smoke YAML or already translated observation-bias config.")
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT, help="Directory that will contain the campaign run root.")
     parser.add_argument("--run-name", default=None, help="Override experiment.run_name.")
     parser.add_argument("--dry-run", action="store_true", help="Write translated plan/artifacts without running sub-block inference.")

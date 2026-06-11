@@ -161,8 +161,18 @@ def _trajectory_plan(
     plate_scale_as_per_pix: float | None,
 ) -> PreparedTraceSourcePlan:
     source_cfg = dict(trace_source_cfg.get("source", {}) or {})
-    if str(source_cfg.get("kind", "airbus_csv")) != "airbus_csv":
-        raise ValueError("Only subblocks.trace_source.source.kind='airbus_csv' is supported.")
+    source_kind_value = str(source_cfg.get("kind", "airbus_csv"))
+    source_format = str(source_cfg.get("format", "airbus_xyz_arcsec"))
+    if source_kind_value == "csv" and source_format != "airbus_xyz_arcsec":
+        raise ValueError(
+            "subblocks.trace_source.source.kind='csv' currently supports only "
+            "format='airbus_xyz_arcsec'."
+        )
+    if source_kind_value not in {"airbus_csv", "csv"}:
+        raise ValueError(
+            "Only subblocks.trace_source.source.kind='airbus_csv' or "
+            "kind='csv' with format='airbus_xyz_arcsec' is supported."
+        )
     source_path = _resolve_path(
         source_cfg.get(
             "path",
@@ -286,7 +296,8 @@ def _trajectory_plan(
             "trace_source_mode": TRACE_SOURCE_MODE_TRAJECTORY,
             "frame_truth_path": str(paths["frame_truth_csv"]),
             "starting_guess_prediction_path": str(paths["starting_guess_prediction_csv"]),
-            "trajectory_source_kind": "airbus_csv",
+            "trajectory_source_kind": source_kind_value,
+            "trajectory_source_format": source_format,
             "trajectory_source_path": str(source_path),
             "trajectory_window_start_s": float(frame_times[0]),
             "trajectory_window_end_s": float(frame_times[-1]),
@@ -341,7 +352,8 @@ def _trajectory_plan(
         summary={
             "mode": TRACE_SOURCE_MODE_TRAJECTORY,
             "source_kind": source_kind,
-            "trajectory_source_kind": "airbus_csv",
+            "trajectory_source_kind": source_kind_value,
+            "trajectory_source_format": source_format,
             "trajectory_source_path": str(source_path),
             "raw_sample_dt_s": sample_dt_s,
             "selected_time_span_s": [float(frame_times[0]), float(frame_times[-1])],

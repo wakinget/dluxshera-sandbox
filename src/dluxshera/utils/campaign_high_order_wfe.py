@@ -14,6 +14,7 @@ from .high_order_wfe import (
     HighOrderWfeDeck,
     MirrorWfeDeck,
     build_high_order_wfe_deck,
+    fit_zernike_coefficients_nm,
     write_high_order_wfe_deck_artifacts,
 )
 
@@ -210,20 +211,37 @@ def apply_high_order_wfe_campaign_config(
     amp = float(truth_cfg.get("amplitude_nm_rms", truth_cfg.get("rms_opd_nm", 1.0)))
     error_amp = float(knowledge_cfg.get("amplitude_nm_rms", knowledge_cfg.get("rms_nm", 0.3))) if knowledge_enabled else 0.0
     alpha = float(truth_cfg.get("power_law_alpha", truth_cfg.get("alpha", 2.5)))
-    error_alpha = float(knowledge_cfg.get("power_law_alpha", knowledge_cfg.get("alpha", alpha)))
+    raw_error_alpha = knowledge_cfg.get("power_law_alpha", knowledge_cfg.get("alpha", alpha))
+    error_alpha = alpha if str(raw_error_alpha).strip().lower() == "same_as_truth" else float(raw_error_alpha)
+    remove_error_low_order = bool(
+        knowledge_cfg.get(
+            "remove_low_order_zernikes",
+            truth_cfg.get("remove_low_order_zernikes", True),
+        )
+    )
+    low_order_noll = [
+        int(i)
+        for i in truth_cfg.get(
+            "remove_zernike_modes",
+            [4, 5, 6, 7, 8, 9, 10, 11]
+            if truth_cfg.get("remove_low_order_zernikes", True)
+            else [],
+        )
+    ]
 
     mirror_wfe_cfg = {
         "truth": {
             "rms_opd_nm": amp,
             "power_law_alpha": alpha,
-            "fit_low_order_zernikes": [4, 5, 6, 7, 8, 9, 10, 11]
-            if truth_cfg.get("remove_low_order_zernikes", True)
-            else [],
+            "fit_low_order_zernikes": low_order_noll,
         },
         "knowledge": {
             "low_order_sigma_nm_per_coeff": 0.0,
             "high_order_error_rms_nm": error_amp,
             "high_order_error_power_law_alpha": error_alpha,
+            "high_order_error_remove_noll_indices": low_order_noll
+            if remove_error_low_order
+            else [],
         },
     }
     deck = build_high_order_wfe_deck(
@@ -272,9 +290,12 @@ def apply_high_order_wfe_campaign_config(
         "knowledge_enabled": knowledge_enabled,
         "truth_amplitude_nm_rms": amp,
         "knowledge_error_amplitude_nm_rms": error_amp,
+        "knowledge_error_power_law_alpha": error_alpha,
+        "knowledge_error_remove_low_order_zernikes": remove_error_low_order,
         "mask_policy": mask_policy,
         "npix": shape_npix,
         "remove_low_order_zernikes": bool(truth_cfg.get("remove_low_order_zernikes", True)),
+        "remove_zernike_modes": low_order_noll,
         "primary": _mirror_summary(deck.primary, active="primary" in mirrors),
         "secondary": _mirror_summary(deck.secondary, active="secondary" in mirrors),
         "deck_comparison": deck.comparison,
@@ -300,6 +321,30 @@ def apply_high_order_wfe_campaign_config(
         raise ValueError("High-order WFE validation requires nonzero truth/inference difference, but knowledge error amplitude is zero.")
     if not knowledge_enabled:
         warnings.append("High-order WFE inference knowledge error is disabled; truth/reference maps match.")
+    max_abs_low_order = validation_cfg.get("max_abs_low_order_projection_nm")
+    if max_abs_low_order is not None and knowledge_enabled and low_order_noll:
+        limit = float(max_abs_low_order)
+        low_order_projection: dict[str, dict[str, float]] = {}
+        for mirror_deck in (deck.primary, deck.secondary):
+            coeffs = fit_zernike_coefficients_nm(
+                mirror_deck.high_order_knowledge_error.opd_nm,
+                low_order_noll,
+                mask=mirror_deck.high_order_knowledge_error.mask,
+            )
+            max_abs = max((abs(float(v)) for v in coeffs.values()), default=0.0)
+            low_order_projection[mirror_deck.mirror] = {
+                **{key: float(value) for key, value in coeffs.items()},
+                "max_abs_projection_nm": float(max_abs),
+            }
+            if max_abs > limit:
+                message = (
+                    f"{mirror_deck.mirror} high-order knowledge-error low-order projection "
+                    f"{max_abs:.6g} nm exceeds validation.max_abs_low_order_projection_nm={limit:.6g}."
+                )
+                if bool(validation_cfg.get("fail_on_low_order_projection", True)):
+                    raise ValueError(message)
+                warnings.append(message)
+        summary_payload["knowledge_error_low_order_projection_nm"] = low_order_projection
 
     return HighOrderWfeCampaignResult(
         truth_system_cfg=truth_system,

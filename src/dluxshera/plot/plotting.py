@@ -18,9 +18,6 @@ from typing import List, Mapping, MutableSequence, Optional, Sequence, Tuple, Un
 import math
 
 import matplotlib
-
-matplotlib.use("Agg", force=True)
-
 import jax.numpy as np
 import matplotlib.pyplot as plt
 import numpy as onp

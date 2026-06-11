@@ -1,6 +1,4 @@
-# Full-Fidelity Binary Iterative Smoke Config Reference
-
-The smoke config uses the same executable field contract as the review config, but may use fields marked `smoke_only` and tiny runtime values. The review config must not use smoke-only shortcuts such as `spectral_model.fast`.
+# Full-Fidelity Binary Iterative Review Config Reference
 
 Generated from `dluxshera.utils.full_fidelity_config_schema.CONFIG_FIELD_REGISTRY`.
 

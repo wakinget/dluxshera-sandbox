@@ -1,8 +1,9 @@
-"""Audit the executable full-fidelity smoke config without running inference.
+"""Audit executable full-fidelity review/smoke configs without running inference.
 
-The audit translates the narrow smoke schema into the existing observation-bias
-campaign schema, classifies active fields, and writes review artifacts that make
-wrapper-consumed, forwarded, smoke-only, and deferred settings explicit.
+The audit translates the narrow full-fidelity schema into the existing
+observation-bias campaign schema, classifies active fields, and writes review
+artifacts that make wrapper-consumed, forwarded, smoke-only, no-op, and deferred
+settings explicit.
 """
 
 from __future__ import annotations
@@ -16,6 +17,13 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from dluxshera.config.io import load_config_file
+from dluxshera.utils.full_fidelity_config_schema import (
+    CONFIG_FIELD_REGISTRY,
+    iter_string_fields,
+    registry_entry_for_path,
+    registry_rows,
+    validate_config_contract,
+)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER_PATH = REPO_ROOT / "examples" / "scripts" / "run_full_fidelity_binary_iterative_campaign.py"
 DEFAULT_CONFIG = (
@@ -23,9 +31,9 @@ DEFAULT_CONFIG = (
     / "examples"
     / "recipes"
     / "full_fidelity_algorithm_campaign_template"
-    / "full_fidelity_binary_iterative_smoke.yaml"
+    / "full_fidelity_binary_iterative_review.yaml"
 )
-DEFAULT_OUTDIR = REPO_ROOT / "Results" / "full_fidelity_config_audit" / "smoke_v0"
+DEFAULT_OUTDIR = REPO_ROOT / "Results" / "full_fidelity_config_audit" / "review_v0"
 
 WRAPPER_CONSUMED_TOP_LEVEL = {
     "kind",
@@ -185,11 +193,9 @@ def _classify_field(path: str) -> dict[str, Any]:
 
 
 def _field_reference_rows(config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rows = []
-    for row in FIELD_REFERENCE:
-        out = dict(row)
-        out["example_value"] = _get_path(config, str(row["field_path"]))
-        rows.append(out)
+    rows = registry_rows()
+    for out in rows:
+        out["example_value"] = _get_path(config, str(out["field_path"]))
     return rows
 
 
@@ -213,20 +219,10 @@ def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
 
 def _markdown_table(rows: list[dict[str, Any]]) -> str:
     columns = [
-        "Field path",
-        "Example value",
-        "Required?",
-        "Consumed by",
-        "Runtime effect",
-        "Fidelity effect",
-        "Provenance effect",
-        "Safe to omit?",
-        "Notes",
-    ]
-    keys = [
         "field_path",
-        "example_value",
-        "required",
+        "valid_values",
+        "default",
+        "implemented_status",
         "consumed_by",
         "runtime_effect",
         "fidelity_effect",
@@ -236,7 +232,7 @@ def _markdown_table(rows: list[dict[str, Any]]) -> str:
     ]
     lines = ["| " + " | ".join(columns) + " |", "| " + " | ".join(["---"] * len(columns)) + " |"]
     for row in rows:
-        cells = [_json_value(row.get(key)).replace("|", "\\|") for key in keys]
+        cells = [_json_value(row.get(key)).replace("|", "\\|") for key in columns]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -289,7 +285,16 @@ def _component_summary(experiment: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None) -> dict[str, Any]:
+def _config_tier(experiment: Mapping[str, Any], config_path: Path) -> str:
+    kind = str(experiment.get("kind", ""))
+    if "review" in kind or "review" in config_path.name:
+        return "review"
+    if "smoke" in kind or "smoke" in config_path.name:
+        return "smoke"
+    return "translated"
+
+
+def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None, strict: bool = False) -> dict[str, Any]:
     wrapper = _load_wrapper()
     raw = load_config_file(config_path)
     experiment = raw.get("experiment", raw)
@@ -298,6 +303,8 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None)
     experiment = dict(experiment)
     warnings_out = wrapper.validate_full_fidelity_smoke_config(raw, emit_warnings=False)
     kind = str(experiment.get("kind", ""))
+    tier = _config_tier(experiment, config_path)
+    contract = validate_config_contract({"experiment": experiment}, config_tier=tier, strict=strict)
     translated: dict[str, Any] | None = None
     translation_error: str | None = None
     try:
@@ -328,14 +335,37 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None)
         matched_truth_reference.append("experiment.high_order_wfe")
 
     reference_rows = _field_reference_rows({"experiment": experiment})
+    accepted_but_noop_used = []
+    for field_path, value in iter_string_fields({"experiment": experiment}):
+        _, entry = registry_entry_for_path(field_path)
+        if entry and entry.get("implemented_status") == "accepted_but_noop":
+            accepted_but_noop_used.append({"field_path": field_path, "value": value})
+
     audit = {
         "schema_version": "full_fidelity_config_audit.v1",
         "config_path": str(config_path),
         "config_kind": kind,
-        "executable_today": kind in {"full_fidelity_binary_iterative_smoke", "observation_bias_campaign"} and translation_error is None,
+        "config_tier": tier,
+        "strict": bool(strict),
+        "executable_today": kind in {"full_fidelity_binary_iterative_smoke", "full_fidelity_binary_iterative_review", "observation_bias_campaign"} and translation_error is None,
         "future_schema_skeleton": kind == "full_fidelity_algorithm_campaign",
         "translation_error": translation_error,
         "warnings": warnings_out,
+        "contract_findings": contract["findings"],
+        "contract_has_errors": contract["has_errors"],
+        "undocumented_string_fields": [
+            f["field_path"] for f in contract["findings"] if f["code"] == "undocumented_string_field"
+        ],
+        "unsupported_enum_values": [
+            f for f in contract["findings"] if f["code"] == "unsupported_enum_value"
+        ],
+        "future_only_or_deferred_used": [
+            f for f in contract["findings"] if f["code"] in {"future_value_used", "future_field_used"}
+        ],
+        "accepted_but_noop_fields_used": accepted_but_noop_used,
+        "smoke_only_in_review": [
+            f for f in contract["findings"] if f["code"] in {"smoke_only_field_in_review", "smoke_only_value_in_review", "fast_in_review_config"}
+        ],
         "consumed_by_wrapper": [row["field_path"] for row in field_rows if row["category"] == "wrapper_consumed"],
         "forwarded_to_observation_bias": [row["field_path"] for row in field_rows if row["category"] == "forwarded"],
         "recognized_by_model_split_helper": [row["field_path"] for row in field_rows if row["category"] == "model_split_recognized"],
@@ -359,12 +389,17 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None)
 
     md = _render_audit_markdown(audit)
     (outdir / "config_audit.md").write_text(md, encoding="utf-8")
+    if strict and audit["contract_has_errors"]:
+        raise ValueError(
+            "Strict full-fidelity config audit failed: "
+            + "; ".join(f"{f['field_path']}[{f['code']}]" for f in audit["contract_findings"] if f["severity"] == "error")
+        )
     return audit
 
 
 def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
     lines = [
-        "# Full-Fidelity Smoke Config Audit",
+        "# Full-Fidelity Config Audit",
         "",
         f"- Config: `{audit['config_path']}`",
         f"- Kind: `{audit['config_kind']}`",
@@ -376,12 +411,16 @@ def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
     lines.extend(["", "## Warnings"])
     warnings_out = list(audit.get("warnings", []))
     lines.extend([f"- {item}" for item in warnings_out] or ["- None"])
+    lines.extend(["", "## Contract Findings"])
+    findings = list(audit.get("contract_findings", []))
+    lines.extend([f"- `{f['severity']}` `{f['field_path']}` `{f['code']}`: {f['message']}" for f in findings] or ["- None"])
     for title, key in (
         ("Consumed By Wrapper", "consumed_by_wrapper"),
         ("Forwarded To Observation Bias", "forwarded_to_observation_bias"),
         ("Recognized By Model-Split Helper", "recognized_by_model_split_helper"),
         ("Smoke-Only Cost Reducers Or Labels", "smoke_only_cost_reducers_or_labels"),
         ("Unknown Or Currently Unused", "unknown_or_currently_unused"),
+        ("Accepted But No-Op Fields Used", "accepted_but_noop_fields_used"),
         ("Truth/Reference Mismatch", "truth_reference_mismatch_fields"),
         ("Matched Truth/Reference", "matched_truth_reference_fields"),
         ("Deferred Fields Absent", "deferred_fields_absent"),
@@ -394,16 +433,17 @@ def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Audit a full-fidelity smoke config without rendering images or running inference.")
+    parser = argparse.ArgumentParser(description="Audit a full-fidelity review/smoke config without rendering images or running inference.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Config to audit.")
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR, help="Output directory for audit artifacts.")
     parser.add_argument("--run-name", default="full_fidelity_config_audit", help="Run name used only in the translated config artifact.")
+    parser.add_argument("--strict", action="store_true", help="Fail on undocumented strings and unsupported/future enum values.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
-    audit = build_audit(args.config, args.outdir, run_name=args.run_name)
+    audit = build_audit(args.config, args.outdir, run_name=args.run_name, strict=bool(args.strict))
     print(json.dumps({"outdir": str(args.outdir), "config_kind": audit["config_kind"], "warnings": audit["warnings"]}, indent=2))
 
 

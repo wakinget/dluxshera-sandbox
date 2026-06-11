@@ -17,9 +17,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import matplotlib
-
-matplotlib.use("Agg", force=True)
-
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize

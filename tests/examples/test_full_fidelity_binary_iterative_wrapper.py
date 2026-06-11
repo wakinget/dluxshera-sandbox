@@ -87,9 +87,20 @@ def test_config_translation_rejects_future_skeleton_helpfully() -> None:
         raise AssertionError("future skeleton was accepted")
 
 
-def test_wrapper_validation_warns_about_spectral_fast() -> None:
+def test_wrapper_validation_smoke_has_no_hidden_spectral_fast() -> None:
     module = load_module()
     raw = module.load_config_file(CONFIG_PATH)
+
+    warnings = module.validate_full_fidelity_smoke_config(raw)
+
+    assert "fast" not in raw["experiment"]["spectral_model"]
+    assert not any("spectral_model.fast" in warning for warning in warnings)
+
+
+def test_wrapper_validation_warns_about_synthetic_spectral_fast() -> None:
+    module = load_module()
+    raw = module.load_config_file(CONFIG_PATH)
+    raw["experiment"]["spectral_model"]["fast"] = True
 
     warnings = module.validate_full_fidelity_smoke_config(raw)
 

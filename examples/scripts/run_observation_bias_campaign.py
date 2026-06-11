@@ -837,6 +837,33 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
     update_mode = str(raw_cfg.get("update_mode", "physical_full"))
     min_sigma_by_label = safety_cfg.get("min_sigma_by_label")
     max_abs_update_by_label = safety_cfg.get("max_abs_update_by_label")
+    posterior_sigma_policy = str(
+        safety_cfg.get(
+            "posterior_sigma_policy",
+            "inflate_by_factor"
+            if safety_cfg.get("posterior_sigma_inflation", safety_cfg.get("inflation_factor")) is not None
+            else "reported_only",
+        )
+    )
+    if posterior_sigma_policy not in {
+        "reported_only",
+        "inflate_by_factor",
+        "floor_only",
+        "process_noise_floor",
+    }:
+        raise ValueError(
+            "experiment.iterative.update_safety.posterior_sigma_policy must be one of "
+            "reported_only, inflate_by_factor, floor_only, process_noise_floor."
+        )
+    if posterior_sigma_policy in {"floor_only", "process_noise_floor"}:
+        raise NotImplementedError(
+            f"posterior_sigma_policy={posterior_sigma_policy!r} is documented as future/deferred."
+        )
+    posterior_sigma_inflation = (
+        float(safety_cfg.get("posterior_sigma_inflation", safety_cfg.get("inflation_factor", 1.0)))
+        if posterior_sigma_policy == "inflate_by_factor"
+        else 1.0
+    )
     if update_mode not in SUPPORTED_ITERATIVE_UPDATE_MODES:
         raise ValueError(
             "experiment.iterative.update_mode must be one of "
@@ -866,10 +893,10 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
         ),
         "update_safety": {
             "enabled": bool(safety_cfg.get("enabled", False)),
-            "posterior_sigma_inflation": float(
-                safety_cfg.get("posterior_sigma_inflation", safety_cfg.get("inflation_factor", 1.0))
-            ),
+            "posterior_sigma_policy": posterior_sigma_policy,
+            "posterior_sigma_inflation": posterior_sigma_inflation,
             "min_sigma_by_label": dict(min_sigma_by_label or {}),
+            "process_noise_by_label": dict(safety_cfg.get("process_noise_by_label") or {}),
             "max_abs_update_by_label": dict(max_abs_update_by_label or {}),
             "reject_on_bad_frame_quality": bool(safety_cfg.get("reject_on_bad_frame_quality", True)),
             "reject_on_nonfinite_posterior": bool(safety_cfg.get("reject_on_nonfinite_posterior", True)),
