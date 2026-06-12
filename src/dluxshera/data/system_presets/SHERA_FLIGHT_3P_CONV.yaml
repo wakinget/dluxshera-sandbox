@@ -49,8 +49,8 @@ system:
         units: detector_pix
     - name: pixel_offsets
       kind: ApplyPixelOffsets
-      dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
-      dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
+      dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
+      dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
     - name: pixel_response
       kind: ApplyPixelResponse
       prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits

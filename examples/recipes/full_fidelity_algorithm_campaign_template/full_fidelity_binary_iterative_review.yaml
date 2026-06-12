@@ -29,9 +29,9 @@ experiment:
     truth:
       label: truth_review_alpha_cen
       mode: effective_source_spectrum
-      n_lambda: 31
-      wavelength_min_nm: 350.0
-      wavelength_max_nm: 850.0
+      n_lambda: 11
+      wavelength_min_nm: 450.0
+      wavelength_max_nm: 650.0
       components:
         detector_qe:
           enabled: true
@@ -56,9 +56,9 @@ experiment:
     inference:
       label: inference_review_alpha_cen
       mode: truncated_effective_source_spectrum
-      n_lambda: 7
-      wavelength_min_nm: 350.0
-      wavelength_max_nm: 850.0
+      n_lambda: 3
+      wavelength_min_nm: 530.0
+      wavelength_max_nm: 570.0
       out_of_band_response: zero
       renormalize_weights: true
       components:
