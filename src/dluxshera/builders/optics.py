@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING, Any
 from collections.abc import Mapping
 
@@ -29,6 +30,34 @@ _THREEPLANE_CACHE: dict[str, SheraThreePlaneOptics] = {}
 _TWOPLANE_CACHE: dict[str, SheraTwoPlaneOptics] = {}
 _CACHE_DISABLED_ENV = "DLUXSHERA_THREEPLANE_CACHE_DISABLED"
 _TWOPLANE_CACHE_DISABLED_ENV = "DLUXSHERA_TWOPLANE_CACHE_DISABLED"
+
+
+def _find_repo_root(start: Path) -> Path:
+    """Walk parents until we find a repo marker. Fallback to start if none found."""
+
+    start = start.resolve()
+    for p in [start, *start.parents]:
+        if (
+            (p / ".git").exists()
+            or (p / "pyproject.toml").exists()
+            or (p / "setup.cfg").exists()
+        ):
+            return p
+    return start
+
+
+_REPO_ROOT = _find_repo_root(Path(__file__).resolve())
+
+
+def _resolve_repo_path(path: str | Path | None) -> str | None:
+    """Resolve package/repo-relative asset paths before handing them to dLux."""
+
+    if path is None:
+        return None
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return str(p)
+    return str((_REPO_ROOT / p).resolve())
 
 
 def _normalize_json_value(value: Any) -> Any:
@@ -102,11 +131,12 @@ def apply_runtime_bindings(
 def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
     """Return a deterministic structural hash for three-plane optics."""
 
-    contract = SheraThreePlaneOptics.contract(cfg)
+    cfg_map = asdict(cfg) if is_dataclass(cfg) else cfg
+    contract = SheraThreePlaneOptics.contract(cfg_map)
     payload = {
         "optics_kind": "three_plane",
-        "structural": _structural_subset_from_contract(cfg, contract),
-        "high_order_wfe": _normalize_json_value(cfg.get("high_order_wfe", {})),
+        "structural": _structural_subset_from_contract(cfg_map, contract),
+        "high_order_wfe": _normalize_json_value(cfg_map.get("high_order_wfe", {})),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -115,11 +145,12 @@ def structural_hash_from_config(cfg: SheraThreePlaneConfig) -> str:
 def structural_hash_for_twoplane(cfg: SheraTwoPlaneConfig) -> str:
     """Return a deterministic structural hash for two-plane optics."""
 
-    contract = SheraTwoPlaneOptics.contract(cfg)
+    cfg_map = asdict(cfg) if is_dataclass(cfg) else cfg
+    contract = SheraTwoPlaneOptics.contract(cfg_map)
     payload = {
         "optics_kind": "two_plane",
-        "structural": _structural_subset_from_contract(cfg, contract),
-        "high_order_wfe": _normalize_json_value(cfg.get("high_order_wfe", {})),
+        "structural": _structural_subset_from_contract(cfg_map, contract),
+        "high_order_wfe": _normalize_json_value(cfg_map.get("high_order_wfe", {})),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -143,7 +174,7 @@ def _load_diffractive_pupil_mask(cfg: SheraTwoPlaneConfig) -> dll.AberratedLayer
     if cfg.diffractive_pupil_path is None:
         return dll.AberratedLayer(jnp.zeros((cfg.pupil_npix, cfg.pupil_npix)))
 
-    mask_array = np.load(cfg.diffractive_pupil_path)
+    mask_array = np.load(_resolve_repo_path(cfg.diffractive_pupil_path))
     return dll.AberratedLayer(jnp.asarray(mask_array))
 
 
@@ -202,7 +233,9 @@ def build_shera_threeplane_optics(
             psf_npixels=optics_cfg["psf_npix"],
             oversample=optics_cfg["oversample"],
             detector_pixel_pitch=optics_cfg["pixel_pitch_m"],
-            mask=optics_cfg.get("diffractive_pupil_path", optics_cfg.get("dp_path")),
+            mask=_resolve_repo_path(
+                optics_cfg.get("diffractive_pupil_path", optics_cfg.get("dp_path"))
+            ),
             m1_noll_ind=tuple(optics_cfg.get("primary_noll_indices") or [])
             if optics_cfg.get("primary_noll_indices")
             else None,
@@ -266,7 +299,9 @@ def build_shera_twoplane_optics(
             psf_npixels=optics_cfg["psf_npix"],
             oversample=optics_cfg["oversample"],
             psf_pixel_scale=optics_cfg["plate_scale_as_per_pix"],
-            mask=optics_cfg.get("diffractive_pupil_path", optics_cfg.get("dp_path")),
+            mask=_resolve_repo_path(
+                optics_cfg.get("diffractive_pupil_path", optics_cfg.get("dp_path"))
+            ),
             m1_diameter=optics_cfg["m1_diameter_m"],
             m2_diameter=optics_cfg["m2_diameter_m"],
             n_struts=optics_cfg["n_struts"],

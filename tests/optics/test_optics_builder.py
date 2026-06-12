@@ -1,4 +1,5 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
+from pathlib import Path
 
 import jax.numpy as jnp
 
@@ -27,6 +28,20 @@ def test_build_shera_threeplane_optics_smoke():
 
     # You can add more checks if SheraThreePlaneOptics exposes them, e.g.:
     # assert optics.m1_diameter == cfg.m1_diameter_m
+
+
+def test_build_shera_threeplane_optics_resolves_repo_relative_pupil_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    clear_threeplane_optics_cache()
+    monkeypatch.chdir(tmp_path)
+    cfg = asdict(SHERA_TESTBED_CONFIG)
+    cfg["diffractive_pupil_path"] = "src/dluxshera/data/pupils/diffractive_pupil.npy"
+
+    optics = build_shera_threeplane_optics(cfg)
+
+    assert optics.wf_npixels == cfg["pupil_npix"]
 
 
 def test_build_shera_threeplane_optics_uses_zernike_coeffs():
