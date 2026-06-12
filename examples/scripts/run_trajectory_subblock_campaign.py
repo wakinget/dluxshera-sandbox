@@ -19,11 +19,16 @@ from dluxshera.utils.campaigns import write_csv_rows, write_json, write_shell_co
 from dluxshera.utils.obs_subblock_cli import append_reference_optimizer_flags
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms
 from dluxshera.utils.obs_subblock_trajectory import (
+    CanonicalTrajectory,
     DEFAULT_OUTPUT_KEYS,
     TRAJECTORY_NOTES,
+    interpolate_trajectory,
     prepare_airbus_subblocks,
+    split_subblocks,
     write_subblock_artifacts,
+    write_trajectory_filter_artifacts,
 )
+from dluxshera.utils.trajectory_filters import parse_trajectory_filter_config
 from dluxshera.utils.trajectory_smear import (
     inject_subblock_smear_layer,
     parse_smear_config,
@@ -268,6 +273,12 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
     output_keys = _parse_output_keys(args.output_keys)
     active_frame_keys = tuple(args.active_frame_keys or _default_active_frame_keys(args.source_kind, output_keys))
     trajectory_processing_cfg = _trajectory_processing_config(args)
+    filter_cfg = dict(
+        trajectory_processing_cfg.get("filter")
+        or trajectory_processing_cfg.get("high_pass_filter")
+        or {}
+    )
+    filter_spec = parse_trajectory_filter_config(filter_cfg)
     smear_cfg = parse_smear_config(
         trajectory_processing_cfg,
         exposure_time_s=float(args.frame_dt_s),
@@ -287,9 +298,33 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         fit_keys=active_frame_keys,
         time_mode="inferred_uniform",
         time_start_s=0.0,
+        filter_config=filter_cfg,
     )
+    unfiltered_blocks = None
+    if filter_spec.write_unfiltered_comparison and trajectory.unfiltered_values is not None:
+        unfiltered_truth = interpolate_trajectory(
+            CanonicalTrajectory(
+                time_s=trajectory.time_s,
+                values=trajectory.unfiltered_values,
+                raw=trajectory.raw,
+                mapping=trajectory.mapping,
+            ),
+            frame_times_s=frame_times,
+        )
+        unfiltered_blocks = split_subblocks(
+            frame_times_s=frame_times,
+            truth_values=unfiltered_truth,
+            n_frames_per_subblock=int(args.n_frames_per_subblock),
+            fit_keys=active_frame_keys,
+        )
 
     run_root.mkdir(parents=True, exist_ok=True)
+    filter_artifacts: dict[str, Any] = {}
+    if filter_spec.enabled and filter_spec.kind != "none":
+        filter_artifacts = write_trajectory_filter_artifacts(
+            outdir=run_root,
+            trajectory=trajectory,
+        )
     resolved_config = {
         "experiment": {
             "kind": "trajectory_subblock_campaign",
@@ -351,6 +386,15 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
             "render_mode": smear_cfg.render_mode if smear_cfg.enabled else "disabled",
             "inference_mode": smear_cfg.inference_mode if smear_cfg.enabled else "disabled",
         },
+        "filter": {
+            "enabled": bool(filter_spec.enabled and filter_spec.kind != "none"),
+            "kind": filter_spec.kind,
+            "method": filter_spec.method,
+            "order": filter_spec.order,
+            "zero_phase": filter_spec.zero_phase,
+            "apply_stage": filter_spec.apply_stage,
+            "provenance_json": str(filter_artifacts.get("trajectory_filter_provenance_json", "")),
+        },
     }
     write_json(run_root / "trajectory_ingest_summary.json", ingest_summary)
 
@@ -360,6 +404,17 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
     for block in blocks:
         subblock_dir = subblocks_root / f"subblock_{block.subblock_index:06d}"
         artifacts = write_subblock_artifacts(block, outdir=subblock_dir, output_keys=output_keys)
+        if unfiltered_blocks is not None:
+            unfiltered_artifacts = write_subblock_artifacts(
+                unfiltered_blocks[block.subblock_index],
+                outdir=subblock_dir / "unfiltered",
+                output_keys=output_keys,
+            )
+            target = subblock_dir / "frame_truth_unfiltered.csv"
+            target.write_text(
+                unfiltered_artifacts["frame_truth_csv"].read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
         frame_truth_path = artifacts["frame_truth_csv"]
         starting_guess_path = artifacts["starting_guess_prediction_csv"]
         smear_artifacts: dict[str, Any] = {}
@@ -447,6 +502,18 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
             "smear_model_policy": smear_cfg.inference_mode if smear_cfg.enabled else "",
             "smear_render_mode": smear_cfg.render_mode if smear_cfg.enabled else "",
             "smear_layer_name": smear_cfg.render_layer_name if smear_cfg.enabled else "",
+            "trajectory_filter_enabled": bool(filter_spec.enabled and filter_spec.kind != "none"),
+            "trajectory_filter_kind": filter_spec.kind if filter_spec.enabled else "",
+            "trajectory_filter_method": filter_spec.method if filter_spec.enabled else "",
+            "trajectory_filter_provenance_json": str(
+                filter_artifacts.get("trajectory_filter_provenance_json", "")
+            ),
+            "trajectory_filtered_csv": str(filter_artifacts.get("trajectory_filtered_csv", "")),
+            "frame_truth_unfiltered_path": str(
+                (subblock_dir / "frame_truth_unfiltered.csv").resolve()
+                if unfiltered_blocks is not None
+                else ""
+            ),
         }
         for key, diag in block.diagnostics.items():
             row[f"rms_{key}_residual"] = diag["rms_residual"]
@@ -512,6 +579,15 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         "source_mode": args.source_kind,
         "subblocks": subblock_rows,
         "smear": smear_summary,
+        "filter": {
+            "enabled": bool(filter_spec.enabled and filter_spec.kind != "none"),
+            "kind": filter_spec.kind,
+            "method": filter_spec.method,
+            "order": filter_spec.order,
+            "zero_phase": filter_spec.zero_phase,
+            "apply_stage": filter_spec.apply_stage,
+            "artifacts": {key: str(value) for key, value in filter_artifacts.items()},
+        },
         "notes": list(TRAJECTORY_NOTES),
         "child_results": child_results,
     }

@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .detector_layer_overrides import patch_smear_layer_for_policy
 from .obs_subblock_trajectory import CanonicalTrajectory, SubblockTrajectory, write_rows_csv
 
 SMEAR_TRUTH_FILENAME = "frame_smear_truth.csv"
@@ -96,8 +97,8 @@ class SmearConfig:
             raise ValueError("smear.truth.kernel_size must be a positive odd integer.")
         if self.inference_mode not in {"matched", "scaled", "angle_offset", "disabled", "constant"}:
             raise ValueError("Unsupported smear.inference.mode.")
-        if self.render_mode not in {"metadata_only", "subblock_constant_layer"}:
-            raise ValueError("smear.render.mode must be metadata_only or subblock_constant_layer.")
+        if self.render_mode not in {"disabled", "metadata_only", "subblock_constant_layer"}:
+            raise ValueError("smear.render.mode must be disabled, metadata_only, or subblock_constant_layer.")
         if self.render_representative not in {"median", "mean", "rms", "max"}:
             raise ValueError("Unsupported smear.render.representative.")
 
@@ -115,9 +116,6 @@ def parse_smear_config(
     """Return a validated smear configuration from a trajectory-processing block."""
 
     root = _as_mapping(cfg)
-    high_pass = _as_mapping(root.get("high_pass_filter"))
-    if bool(high_pass.get("enabled", False)):
-        raise ValueError("trajectory_processing.high_pass_filter.enabled=true is reserved but not implemented.")
     smear = _as_mapping(root.get("smear"))
     exposure = _as_mapping(smear.get("exposure"))
     truth = _as_mapping(smear.get("truth"))
@@ -144,9 +142,9 @@ def parse_smear_config(
         inference_constant_theta_deg=(
             None if inference.get("constant_theta_deg") is None else float(inference["constant_theta_deg"])
         ),
-        render_mode=str(render.get("mode", "metadata_only")),
+        render_mode=str(render.get("mode", "metadata_only" if bool(smear.get("enabled", False)) else "disabled")),
         render_representative=str(render.get("representative", "median")),
-        render_layer_name=str(render.get("layer_name", "trajectory_smear")),
+        render_layer_name=str(render.get("target_layer", render.get("layer_name", "smear"))),
         render_apply_to=str(render.get("apply_to", "truth")),
         render_model_layer_policy=str(render.get("model_layer_policy", "from_inference_smear")),
         source=str(truth.get("source", "resolved_trajectory")),
@@ -431,13 +429,37 @@ def write_smear_sidecars(
 
 
 def inject_subblock_smear_layer(render_cfg: dict[str, Any], *, cfg: SmearConfig, representative_kernel: Mapping[str, Any]) -> dict[str, Any]:
-    """Insert a representative ``ApplyConvolution`` line layer into a render config."""
+    """Patch the configured smear layer, injecting only when explicitly allowed."""
 
+    smear_raw = cfg.raw_config.get("smear", {}) if isinstance(cfg.raw_config, Mapping) else {}
+    render_raw = smear_raw.get("render", {}) if isinstance(smear_raw, Mapping) else {}
+    allow_injection = bool(render_raw.get("allow_layer_injection", False)) if isinstance(render_raw, Mapping) else False
+    require_existing = bool(render_raw.get("require_existing_layer", True)) if isinstance(render_raw, Mapping) else True
+    system = render_cfg.get("system") if isinstance(render_cfg.get("system"), Mapping) else render_cfg
+    if isinstance(system, Mapping):
+        try:
+            patched_system, _ = patch_smear_layer_for_policy(
+                system,
+                smear_raw if isinstance(smear_raw, Mapping) else {"enabled": cfg.enabled, "render": {"mode": cfg.render_mode}},
+                representative_kernel=representative_kernel,
+                context="trajectory_subblock.render",
+                strict=True,
+            )
+            if "system" in render_cfg:
+                render_cfg["system"] = patched_system
+            else:
+                render_cfg.update(patched_system)
+            return render_cfg
+        except ValueError:
+            if require_existing or not allow_injection:
+                raise
     system = render_cfg.setdefault("system", {})
     detector = system.setdefault("detector", {})
     layers = detector.setdefault("layers", [])
     if not isinstance(layers, list):
         raise ValueError("render config system.detector.layers must be a list to inject smear layer.")
+    if not allow_injection:
+        raise ValueError("smear.render.allow_layer_injection must be true to insert a new smear layer.")
     layer = {
         "name": cfg.render_layer_name,
         "kind": "ApplyConvolution",

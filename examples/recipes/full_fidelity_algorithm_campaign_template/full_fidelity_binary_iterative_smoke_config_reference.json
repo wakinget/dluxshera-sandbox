@@ -1,5 +1,53 @@
 [
   {
+    "valid_values": "{\"disable\": {\"description\": \"Alias for remove.\", \"status\": \"implemented\"}, \"keep\": {\"description\": \"Leave named layer unchanged.\", \"status\": \"implemented\"}, \"remove\": {\"description\": \"Remove a named layer.\", \"status\": \"implemented\"}, \"update\": {\"description\": \"Deep-merge fields into a named layer.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "detector layer override utility",
+    "runtime_effect": "none",
+    "fidelity_effect": "patches resolved detector layer stack",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.detector_overrides.layers.*.action"
+  },
+  {
+    "valid_values": "{}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "detector layer override utility",
+    "runtime_effect": "missing named layer does not fail when true",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.detector_overrides.layers.*.allow_missing"
+  },
+  {
+    "valid_values": "{\"box\": {\"description\": \"Box/pixel-MTF convolution kernel.\", \"status\": \"implemented\"}, \"gaussian\": {\"description\": \"Gaussian convolution kernel.\", \"status\": \"implemented\"}, \"line\": {\"description\": \"Line-smear convolution kernel.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "detector layer override utility",
+    "runtime_effect": "none",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.detector_overrides.layers.*.kernel.kind"
+  },
+  {
+    "valid_values": "{\"detector_pix\": {\"description\": \"Detector pixel units.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "detector layer override utility",
+    "runtime_effect": "none",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.detector_overrides.layers.*.kernel.units"
+  },
+  {
     "valid_values": "{}",
     "default": null,
     "implemented_status": "accepted_but_noop",
@@ -1128,6 +1176,42 @@
     "field_path": "experiment.subblocks.trace_source.mode"
   },
   {
+    "valid_values": "{\"after_window\": {\"description\": \"Apply filtering after window selection.\", \"status\": \"implemented\"}, \"before_window\": {\"description\": \"Apply filtering before subblock window selection.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "campaign_trace_sources",
+    "runtime_effect": "none",
+    "fidelity_effect": "trajectory truth preprocessing",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trace_source.processing.filter.apply_stage"
+  },
+  {
+    "valid_values": "{\"high_pass\": {\"description\": \"High-pass trajectory filtering.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "campaign_trace_sources",
+    "runtime_effect": "none",
+    "fidelity_effect": "trajectory truth preprocessing",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trace_source.processing.filter.kind"
+  },
+  {
+    "valid_values": "{\"bessel\": {\"description\": \"Bessel high-pass filter.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "campaign_trace_sources",
+    "runtime_effect": "none",
+    "fidelity_effect": "trajectory truth preprocessing",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trace_source.processing.filter.method"
+  },
+  {
     "valid_values": "{\"linear\": {\"description\": \"Linear interpolation.\", \"status\": \"implemented\"}}",
     "default": null,
     "implemented_status": "implemented",
@@ -1200,7 +1284,31 @@
     "field_path": "experiment.subblocks.trajectory_processing.high_pass.note"
   },
   {
-    "valid_values": "{\"line_kernel_from_trajectory\": {\"description\": \"Future line kernel rendering.\", \"status\": \"future_placeholder\"}, \"metadata_only\": {\"description\": \"Write smear sidecars; do not insert render layer.\", \"status\": \"implemented\"}, \"none\": {\"description\": \"No smear sidecars/render layer.\", \"status\": \"implemented\"}, \"per_frame_dynamic_kernel\": {\"description\": \"Future dynamic kernel rendering.\", \"status\": \"future_placeholder\"}, \"subblock_constant_layer\": {\"description\": \"Future constant render layer.\", \"status\": \"future_placeholder\"}}",
+    "valid_values": "{}",
+    "default": false,
+    "implemented_status": "implemented",
+    "consumed_by": "trajectory_smear",
+    "runtime_effect": "allows opt-in insertion of a missing smear layer",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trajectory_processing.smear.render.allow_layer_injection"
+  },
+  {
+    "valid_values": "{\"detector_pix\": {\"description\": \"Detector pixel units.\", \"status\": \"implemented\"}}",
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "trajectory_smear",
+    "runtime_effect": "none",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trajectory_processing.smear.render.defaults.units"
+  },
+  {
+    "valid_values": "{\"disabled\": {\"description\": \"Remove/disable the named smear layer and write no rendered smear.\", \"status\": \"implemented\"}, \"line_kernel_from_trajectory\": {\"description\": \"Future line kernel rendering.\", \"status\": \"future_placeholder\"}, \"metadata_only\": {\"description\": \"Write smear sidecars; remove/disable the named smear render layer.\", \"status\": \"implemented\"}, \"none\": {\"description\": \"Compatibility alias for no rendered smear.\", \"status\": \"implemented\"}, \"per_frame_dynamic_kernel\": {\"description\": \"Future dynamic kernel rendering.\", \"status\": \"future_placeholder\"}, \"subblock_constant_layer\": {\"description\": \"Patch a representative trajectory-derived line kernel into the named smear layer.\", \"status\": \"implemented\"}}",
     "default": null,
     "implemented_status": "implemented",
     "consumed_by": "trajectory_smear",
@@ -1210,6 +1318,30 @@
     "safe_to_omit": true,
     "notes": "",
     "field_path": "experiment.subblocks.trajectory_processing.smear.render.mode"
+  },
+  {
+    "valid_values": "{}",
+    "default": true,
+    "implemented_status": "implemented",
+    "consumed_by": "trajectory_smear",
+    "runtime_effect": "fails when subblock_constant_layer target is absent",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trajectory_processing.smear.render.require_existing_layer"
+  },
+  {
+    "valid_values": "{}",
+    "default": "smear",
+    "implemented_status": "implemented",
+    "consumed_by": "trajectory_smear",
+    "runtime_effect": "selects the named detector layer to patch/remove",
+    "fidelity_effect": "none",
+    "provenance_effect": "none",
+    "safe_to_omit": true,
+    "notes": "",
+    "field_path": "experiment.subblocks.trajectory_processing.smear.render.target_layer"
   },
   {
     "valid_values": "{}",
@@ -1224,8 +1356,8 @@
     "field_path": "experiment.subblocks.variance_floor"
   },
   {
-    "valid_values": "{\"SHERA_FLIGHT_2P\": {\"description\": \"Two-plane flight preset.\", \"status\": \"implemented\"}, \"SHERA_FLIGHT_3P\": {\"description\": \"Current flight three-plane preset.\", \"status\": \"implemented\"}, \"SHERA_TESTBED_3P\": {\"description\": \"Testbed three-plane preset.\", \"status\": \"implemented\"}}",
-    "default": null,
+    "valid_values": "{\"SHERA_FLIGHT_2P\": {\"description\": \"Two-plane flight preset.\", \"status\": \"implemented\"}, \"SHERA_FLIGHT_3P\": {\"description\": \"Legacy flight three-plane baseline preset.\", \"status\": \"implemented\"}, \"SHERA_FLIGHT_3P_CONV\": {\"description\": \"Full-fidelity default preset with named detector realism layers.\", \"status\": \"implemented\"}, \"SHERA_TESTBED_3P\": {\"description\": \"Testbed three-plane preset.\", \"status\": \"implemented\"}}",
+    "default": "SHERA_FLIGHT_3P_CONV",
     "implemented_status": "implemented",
     "consumed_by": "config resolver",
     "runtime_effect": "none",

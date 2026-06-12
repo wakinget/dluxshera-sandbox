@@ -18,13 +18,14 @@ The current preparation workflow:
 
 1. loads the raw Airbus trajectory
 2. normalizes it to canonical dLuxShera frame keys
-3. selects a requested time window
-4. linearly interpolates the trajectory to the frame cadence, normally 50 ms
-5. splits the selected frames into non-overlapping subblocks
-6. writes each subblock's `frame_truth.csv`
-7. fits a per-subblock line for each active registration key and writes
+3. optionally filters the full mapped trajectory when configured
+4. selects a requested time window
+5. linearly interpolates the trajectory to the frame cadence, normally 50 ms
+6. splits the selected frames into non-overlapping subblocks
+7. writes each subblock's `frame_truth.csv`
+8. fits a per-subblock line for each active registration key and writes
    `starting_guess_prediction.csv`
-8. writes case-local trace/render/inference config records and `command.sh`
+9. writes case-local trace/render/inference config records and `command.sh`
 
 For a 20-frame, 50 ms subblock, frame times are
 `t_block_start + i * 0.05` for `i = 0 ... 19`, so one block covers 0.00 through
@@ -36,6 +37,42 @@ The renderer still consumes the canonical explicit trace schema:
 ```text
 frame_index,time_s,source.x_position_as,source.y_position_as,source.position_angle_deg
 ```
+
+## Trajectory Filtering
+
+Filtering is implemented in `src/dluxshera/utils/trajectory_filters.py` and is opt-in. Existing trajectory behavior is unchanged unless a filter config has `enabled: true`.
+
+The canonical wrapper config location is:
+
+```yaml
+experiment:
+  subblocks:
+    trace_source:
+      mode: trajectory
+      source:
+        kind: csv
+        format: airbus_xyz_arcsec
+        path: src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv
+      processing:
+        filter:
+          enabled: true
+          kind: high_pass
+          method: bessel
+          order: 4
+          cutoff_period_s: 15.0
+          zero_phase: true
+          apply_stage: before_window
+```
+
+`source.kind: csv` with `format: airbus_xyz_arcsec` is canonical. `source.kind: airbus_csv` remains a backward-compatible alias. Future formats should be added explicitly and should not be silently accepted.
+
+Supported filter kinds are `none`, `low_pass`, `high_pass`, and `band_pass`. The implemented method is `bessel`, using SciPy Bessel second-order sections. A Bessel filter is used when preserving the time-domain trajectory shape is more important than achieving the steepest possible cutoff. For offline preprocessing, `zero_phase: true` uses forward/backward filtering and avoids phase lag; `zero_phase: false` uses causal filtering and records expected phase/group delay.
+
+Cutoff periods are frequency conveniences, not time constants: `cutoff_hz = 1 / cutoff_period_s`. A high-pass filter with `cutoff_period_s: 15.0` suppresses trends with periods longer than roughly 15 s and preserves faster residual motion. A low-pass filter with the same period preserves slower trends and suppresses faster residuals. Band-pass filters require `low_cutoff_hz < high_cutoff_hz`; with period fields, `low_cutoff_period_s` is the longer-period lower-frequency edge and `high_cutoff_period_s` is the shorter-period higher-frequency edge.
+
+The default `apply_stage` is `before_window`: load the full raw trajectory, map it to canonical columns, filter the full mapped sequence, then select frame windows and split subblocks. This is preferred for high-pass/low-pass conditioning because zero-phase filters need padding and short selected windows can create edge artifacts. `after_window` is supported for diagnostics and records an edge-artifact warning.
+
+When filtering is enabled the trajectory root records `trajectory_raw.csv`, `trajectory_filtered.csv`, `trajectory_filter_provenance.json`, `trajectory_filter_summary.csv`, and `trajectory_filter_diagnostic.png`. The provenance records cutoff fields, sample cadence, Nyquist frequency, columns filtered, input/output/removed RMS by column, method/order, zero-phase setting, and warnings. Per-subblock `frame_truth.csv` is the filtered truth used by rendering. A standalone trajectory campaign can also write `frame_truth_unfiltered.csv` when `write_unfiltered_comparison: true`.
 
 Single-star calibration-style preparation can omit PA by passing explicit
 output keys, for example:
@@ -801,8 +838,9 @@ When smear is enabled, the default model/inference smear is `matched`, so the mo
 
 Render handling has two deliberately scoped modes:
 
-- `metadata_only` writes sidecars and plan summary fields without modifying detector layers.
-- `subblock_constant_layer` computes one representative per-subblock line kernel and injects an existing `ApplyConvolution` detector layer in standalone trajectory render configs.
+- `disabled` removes/disables the named smear detector layer.
+- `metadata_only` writes sidecars and plan summary fields, but removes/disables the named smear detector layer so preset defaults cannot render accidentally.
+- `subblock_constant_layer` computes one representative per-subblock line kernel and patches an existing named `ApplyConvolution` smear detector layer by default. Inserting a missing layer requires `allow_layer_injection: true`.
 
 Per-frame dynamic convolution kernels, dynamic crop / ROI-origin realism, high-order WFE coupling, spectral/WFE/trajectory combined smokes, and production trajectory campaigns are deferred.
 
@@ -810,4 +848,4 @@ Per-frame dynamic convolution kernels, dynamic crop / ROI-origin realism, high-o
 
 Observation-bias and full-fidelity smoke plans now reference the shared `campaign_model_split.v1` contract. Trajectory mode still preserves the existing file semantics: `frame_truth.csv` is frame-center render truth, `starting_guess_prediction.csv` is optimizer initialization only, and smear truth/model sidecars remain separate artifacts.
 
-When trajectory smear is enabled in the full-fidelity smoke, the model split records `trajectory_smear.enabled=true` and `mode=metadata_only`. This is provenance only for the first smoke; dynamic crop/ROI handling and per-frame dynamic smear kernels remain deferred.
+When trajectory smear is enabled in the full-fidelity smoke, the model split records `trajectory_smear.enabled=true` and `mode=metadata_only`. This is sidecar/provenance only: because `SHERA_FLIGHT_3P_CONV` includes a default nonzero `smear` layer, metadata-only mode removes that layer from render/truth and inference/reference templates. Dynamic crop/ROI handling and per-frame dynamic smear kernels remain deferred.

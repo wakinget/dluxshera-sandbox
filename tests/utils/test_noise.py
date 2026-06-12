@@ -17,7 +17,7 @@ def test_photon_noise_poisson_and_variance():
 
     rng_base, photon_key = jr.split(rng)
     expected = jr.poisson(photon_key, image).astype(image.dtype)
-    expected_var = jnp.maximum(image, 1.0)
+    expected_var = jnp.maximum(image, 0.0)
 
     assert jnp.array_equal(noisy, expected)
     assert jnp.array_equal(var, expected_var)
@@ -43,7 +43,7 @@ def test_read_noise_adds_gaussian_and_variance():
 
     rng_after, read_key = jr.split(rng)
     expected = image + 2.0 * jr.normal(read_key, image.shape, dtype=image.dtype)
-    expected_var = jnp.maximum(image, 1.0) + 4.0
+    expected_var = jnp.zeros_like(image) + 4.0
 
     assert jnp.allclose(noisy, expected)
     assert jnp.allclose(var, expected_var)
@@ -67,7 +67,7 @@ def test_dark_current_adds_gaussian_and_variance():
     _, dark_key = jr.split(rng)
     dc_var = spec.dark_current * exposure
     expected = image + jnp.sqrt(dc_var) * jr.normal(dark_key, image.shape, dtype=image.dtype)
-    expected_var = jnp.maximum(image, 1.0) + dc_var
+    expected_var = jnp.zeros_like(image) + dc_var
 
     assert jnp.allclose(noisy, expected)
     assert jnp.allclose(var, expected_var)
@@ -81,7 +81,7 @@ def test_flags_disable_additional_noise():
     noisy, var = apply_observation_noise(image, noise_cfg=noise_cfg, rng_key=rng)
 
     assert jnp.array_equal(noisy, image)
-    assert jnp.array_equal(var, jnp.maximum(image, 1.0))
+    assert jnp.array_equal(var, jnp.zeros_like(image))
 
 
 def test_missing_detector_metadata_raises():

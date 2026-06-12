@@ -146,6 +146,10 @@ def _mirror_summary(mirror: MirrorWfeDeck, *, active: bool) -> dict[str, Any]:
         "knowledge_error_rms_nm": mirror.high_order_knowledge_error.rms_nm,
         "truth_inference_difference_rms_nm": mirror.high_order_knowledge_error.rms_nm,
         "low_order_removed": list(mirror.diagnostics.get("low_order_mapping", {})),
+        "low_order_truth_coefficients_nm": dict(mirror.low_order_truth_coeffs_nm),
+        "low_order_inference_coefficients_nm": dict(mirror.low_order_knowledge_coeffs_nm),
+        "low_order_error_coefficients_nm": dict(mirror.low_order_knowledge_error_nm),
+        "low_order_mapping": copy.deepcopy(dict(mirror.diagnostics.get("low_order_mapping", {}))),
     }
 
 

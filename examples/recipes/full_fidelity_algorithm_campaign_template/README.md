@@ -74,6 +74,38 @@ Primary physical-fidelity controls:
 
 `spectral_model.fast` is documented as a smoke-only shortcut. The current review config and smoke config use explicit `n_lambda` values instead of hidden clamping. If `fast: true` is introduced in an ad hoc smoke config, audit reports the clamp semantics: truth `n_lambda <= 7` and inference `n_lambda <= 5`.
 
+## Render Noise And Inference Variance
+
+Render/data noise and the inference likelihood variance are separate controls.
+
+`experiment.subblocks.noise` accepts legacy scalar values (`enabled`,
+`disabled`, `inherit`) and the structured review mapping. The structured mapping
+uses `enabled`, `shot_noise`, `read_noise`, `dark_current`,
+`use_detector_read_noise`, `read_noise_electrons`,
+`use_detector_dark_current`, `dark_current_e_per_s`, `variance_floor`,
+`write_variance`, and `seed_policy`. Legacy values are normalized internally and
+written to provenance.
+
+Read-noise amplitude provenance is explicit. `read_noise_electrons` wins when
+set; otherwise the audit resolves the value from the detector config/spec and
+records the source. Dark-current provenance follows the same rule with
+`dark_current_e_per_s`; if dark current is enabled, the expected variance uses
+`dark_current_e_per_s * exposure_time_s`.
+
+The current full-fidelity wrapper still delegates to a legacy subblock runner
+noise flag, so structured term-specific requests are recorded and mapped to
+`noise: enabled` or `noise: disabled`. Audits warn that separate shot/read/dark
+runner controls are not fully available through that coarse flag. The notebook
+review verifies the same resolved truth system through the Binder render path,
+then applies the structured request with the project noise utility to check
+shot/read/dark variance behavior.
+
+`use_render_variance` controls the inference side. `true` requests
+`variance_model: provided_cube`; `false` uses the data/floor variance model;
+`auto` reports the intended policy and leaves template behavior visible in the
+audit. `variance_floor` is an inference likelihood floor and is not silently
+baked into the render variance map.
+
 ## Data/Inference Split
 
 The executable configs create deliberate truth/reference mismatches:
@@ -132,6 +164,68 @@ Fields consumed directly by the wrapper include:
 - `target`
 - `n_cases`
 - `system_preset`
+- `detector_overrides`
+
+## Detector Layer Policy
+
+Executable full-fidelity review and smoke configs now default to
+`SHERA_FLIGHT_3P_CONV`. That preset supplies the detector realism layers used by
+the full-fidelity path in a fixed order:
+
+1. `pixel_mtf`
+2. `diffusion`
+3. `pixel_offsets`
+4. `pixel_response`
+5. `jitter`
+6. `smear`
+
+Campaign scripts do not dynamically insert those standard layers when this
+preset is selected. Instead, the resolved system config is patched before
+system instantiation:
+
+- `experiment.detector_overrides.layers.<name>.action: update` deep-merges
+  fields into the named detector layer.
+- `action: remove` removes the named layer while preserving unrelated layer
+  order.
+- `action: disable` is currently equivalent to removal.
+- missing layers fail unless `allow_missing: true` is set.
+
+The review and smoke configs keep the named `jitter` layer but reduce it to
+`sigma_x = sigma_y = 0.001` detector pixels. This preserves a stable layer name
+for audits/notebooks without adding a large extra pointing blur. Audits warn if
+`jitter` exceeds `0.05` detector pixels while trajectory-derived frame truth or
+smear is enabled, because that may double-count pointing blur.
+
+Smear policy is explicit because `SHERA_FLIGHT_3P_CONV` contains a nonzero
+default line-smear layer. `render.mode: disabled` removes the named `smear`
+layer. `render.mode: metadata_only` may still write smear sidecars, but it also
+removes the named `smear` layer so no rendered smear is applied. `render.mode:
+subblock_constant_layer` patches the existing named `smear` layer with
+trajectory-derived `length` and `theta_deg`; layer injection is disabled unless
+`allow_layer_injection: true` is explicitly requested.
+
+The executable review and smoke configs currently use `metadata_only` because
+the observation-bias runner writes shared render templates before per-subblock
+smear sidecars exist. The model split therefore reports that smear sidecars are
+generated but not applied to rendered detector layers. Explicit
+`subblock_constant_layer` configs are supported by the layer utility and
+standalone trajectory rendering path, but full per-subblock render-template
+patching remains a future runner change.
+
+## Preset Migration Table
+
+| Script/config | Old default preset | New default preset | Migration status | Reason |
+| --- | --- | --- | --- | --- |
+| `full_fidelity_binary_iterative_review.yaml` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P_CONV` | Migrated | Full-fidelity review should exercise the detector-realism preset and explicit layer policy. |
+| `full_fidelity_binary_iterative_smoke.yaml` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P_CONV` | Migrated | Smoke should validate the same detector preset family; rendered smear is removed in metadata-only mode. |
+| `run_full_fidelity_binary_iterative_campaign.py` | hard-coded `SHERA_FLIGHT_3P` fallback | `DEFAULT_FULL_FIDELITY_SYSTEM_PRESET` (`SHERA_FLIGHT_3P_CONV`) | Migrated | Wrapper fallback now matches executable full-fidelity configs. |
+| `audit_full_fidelity_config.py` | documented `SHERA_FLIGHT_3P` fallback | `DEFAULT_FULL_FIDELITY_SYSTEM_PRESET` (`SHERA_FLIGHT_3P_CONV`) | Migrated | Audit reports base, overridden, and smear-policy detector stacks. |
+| `full_fidelity_resolved_system_review.ipynb` / notebook backend | inherited wrapper fallback | `DEFAULT_FULL_FIDELITY_SYSTEM_PRESET` (`SHERA_FLIGHT_3P_CONV`) | Migrated via backend | Notebook review uses the same resolver/override path. |
+| `run_observation_bias_campaign.py` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P` | Legacy baseline preserved | General observation-bias campaigns are not automatically full-fidelity migrations. |
+| `run_trajectory_subblock_campaign.py` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P` | Legacy baseline preserved | Standalone trajectory campaigns retain historical defaults unless a config/CLI selects CONV. |
+| `run_single_star_calibration_demo.py` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P` | Legacy baseline preserved | Single-star calibration demo is outside the new full-fidelity path. |
+| `run_single_star_both_wfe_campaigns.py` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P` | Legacy baseline preserved | Historical WFE comparison baseline is preserved. |
+| `run_obs_subblock_study.py` | template-driven | template-driven | Not migrated | Subblock runner consumes already prepared templates. |
 
 ## Spectral And WFE Policy Notes
 
@@ -148,6 +242,23 @@ errors. By default, configured low-order Zernike modes are removed from the
 additive error before it is added to the truth high-order map. This avoids
 double-counting low-order WFE uncertainty, which is already represented by the
 low-order Zernike coefficient state.
+
+The WFE deck separates low-order state from high-order map realism. For each
+mirror, a raw truth OPD map is generated and piston/tip/tilt are removed. The
+configured low-order modes, normally Noll Z4-Z11, are fit from that raw map and
+stored as low-order coefficient arrays where array index 0 maps to Z4. Their
+Zernike reconstruction is subtracted from the raw map to form the stored
+high-order truth residual OPD. The reference/inference high-order map is then
+the high-order truth residual plus a separate high-order knowledge-error
+residual. That error residual also has piston/tip/tilt and configured low-order
+Zernike modes removed by default.
+
+Review plots should therefore show stored low-order coefficients separately
+from residual low-order projections. Near-zero residual projection bars are
+expected: they are leakage/orthogonality diagnostics showing that low-order
+modes were removed from the high-order residual maps. Meaningful low-order WFE
+bias should be read from the stored truth/reference/error coefficient table,
+not from a refit to already-filtered high-order residual OPD maps.
 
 The system preset defines the base source, optics, detector, wavelength
 defaults, low-order WFE coefficient arrays, and detector layer stack. The
@@ -250,7 +361,7 @@ or:
 PYTHONPATH=src jupyter notebook examples/notebooks/full_fidelity_resolved_system_review.ipynb
 ```
 
-The notebook checks the translated observation-bias config, resolved base/truth/inference systems, source wavelength grids and weights, flux-parameter preservation, high-order WFE maps and Zernike projections, optics preset fields, detector layer/calibration-map presence, disabled-vs-demo noise behavior, the configured Airbus trajectory segment, a diagnostic 15 s high-pass residual, trace-jitter wiring, and a compact reviewer dashboard.
+The notebook checks the translated observation-bias config, resolved base/truth/inference systems, source wavelength grids and weights, flux-parameter preservation, high-order WFE decomposition, stored low-order Zernike coefficients, high-order residual projection leakage, optics preset fields, detector layer/calibration-map presence, campaign noise-path audit, the configured Airbus trajectory segment, configured trajectory filtering, trace-jitter wiring, and a compact reviewer dashboard.
 
 Optional notebook artifacts are written under:
 
@@ -260,7 +371,17 @@ Results/full_fidelity_resolved_system_review/<run_label>/
 
 Inspect `resolved_*_system.yaml`, `model_split_summary.json`, `spectral_review_tables.csv`, `*_review_summary.json`, and `config_review_notes.md` if `WRITE_ARTIFACTS=True`.
 
-The notebook does not launch a production campaign, run optimization, silently change the review/smoke configs, implement dynamic smear physics, or make high-pass filtering part of the production trajectory source. The high-pass section is diagnostic unless an explicit supported config path is added later.
+The notebook does not launch a production campaign, run optimization, silently change the review/smoke configs, or implement dynamic smear physics. Trajectory filtering is used only when `experiment.subblocks.trace_source.processing.filter.enabled: true` or the legacy `experiment.subblocks.trajectory_processing.filter.enabled: true` path is set.
+
+## Trajectory Filtering
+
+Trajectory mode supports `none`, `low_pass`, `high_pass`, and `band_pass` filters in `experiment.subblocks.trace_source.processing.filter`. The canonical source schema is `source.kind: csv` with `source.format: airbus_xyz_arcsec`; legacy `source.kind: airbus_csv` remains accepted.
+
+The implemented method is `bessel` via SciPy second-order sections. A Bessel filter is used when preserving the time-domain trajectory shape is more important than achieving the steepest possible cutoff. For offline preprocessing, `zero_phase: true` uses forward/backward filtering to avoid phase lag; `zero_phase: false` uses causal filtering and records expected phase/group delay in provenance.
+
+Cutoff periods are frequency conveniences, not time constants: `cutoff_hz = 1 / cutoff_period_s`. For a high-pass filter with `cutoff_period_s: 15.0`, slower trends are suppressed and faster residual motion is preserved. For a low-pass filter the same period preserves slower trends and suppresses faster residuals. Band-pass filters require `low_cutoff_hz < high_cutoff_hz`; with periods, `low_cutoff_period_s` is the longer-period lower-frequency edge and `high_cutoff_period_s` is the shorter-period higher-frequency edge.
+
+Filtering defaults to `apply_stage: before_window`, which loads and filters the full mapped trajectory before selecting frame windows. This avoids short-window edge artifacts from zero-phase padding. Enabled filtering writes `trajectory_raw.csv`, `trajectory_filtered.csv`, `trajectory_filter_provenance.json`, `trajectory_filter_summary.csv`, and a diagnostic plot beside the trajectory artifacts. Per-subblock `frame_truth.csv` is always the filtered truth when filtering is enabled; `frame_truth_unfiltered.csv` is written only when `write_unfiltered_comparison: true`.
 
 ## Intentionally Omitted From Smoke
 

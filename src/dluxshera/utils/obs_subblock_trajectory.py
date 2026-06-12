@@ -8,12 +8,19 @@ starting-guess prediction table for recovered-reference inference.
 from __future__ import annotations
 
 import csv
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+from .trajectory_filters import (
+    TrajectoryFilterSpec,
+    apply_trajectory_filter,
+    parse_trajectory_filter_config,
+)
 
 
 AIRBUS_DEFAULT_MAPPING: dict[str, dict[str, Any]] = {
@@ -60,6 +67,8 @@ class CanonicalTrajectory:
     values: Mapping[str, np.ndarray]
     raw: RawTrajectory
     mapping: Mapping[str, Mapping[str, Any]]
+    filter_provenance: Mapping[str, Any] | None = None
+    unfiltered_values: Mapping[str, np.ndarray] | None = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +229,43 @@ def map_trajectory(
             raise ValueError(f"Mapped trajectory values for {key!r} are not finite.")
         values[key] = series
     return CanonicalTrajectory(time_s=raw.time_s, values=values, raw=raw, mapping=mapping)
+
+
+def apply_filter_to_trajectory(
+    trajectory: CanonicalTrajectory,
+    *,
+    config: Mapping[str, Any] | None,
+) -> CanonicalTrajectory:
+    """Return a trajectory with configured columns filtered at source cadence."""
+
+    spec = parse_trajectory_filter_config(config)
+    columns = tuple(key for key in spec.columns if key in trajectory.values)
+    if not columns:
+        if spec.enabled and spec.kind != "none":
+            raise ValueError(
+                "trajectory filter columns do not match mapped trajectory keys: "
+                + ", ".join(spec.columns)
+            )
+        columns = tuple(trajectory.values)
+    values = np.column_stack([np.asarray(trajectory.values[key], dtype=float) for key in columns])
+    filtered, provenance = apply_trajectory_filter(
+        np.asarray(trajectory.time_s, dtype=float),
+        values,
+        TrajectoryFilterSpec(**{**spec.__dict__, "columns": columns}),
+        axis=0,
+    )
+    output = {key: np.asarray(value, dtype=float).copy() for key, value in trajectory.values.items()}
+    if spec.enabled and spec.kind != "none":
+        for index, key in enumerate(columns):
+            output[key] = np.asarray(filtered[:, index], dtype=float)
+    return CanonicalTrajectory(
+        time_s=trajectory.time_s,
+        values=output,
+        raw=trajectory.raw,
+        mapping=trajectory.mapping,
+        filter_provenance=provenance,
+        unfiltered_values=trajectory.values,
+    )
 
 
 def derive_window_duration(
@@ -408,6 +454,87 @@ def write_rows_csv(path: Path, rows: Sequence[Mapping[str, Any]], fieldnames: Se
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def trajectory_rows(
+    trajectory: CanonicalTrajectory,
+    *,
+    values: Mapping[str, Sequence[float]] | None = None,
+) -> list[dict[str, Any]]:
+    selected = trajectory.values if values is None else values
+    rows: list[dict[str, Any]] = []
+    for index, time_s in enumerate(trajectory.time_s):
+        row: dict[str, Any] = {"sample_index": int(index), "time_s": float(time_s)}
+        for key, series in selected.items():
+            row[key] = float(np.asarray(series, dtype=float)[index])
+        rows.append(row)
+    return rows
+
+
+def write_trajectory_filter_artifacts(
+    *,
+    outdir: Path,
+    trajectory: CanonicalTrajectory,
+) -> dict[str, Path]:
+    """Write raw/filtered trajectory CSVs and filter provenance sidecars."""
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    raw_values = trajectory.unfiltered_values or trajectory.values
+    keys = tuple(trajectory.values)
+    fieldnames = ("sample_index", "time_s", *keys)
+    raw_path = outdir / "trajectory_raw.csv"
+    filtered_path = outdir / "trajectory_filtered.csv"
+    provenance_path = outdir / "trajectory_filter_provenance.json"
+    summary_path = outdir / "trajectory_filter_summary.csv"
+    diagnostic_path = outdir / "trajectory_filter_diagnostic.png"
+    write_rows_csv(raw_path, trajectory_rows(trajectory, values=raw_values), fieldnames)
+    write_rows_csv(filtered_path, trajectory_rows(trajectory), fieldnames)
+    provenance = dict(trajectory.filter_provenance or {})
+    with provenance_path.open("w", encoding="utf-8") as handle:
+        json.dump(provenance, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    summary_rows = []
+    input_rms = dict(provenance.get("input_rms_by_column", {}) or {})
+    output_rms = dict(provenance.get("output_rms_by_column", {}) or {})
+    removed_rms = dict(provenance.get("removed_rms_by_column", {}) or {})
+    for key in keys:
+        summary_rows.append(
+            {
+                "column": key,
+                "input_rms": input_rms.get(key, ""),
+                "output_rms": output_rms.get(key, ""),
+                "removed_rms": removed_rms.get(key, ""),
+            }
+        )
+    write_rows_csv(summary_path, summary_rows, ("column", "input_rms", "output_rms", "removed_rms"))
+    try:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        fig = Figure(figsize=(8, max(2.5, 2.0 * len(keys))))
+        FigureCanvasAgg(fig)
+        axes = fig.subplots(len(keys), 1, sharex=True)
+        if len(keys) == 1:
+            axes = [axes]
+        for axis, key in zip(axes, keys):
+            axis.plot(trajectory.time_s, np.asarray(raw_values[key], dtype=float), label="raw", linewidth=1.0)
+            axis.plot(trajectory.time_s, np.asarray(trajectory.values[key], dtype=float), label="filtered", linewidth=1.0)
+            axis.set_ylabel(key)
+            axis.grid(True, alpha=0.25)
+        axes[-1].set_xlabel("time_s")
+        axes[0].legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(diagnostic_path, dpi=140)
+    except Exception as exc:
+        with diagnostic_path.with_suffix(".txt").open("w", encoding="utf-8") as handle:
+            handle.write(f"trajectory filter diagnostic plot unavailable: {exc}\n")
+    return {
+        "trajectory_raw_csv": raw_path.resolve(),
+        "trajectory_filtered_csv": filtered_path.resolve(),
+        "trajectory_filter_provenance_json": provenance_path.resolve(),
+        "trajectory_filter_summary_csv": summary_path.resolve(),
+        "trajectory_filter_diagnostic_png": diagnostic_path.resolve(),
+    }
+
+
 def write_subblock_artifacts(
     block: SubblockTrajectory,
     *,
@@ -457,6 +584,7 @@ def prepare_airbus_subblocks(
     time_mode: str = "inferred_uniform",
     time_start_s: float = 0.0,
     interpolation: str = "linear",
+    filter_config: Mapping[str, Any] | None = None,
 ) -> tuple[CanonicalTrajectory, np.ndarray, list[SubblockTrajectory]]:
     """Load Airbus trajectory and return prepared subblocks."""
 
@@ -467,6 +595,9 @@ def prepare_airbus_subblocks(
         start_s=time_start_s,
     )
     trajectory = map_trajectory(raw, output_keys=output_keys)
+    filter_spec = parse_trajectory_filter_config(filter_config)
+    if filter_spec.apply_stage == "before_window":
+        trajectory = apply_filter_to_trajectory(trajectory, config=filter_config)
     resolved_duration = derive_window_duration(
         duration_s=duration_s,
         n_subblocks=n_subblocks,
@@ -484,6 +615,35 @@ def prepare_airbus_subblocks(
         frame_times_s=frame_times,
         method=interpolation,
     )
+    if filter_spec.apply_stage == "after_window":
+        columns = tuple(key for key in filter_spec.columns if key in truth)
+        if not columns and filter_spec.enabled and filter_spec.kind != "none":
+            raise ValueError(
+                "trajectory filter columns do not match interpolated trajectory keys: "
+                + ", ".join(filter_spec.columns)
+            )
+        if columns:
+            values = np.column_stack([np.asarray(truth[key], dtype=float) for key in columns])
+            filtered, provenance = apply_trajectory_filter(
+                frame_times,
+                values,
+                TrajectoryFilterSpec(**{**filter_spec.__dict__, "columns": columns}),
+                axis=0,
+            )
+            if filter_spec.enabled and filter_spec.kind != "none":
+                provenance.setdefault("warnings", []).append(
+                    "filter apply_stage=after_window can introduce edge artifacts in the selected segment"
+                )
+                for index, key in enumerate(columns):
+                    truth[key] = np.asarray(filtered[:, index], dtype=float)
+            trajectory = CanonicalTrajectory(
+                time_s=trajectory.time_s,
+                values=trajectory.values,
+                raw=trajectory.raw,
+                mapping=trajectory.mapping,
+                filter_provenance=provenance,
+                unfiltered_values=trajectory.values,
+            )
     blocks = split_subblocks(
         frame_times_s=frame_times,
         truth_values=truth,
@@ -504,6 +664,7 @@ __all__ = [
     "derive_window_duration",
     "frame_truth_rows",
     "interpolate_trajectory",
+    "apply_filter_to_trajectory",
     "load_airbus_csv",
     "map_trajectory",
     "prepare_airbus_subblocks",
@@ -511,4 +672,5 @@ __all__ = [
     "starting_guess_rows",
     "write_rows_csv",
     "write_subblock_artifacts",
+    "write_trajectory_filter_artifacts",
 ]

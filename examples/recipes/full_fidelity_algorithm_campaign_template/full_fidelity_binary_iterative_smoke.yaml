@@ -7,7 +7,17 @@ experiment:
   target: ALPHA_CEN
   n_cases: 1
   n_draws: 1
-  system_preset: SHERA_FLIGHT_3P
+  system_preset: SHERA_FLIGHT_3P_CONV
+  detector_overrides:
+    layers:
+      jitter:
+        action: update
+        kernel:
+          sigma_x: 0.001
+          sigma_y: 0.001
+          theta_deg: 0.0
+          kernel_size: 3
+          units: detector_pix
   spectral_model:
     enabled: true
     preserve_flux_parameters: true
@@ -89,6 +99,7 @@ experiment:
         enabled: true
         render:
           mode: metadata_only
+          target_layer: smear
     trace_jitter:
       x_sigma_as: 0.001
       y_sigma_as: 0.001

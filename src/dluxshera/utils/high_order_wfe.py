@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 import dLux.utils as dlu
@@ -243,20 +243,43 @@ def _zernike_basis(shape: tuple[int, int], noll_indices: list[int] | tuple[int, 
     return np.asarray([np.asarray(dlu.zernike(int(i), coords, 2.0)) for i in noll_indices], dtype=float)
 
 
-def fit_zernike_coefficients_nm(opd_nm: np.ndarray, noll_indices: list[int] | tuple[int, ...], mask: np.ndarray | None = None) -> dict[str, float]:
+def fit_zernike_coefficients_nm(
+    opd_map: np.ndarray,
+    mask_or_noll_indices: np.ndarray | Sequence[int],
+    noll_indices: Sequence[int] | None = None,
+    *,
+    input_unit: Literal["nm", "m"] = "nm",
+    mask: np.ndarray | None = None,
+) -> dict[str, float]:
     """Fit Noll-indexed Zernike OPD coefficients over a pupil mask.
 
     Coefficients are returned in nanometres with stable labels ``Z<Noll>``.
     The fit is an ordinary least-squares projection on the masked pixels and is
     used for both PTT removal and low-order Z4-Z11 truth extraction.
+
+    The preferred review-call form is ``fit_zernike_coefficients_nm(opd_map,
+    mask, noll_indices, input_unit="nm")``. The older internal form
+    ``fit_zernike_coefficients_nm(opd_map, noll_indices, mask=mask)`` is kept
+    for compatibility.
     """
 
-    arr = np.asarray(opd_nm, dtype=float)
-    indices = [int(i) for i in noll_indices]
+    if noll_indices is None:
+        indices = [int(i) for i in mask_or_noll_indices]  # legacy call form
+        valid_mask = mask
+    else:
+        indices = [int(i) for i in noll_indices]
+        valid_mask = np.asarray(mask_or_noll_indices, dtype=bool)
+        if mask is not None:
+            raise TypeError("Pass mask either positionally or by keyword, not both.")
+    arr = np.asarray(opd_map, dtype=float)
+    if input_unit == "m":
+        arr = arr * 1.0e9
+    elif input_unit != "nm":
+        raise ValueError("input_unit must be 'nm' or 'm'.")
     if not indices:
         return {}
     basis = _zernike_basis(arr.shape, indices)
-    valid = _valid_mask(mask, arr.shape)
+    valid = _valid_mask(valid_mask, arr.shape)
     coeffs, *_ = np.linalg.lstsq(basis[:, valid].T, arr[valid], rcond=None)
     return {f"Z{i}": float(c) for i, c in zip(indices, coeffs)}
 

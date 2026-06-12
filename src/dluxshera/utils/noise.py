@@ -9,6 +9,7 @@ framework; additional models (e.g., 1/f) can hook into the stubs below later.
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any, Mapping, Tuple, Optional
 
 import jax.numpy as jnp
@@ -17,6 +18,249 @@ import jax.random as jr
 from ..components.detectors import DetectorSpec
 
 Array = jnp.ndarray
+
+_MISSING = object()
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
+
+
+def _coalesce_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def normalize_noise_request(noise: Any) -> dict[str, Any]:
+    """Normalize legacy scalar or structured render-noise requests.
+
+    The returned mapping is the canonical review schema. Legacy
+    ``enabled``/``disabled``/``inherit`` values remain accepted; ``enabled``
+    means shot noise is requested while read noise and dark current are left
+    off unless the structured request explicitly enables them.
+    """
+
+    defaults = {
+        "enabled": False,
+        "shot_noise": False,
+        "read_noise": False,
+        "dark_current": False,
+        "use_detector_read_noise": True,
+        "read_noise_electrons": None,
+        "use_detector_dark_current": True,
+        "dark_current_e_per_s": None,
+        "variance_floor": None,
+        "write_variance": True,
+        "seed_policy": "from_subblock_noise_seed",
+        "legacy_mode": None,
+    }
+    if isinstance(noise, Mapping):
+        out = dict(defaults)
+        out.update(dict(noise))
+        enabled = _bool(out.get("enabled"), False)
+        out["enabled"] = enabled
+        requested_shot = noise.get("shot_noise", noise.get("photon_noise", enabled))
+        out["shot_noise"] = _bool(
+            requested_shot,
+            enabled,
+        ) if enabled else False
+        out["photon_noise"] = bool(out["shot_noise"])
+        out["read_noise"] = _bool(out.get("read_noise"), False) if enabled else False
+        out["dark_current"] = _bool(out.get("dark_current"), False) if enabled else False
+        out["use_detector_read_noise"] = _bool(out.get("use_detector_read_noise"), True)
+        out["use_detector_dark_current"] = _bool(out.get("use_detector_dark_current"), True)
+        out["write_variance"] = _bool(out.get("write_variance"), True)
+        return out
+
+    mode = str(noise if noise is not None else "disabled").strip().lower()
+    out = dict(defaults)
+    out["legacy_mode"] = mode
+    if mode in {"enabled", "enable", "true", "on", "yes", "inherit"}:
+        out["enabled"] = True
+        out["shot_noise"] = True
+        out["photon_noise"] = True
+    elif mode in {"disabled", "disable", "false", "off", "none", "no", ""}:
+        out["enabled"] = False
+        out["shot_noise"] = False
+        out["photon_noise"] = False
+    elif mode in {"read", "read_noise", "shot_read", "photon_read"}:
+        out["enabled"] = True
+        out["shot_noise"] = mode != "read"
+        out["photon_noise"] = out["shot_noise"]
+        out["read_noise"] = True
+    else:
+        out["enabled"] = True
+        out["shot_noise"] = True
+        out["photon_noise"] = True
+    return out
+
+
+def detector_spec_for_model(model: str | None) -> DetectorSpec:
+    from ..components.detectors import GSENSE2020BSI_SPEC, HWK4123_SPEC
+
+    return {
+        "GSENSE2020BSI": GSENSE2020BSI_SPEC,
+        "HWK4123": HWK4123_SPEC,
+    }.get(str(model), GSENSE2020BSI_SPEC)
+
+
+def _detector_block(system_cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    system = _coalesce_mapping(system_cfg)
+    if isinstance(system.get("system"), Mapping):
+        system = dict(system["system"])
+    return _coalesce_mapping(system.get("detector"))
+
+
+def _first_numeric(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[float | None, str | None]:
+    for key in keys:
+        value = mapping.get(key, _MISSING)
+        if value is _MISSING or value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number, key
+    return None, None
+
+
+def _first_layer_numeric(detector: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[float | None, str | None]:
+    layers = detector.get("layers", [])
+    if not isinstance(layers, list):
+        return None, None
+    for idx, layer in enumerate(layers):
+        if not isinstance(layer, Mapping):
+            continue
+        value, key = _first_numeric(layer, keys)
+        if value is not None:
+            name = layer.get("name", f"layer_{idx}")
+            return value, f"detector.layers[{idx}]({name}).{key}"
+    return None, None
+
+
+def resolve_detector_noise_spec(
+    system_cfg: Mapping[str, Any] | None,
+    noise_cfg: Mapping[str, Any] | Any,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Resolve render-noise amplitudes and provenance for a system config."""
+
+    normalized = normalize_noise_request(noise_cfg)
+    detector = _detector_block(system_cfg)
+    spec = detector_spec_for_model(detector.get("model"))
+    warnings_out: list[str] = []
+
+    def resolve_read() -> tuple[float | None, str]:
+        if normalized.get("read_noise_electrons") is not None:
+            return float(normalized["read_noise_electrons"]), "config_override"
+        if not _bool(normalized.get("use_detector_read_noise"), True):
+            return None, "missing"
+        value, key = _first_numeric(detector, ("read_noise_electrons", "read_noise_e", "read_noise"))
+        if value is not None:
+            return value, f"detector_spec:{key}"
+        value, key = _first_layer_numeric(detector, ("read_noise_electrons", "read_noise_e", "read_noise"))
+        if value is not None:
+            return value, f"detector_layer:{key}"
+        if spec.read_noise is not None:
+            return float(spec.read_noise), "detector_spec"
+        return None, "missing"
+
+    def resolve_dark() -> tuple[float | None, str]:
+        if normalized.get("dark_current_e_per_s") is not None:
+            return float(normalized["dark_current_e_per_s"]), "config_override"
+        if not _bool(normalized.get("use_detector_dark_current"), True):
+            return None, "missing"
+        value, key = _first_numeric(detector, ("dark_current_e_per_s", "dark_current"))
+        if value is not None:
+            return value, f"detector_spec:{key}"
+        value, key = _first_layer_numeric(detector, ("dark_current_e_per_s", "dark_current"))
+        if value is not None:
+            return value, f"detector_layer:{key}"
+        if spec.dark_current is not None:
+            return float(spec.dark_current), "detector_spec"
+        return None, "missing"
+
+    read_noise, read_source = resolve_read()
+    dark_current, dark_source = resolve_dark()
+
+    exposure = None
+    system = _coalesce_mapping(system_cfg)
+    if isinstance(system.get("system"), Mapping):
+        system = dict(system["system"])
+    source = _coalesce_mapping(system.get("source"))
+    if source.get("exposure_time_s") is not None:
+        exposure = float(source["exposure_time_s"])
+    elif normalized.get("exposure_time_s") is not None:
+        exposure = float(normalized["exposure_time_s"])
+
+    if normalized["enabled"] and normalized["read_noise"] and read_noise is None:
+        warnings_out.append("read_noise=true but no read-noise amplitude was found in config or detector spec.")
+    if normalized["enabled"] and normalized["dark_current"] and dark_current is None:
+        warnings_out.append("dark_current=true but no dark-current amplitude was found in config or detector spec.")
+    if normalized["enabled"] and normalized["dark_current"] and exposure is None:
+        warnings_out.append("dark_current=true but exposure_time_s was not found for dark-current scaling.")
+
+    if strict and warnings_out:
+        raise ValueError("; ".join(warnings_out))
+
+    return {
+        "noise_request_normalized": normalized,
+        "detector_model": detector.get("model", spec.model_name),
+        "read_noise_electrons": read_noise,
+        "read_noise_source": read_source,
+        "dark_current_e_per_s": dark_current,
+        "dark_current_source": dark_source,
+        "exposure_time_s": exposure,
+        "shot_noise_enabled": bool(normalized["enabled"] and normalized["shot_noise"]),
+        "read_noise_enabled": bool(normalized["enabled"] and normalized["read_noise"]),
+        "dark_current_enabled": bool(normalized["enabled"] and normalized["dark_current"]),
+        "warnings": warnings_out,
+    }
+
+
+def expected_noise_variance(
+    image: Array,
+    *,
+    noise_cfg: Mapping[str, Any] | Any,
+    detector_noise: Mapping[str, Any] | None = None,
+    detector_spec: DetectorSpec | None = None,
+    exposure_time_s: float | None = None,
+    variance_floor: float | None = None,
+) -> Array:
+    """Compute render-noise variance for enabled terms.
+
+    ``variance_floor`` is optional and should only be passed for inference
+    likelihood diagnostics. Render variance itself is returned without a floor.
+    """
+
+    normalized = normalize_noise_request(noise_cfg)
+    variance = jnp.zeros_like(image)
+    if not normalized["enabled"]:
+        return variance if variance_floor is None else jnp.maximum(variance, float(variance_floor))
+    if normalized["shot_noise"]:
+        variance = variance + jnp.maximum(image, 0.0)
+
+    info = dict(detector_noise or {})
+    read = info.get("read_noise_electrons")
+    dark = info.get("dark_current_e_per_s")
+    exposure = info.get("exposure_time_s", exposure_time_s)
+    if read is None and detector_spec is not None:
+        read = detector_spec.read_noise
+    if dark is None and detector_spec is not None:
+        dark = detector_spec.dark_current
+
+    if normalized["read_noise"] and read is not None:
+        variance = variance + float(read) ** 2
+    if normalized["dark_current"] and dark is not None and exposure is not None:
+        variance = variance + max(float(dark) * float(exposure), 0.0)
+    if variance_floor is not None:
+        variance = jnp.maximum(variance, float(variance_floor))
+    return variance
 
 
 # ---------------------------------------------------------------------------
@@ -129,25 +373,29 @@ def apply_observation_noise(
     if noise_cfg is None:
         noise_cfg = {}
 
+    noise_cfg = normalize_noise_request(noise_cfg)
+
     enabled = noise_cfg.get("enabled")
     if enabled is None:
         enabled = noise_cfg.get("add_noise")
     if not enabled:
-        var = jnp.maximum(image, 1.0)
+        var = jnp.zeros_like(image)
         return image, var
 
-    photon_noise = noise_cfg.get("photon_noise", True)
+    photon_noise = noise_cfg.get("shot_noise", noise_cfg.get("photon_noise", True))
     read_noise_enabled = noise_cfg.get("read_noise", False)
     dark_current_enabled = noise_cfg.get("dark_current", False)
 
-    total_var = jnp.maximum(image, 1.0)
+    total_var = jnp.zeros_like(image)
 
     if photon_noise:
         rng_key, subkey = jr.split(rng_key)
+        shot_mean = jnp.maximum(image, 0.0)
         if jnp.min(image) > bright_threshold:
             noisy = jnp.sqrt(image) * jr.normal(subkey, image.shape) + image
         else:
-            noisy = jr.poisson(subkey, image).astype(image.dtype)
+            noisy = jr.poisson(subkey, shot_mean).astype(image.dtype)
+        total_var = total_var + shot_mean
     else:
         noisy = image
 
@@ -176,7 +424,11 @@ def apply_observation_noise(
 __all__ = [
     "apply_knowledge_error",
     "apply_observation_noise",
+    "detector_spec_for_model",
+    "expected_noise_variance",
     "make_subkey",
     "make_subseed",
+    "normalize_noise_request",
     "perturb_array",
+    "resolve_detector_noise_spec",
 ]

@@ -30,8 +30,10 @@
 #   diagnostics are separate.
 # - trace_jitter.apply_to=downstream_template_override is current behavior: it is
 #   not added to the materialized trajectory CSV.
+# - SHERA_FLIGHT_3P_CONV supplies detector realism layers. Named overrides keep
+#   jitter near identity and patch/remove the existing smear layer by policy.
 # - observation_theta Zernike indices are array indices into the resolved system
-#   coefficient vector. For SHERA_FLIGHT_3P, array index 0 maps to Noll Z4.
+#   coefficient vector. For SHERA_FLIGHT_3P_CONV, array index 0 maps to Noll Z4.
 # - prior_draws sigma kind implemented values: absolute and fractional.
 experiment:
   kind: full_fidelity_binary_iterative_review
@@ -41,7 +43,18 @@ experiment:
   source_kind: binary_target
   target: ALPHA_CEN
   n_cases: 1
-  system_preset: SHERA_FLIGHT_3P
+  system_preset: SHERA_FLIGHT_3P_CONV
+
+  detector_overrides:
+    layers:
+      jitter:
+        action: update
+        kernel:
+          sigma_x: 0.001
+          sigma_y: 0.001
+          theta_deg: 0.0
+          kernel_size: 3
+          units: detector_pix
 
   spectral_model:
     enabled: true
@@ -133,9 +146,12 @@ experiment:
       dark_current: false
       use_detector_read_noise: true
       read_noise_electrons: null
+      use_detector_dark_current: true
       dark_current_e_per_s: null
       variance_floor: 1.0
+      write_variance: true
       seed_policy: from_subblock_noise_seed
+    use_render_variance: auto
     phi_ref: truth_when_available
     schur_curvature_method: auto
     max_dense_dim: 80
@@ -181,6 +197,7 @@ experiment:
         enabled: true
         render:
           mode: metadata_only
+          target_layer: smear
     trace_jitter:
       enabled: true
       apply_to: downstream_template_override

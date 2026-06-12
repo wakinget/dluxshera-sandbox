@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from dluxshera.config.io import load_config_file
+from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
+from dluxshera.utils.noise import normalize_noise_request
 
 from run_observation_bias_campaign import (  # type: ignore
     DEFAULT_RESULTS_ROOT,
@@ -181,20 +183,41 @@ def _normalize_subblock_noise_for_observation_bias(subblocks: Mapping[str, Any])
     out = dict(subblocks)
     noise = out.get("noise")
     if isinstance(noise, Mapping):
-        noise_cfg = dict(noise)
+        noise_cfg = normalize_noise_request(noise)
         enabled = bool(noise_cfg.get("enabled", False))
         out["noise_model"] = {
             "schema_version": "structured_noise_request.v1",
+            "original_request": dict(noise),
             "requested": noise_cfg,
+            "normalized": noise_cfg,
+            "render_template_terms": {
+                "enabled": enabled,
+                "photon_noise": bool(noise_cfg.get("shot_noise", False)),
+                "shot_noise": bool(noise_cfg.get("shot_noise", False)),
+                "read_noise": bool(noise_cfg.get("read_noise", False)),
+                "dark_current": bool(noise_cfg.get("dark_current", False)),
+                "write_variance": bool(noise_cfg.get("write_variance", True)),
+                "variance_floor": noise_cfg.get("variance_floor"),
+            },
             "legacy_runner_flag": "enabled" if enabled else "disabled",
             "separate_term_control": False,
-            "warning": (
+            "warnings": [
                 "Structured shot/read/dark-current settings are translated to the "
                 "legacy subblock --noise enabled/disabled flag; separate per-term "
                 "runner controls are not implemented yet."
-            ),
+            ],
         }
         out["noise"] = "enabled" if enabled else "disabled"
+    else:
+        out["noise_model"] = {
+            "schema_version": "structured_noise_request.v1",
+            "original_request": noise,
+            "requested": normalize_noise_request(noise),
+            "normalized": normalize_noise_request(noise),
+            "legacy_runner_flag": str(noise or "disabled"),
+            "separate_term_control": False,
+            "warnings": [],
+        }
     return out
 
 
@@ -262,9 +285,10 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
             "seed": int(experiment.get("seed", 42)),
             "run_name": run_name or experiment.get("run_name", kind),
             "system": {
-                "preset": experiment.get("system_preset", "SHERA_FLIGHT_3P"),
+                "preset": experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET),
                 "source": {"kind": source_kind, "target": target},
             },
+            "detector_overrides": _as_mapping(experiment.get("detector_overrides"), name="experiment.detector_overrides"),
             "spectral_model": _as_mapping(experiment.get("spectral_model"), name="experiment.spectral_model"),
             "high_order_wfe": _as_mapping(experiment.get("high_order_wfe"), name="experiment.high_order_wfe"),
             "subblocks": subblocks,

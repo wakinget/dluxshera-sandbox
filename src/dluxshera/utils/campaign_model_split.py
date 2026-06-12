@@ -11,6 +11,12 @@ from typing import Any, Mapping
 
 from .campaign_high_order_wfe import apply_high_order_wfe_campaign_config
 from .campaigns import json_ready
+from .detector_layer_overrides import (
+    detector_blur_warnings,
+    detector_layer_stack,
+    patch_smear_layer_for_policy,
+    validate_no_accidental_default_smear,
+)
 from .spectral_response import (
     build_target_aware_spectral_deck,
     build_truth_inference_spectral_deck,
@@ -205,8 +211,17 @@ def build_campaign_model_split(
         "seed_context": json_ready(seed_context),
         "source_kind": source_kind,
         "target": target,
-        "composition_order": ["spectral_model", "high_order_wfe", "scalar_reference_offsets", "trajectory_smear", "detector_noise"],
+        "composition_order": [
+            "resolve_base_system_preset",
+            "global_detector_layer_overrides",
+            "spectral_model",
+            "high_order_wfe",
+            "scalar_reference_offsets",
+            "trajectory_smear_policy",
+            "detector_noise",
+        ],
         "invariant": "trace/render use truth_system_cfg; inference/reference use inference_system_cfg",
+        "detector_layers_from_base": detector_layer_stack(base_system_cfg),
     }
 
     spectral_cfg = _cfg(spectral_model_cfg)
@@ -279,12 +294,75 @@ def build_campaign_model_split(
     provenance["scalar_reference_offsets"] = scalar_summary
 
     smear = _cfg(trajectory_smear_metadata)
+    render_cfg = smear.get("render", {}) if isinstance(smear.get("render"), Mapping) else {}
     smear_enabled = bool(smear.get("enabled", False))
+    smear_render_mode = str(render_cfg.get("mode", "metadata_only" if smear_enabled else "disabled"))
+    if smear_render_mode == "subblock_constant_layer":
+        truth_system, truth_smear_prov = patch_smear_layer_for_policy(
+            truth_system,
+            smear,
+            context="campaign_model_split.truth",
+            strict=True,
+        )
+        model_policy = str(render_cfg.get("model_layer_policy", "from_inference_smear"))
+        if model_policy in {"same_as_truth", "from_inference_smear"}:
+            inference_system, inference_smear_prov = patch_smear_layer_for_policy(
+                inference_system,
+                smear,
+                context="campaign_model_split.inference",
+                strict=True,
+            )
+        else:
+            inference_system, inference_smear_prov = patch_smear_layer_for_policy(
+                inference_system,
+                {"enabled": False, "render": {"mode": "disabled", "target_layer": render_cfg.get("target_layer", "smear")}},
+                context="campaign_model_split.inference",
+                strict=True,
+            )
+    else:
+        truth_system, truth_smear_prov = patch_smear_layer_for_policy(
+            truth_system,
+            smear,
+            context="campaign_model_split.truth",
+            strict=True,
+        )
+        inference_system, inference_smear_prov = patch_smear_layer_for_policy(
+            inference_system,
+            smear,
+            context="campaign_model_split.inference",
+            strict=True,
+        )
+    smear_warnings = []
+    smear_warnings.extend(
+        validate_no_accidental_default_smear(
+            truth_system,
+            system_preset=str(truth_system.get("preset", "")),
+            smear_cfg=smear,
+            strict=True,
+        )
+    )
+    smear_warnings.extend(detector_blur_warnings(truth_system, smear_cfg=smear))
     smear_summary = {
         "enabled": smear_enabled,
-        "mode": str(smear.get("mode", "metadata_only" if smear_enabled else "none")),
+        "mode": smear_render_mode,
+        "target_layer": render_cfg.get("target_layer", render_cfg.get("layer_name", "smear")),
+        "warnings": smear_warnings,
     }
-    provenance["trajectory_smear"] = smear
+    provenance["trajectory_smear"] = {
+        "config": smear,
+        "truth_policy": truth_smear_prov,
+        "inference_policy": inference_smear_prov,
+        "warnings": smear_warnings,
+        "note": (
+            "metadata_only writes smear sidecars/provenance only; rendered detector smear is removed."
+            if smear_render_mode == "metadata_only"
+            else ""
+        ),
+    }
+    provenance["detector_layers_after_smear_policy"] = {
+        "truth": detector_layer_stack(truth_system),
+        "inference": detector_layer_stack(inference_system),
+    }
 
     detector_noise = _cfg(detector_noise_metadata)
     detector_noise_summary = {

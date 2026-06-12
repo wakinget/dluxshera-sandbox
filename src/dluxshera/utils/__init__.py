@@ -7,9 +7,12 @@ from .chi2_diagnostics import (
 from .noise import (
     apply_knowledge_error,
     apply_observation_noise,
+    expected_noise_variance,
     make_subkey,
     make_subseed,
+    normalize_noise_request,
     perturb_array,
+    resolve_detector_noise_spec,
 )
 
 from .runtime_profile import (

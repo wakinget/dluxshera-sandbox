@@ -12,7 +12,9 @@ from .obs_subblock_trajectory import (
     TRAJECTORY_NOTES,
     prepare_airbus_subblocks,
     write_subblock_artifacts,
+    write_trajectory_filter_artifacts,
 )
+from .trajectory_filters import parse_trajectory_filter_config
 from .trajectory_smear import (
     parse_smear_config,
     write_smear_sidecars,
@@ -183,6 +185,15 @@ def _trajectory_plan(
     sample_dt_s = float(source_cfg.get("sample_dt_s", 0.1))
     window_cfg = dict(trace_source_cfg.get("window", {}) or {})
     sampling_cfg = dict(trace_source_cfg.get("sampling", {}) or {})
+    processing_cfg = dict(trace_source_cfg.get("processing", {}) or {})
+    legacy_processing_cfg = dict(trajectory_processing_cfg or {})
+    filter_cfg = dict(
+        processing_cfg.get("filter")
+        or legacy_processing_cfg.get("filter")
+        or legacy_processing_cfg.get("high_pass_filter")
+        or {}
+    )
+    filter_spec = parse_trajectory_filter_config(filter_cfg)
     start_s = float(window_cfg.get("start_s", 0.0))
     requested_n_subblocks = int(window_cfg.get("n_subblocks", n_subblocks))
     if requested_n_subblocks != int(n_subblocks):
@@ -230,6 +241,16 @@ def _trajectory_plan(
     trajectory_root = artifact_root
     if reuse_existing:
         missing: list[Path] = []
+        if filter_spec.enabled and filter_spec.kind != "none":
+            for filename in (
+                "trajectory_raw.csv",
+                "trajectory_filtered.csv",
+                "trajectory_filter_provenance.json",
+                "trajectory_filter_summary.csv",
+            ):
+                path = trajectory_root / filename
+                if not path.exists():
+                    missing.append(path)
         for index in range(int(n_subblocks)):
             for filename in ("frame_truth.csv", "starting_guess_prediction.csv"):
                 path = trajectory_root / f"subblock_{index:06d}" / filename
@@ -262,7 +283,29 @@ def _trajectory_plan(
         output_keys=output_keys,
         fit_keys=fit_keys,
         interpolation=str(sampling_cfg.get("interpolation", "linear")),
+        filter_config=filter_cfg,
     )
+    filter_artifacts: dict[str, Any] = {}
+    if filter_spec.enabled and filter_spec.kind != "none":
+        if not reuse_existing:
+            filter_artifacts = write_trajectory_filter_artifacts(
+                outdir=trajectory_root,
+                trajectory=trajectory,
+            )
+        else:
+            filter_artifacts = {
+                "trajectory_raw_csv": (trajectory_root / "trajectory_raw.csv").resolve(),
+                "trajectory_filtered_csv": (trajectory_root / "trajectory_filtered.csv").resolve(),
+                "trajectory_filter_provenance_json": (
+                    trajectory_root / "trajectory_filter_provenance.json"
+                ).resolve(),
+                "trajectory_filter_summary_csv": (
+                    trajectory_root / "trajectory_filter_summary.csv"
+                ).resolve(),
+                "trajectory_filter_diagnostic_png": (
+                    trajectory_root / "trajectory_filter_diagnostic.png"
+                ).resolve(),
+            }
 
     rows: list[dict[str, Any]] = []
     subblocks: list[PreparedTraceSubblock] = []
@@ -317,6 +360,13 @@ def _trajectory_plan(
             "smear_model_policy": smear_cfg.inference_mode if smear_cfg.enabled else "",
             "smear_render_mode": smear_cfg.render_mode if smear_cfg.enabled else "",
             "smear_layer_name": smear_cfg.render_layer_name if smear_cfg.enabled else "",
+            "trajectory_filter_enabled": bool(filter_spec.enabled and filter_spec.kind != "none"),
+            "trajectory_filter_kind": filter_spec.kind if filter_spec.enabled else "",
+            "trajectory_filter_method": filter_spec.method if filter_spec.enabled else "",
+            "trajectory_filter_provenance_json": str(
+                filter_artifacts.get("trajectory_filter_provenance_json", "")
+            ),
+            "trajectory_filtered_csv": str(filter_artifacts.get("trajectory_filtered_csv", "")),
         }
         for key, diag in block.diagnostics.items():
             diagnostics[key] = dict(diag)
@@ -368,6 +418,16 @@ def _trajectory_plan(
                 "enabled": bool(smear_cfg.enabled),
                 "render_mode": smear_cfg.render_mode if smear_cfg.enabled else "disabled",
                 "inference_mode": smear_cfg.inference_mode if smear_cfg.enabled else "disabled",
+            },
+            "filter": {
+                "enabled": bool(filter_spec.enabled and filter_spec.kind != "none"),
+                "kind": filter_spec.kind,
+                "method": filter_spec.method,
+                "order": filter_spec.order,
+                "zero_phase": filter_spec.zero_phase,
+                "apply_stage": filter_spec.apply_stage,
+                "provenance_json": str(filter_artifacts.get("trajectory_filter_provenance_json", "")),
+                "summary_csv": str(filter_artifacts.get("trajectory_filter_summary_csv", "")),
             },
             "notes": list(TRAJECTORY_NOTES),
         },

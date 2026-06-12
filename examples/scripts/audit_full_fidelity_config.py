@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from dluxshera.config.io import load_config_file
+from dluxshera.config.resolver import resolve_config
+from dluxshera.utils.detector_layer_overrides import (
+    apply_detector_layer_overrides,
+    detector_blur_warnings,
+    detector_layer_stack,
+    patch_smear_layer_for_policy,
+    validate_no_accidental_default_smear,
+)
+from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
 from dluxshera.utils.full_fidelity_config_schema import (
     CONFIG_FIELD_REGISTRY,
     iter_string_fields,
@@ -44,6 +53,7 @@ WRAPPER_CONSUMED_TOP_LEVEL = {
     "target",
     "n_cases",
     "system_preset",
+    "detector_overrides",
 }
 FORWARDED_TOP_LEVEL = {
     "spectral_model",
@@ -98,7 +108,7 @@ FIELD_REFERENCE: list[dict[str, Any]] = [
     {"field_path": "experiment.target", "required": False, "consumed_by": "wrapper/model-split", "runtime_effect": "SED/source lookup", "fidelity_effect": "target-aware spectral deck", "provenance_effect": "science target", "safe_to_omit": True, "notes": "Defaults to ALPHA_CEN."},
     {"field_path": "experiment.n_cases", "required": False, "consumed_by": "wrapper", "runtime_effect": "case count when prior_draws omitted", "fidelity_effect": "none", "provenance_effect": "smoke scale", "safe_to_omit": True, "notes": "Keep 1 for smoke; use 2-4 for a less tiny validation."},
     {"field_path": "experiment.n_draws", "required": False, "consumed_by": "smoke label only", "runtime_effect": "none today", "fidelity_effect": "none", "provenance_effect": "documents intended tiny draw count", "safe_to_omit": True, "notes": "prior_draws.n_cases controls generated prior cases."},
-    {"field_path": "experiment.system_preset", "required": False, "consumed_by": "wrapper", "runtime_effect": "system resolver", "fidelity_effect": "selects SHERA preset", "provenance_effect": "system label", "safe_to_omit": True, "notes": "Defaults to SHERA_FLIGHT_3P."},
+    {"field_path": "experiment.system_preset", "required": False, "consumed_by": "wrapper", "runtime_effect": "system resolver", "fidelity_effect": "selects SHERA preset", "provenance_effect": "system label", "safe_to_omit": True, "notes": f"Full-fidelity default is {DEFAULT_FULL_FIDELITY_SYSTEM_PRESET}."},
     {"field_path": "experiment.spectral_model.enabled", "required": False, "consumed_by": "model-split helper", "runtime_effect": "enables spectral deck", "fidelity_effect": "truth/reference spectral mismatch possible", "provenance_effect": "component summary", "safe_to_omit": True, "notes": "If false/omitted, spectral model split is disabled."},
     {"field_path": "experiment.spectral_model.fast", "required": False, "consumed_by": "model-split helper", "runtime_effect": "clamps truth<=7 and inference<=5 wavelengths", "fidelity_effect": "reduces spectral sampling fidelity", "provenance_effect": "smoke shortcut", "safe_to_omit": True, "notes": "Not a substitute for explicit n_lambda/range/response settings."},
     {"field_path": "experiment.spectral_model.preserve_flux_parameters", "required": False, "consumed_by": "model-split helper", "runtime_effect": "none significant", "fidelity_effect": "keeps scalar flux parameters separate from spectral weights", "provenance_effect": "spectral config", "safe_to_omit": True, "notes": "Default is true in model-split composition."},
@@ -112,7 +122,7 @@ FIELD_REFERENCE: list[dict[str, Any]] = [
     {"field_path": "experiment.high_order_wfe.artifacts.write_maps", "required": False, "consumed_by": "model-split helper", "runtime_effect": "artifact I/O", "fidelity_effect": "none", "provenance_effect": "debug artifact availability", "safe_to_omit": True, "notes": "False keeps smoke artifacts small."},
     {"field_path": "experiment.subblocks.n_frames", "required": False, "consumed_by": "observation-bias campaign", "runtime_effect": "linear-ish render/inference cost", "fidelity_effect": "temporal sampling", "provenance_effect": "plan scale", "safe_to_omit": True, "notes": "3 is smoke scale; 5-10 is a less tiny validation."},
     {"field_path": "experiment.subblocks.reference_n_iter", "required": False, "consumed_by": "observation-bias campaign", "runtime_effect": "optimizer iterations", "fidelity_effect": "reference-solve convergence", "provenance_effect": "optimizer config", "safe_to_omit": True, "notes": "3 is deliberately tiny."},
-    {"field_path": "experiment.subblocks.trajectory_processing.smear.render.mode", "required": False, "consumed_by": "model-split metadata", "runtime_effect": "metadata_only avoids dynamic smear rendering", "fidelity_effect": "dynamic smear not active", "provenance_effect": "smear sidecar mode", "safe_to_omit": True, "notes": "Only none/metadata_only are wired in the smoke wrapper."},
+    {"field_path": "experiment.subblocks.trajectory_processing.smear.render.mode", "required": False, "consumed_by": "model-split smear policy", "runtime_effect": "disabled/metadata_only remove rendered smear; subblock_constant_layer patches the named smear layer", "fidelity_effect": "controls detector smear layer", "provenance_effect": "smear layer policy", "safe_to_omit": True, "notes": "metadata_only must not leave the preset default smear active."},
     {"field_path": "experiment.iterative.update_gain", "required": False, "consumed_by": "observation-bias iterative update", "runtime_effect": "none significant", "fidelity_effect": "update damping/stability", "provenance_effect": "iterative plan", "safe_to_omit": True, "notes": "0.25 is conservative for smoke."},
     {"field_path": "experiment.iterative.update_safety.posterior_sigma_inflation", "required": False, "consumed_by": "observation-bias iterative update", "runtime_effect": "none significant", "fidelity_effect": "conservative posterior uncertainty", "provenance_effect": "update safety", "safe_to_omit": True, "notes": "10.0 is a smoke safety guard."},
     {"field_path": "experiment.observation_theta.optics.primary_zernikes.indices", "required": False, "consumed_by": "observation theta layout", "runtime_effect": "state dimension", "fidelity_effect": "active low-order optical parameters", "provenance_effect": "theta layout", "safe_to_omit": True, "notes": "[0] is tiny; from_system or more indices increases state dimension."},
@@ -285,6 +295,57 @@ def _component_summary(experiment: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _detector_policy_summary(experiment: Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
+    selected_preset = str(experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET))
+    resolved = resolve_config({"system": {"preset": selected_preset}})
+    system_cfg = dict(resolved["system"])
+    base_stack = detector_layer_stack(system_cfg)
+    detector_overrides = experiment.get("detector_overrides")
+    override_provenance = None
+    if isinstance(detector_overrides, Mapping):
+        system_cfg, override_provenance = apply_detector_layer_overrides(
+            system_cfg,
+            detector_overrides,
+            context="full_fidelity_config_audit.global",
+        )
+    after_global = detector_layer_stack(system_cfg)
+    subblocks = experiment.get("subblocks", {}) if isinstance(experiment.get("subblocks"), Mapping) else {}
+    trajectory_processing = (
+        subblocks.get("trajectory_processing", {})
+        if isinstance(subblocks.get("trajectory_processing"), Mapping)
+        else {}
+    )
+    smear_cfg = trajectory_processing.get("smear", {}) if isinstance(trajectory_processing.get("smear"), Mapping) else {}
+    system_after_smear, smear_provenance = patch_smear_layer_for_policy(
+        system_cfg,
+        smear_cfg if isinstance(smear_cfg, Mapping) else {},
+        context="full_fidelity_config_audit",
+        strict=strict,
+    )
+    warnings_out = []
+    warnings_out.extend(
+        validate_no_accidental_default_smear(
+            system_after_smear,
+            system_preset=selected_preset,
+            smear_cfg=smear_cfg if isinstance(smear_cfg, Mapping) else {},
+            strict=strict,
+        )
+    )
+    warnings_out.extend(detector_blur_warnings(system_after_smear, smear_cfg=smear_cfg if isinstance(smear_cfg, Mapping) else {}))
+    names_after_smear = [row.get("name") for row in detector_layer_stack(system_after_smear)]
+    return {
+        "selected_system_preset": selected_preset,
+        "detector_layer_stack_from_base_preset": base_stack,
+        "detector_layer_stack_after_global_overrides": after_global,
+        "detector_layer_stack_after_smear_policy": detector_layer_stack(system_after_smear),
+        "detector_layer_overrides": override_provenance,
+        "smear_policy": smear_provenance,
+        "smear_status": "present" if "smear" in names_after_smear else "removed",
+        "jitter_status": "present" if "jitter" in names_after_smear else "removed",
+        "warnings": warnings_out,
+    }
+
+
 def _config_tier(experiment: Mapping[str, Any], config_path: Path) -> str:
     kind = str(experiment.get("kind", ""))
     if "review" in kind or "review" in config_path.name:
@@ -333,6 +394,14 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         truth_reference_mismatch.append("experiment.high_order_wfe.truth vs inference.knowledge_error")
     elif high_order["enabled"]:
         matched_truth_reference.append("experiment.high_order_wfe")
+    detector_policy_summary: dict[str, Any] | None = None
+    detector_policy_error: str | None = None
+    try:
+        detector_policy_summary = _detector_policy_summary(experiment, strict=strict)
+    except Exception as exc:
+        detector_policy_error = str(exc)
+        if strict:
+            raise
 
     reference_rows = _field_reference_rows({"experiment": experiment})
     accepted_but_noop_used = []
@@ -378,6 +447,8 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         "field_rows": field_rows,
         "field_reference": reference_rows,
         "resolved_component_summary": _component_summary(experiment),
+        "detector_policy_summary": detector_policy_summary,
+        "detector_policy_error": detector_policy_error,
     }
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -385,6 +456,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
     _write_json(outdir / "translated_observation_bias_config.json", translated or {"error": translation_error})
     _write_json(outdir / "field_reference.json", reference_rows)
     _write_json(outdir / "resolved_component_summary.json", audit["resolved_component_summary"])
+    _write_json(outdir / "detector_policy_summary.json", detector_policy_summary or {"error": detector_policy_error})
     _write_csv(outdir / "field_reference.csv", reference_rows)
 
     md = _render_audit_markdown(audit)
@@ -410,7 +482,23 @@ def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
         lines.append(f"- Translation error: `{audit['translation_error']}`")
     lines.extend(["", "## Warnings"])
     warnings_out = list(audit.get("warnings", []))
+    detector_policy = audit.get("detector_policy_summary")
+    if isinstance(detector_policy, Mapping):
+        warnings_out.extend(detector_policy.get("warnings", []) or [])
     lines.extend([f"- {item}" for item in warnings_out] or ["- None"])
+    if isinstance(detector_policy, Mapping):
+        lines.extend(
+            [
+                "",
+                "## Detector Layer Policy",
+                f"- Selected preset: `{detector_policy.get('selected_system_preset')}`",
+                f"- Base layers: `{[row.get('name') for row in detector_policy.get('detector_layer_stack_from_base_preset', [])]}`",
+                f"- After global overrides: `{[row.get('name') for row in detector_policy.get('detector_layer_stack_after_global_overrides', [])]}`",
+                f"- After smear policy: `{[row.get('name') for row in detector_policy.get('detector_layer_stack_after_smear_policy', [])]}`",
+                f"- Smear: `{detector_policy.get('smear_status')}`",
+                f"- Jitter: `{detector_policy.get('jitter_status')}`",
+            ]
+        )
     lines.extend(["", "## Contract Findings"])
     findings = list(audit.get("contract_findings", []))
     lines.extend([f"- `{f['severity']}` `{f['field_path']}` `{f['code']}`: {f['message']}" for f in findings] or ["- None"])

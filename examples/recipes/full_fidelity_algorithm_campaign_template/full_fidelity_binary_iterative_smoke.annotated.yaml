@@ -19,6 +19,9 @@
 #   smoke execution. The review config uses the structured noise request.
 # - reference_n_iter=3 and observation_theta Zernike indices [0] are smoke-only
 #   runtime reducers.
+# - SHERA_FLIGHT_3P_CONV supplies detector realism layers; this smoke removes
+#   rendered smear so the preset's default line kernel is not applied.
+# - jitter is kept as a named near-identity convolution layer for override tests.
 # - trace_jitter, when forwarded, is a downstream trace-template override and is
 #   not added to materialized trajectory frame_truth.csv.
 experiment:
@@ -30,7 +33,17 @@ experiment:
   target: ALPHA_CEN
   n_cases: 1
   n_draws: 1
-  system_preset: SHERA_FLIGHT_3P
+  system_preset: SHERA_FLIGHT_3P_CONV
+  detector_overrides:
+    layers:
+      jitter:
+        action: update
+        kernel:
+          sigma_x: 0.001
+          sigma_y: 0.001
+          theta_deg: 0.0
+          kernel_size: 3
+          units: detector_pix
   spectral_model:
     enabled: true
     preserve_flux_parameters: true
@@ -112,6 +125,7 @@ experiment:
         enabled: true
         render:
           mode: metadata_only
+          target_layer: smear
     trace_jitter:
       x_sigma_as: 0.001
       y_sigma_as: 0.001

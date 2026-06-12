@@ -28,18 +28,32 @@ from dluxshera.config.io import load_config_file
 from dluxshera.config.resolver import resolve_config
 from dluxshera.components.detectors import GSENSE2020BSI_SPEC, HWK4123_SPEC, DetectorSpec
 from dluxshera.params.store import ParameterStore
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.campaign_model_split import (
     CampaignModelSplit,
     build_campaign_model_split,
     summarize_campaign_model_split,
 )
+from dluxshera.utils.detector_layer_overrides import (
+    apply_detector_layer_overrides,
+    detector_blur_warnings,
+    detector_layer_stack,
+)
+from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
 from dluxshera.utils.high_order_wfe import (
     fit_zernike_coefficients_nm,
     make_pupil_mask,
     remove_zernike_modes,
+    reconstruct_zernike_opd_nm,
 )
-from dluxshera.utils.noise import apply_observation_noise
+from dluxshera.utils.noise import (
+    apply_observation_noise,
+    detector_spec_for_model,
+    expected_noise_variance,
+    normalize_noise_request,
+    resolve_detector_noise_spec,
+)
 from dluxshera.utils.obs_subblock_trajectory import (
     DEFAULT_OUTPUT_KEYS,
     prepare_airbus_subblocks,
@@ -134,7 +148,7 @@ def _resolve_base_system_config(translated_cfg: Mapping[str, Any]) -> tuple[dict
     exp = _experiment(translated_cfg)
     system_seed = exp.get("system") if isinstance(exp.get("system"), Mapping) else None
     if system_seed is None:
-        system_seed = {"preset": exp.get("system_preset", "SHERA_FLIGHT_3P")}
+        system_seed = {"preset": exp.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET)}
     user_cfg = {"system": copy.deepcopy(dict(system_seed))}
     exposure = _subblock_exposure_time_s(exp)
     if exposure is not None:
@@ -143,6 +157,15 @@ def _resolve_base_system_config(translated_cfg: Mapping[str, Any]) -> tuple[dict
         user_cfg["system"]["source"] = source
     resolved = resolve_config(user_cfg)
     system_cfg = dict(resolved["system"])
+    detector_stack_from_preset = detector_layer_stack(system_cfg)
+    detector_override_provenance = None
+    detector_overrides = exp.get("detector_overrides")
+    if isinstance(detector_overrides, Mapping):
+        system_cfg, detector_override_provenance = apply_detector_layer_overrides(
+            system_cfg,
+            detector_overrides,
+            context="full_fidelity_review.global",
+        )
     spec = compose_forward_spec(system_cfg)
     store = ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
     provenance = {
@@ -151,6 +174,9 @@ def _resolve_base_system_config(translated_cfg: Mapping[str, Any]) -> tuple[dict
         "source_target": (system_cfg.get("source") or {}).get("target"),
         "optics_kind": (system_cfg.get("optics") or {}).get("kind"),
         "detector_model": (system_cfg.get("detector") or {}).get("model"),
+        "detector_layer_stack_from_preset": detector_stack_from_preset,
+        "detector_layer_stack_after_global_overrides": detector_layer_stack(system_cfg),
+        "detector_layer_overrides": detector_override_provenance,
     }
     return system_cfg, store, provenance
 
@@ -349,6 +375,101 @@ def _masked_stats(arr: np.ndarray, mask: np.ndarray) -> dict[str, float]:
     }
 
 
+def masked_for_imshow(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Return a float image with pixels outside ``mask`` set to NaN."""
+
+    data = np.asarray(arr, dtype=float).copy()
+    valid = np.asarray(mask, dtype=bool)
+    if data.shape != valid.shape:
+        raise ValueError(f"Map/mask shape mismatch: {data.shape} vs {valid.shape}.")
+    data[~valid] = np.nan
+    return data
+
+
+def cmap_with_bad(base: str = "RdBu_r", bad: str = "0.5") -> Any:
+    """Return a copied Matplotlib colormap with NaN/bad pixels set to grey."""
+
+    import matplotlib.pyplot as plt
+
+    cmap = plt.get_cmap(base).copy()
+    cmap.set_bad(bad)
+    return cmap
+
+
+def symmetric_nan_limits(arr: np.ndarray, percentile: float = 99.0) -> tuple[float, float]:
+    """Return symmetric color limits from finite values in ``arr``."""
+
+    vals = np.asarray(arr, dtype=float)
+    finite = vals[np.isfinite(vals)]
+    if finite.size == 0:
+        return -1.0, 1.0
+    limit = float(np.nanpercentile(np.abs(finite), float(percentile)))
+    if not np.isfinite(limit) or limit == 0.0:
+        limit = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+    if not np.isfinite(limit) or limit == 0.0:
+        limit = 1.0
+    return -limit, limit
+
+
+def _wfe_artifact_manifest(model_split: CampaignModelSplit) -> dict[str, Any] | None:
+    for key, path in model_split.artifact_paths.items():
+        if key.endswith("high_order_wfe_deck_manifest.json"):
+            p = resolve_repo_path(path)
+            if p.exists():
+                return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def _manifest_map(manifest: Mapping[str, Any] | None, mirror: str, name: str) -> np.ndarray | None:
+    if not manifest:
+        return None
+    path = (((manifest.get("artifacts") or {}).get(f"{mirror}_{name}_opd_nm.fits")))
+    if not path:
+        return None
+    try:
+        from astropy.io import fits
+
+        return np.asarray(fits.getdata(resolve_repo_path(path)), dtype=float)
+    except Exception:
+        return None
+
+
+def _manifest_coefficients(manifest: Mapping[str, Any] | None, mirror: str) -> dict[str, dict[str, float]] | None:
+    if not manifest or not isinstance(manifest.get(mirror), Mapping):
+        return None
+    item = manifest[mirror]
+    truth = item.get("low_order_truth_coeffs_nm")
+    inference = item.get("low_order_knowledge_coeffs_nm")
+    error = item.get("low_order_knowledge_error_nm")
+    if not all(isinstance(x, Mapping) for x in (truth, inference, error)):
+        return None
+    return {
+        "truth": {str(k): float(v) for k, v in truth.items()},
+        "inference": {str(k): float(v) for k, v in inference.items()},
+        "error": {str(k): float(v) for k, v in error.items()},
+    }
+
+
+def _provenance_coefficients(prov: Mapping[str, Any], mirror: str) -> dict[str, dict[str, float]] | None:
+    item = prov.get(mirror)
+    if not isinstance(item, Mapping):
+        return None
+    truth = item.get("low_order_truth_coefficients_nm")
+    inference = item.get("low_order_inference_coefficients_nm")
+    error = item.get("low_order_error_coefficients_nm")
+    if not all(isinstance(x, Mapping) for x in (truth, inference, error)):
+        return None
+    return {
+        "truth": {str(k): float(v) for k, v in truth.items()},
+        "inference": {str(k): float(v) for k, v in inference.items()},
+        "error": {str(k): float(v) for k, v in error.items()},
+    }
+
+
+def _max_abs_coeff(coeffs: Mapping[str, float]) -> float:
+    return max((abs(float(v)) for v in coeffs.values()), default=0.0)
+
+
 def summarize_wfe_artifacts(model_split: CampaignModelSplit, *, noll_indices: Sequence[int] = LOW_ORDER_NOLL_INDICES) -> dict[str, Any]:
     """Summarize truth/reference high-order OPD maps inserted in system configs."""
 
@@ -360,6 +481,13 @@ def summarize_wfe_artifacts(model_split: CampaignModelSplit, *, noll_indices: Se
     out["enabled"] = True
     requested_truth = float(prov.get("truth_amplitude_nm_rms", np.nan))
     requested_error = float(prov.get("knowledge_error_amplitude_nm_rms", np.nan))
+    manifest = _wfe_artifact_manifest(model_split)
+    projection_limit = float(
+        prov.get("validation", {}).get("max_abs_low_order_projection_nm", 1.0e-8)
+        if isinstance(prov.get("validation"), Mapping)
+        else 1.0e-8
+    )
+    sum_limit = 1.0e-10
     for mirror in ("primary", "secondary"):
         truth, _ = _mirror_wfe_maps(model_split.truth_system_cfg, mirror)
         ref_truth, err = _mirror_wfe_maps(model_split.inference_system_cfg, mirror)
@@ -369,17 +497,71 @@ def summarize_wfe_artifacts(model_split: CampaignModelSplit, *, noll_indices: Se
         error = np.zeros_like(truth) if err is None else np.asarray(err, dtype=float)
         inference = ref_truth + error
         mask = make_pupil_mask(truth.shape, mode=str(prov.get("mask_policy", "circular_fallback")))
-        coeff_truth = fit_zernike_coefficients_nm(truth, list(noll_indices), mask=mask)
-        coeff_inference = fit_zernike_coefficients_nm(inference, list(noll_indices), mask=mask)
-        coeff_error = fit_zernike_coefficients_nm(inference - truth, list(noll_indices), mask=mask)
-        residual_truth, _ = remove_zernike_modes(truth, list(noll_indices), mask=mask)
-        residual_error, _ = remove_zernike_modes(inference - truth, list(noll_indices), mask=mask)
-        measured_truth = _masked_stats(truth, mask)
-        measured_error = _masked_stats(inference - truth, mask)
+        raw_truth = _manifest_map(manifest, mirror, "full_truth")
+        stored_coeff = _manifest_coefficients(manifest, mirror) or _provenance_coefficients(prov, mirror)
+        warnings: list[str] = []
+        if raw_truth is None:
+            warnings.append("Raw PTT-removed truth OPD artifact is unavailable; reconstructing from stored coefficients and high-order residual.")
+        if stored_coeff is None:
+            warnings.append("Stored low-order coefficient artifacts are unavailable; falling back to refit from reconstructed raw truth.")
+            low_truth_fallback = fit_zernike_coefficients_nm(raw_truth if raw_truth is not None else truth, mask, list(noll_indices))
+            stored_coeff = {
+                "truth": low_truth_fallback,
+                "inference": {key: np.nan for key in low_truth_fallback},
+                "error": {key: np.nan for key in low_truth_fallback},
+            }
+        labels = [f"Z{int(i)}" for i in noll_indices]
+        low_truth = {label: float(stored_coeff["truth"].get(label, 0.0)) for label in labels}
+        low_recon = reconstruct_zernike_opd_nm(low_truth, truth.shape, mask=mask)
+        if raw_truth is None:
+            raw_truth = low_recon + truth
+        raw_truth = np.asarray(raw_truth, dtype=float)
+        truth_residual = np.asarray(truth, dtype=float)
+        knowledge_error_residual = np.asarray(inference - truth_residual, dtype=float)
+        inference_sum_residual = inference - truth_residual - knowledge_error_residual
+        residual_projection = {
+            "truth_high_order_residual": fit_zernike_coefficients_nm(truth_residual, mask, list(noll_indices)),
+            "knowledge_error_residual": fit_zernike_coefficients_nm(knowledge_error_residual, mask, list(noll_indices)),
+            "inference_high_order": fit_zernike_coefficients_nm(inference, mask, list(noll_indices)),
+        }
+        coeff_truth = residual_projection["truth_high_order_residual"]
+        coeff_inference = residual_projection["inference_high_order"]
+        coeff_error = residual_projection["knowledge_error_residual"]
+        residual_truth, _ = remove_zernike_modes(truth_residual, list(noll_indices), mask=mask)
+        residual_error, _ = remove_zernike_modes(knowledge_error_residual, list(noll_indices), mask=mask)
+        measured_truth = _masked_stats(truth_residual, mask)
+        measured_error = _masked_stats(knowledge_error_residual, mask)
+        max_sum = float(np.max(np.abs(inference_sum_residual[mask])))
+        max_projection = max(_max_abs_coeff(coeffs) for coeffs in residual_projection.values())
+        if max_sum > sum_limit:
+            warnings.append(f"inference sum residual max {max_sum:.6g} nm exceeds {sum_limit:.6g} nm.")
+        if max_projection > projection_limit:
+            warnings.append(f"residual low-order projection max {max_projection:.6g} nm exceeds {projection_limit:.6g} nm.")
+        if np.nanmax(np.abs(raw_truth[mask])) < 1.0e-6 and requested_truth > 1.0e-3:
+            warnings.append("Raw truth OPD magnitude is unexpectedly tiny for nm units; check map units.")
+        if truth_residual.shape[0] != int(prov.get("npix", truth_residual.shape[0])):
+            warnings.append("High-order WFE map shape differs from provenance npix.")
+        rms = {
+            "raw_ptt_removed_truth": _masked_stats(raw_truth, mask)["rms_nm"],
+            "low_order_reconstruction": _masked_stats(low_recon, mask)["rms_nm"],
+            "truth_high_order_residual": measured_truth["rms_nm"],
+            "knowledge_error_residual": measured_error["rms_nm"],
+            "inference_high_order": _masked_stats(inference, mask)["rms_nm"],
+            "inference_sum_residual": _masked_stats(inference_sum_residual, mask)["rms_nm"],
+        }
         out["mirrors"][mirror] = {
-            "truth_opd_nm": truth,
+            "raw_ptt_removed_truth_opd_nm": raw_truth,
+            "low_order_truth_reconstruction_nm": low_recon,
+            "truth_high_order_residual_opd_nm": truth_residual,
+            "knowledge_error_high_order_residual_opd_nm": knowledge_error_residual,
+            "inference_high_order_opd_nm": inference,
+            "inference_sum_residual_nm": inference_sum_residual,
+            "stored_low_order_coefficients_nm": stored_coeff,
+            "residual_low_order_projection_nm": residual_projection,
+            "rms_nm": rms,
+            "truth_opd_nm": truth_residual,
             "inference_opd_nm": inference,
-            "knowledge_error_opd_nm": inference - truth,
+            "knowledge_error_opd_nm": knowledge_error_residual,
             "mask": mask,
             "requested_truth_rms_nm": requested_truth,
             "requested_knowledge_error_rms_nm": requested_error,
@@ -396,7 +578,13 @@ def summarize_wfe_artifacts(model_split: CampaignModelSplit, *, noll_indices: Se
                 "error": _masked_stats(residual_error, mask)["rms_nm"],
             },
             "noll_index_mapping": {f"Z{int(i)}": idx for idx, i in enumerate(noll_indices)},
+            "coefficient_array_index_mapping": {
+                idx: {"label": f"Z{int(i)}", "noll_index": int(i)}
+                for idx, i in enumerate(noll_indices)
+            },
+            "warnings": warnings,
         }
+        out["warnings"].extend(f"{mirror}: {warning}" for warning in warnings)
         if np.isfinite(requested_error) and not np.isclose(measured_error["rms_nm"], requested_error, rtol=0.05, atol=1e-6):
             out["warnings"].append(f"{mirror} knowledge-error RMS {measured_error['rms_nm']:.4g} nm differs from requested {requested_error:.4g} nm.")
     out["provenance"] = prov
@@ -453,10 +641,6 @@ def _diff_paths(base: Mapping[str, Any], truth: Mapping[str, Any], inference: Ma
             "status": "matched" if tv == iv else "mismatch",
         })
     return rows
-
-
-def detector_spec_for_model(model: str | None) -> DetectorSpec:
-    return {"GSENSE2020BSI": GSENSE2020BSI_SPEC, "HWK4123": HWK4123_SPEC}.get(str(model), GSENSE2020BSI_SPEC)
 
 
 def summarize_detector_config(system_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -517,28 +701,67 @@ def load_detector_calibration_maps(system_cfg: Mapping[str, Any]) -> dict[str, n
 def summarize_noise_config(config: Mapping[str, Any], system_cfg: Mapping[str, Any]) -> dict[str, Any]:
     exp = _experiment(config)
     sub = dict(exp.get("subblocks", {}) or {})
-    mode = str(sub.get("noise", "disabled"))
-    structured = sub.get("noise_model", {}).get("requested", {}) if isinstance(sub.get("noise_model"), Mapping) else {}
-    if not structured and isinstance(sub.get("noise"), Mapping):
-        structured = dict(sub["noise"])
-    detector = summarize_detector_config(system_cfg)
+    original = sub.get("noise", "disabled")
+    structured = sub.get("noise_model", {}).get("requested", {}) if isinstance(sub.get("noise_model"), Mapping) else original
+    normalized = normalize_noise_request(structured)
+    detector_noise = resolve_detector_noise_spec(system_cfg, normalized)
+    warnings_out = list(detector_noise.get("warnings", []))
+    separate_term_control = (
+        sub.get("noise_model", {}).get("separate_term_control")
+        if isinstance(sub.get("noise_model"), Mapping)
+        else True
+    )
+    if separate_term_control is False and normalized.get("enabled") and any(
+        bool(normalized.get(key)) for key in ("read_noise", "dark_current")
+    ):
+        warnings_out.append(
+            "Structured shot/read/dark-current request is translated through a coarse legacy noise flag; "
+            "term-specific runner controls are not fully available in the campaign wrapper."
+        )
+    use_render_variance = sub.get("use_render_variance", "auto")
+    variance_model = "provided_cube" if use_render_variance is True else "data"
+    if str(use_render_variance).lower() == "true":
+        variance_model = "provided_cube"
     return {
-        "noise_mode": mode,
+        "noise_request_original": original,
+        "noise_request_normalized": normalized,
+        "render_noise": {
+            "enabled": bool(normalized["enabled"]),
+            "shot_noise": bool(detector_noise["shot_noise_enabled"]),
+            "read_noise": bool(detector_noise["read_noise_enabled"]),
+            "dark_current": bool(detector_noise["dark_current_enabled"]),
+            "read_noise_electrons": detector_noise["read_noise_electrons"],
+            "read_noise_source": detector_noise["read_noise_source"],
+            "dark_current_e_per_s": detector_noise["dark_current_e_per_s"],
+            "dark_current_source": detector_noise["dark_current_source"],
+            "exposure_time_s": detector_noise["exposure_time_s"],
+            "write_variance": bool(normalized.get("write_variance", True)),
+            "separate_term_control": separate_term_control,
+        },
+        "inference_noise_model": {
+            "variance_model": variance_model,
+            "variance_floor": normalized.get("variance_floor", sub.get("variance_floor")),
+            "use_render_variance": use_render_variance,
+        },
+        "shot_noise_signal_dependent": bool(detector_noise["shot_noise_enabled"]),
+        "read_noise_signal_independent": bool(detector_noise["read_noise_enabled"]),
+        "dark_current_expected_variance_included": bool(detector_noise["dark_current_enabled"]),
+        "warnings": warnings_out,
+        "noise_mode": str(original) if not isinstance(original, Mapping) else ("enabled" if normalized["enabled"] else "disabled"),
         "structured_request": structured,
-        "shot_noise_enabled": bool(structured.get("shot_noise", mode not in {"disabled", "none", "off"})),
-        "read_noise_enabled": bool(structured.get("read_noise", mode in {"read", "read_noise", "shot_read", "photon_read"})),
-        "read_noise": detector["read_noise"],
+        "shot_noise_enabled": bool(detector_noise["shot_noise_enabled"]),
+        "read_noise_enabled": bool(detector_noise["read_noise_enabled"]),
+        "read_noise": detector_noise["read_noise_electrons"],
         "read_noise_unit": "electrons RMS per pixel",
-        "dark_current_enabled": bool(structured.get("dark_current", False)),
-        "dark_current": detector["dark_current"],
+        "read_noise_source": detector_noise["read_noise_source"],
+        "dark_current_enabled": bool(detector_noise["dark_current_enabled"]),
+        "dark_current": detector_noise["dark_current_e_per_s"],
         "dark_current_unit": "electrons / s / pixel",
-        "variance_floor": sub.get("variance_floor"),
-        "use_render_variance": sub.get("use_render_variance", "inherited/default"),
-        "separate_term_control": (
-            sub.get("noise_model", {}).get("separate_term_control")
-            if isinstance(sub.get("noise_model"), Mapping)
-            else None
-        ),
+        "dark_current_source": detector_noise["dark_current_source"],
+        "exposure_time_s": detector_noise["exposure_time_s"],
+        "variance_floor": normalized.get("variance_floor", sub.get("variance_floor")),
+        "use_render_variance": use_render_variance,
+        "separate_term_control": separate_term_control,
     }
 
 
@@ -585,6 +808,14 @@ def load_trajectory_for_review(config: Mapping[str, Any]) -> dict[str, Any]:
     source = dict(trace.get("source", {}) or {})
     window = dict(trace.get("window", {}) or {})
     sampling = dict(trace.get("sampling", {}) or {})
+    processing = dict(trace.get("processing", {}) or {})
+    legacy_processing = dict(sub.get("trajectory_processing", {}) or {})
+    filter_cfg = dict(
+        processing.get("filter")
+        or legacy_processing.get("filter")
+        or legacy_processing.get("high_pass_filter")
+        or {}
+    )
     path = resolve_repo_path(source.get("path", "src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv"))
     n_subblocks = int(window.get("n_subblocks", sub.get("n_subblocks", 1)))
     trajectory, frame_times, blocks = prepare_airbus_subblocks(
@@ -599,6 +830,7 @@ def load_trajectory_for_review(config: Mapping[str, Any]) -> dict[str, Any]:
         output_keys=trace.get("output_keys", DEFAULT_OUTPUT_KEYS),
         fit_keys=dict(trace.get("starting_guess", {}) or {}).get("fit_keys"),
         interpolation=str(sampling.get("interpolation", "linear")),
+        filter_config=filter_cfg,
     )
     return {
         "available": True,
@@ -615,6 +847,7 @@ def load_trajectory_for_review(config: Mapping[str, Any]) -> dict[str, Any]:
             "n_subblocks": len(blocks),
             "n_frames": int(frame_times.size),
             "output_keys": list(trajectory.values),
+            "filter": dict(trajectory.filter_provenance or {}),
         },
     }
 
@@ -636,7 +869,7 @@ def make_high_pass_trajectory_diagnostic(trajectory_review: Mapping[str, Any], *
         low = np.convolve(padded, kernel, mode="valid")
         high = arr - low
         out["series"][key] = {"raw": arr, "low_pass": low, "high_pass": high, "rms_high_pass": float(np.sqrt(np.mean(high * high)))}
-    out["note"] = "Notebook diagnostic only; campaign trace source currently rejects high_pass_filter.enabled=true."
+    out["note"] = "Moving-average diagnostic only; configured production filtering is reported separately from trajectory.filter_provenance."
     return out
 
 
@@ -671,15 +904,101 @@ def compare_trace_jitter_enabled_disabled(config: Mapping[str, Any]) -> dict[str
     }
 
 
-def render_tiny_review_images(*_: Any, **__: Any) -> dict[str, Any]:
-    """Optional rendering hook placeholder for the notebook.
+def _render_truth_system_image(system_cfg: Mapping[str, Any]) -> np.ndarray:
+    spec = compose_forward_spec(system_cfg)
+    store = ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+    binder = SheraBinder(system_cfg, spec, store)
+    image = np.asarray(binder.model(), dtype=float)
+    if image.ndim > 2:
+        image = np.asarray(image).reshape((-1, *image.shape[-2:])).sum(axis=0)
+    return image
 
-    Runtime rendering can be expensive and depends on interactive environment
-    choices, so the notebook can call this and show a clear unsupported status
-    unless Dylan chooses to add an explicit renderer path.
-    """
 
-    return {"available": False, "reason": "Tiny rendering is intentionally optional; no production campaign is launched by this helper."}
+def render_tiny_review_images(
+    config: Mapping[str, Any],
+    truth_system_cfg: Mapping[str, Any],
+    *,
+    seed: int = 123,
+    crop_npix: int | None = 64,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Render the real resolved truth system and audit configured noise terms."""
+
+    exp = _experiment(config)
+    sub = dict(exp.get("subblocks", {}) or {})
+    noise_request = sub.get("noise_model", {}).get("requested", sub.get("noise", "disabled")) if isinstance(sub.get("noise_model"), Mapping) else sub.get("noise", "disabled")
+    normalized = normalize_noise_request(noise_request)
+    detector_noise = resolve_detector_noise_spec(truth_system_cfg, normalized, strict=strict)
+    warnings_out = list(detector_noise.get("warnings", []))
+
+    noiseless = _render_truth_system_image(truth_system_cfg)
+    if crop_npix is not None and crop_npix > 0 and min(noiseless.shape[-2:]) > crop_npix:
+        ny, nx = noiseless.shape[-2:]
+        cy, cx = ny // 2, nx // 2
+        half = int(crop_npix) // 2
+        noiseless = noiseless[cy - half : cy - half + int(crop_npix), cx - half : cx - half + int(crop_npix)]
+
+    detector_spec = DetectorSpec(
+        model_name=str(detector_noise.get("detector_model")),
+        read_noise=detector_noise.get("read_noise_electrons"),
+        dark_current=detector_noise.get("dark_current_e_per_s"),
+    )
+    key = jr.PRNGKey(int(seed))
+    noisy, render_variance = apply_observation_noise(
+        jnp.asarray(noiseless),
+        noise_cfg=normalized,
+        rng_key=key,
+        detector_spec=detector_spec,
+        exposure_time_s=detector_noise.get("exposure_time_s"),
+    )
+    expected_variance = expected_noise_variance(
+        jnp.asarray(noiseless),
+        noise_cfg=normalized,
+        detector_noise=detector_noise,
+    )
+    noisy_np = np.asarray(noisy)
+    render_variance_np = np.asarray(render_variance)
+    expected_variance_np = np.asarray(expected_variance)
+    residual = noisy_np - noiseless
+    denom = np.sqrt(np.maximum(expected_variance_np, 1.0e-12))
+    normalized_residual = residual / denom
+    if bool(normalized.get("write_variance", True)) and not np.any(np.isfinite(render_variance_np)):
+        warnings_out.append("write_variance=true but no finite variance map was produced by the render helper.")
+
+    diagnostics = {
+        "mean_expected_variance": float(np.mean(expected_variance_np)),
+        "mean_render_variance": float(np.mean(render_variance_np)),
+        "residual_variance": float(np.var(residual)),
+        "normalized_residual_std": float(np.std(normalized_residual)),
+        "render_expected_variance_max_abs_diff": float(np.max(np.abs(render_variance_np - expected_variance_np))),
+    }
+    return {
+        "available": True,
+        "source": "resolved_truth_system_binder",
+        "seed": int(seed),
+        "noise_request_original": noise_request,
+        "noise_request_normalized": normalized,
+        "render_noise": {
+            "enabled": bool(normalized["enabled"]),
+            "shot_noise": bool(detector_noise["shot_noise_enabled"]),
+            "read_noise": bool(detector_noise["read_noise_enabled"]),
+            "dark_current": bool(detector_noise["dark_current_enabled"]),
+            "read_noise_electrons": detector_noise["read_noise_electrons"],
+            "read_noise_source": detector_noise["read_noise_source"],
+            "dark_current_e_per_s": detector_noise["dark_current_e_per_s"],
+            "dark_current_source": detector_noise["dark_current_source"],
+            "exposure_time_s": detector_noise["exposure_time_s"],
+            "write_variance": bool(normalized.get("write_variance", True)),
+        },
+        "variance_diagnostics": diagnostics,
+        "warnings": warnings_out,
+        "noiseless": noiseless,
+        "configured_noisy": noisy_np,
+        "noise_residual": residual,
+        "expected_variance": expected_variance_np,
+        "render_variance": render_variance_np,
+        "normalized_residual": normalized_residual,
+    }
 
 
 def write_review_artifacts(
@@ -724,6 +1043,12 @@ def write_review_artifacts(
         write_payload("detector_layer_summary.json", detector_summary)
     if noise_summary is not None:
         write_payload("noise_review_summary.json", noise_summary)
+        if isinstance(noise_summary, Mapping):
+            write_payload("noise_request_normalized.json", noise_summary.get("noise_request_normalized", {}))
+            write_payload("noise_render_provenance.json", noise_summary.get("render_noise", {}))
+            write_payload("noise_inference_provenance.json", noise_summary.get("inference_noise_model", {}))
+            if noise_summary.get("variance_diagnostics") is not None:
+                write_payload("noise_variance_summary.json", noise_summary.get("variance_diagnostics", {}))
     if trajectory_summary is not None:
         write_payload("trajectory_review_summary.json", _strip_arrays(trajectory_summary))
     notes = root / "config_review_notes.md"
@@ -841,12 +1166,12 @@ def _jsonable(value: Any) -> Any:
 __all__ = [
     "DEFAULT_OUTPUT_ROOT", "DEFAULT_REVIEW_CONFIG", "DEFAULT_SMOKE_CONFIG", "LOW_ORDER_NOLL_INDICES",
     "build_model_split_from_smoke", "compare_trace_jitter_enabled_disabled",
-    "extract_spectral_arrays", "load_detector_calibration_maps", "load_smoke_config",
+    "cmap_with_bad", "extract_spectral_arrays", "load_detector_calibration_maps", "load_smoke_config",
     "load_trajectory_for_review", "make_high_pass_trajectory_diagnostic", "noise_demo",
-    "optics_diff_table", "preserve_flux_review", "render_tiny_review_images",
+    "masked_for_imshow", "optics_diff_table", "preserve_flux_review", "render_tiny_review_images",
     "repo_root", "resolve_repo_path", "response_curve_review", "spectral_review_tables",
     "summarize_detector_config", "summarize_noise_config", "summarize_optics_config",
-    "summarize_source_config", "summarize_spectral_deck", "summarize_wfe_artifacts",
+    "summarize_source_config", "summarize_spectral_deck", "summarize_wfe_artifacts", "symmetric_nan_limits",
     "summary_dashboard", "translate_smoke_to_observation_bias", "write_review_artifacts",
     "write_spectral_review_csv",
 ]

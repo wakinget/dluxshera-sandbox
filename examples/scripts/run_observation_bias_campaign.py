@@ -79,6 +79,11 @@ from dluxshera.utils.campaign_model_split import (
     validate_campaign_model_split_artifacts,
     write_campaign_model_split_templates,
 )
+from dluxshera.utils.detector_layer_overrides import (
+    apply_detector_layer_overrides,
+    detector_blur_warnings,
+    detector_layer_stack,
+)
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
     PreparedTraceSubblock,
@@ -475,14 +480,35 @@ def _resolve_system_store(
     system_cfg = resolved_cfg.get("system")
     if not isinstance(system_cfg, Mapping):
         raise ValueError("Campaign system resolution requires a resolved system block.")
+    experiment_cfg = _experiment_config(config)
+    detector_overrides = experiment_cfg.get("detector_overrides")
+    detector_override_provenance: dict[str, Any] | None = None
+    detector_stack_from_preset = detector_layer_stack(system_cfg)
+    if isinstance(detector_overrides, Mapping):
+        system_cfg, detector_override_provenance = apply_detector_layer_overrides(
+            system_cfg,
+            detector_overrides,
+            context="observation_bias_campaign.global",
+        )
     forward_spec = compose_forward_spec(system_cfg)
     store = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
+    subblock_cfg = experiment_cfg.get("subblocks", {}) if isinstance(experiment_cfg.get("subblocks"), Mapping) else {}
+    trajectory_processing = (
+        subblock_cfg.get("trajectory_processing", {})
+        if isinstance(subblock_cfg.get("trajectory_processing"), Mapping)
+        else {}
+    )
+    smear_cfg = trajectory_processing.get("smear", {}) if isinstance(trajectory_processing.get("smear"), Mapping) else {}
     provenance = {
         "system_preset": system_cfg.get("preset", preset),
         "source_kind": system_cfg.get("source", {}).get("kind"),
         "source_target": system_cfg.get("source", {}).get("target"),
         "optics_kind": system_cfg.get("optics", {}).get("kind"),
         "detector_model": system_cfg.get("detector", {}).get("model"),
+        "detector_layer_stack_from_preset": detector_stack_from_preset,
+        "detector_layer_stack_after_global_overrides": detector_layer_stack(system_cfg),
+        "detector_layer_overrides": detector_override_provenance,
+        "detector_blur_warnings": detector_blur_warnings(system_cfg, smear_cfg=smear_cfg),
     }
     return store, dict(system_cfg), provenance
 

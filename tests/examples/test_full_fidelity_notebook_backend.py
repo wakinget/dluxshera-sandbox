@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK_PATH = REPO_ROOT / "examples/notebooks/full_fidelity_resolved_system_review.ipynb"
 HELPER_PATHS = (
     REPO_ROOT / "src/dluxshera/utils/full_fidelity_review.py",
+    REPO_ROOT / "src/dluxshera/utils/obs_subblock_trajectory.py",
     REPO_ROOT / "src/dluxshera/plot/plotting.py",
     REPO_ROOT / "src/dluxshera/plot/obs_subblock.py",
 )
@@ -34,8 +35,8 @@ def test_full_fidelity_notebook_configures_backend_before_pyplot() -> None:
     code_cells = [cell for cell in notebook["cells"] if cell.get("cell_type") == "code"]
     sources = [_cell_source(cell) for cell in code_cells]
 
-    setup_index = next(i for i, source in enumerate(sources) if "PLOT_BACKEND = \"auto\"" in source)
-    pyplot_index = next(i for i, source in enumerate(sources) if "import matplotlib.pyplot as plt" in source)
+    setup_index = next(i for i, source in enumerate(sources) if "PLOT_BACKEND = \"inline\"" in source)
+    pyplot_index = next(i for i, source in enumerate(sources) if "import matplotlib.pyplot as plt\nplt.ion()" in source)
     diagnostics_index = next(i for i, source in enumerate(sources) if "Matplotlib backend:" in source)
 
     assert setup_index < pyplot_index
@@ -70,4 +71,3 @@ def test_review_helpers_do_not_force_agg_on_import() -> None:
         source = path.read_text(encoding="utf-8")
         for pattern in forbidden:
             assert pattern not in source, f"{path} contains import-time backend forcing: {pattern}"
-
