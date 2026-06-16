@@ -5,8 +5,9 @@
 # future_placeholder, deprecated, unknown_should_fail.
 #
 # Key contract notes:
-# - experiment.kind valid executable values: full_fidelity_binary_iterative_review,
-#   full_fidelity_binary_iterative_smoke, observation_bias_campaign. The future
+# - experiment.kind valid executable values: full_fidelity_binary_iterative and
+#   observation_bias_campaign. Deprecated review/smoke aliases are normalized
+#   for compatibility only. The future
 #   full_fidelity_algorithm_campaign skeleton remains non-executable.
 # - spectral_model.fast is smoke_only and intentionally absent here.
 # - photometry_mode implemented value: preserve_detected_flux_parameters.
@@ -36,8 +37,8 @@
 #   coefficient vector. For SHERA_FLIGHT_3P_CONV, array index 0 maps to Noll Z4.
 # - prior_draws sigma kind implemented values: absolute and fractional.
 experiment:
-  kind: full_fidelity_binary_iterative_review
-  schema_version: full_fidelity_binary_iterative_review.v1
+  kind: full_fidelity_binary_iterative
+  schema_version: full_fidelity_binary_iterative.v1
   run_name: full_fidelity_binary_iterative_review
   seed: 42
   source_kind: binary_target
@@ -195,8 +196,10 @@ experiment:
       smear:
         enabled: true
         render:
-          mode: metadata_only
+          mode: subblock_constant_layer
           target_layer: smear
+        inference:
+          mode: matched_subblock_constant
     trace_jitter:
       enabled: true
       apply_to: downstream_template_override

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -354,6 +355,11 @@ def _trajectory_plan(
             "smear_truth_csv": str(smear_artifacts.get("smear_truth_csv", "")),
             "smear_model_csv": str(smear_artifacts.get("smear_model_csv", "")),
             "smear_provenance_json": str(smear_artifacts.get("smear_provenance_json", "")),
+            "smear_representative_kernel_json": (
+                json.dumps(smear_artifacts.get("representative_kernel", {}), sort_keys=True)
+                if smear_artifacts.get("representative_kernel")
+                else ""
+            ),
             "smear_truth_length_pix_median": smear_artifacts.get("smear_truth_length_pix_median", ""),
             "smear_truth_length_pix_max": smear_artifacts.get("smear_truth_length_pix_max", ""),
             "smear_model_length_pix_median": smear_artifacts.get("smear_model_length_pix_median", ""),

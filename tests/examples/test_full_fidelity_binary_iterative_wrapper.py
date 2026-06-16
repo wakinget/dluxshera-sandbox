@@ -48,7 +48,8 @@ def test_config_translation_accepts_full_fidelity_smoke() -> None:
     experiment = translated["experiment"]
 
     assert experiment["kind"] == "observation_bias_campaign"
-    assert experiment["source_campaign_kind"] == "full_fidelity_binary_iterative_smoke"
+    assert experiment["source_campaign_kind"] == "full_fidelity_binary_iterative"
+    assert "source_campaign_alias" not in experiment
     assert experiment["system"]["source"]["kind"]
     assert experiment["system"]["source"]["target"]
     for key in (
@@ -67,7 +68,7 @@ def test_config_translation_rejects_unsupported_kind() -> None:
     try:
         module._full_fidelity_to_observation_bias({"experiment": {"kind": "bad"}}, run_name=None)
     except ValueError as exc:
-        assert "full_fidelity_binary_iterative_smoke" in str(exc)
+        assert "full_fidelity_binary_iterative" in str(exc)
     else:
         raise AssertionError("unsupported kind was accepted")
 
@@ -82,7 +83,7 @@ def test_config_translation_rejects_future_skeleton_helpfully() -> None:
         text = str(exc)
         assert "full_fidelity_algorithm_campaign" in text
         assert "non-executable" in text
-        assert "full_fidelity_binary_iterative_smoke.yaml" in text
+        assert "full_fidelity_binary_iterative" in text
     else:
         raise AssertionError("future skeleton was accepted")
 

@@ -26,19 +26,26 @@ The larger v1 file is a future schema/design skeleton. It is not runner-ready an
 
 ## Executable Config Tiers
 
-Use `full_fidelity_binary_iterative_review.yaml` for resolved-system review and `full_fidelity_binary_iterative_smoke.yaml` for tiny wiring validation.
+Use `full_fidelity_binary_iterative_review.yaml` for resolved-system review and `full_fidelity_binary_iterative_smoke.yaml` for tiny wiring validation. Both are size/config variants of the same executable schema:
+
+- `experiment.kind: full_fidelity_binary_iterative`
+- `experiment.schema_version: full_fidelity_binary_iterative.v1`
 
 The wrapper accepts:
 
-- `experiment.kind: full_fidelity_binary_iterative_review`
-- `experiment.kind: full_fidelity_binary_iterative_smoke`
+- `experiment.kind: full_fidelity_binary_iterative`
 - `experiment.kind: observation_bias_campaign` for already translated replay/debug configs
+
+Deprecated aliases `full_fidelity_binary_iterative_review` and
+`full_fidelity_binary_iterative_smoke` may be accepted temporarily, but the
+wrapper normalizes them to `full_fidelity_binary_iterative` and records the
+alias only as provenance.
 
 The wrapper rejects:
 
 - `experiment.kind: full_fidelity_algorithm_campaign`
 
-The wrapper stays thin. It translates the executable full-fidelity review/smoke schemas into `observation_bias_campaign` and delegates to `examples/scripts/run_observation_bias_campaign.py`. The translated config carries `source_campaign_kind` matching the source tier and forwards the model-split blocks into the existing observation-bias campaign machinery.
+The wrapper stays thin. It translates the executable full-fidelity schema into `observation_bias_campaign` and delegates to `examples/scripts/run_observation_bias_campaign.py`. The translated config carries `source_campaign_kind: full_fidelity_binary_iterative` and forwards the model-split blocks into the existing observation-bias campaign machinery.
 
 ## Future Schema Skeleton
 
@@ -76,12 +83,14 @@ Primary physical-fidelity controls:
 
 ## Trajectory, Subblocks, And Iterative Windows
 
-`experiment.subblocks.n_subblocks` is the canonical number of subblocks generated
-per prior draw. `experiment.subblocks.trace_source.window.start_s` selects the
-start of the continuous trajectory interval. `trace_source.window.n_subblocks`
-is optional; when present it must match `subblocks.n_subblocks`. The executable
-review and smoke configs omit the redundant window value and let the trace-source
-planner use the canonical campaign count.
+When `experiment.iterative.enabled: true`,
+`iterative.windows_per_draw * iterative.subblocks_per_window` is the canonical
+total number of subblocks generated per prior draw. `subblocks.n_subblocks` is
+optional in this mode; when present it must match the iterative product.
+`experiment.subblocks.trace_source.window.start_s` selects the start of the
+continuous trajectory interval. `trace_source.window.n_subblocks` is optional;
+when present it must match the resolved total subblock count. The executable
+review and smoke configs omit the redundant window value.
 
 `experiment.subblocks.n_frames` controls how many frame centers are sampled in
 each subblock. Frame times are generated from the selected trajectory window as
@@ -93,10 +102,9 @@ not imply a discontinuity in the source trajectory.
 
 `experiment.iterative.windows_per_draw` and
 `experiment.iterative.subblocks_per_window` describe how generated subblocks are
-grouped into iterative update windows. For the current planner,
-`windows_per_draw * subblocks_per_window` must equal
-`subblocks.n_subblocks` unless an explicit partial-window policy is configured.
-The current review setting is consistent: `2 * 1 = 2`.
+grouped into iterative update windows. For iterative-disabled configs,
+`subblocks.n_subblocks` is the canonical total subblock count, defaulting
+clearly to 1 when omitted by the existing runner.
 
 Trajectory filtering is applied to the continuous trace before selected frame
 times are sampled when `trace_source.processing.filter.apply_stage:
@@ -156,11 +164,14 @@ review verifies the same resolved truth system through the Binder render path,
 then applies the structured request with the project noise utility to check
 shot/read/dark variance behavior.
 
+`experiment.subblocks.noise.variance_floor` is the canonical variance floor. The
+legacy `experiment.subblocks.variance_floor` field is deprecated and should be
+removed from new configs. The value is a variance floor, not a read-noise sigma.
+
 `use_render_variance` controls the inference side. `true` requests
 `variance_model: provided_cube`; `false` uses the data/floor variance model;
 `auto` reports the intended policy and leaves template behavior visible in the
-audit. `variance_floor` is an inference likelihood floor and is not silently
-baked into the render variance map.
+audit.
 
 ## Data/Inference Split
 
@@ -170,7 +181,8 @@ The executable configs create deliberate truth/reference mismatches:
 - review config has no hidden spectral fast clamp;
 - truth high-order WFE maps are synthetic and nonzero;
 - inference high-order WFE uses `knowledge_error` rather than exact truth;
-- trajectory trace metadata is present while dynamic per-frame smear rendering is deferred.
+- trajectory-derived `subblock_constant_layer` smear is rendered in truth/data
+  templates and matched in inference templates.
 
 The split contract is written under the run root during dry-run/execution:
 
@@ -255,25 +267,28 @@ smear is enabled, because that may double-count pointing blur.
 Smear policy is explicit because `SHERA_FLIGHT_3P_CONV` contains a nonzero
 default line-smear layer. `render.mode: disabled` removes the named `smear`
 layer. `render.mode: metadata_only` may still write smear sidecars, but it also
-removes the named `smear` layer so no rendered smear is applied. `render.mode:
-subblock_constant_layer` patches the existing named `smear` layer with
-trajectory-derived `length` and `theta_deg`; layer injection is disabled unless
-`allow_layer_injection: true` is explicitly requested.
+removes the named `smear` layer so no rendered smear is applied; this is a
+diagnostic/debug mode. `render.mode: subblock_constant_layer` fits X/Y pointing
+over each subblock, scales the fitted slope to one rendered frame exposure,
+converts that displacement to detector pixels, and patches the named `smear`
+layer with trajectory-derived `length`, `theta_deg`, `sigma_perp`,
+`kernel_size`, and `units: detector_pix`.
 
-The executable review and smoke configs currently use `metadata_only` because
-the observation-bias runner writes shared render templates before per-subblock
-smear sidecars exist. The model split therefore reports that smear sidecars are
-generated but not applied to rendered detector layers. Explicit
-`subblock_constant_layer` configs are supported by the layer utility and
-standalone trajectory rendering path, but full per-subblock render-template
-patching remains a future runner change.
+The same smear kernel is used for every rendered frame/image in a subblock.
+Per-subblock render and inference templates are written under each trajectory
+subblock artifact directory and their paths/hashes are recorded in plan CSVs.
+`inference.mode: matched_subblock_constant` patches the inference template with
+the same subblock-level kernel; `inference.mode: disabled` removes the smear
+layer from the inference/reference template. `render.mode: per_frame` and
+inference modes such as `solve_subblock_smear` remain future/deferred and fail
+clearly if requested before implementation.
 
 ## Preset Migration Table
 
 | Script/config | Old default preset | New default preset | Migration status | Reason |
 | --- | --- | --- | --- | --- |
 | `full_fidelity_binary_iterative_review.yaml` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P_CONV` | Migrated | Full-fidelity review should exercise the detector-realism preset and explicit layer policy. |
-| `full_fidelity_binary_iterative_smoke.yaml` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P_CONV` | Migrated | Smoke should validate the same detector preset family; rendered smear is removed in metadata-only mode. |
+| `full_fidelity_binary_iterative_smoke.yaml` | `SHERA_FLIGHT_3P` | `SHERA_FLIGHT_3P_CONV` | Migrated | Smoke validates the same detector preset family and rendered subblock smear path at tiny scale. |
 | `run_full_fidelity_binary_iterative_campaign.py` | hard-coded `SHERA_FLIGHT_3P` fallback | `DEFAULT_FULL_FIDELITY_SYSTEM_PRESET` (`SHERA_FLIGHT_3P_CONV`) | Migrated | Wrapper fallback now matches executable full-fidelity configs. |
 | `audit_full_fidelity_config.py` | documented `SHERA_FLIGHT_3P` fallback | `DEFAULT_FULL_FIDELITY_SYSTEM_PRESET` (`SHERA_FLIGHT_3P_CONV`) | Migrated | Audit reports base, overridden, and smear-policy detector stacks. |
 | `full_fidelity_resolved_system_review.ipynb` / notebook backend | inherited wrapper fallback | `DEFAULT_FULL_FIDELITY_SYSTEM_PRESET` (`SHERA_FLIGHT_3P_CONV`) | Migrated via backend | Notebook review uses the same resolver/override path. |

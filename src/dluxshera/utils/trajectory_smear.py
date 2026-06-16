@@ -95,9 +95,18 @@ class SmearConfig:
             raise ValueError("smear.truth.sigma_perp_detector_pix must be positive.")
         if self.truth_kernel_size <= 0 or self.truth_kernel_size % 2 == 0:
             raise ValueError("smear.truth.kernel_size must be a positive odd integer.")
-        if self.inference_mode not in {"matched", "scaled", "angle_offset", "disabled", "constant"}:
+        if self.inference_mode not in {
+            "matched",
+            "matched_subblock_constant",
+            "scaled",
+            "angle_offset",
+            "disabled",
+            "constant",
+        }:
             raise ValueError("Unsupported smear.inference.mode.")
-        if self.render_mode not in {"disabled", "metadata_only", "subblock_constant_layer"}:
+        if self.render_mode == "per_frame":
+            raise ValueError("smear.render.mode='per_frame' is future/deferred and not implemented.")
+        if self.render_mode not in {"disabled", "none", "metadata_only", "subblock_constant_layer"}:
             raise ValueError("smear.render.mode must be disabled, metadata_only, or subblock_constant_layer.")
         if self.render_representative not in {"median", "mean", "rms", "max"}:
             raise ValueError("Unsupported smear.render.representative.")
@@ -132,7 +141,7 @@ def parse_smear_config(
         plate_scale_as_per_pix=plate_scale_as_per_pix,
         truth_sigma_perp_detector_pix=float(truth.get("sigma_perp_detector_pix", 0.25)),
         truth_kernel_size=int(truth.get("kernel_size", 9)),
-        inference_mode=str(inference.get("mode", "matched")),
+        inference_mode=str(inference.get("mode", "matched_subblock_constant")),
         inference_length_scale=float(inference.get("length_scale", 1.0)),
         inference_theta_offset_deg=float(inference.get("theta_offset_deg", 0.0)),
         inference_min_length_detector_pix=float(inference.get("min_length_detector_pix", 0.0)),
@@ -287,7 +296,7 @@ def derive_model_smear_rows(truth_rows: Sequence[Mapping[str, Any]], cfg: SmearC
                     "notes": "model smear disabled/unmodeled",
                 }
             )
-        elif cfg.inference_mode == "matched":
+        elif cfg.inference_mode in {"matched", "matched_subblock_constant"}:
             model["smear_policy"] = "inference_matched"
         else:
             length_pix = float(model["smear_length_detector_pix"])
@@ -364,6 +373,47 @@ def representative_line_kernel(rows: Sequence[Mapping[str, Any]], *, representat
     }
 
 
+def subblock_constant_line_kernel_from_fit(block: SubblockTrajectory, cfg: SmearConfig) -> dict[str, Any]:
+    """Return a line-kernel from the subblock linear X/Y fit and one exposure.
+
+    This is the full-fidelity rendered-smear policy: fit over the subblock, but
+    scale the detector line length to a single rendered frame exposure.
+    """
+
+    if cfg.plate_scale_as_per_pix is None or cfg.plate_scale_as_per_pix <= 0.0:
+        raise ValueError("subblock_constant_layer requires a positive plate_scale_as_per_pix.")
+    try:
+        slope_x = float(block.fit_coefficients["source.x_position_as"][1])
+        slope_y = float(block.fit_coefficients["source.y_position_as"][1])
+    except KeyError as exc:
+        raise ValueError(
+            "subblock_constant_layer requires fitted source.x_position_as and source.y_position_as."
+        ) from exc
+    dx_as = slope_x * float(cfg.exposure_time_s)
+    dy_as = slope_y * float(cfg.exposure_time_s)
+    dx_pix = dx_as / float(cfg.plate_scale_as_per_pix)
+    dy_pix = dy_as / float(cfg.plate_scale_as_per_pix)
+    length_pix = float(math.hypot(dx_pix, dy_pix))
+    theta = 0.0 if length_pix == 0.0 else float(math.degrees(math.atan2(dy_pix, dx_pix)))
+    return {
+        "kind": "line",
+        "length": length_pix,
+        "sigma_perp": float(cfg.truth_sigma_perp_detector_pix),
+        "theta_deg": theta,
+        "kernel_size": int(cfg.truth_kernel_size),
+        "units": "detector_pix",
+        "source": "subblock_linear_fit_one_frame_exposure",
+        "slope_x_as_per_s": slope_x,
+        "slope_y_as_per_s": slope_y,
+        "dx_frame_as": float(dx_as),
+        "dy_frame_as": float(dy_as),
+        "dx_frame_pix": float(dx_pix),
+        "dy_frame_pix": float(dy_pix),
+        "exposure_time_s": float(cfg.exposure_time_s),
+        "plate_scale_as_per_pix": float(cfg.plate_scale_as_per_pix),
+    }
+
+
 def write_smear_sidecars(
     *,
     outdir: Path,
@@ -381,7 +431,11 @@ def write_smear_sidecars(
     provenance_path = (outdir / SMEAR_PROVENANCE_FILENAME).resolve()
     write_rows_csv(truth_path, truth_rows, SMEAR_FIELDNAMES)
     write_rows_csv(model_path, model_rows, SMEAR_FIELDNAMES)
-    representative = representative_line_kernel(truth_rows, representative=cfg.render_representative)
+    representative = (
+        subblock_constant_line_kernel_from_fit(block, cfg)
+        if cfg.render_mode == "subblock_constant_layer"
+        else representative_line_kernel(truth_rows, representative=cfg.render_representative)
+    )
     provenance = {
         "schema_version": "trajectory_smear_provenance.v1",
         "subblock_index": int(block.subblock_index),
@@ -406,6 +460,7 @@ def write_smear_sidecars(
             "representative": cfg.render_representative,
             "layer_name": cfg.render_layer_name,
             "representative_kernel": representative,
+            "pa_smear_mode": "ignored_for_line_kernel",
             "per_frame_dynamic_kernels_deferred": True,
         },
         "truth_summary": summarize_smear_rows(truth_rows, prefix="smear_truth"),
@@ -487,6 +542,7 @@ __all__ = [
     "inject_subblock_smear_layer",
     "parse_smear_config",
     "representative_line_kernel",
+    "subblock_constant_line_kernel_from_fit",
     "summarize_smear_rows",
     "write_smear_sidecars",
 ]

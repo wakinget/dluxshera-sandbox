@@ -17,6 +17,7 @@ def _config(
     if trace_window_n_subblocks is not None:
         window["n_subblocks"] = trace_window_n_subblocks
     iterative = {
+        "enabled": True,
         "windows_per_draw": windows_per_draw,
         "subblocks_per_window": subblocks_per_window,
     }
@@ -50,7 +51,7 @@ def test_inconsistent_trace_window_warns_by_default_and_fails_strict() -> None:
 
     assert resolved["resolved_n_subblocks"] == 2
     assert resolved["consistency_status"] == "inconsistent"
-    assert any("disagrees with subblocks.n_subblocks=2" in warning for warning in warnings)
+    assert any("disagrees with resolved total subblocks=2" in warning for warning in warnings)
     with pytest.raises(ValueError, match="trace_source.window.n_subblocks=3 disagrees"):
         resolve_subblock_plan_settings(cfg, strict=True)
 
@@ -72,25 +73,31 @@ def test_iterative_grouping_mismatch_warns_and_fails_strict_without_policy() -> 
 
     assert resolved["expected_iterative_subblocks"] == 2
     assert resolved["consistency_status"] == "inconsistent"
-    assert any("does not support implicit unused subblocks" in warning for warning in warnings)
-    with pytest.raises(ValueError, match="current planner does not support implicit unused subblocks"):
+    assert any("Remove subblocks.n_subblocks" in warning for warning in warnings)
+    with pytest.raises(ValueError, match="Remove subblocks.n_subblocks"):
         resolve_subblock_plan_settings(cfg, strict=True)
 
 
 def test_iterative_grouping_mismatch_allows_explicit_partial_policy() -> None:
-    resolved, warnings = resolve_subblock_plan_settings(
-        _config(
-            n_subblocks=4,
-            windows_per_draw=2,
-            subblocks_per_window=1,
-            partial_policy="allow_unused_subblocks",
-        ),
-        strict=True,
+    cfg = _config(
+        n_subblocks=4,
+        windows_per_draw=2,
+        subblocks_per_window=1,
+        partial_policy="allow_unused_subblocks",
     )
+    with pytest.raises(ValueError, match="Remove subblocks.n_subblocks"):
+        resolve_subblock_plan_settings(cfg, strict=True)
 
-    assert resolved["consistency_status"] == "consistent"
-    assert resolved["partial_window_policy_enabled"] is True
-    assert any("partial-window policy" in warning for warning in warnings)
+
+def test_iterative_enabled_can_derive_total_when_n_subblocks_omitted() -> None:
+    cfg = _config(n_subblocks=2, windows_per_draw=3, subblocks_per_window=5)
+    del cfg["experiment"]["subblocks"]["n_subblocks"]
+
+    resolved, warnings = resolve_subblock_plan_settings(cfg, strict=True)
+
+    assert resolved["resolved_total_subblocks"] == 15
+    assert resolved["subblock_count_source"] == "experiment.iterative.windows_per_draw*subblocks_per_window"
+    assert any("deriving total subblocks" in warning for warning in warnings)
 
 
 def test_trace_window_n_subblocks_is_optional() -> None:
@@ -98,5 +105,5 @@ def test_trace_window_n_subblocks_is_optional() -> None:
 
     assert resolved["resolved_n_subblocks"] == 2
     assert resolved["trace_source_window_n_subblocks"] is None
-    assert resolved["canonical_source"] == "experiment.subblocks.n_subblocks"
+    assert resolved["canonical_source"] == "experiment.iterative.windows_per_draw*subblocks_per_window"
     assert not any("trace_source.window.n_subblocks" in warning for warning in warnings)

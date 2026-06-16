@@ -396,7 +396,28 @@
     "field_path": "experiment.iterative.windows_per_draw"
   },
   {
-    "valid_values": "{\"full_fidelity_algorithm_campaign\": {\"description\": \"Future schema skeleton; intentionally non-executable.\", \"status\": \"future_placeholder\"}, \"full_fidelity_binary_iterative_review\": {\"description\": \"Executable resolved-system review schema translated to observation_bias_campaign.\", \"status\": \"implemented\"}, \"full_fidelity_binary_iterative_smoke\": {\"description\": \"Tiny wiring smoke schema translated to observation_bias_campaign.\", \"status\": \"implemented\"}, \"observation_bias_campaign\": {\"description\": \"Already translated campaign config.\", \"status\": \"implemented\"}}",
+    "valid_values": {
+      "full_fidelity_binary_iterative": {
+        "status": "implemented",
+        "description": "Canonical executable full-fidelity binary iterative schema translated to observation_bias_campaign."
+      },
+      "full_fidelity_binary_iterative_review": {
+        "status": "deprecated_alias",
+        "description": "Deprecated compatibility alias normalized to full_fidelity_binary_iterative."
+      },
+      "full_fidelity_binary_iterative_smoke": {
+        "status": "deprecated_alias",
+        "description": "Deprecated compatibility alias normalized to full_fidelity_binary_iterative."
+      },
+      "observation_bias_campaign": {
+        "status": "implemented",
+        "description": "Already translated campaign config."
+      },
+      "full_fidelity_algorithm_campaign": {
+        "status": "future_placeholder",
+        "description": "Future schema skeleton; intentionally non-executable."
+      }
+    },
     "default": null,
     "implemented_status": "implemented",
     "consumed_by": "full-fidelity wrapper",
@@ -1296,6 +1317,43 @@
     "field_path": "experiment.subblocks.trajectory_processing.smear.render.allow_layer_injection"
   },
   {
+    "field_path": "experiment.subblocks.trajectory_processing.smear.inference.mode",
+    "valid_values": {
+      "matched_subblock_constant": {
+        "status": "implemented",
+        "description": "Patch the inference template with the same subblock smear kernel as truth/render."
+      },
+      "disabled": {
+        "status": "implemented",
+        "description": "Remove/disable smear in the inference/reference template."
+      },
+      "solve_subblock_smear": {
+        "status": "future_placeholder",
+        "description": "Future nuisance-parameter smear solve."
+      },
+      "per_frame": {
+        "status": "future_placeholder",
+        "description": "Future per-frame inference smear."
+      },
+      "mismatch_scaled": {
+        "status": "future_placeholder",
+        "description": "Future length mismatch policy."
+      },
+      "mismatch_angle_offset": {
+        "status": "future_placeholder",
+        "description": "Future direction mismatch policy."
+      }
+    },
+    "default": null,
+    "implemented_status": "implemented",
+    "consumed_by": "trajectory_smear",
+    "runtime_effect": "selects inference/reference smear template policy",
+    "fidelity_effect": "inference/reference smear match or removal",
+    "provenance_effect": "smear policy",
+    "safe_to_omit": true,
+    "notes": "Future solve/per_frame/mismatch modes are documented but not implemented."
+  },
+  {
     "valid_values": "{\"detector_pix\": {\"description\": \"Detector pixel units.\", \"status\": \"implemented\"}}",
     "default": null,
     "implemented_status": "implemented",
@@ -1308,7 +1366,28 @@
     "field_path": "experiment.subblocks.trajectory_processing.smear.render.defaults.units"
   },
   {
-    "valid_values": "{\"disabled\": {\"description\": \"Remove/disable the named smear layer and write no rendered smear.\", \"status\": \"implemented\"}, \"line_kernel_from_trajectory\": {\"description\": \"Future line kernel rendering.\", \"status\": \"future_placeholder\"}, \"metadata_only\": {\"description\": \"Write smear sidecars; remove/disable the named smear render layer.\", \"status\": \"implemented\"}, \"none\": {\"description\": \"Compatibility alias for no rendered smear.\", \"status\": \"implemented\"}, \"per_frame_dynamic_kernel\": {\"description\": \"Future dynamic kernel rendering.\", \"status\": \"future_placeholder\"}, \"subblock_constant_layer\": {\"description\": \"Patch a representative trajectory-derived line kernel into the named smear layer.\", \"status\": \"implemented\"}}",
+    "valid_values": {
+      "disabled": {
+        "status": "implemented",
+        "description": "Remove/disable the named smear layer and write no rendered smear."
+      },
+      "none": {
+        "status": "implemented",
+        "description": "Compatibility alias for no rendered smear."
+      },
+      "metadata_only": {
+        "status": "implemented",
+        "description": "Diagnostic sidecars only; remove/disable the named smear render layer."
+      },
+      "subblock_constant_layer": {
+        "status": "implemented",
+        "description": "Patch a subblock fit-derived one-frame-exposure line kernel into the named smear layer."
+      },
+      "per_frame": {
+        "status": "future_placeholder",
+        "description": "Future dynamic per-frame kernel rendering."
+      }
+    },
     "default": null,
     "implemented_status": "implemented",
     "consumed_by": "trajectory_smear",
@@ -1348,11 +1427,11 @@
     "default": null,
     "implemented_status": "implemented",
     "consumed_by": "subblock runner",
-    "runtime_effect": "variance model",
+    "runtime_effect": "deprecated variance floor alias",
     "fidelity_effect": "none",
     "provenance_effect": "none",
     "safe_to_omit": true,
-    "notes": "",
+    "notes": "Deprecated; use experiment.subblocks.noise.variance_floor.",
     "field_path": "experiment.subblocks.variance_floor"
   },
   {

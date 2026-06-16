@@ -296,6 +296,137 @@ def _component_summary(experiment: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _semantic_overlap(
+    *,
+    field_a: str,
+    field_b: str,
+    current_values: Mapping[str, Any],
+    canonical_field: str,
+    precedence: str,
+    action: str,
+    severity: str,
+) -> dict[str, Any]:
+    return {
+        "field_a": field_a,
+        "field_b": field_b,
+        "current_values": dict(current_values),
+        "canonical_field": canonical_field,
+        "precedence": precedence,
+        "action": action,
+        "severity": severity,
+    }
+
+
+def _semantic_overlaps(experiment: Mapping[str, Any], subblock_plan_summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    overlaps: list[dict[str, Any]] = []
+    subblocks = experiment.get("subblocks", {}) if isinstance(experiment.get("subblocks"), Mapping) else {}
+    seeding = experiment.get("seeding", {}) if isinstance(experiment.get("seeding"), Mapping) else {}
+    prior_draws = experiment.get("prior_draws", {}) if isinstance(experiment.get("prior_draws"), Mapping) else {}
+    trace = subblocks.get("trace_source", {}) if isinstance(subblocks.get("trace_source"), Mapping) else {}
+    window = trace.get("window", {}) if isinstance(trace.get("window"), Mapping) else {}
+    noise = subblocks.get("noise", {}) if isinstance(subblocks.get("noise"), Mapping) else {}
+    smear = {}
+    processing = subblocks.get("trajectory_processing", {}) if isinstance(subblocks.get("trajectory_processing"), Mapping) else {}
+    if isinstance(processing.get("smear"), Mapping):
+        smear = dict(processing["smear"])
+    render = smear.get("render", {}) if isinstance(smear.get("render"), Mapping) else {}
+
+    if experiment.get("seed") is not None and seeding.get("base_seed") is not None:
+        overlaps.append(
+            _semantic_overlap(
+                field_a="experiment.seed",
+                field_b="experiment.seeding.base_seed",
+                current_values={"experiment.seed": experiment.get("seed"), "experiment.seeding.base_seed": seeding.get("base_seed")},
+                canonical_field="experiment.seed",
+                precedence="explicit seeding.base_seed currently overrides experiment.seed in observation-bias runner",
+                action="remove seeding.base_seed unless intentionally different",
+                severity="warning",
+            )
+        )
+    if experiment.get("n_cases") is not None and prior_draws.get("n_cases") is not None:
+        overlaps.append(
+            _semantic_overlap(
+                field_a="experiment.n_cases",
+                field_b="experiment.prior_draws.n_cases",
+                current_values={"experiment.n_cases": experiment.get("n_cases"), "experiment.prior_draws.n_cases": prior_draws.get("n_cases")},
+                canonical_field="experiment.prior_draws.n_cases",
+                precedence="prior_draws.n_cases controls generated draw cases",
+                action="remove experiment.n_cases or keep it as a matching label only",
+                severity="info" if experiment.get("n_cases") == prior_draws.get("n_cases") else "warning",
+            )
+        )
+    if subblocks.get("n_subblocks") is not None and bool((experiment.get("iterative", {}) or {}).get("enabled", False)):
+        overlaps.append(
+            _semantic_overlap(
+                field_a="experiment.subblocks.n_subblocks",
+                field_b="experiment.iterative.windows_per_draw*subblocks_per_window",
+                current_values={
+                    "experiment.subblocks.n_subblocks": subblocks.get("n_subblocks"),
+                    "resolved_total_subblocks": subblock_plan_summary.get("resolved_total_subblocks"),
+                },
+                canonical_field="experiment.iterative.windows_per_draw*subblocks_per_window",
+                precedence="iterative grouping is canonical when iterative.enabled=true",
+                action="remove subblocks.n_subblocks or make it match the iterative product",
+                severity="strict_error" if subblock_plan_summary.get("consistency_status") != "consistent" else "info",
+            )
+        )
+    if window.get("n_subblocks") is not None:
+        overlaps.append(
+            _semantic_overlap(
+                field_a="experiment.subblocks.trace_source.window.n_subblocks",
+                field_b="resolved_total_subblocks",
+                current_values={
+                    "trace_source.window.n_subblocks": window.get("n_subblocks"),
+                    "resolved_total_subblocks": subblock_plan_summary.get("resolved_total_subblocks"),
+                },
+                canonical_field="resolved_total_subblocks",
+                precedence="resolved campaign subblock count controls trace planning",
+                action="remove trace_source.window.n_subblocks unless needed for an external trace plan",
+                severity="strict_error" if window.get("n_subblocks") != subblock_plan_summary.get("resolved_total_subblocks") else "info",
+            )
+        )
+    if subblocks.get("variance_floor") is not None and noise.get("variance_floor") is not None:
+        overlaps.append(
+            _semantic_overlap(
+                field_a="experiment.subblocks.variance_floor",
+                field_b="experiment.subblocks.noise.variance_floor",
+                current_values={
+                    "experiment.subblocks.variance_floor": subblocks.get("variance_floor"),
+                    "experiment.subblocks.noise.variance_floor": noise.get("variance_floor"),
+                },
+                canonical_field="experiment.subblocks.noise.variance_floor",
+                precedence="nested noise.variance_floor is canonical",
+                action="remove experiment.subblocks.variance_floor",
+                severity="warning",
+            )
+        )
+    if str(experiment.get("kind")) in {"full_fidelity_binary_iterative_review", "full_fidelity_binary_iterative_smoke"}:
+        overlaps.append(
+            _semantic_overlap(
+                field_a="experiment.kind",
+                field_b="canonical experiment.kind",
+                current_values={"experiment.kind": experiment.get("kind")},
+                canonical_field="experiment.kind=full_fidelity_binary_iterative",
+                precedence="deprecated alias is normalized by wrapper",
+                action="replace deprecated review/smoke kind with full_fidelity_binary_iterative",
+                severity="warning",
+            )
+        )
+    if bool(smear.get("enabled", False)) and render.get("mode") == "metadata_only":
+        overlaps.append(
+            _semantic_overlap(
+                field_a="trajectory_processing.smear.enabled",
+                field_b="trajectory_processing.smear.render.mode",
+                current_values={"enabled": smear.get("enabled"), "render.mode": render.get("mode")},
+                canonical_field="trajectory_processing.smear.render.mode=subblock_constant_layer",
+                precedence="metadata_only writes sidecars but disables rendered smear",
+                action="use subblock_constant_layer for intended rendered full-fidelity smear",
+                severity="warning",
+            )
+        )
+    return overlaps
+
+
 def _detector_policy_summary(experiment: Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
     selected_preset = str(experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET))
     resolved = resolve_config({"system": {"preset": selected_preset}})
@@ -408,6 +539,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         strict=strict,
     )
     warnings_out.extend(subblock_plan_warnings)
+    semantic_overlaps = _semantic_overlaps(experiment, subblock_plan_summary)
 
     reference_rows = _field_reference_rows({"experiment": experiment})
     accepted_but_noop_used = []
@@ -427,6 +559,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         "translation_error": translation_error,
         "warnings": warnings_out,
         "contract_findings": contract["findings"],
+        "semantic_overlaps": semantic_overlaps,
         "contract_has_errors": contract["has_errors"],
         "undocumented_string_fields": [
             f["field_path"] for f in contract["findings"] if f["code"] == "undocumented_string_field"
@@ -526,6 +659,16 @@ def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
     lines.extend(["", "## Contract Findings"])
     findings = list(audit.get("contract_findings", []))
     lines.extend([f"- `{f['severity']}` `{f['field_path']}` `{f['code']}`: {f['message']}" for f in findings] or ["- None"])
+    lines.extend(["", "## Semantic Overlaps"])
+    overlaps = list(audit.get("semantic_overlaps", []))
+    lines.extend(
+        [
+            f"- `{item['severity']}` `{item['field_a']}` vs `{item['field_b']}`; "
+            f"canonical `{item['canonical_field']}`; action: {item['action']}"
+            for item in overlaps
+        ]
+        or ["- None"]
+    )
     for title, key in (
         ("Consumed By Wrapper", "consumed_by_wrapper"),
         ("Forwarded To Observation Bias", "forwarded_to_observation_bias"),

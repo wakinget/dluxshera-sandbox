@@ -74,7 +74,9 @@ from dluxshera.utils.campaigns import (
     write_shell_command,
 )
 from dluxshera.utils.campaign_model_split import (
+    CampaignModelSplit,
     build_campaign_model_split,
+    hash_campaign_model_config,
     template_hash_row,
     validate_campaign_model_split_artifacts,
     write_campaign_model_split_templates,
@@ -83,6 +85,7 @@ from dluxshera.utils.detector_layer_overrides import (
     apply_detector_layer_overrides,
     detector_blur_warnings,
     detector_layer_stack,
+    patch_smear_layer_for_policy,
 )
 from dluxshera.utils.campaign_trace_sources import (
     PreparedTraceSourcePlan,
@@ -269,6 +272,150 @@ def _write_observation_bias_templates(
         inference_payload=payloads["inference"],
         split=model_split,
     )
+
+
+def _smear_render_mode(subblock_cfg: Mapping[str, Any]) -> str:
+    processing = subblock_cfg.get("trajectory_processing")
+    smear = processing.get("smear", {}) if isinstance(processing, Mapping) else {}
+    render = smear.get("render", {}) if isinstance(smear, Mapping) else {}
+    enabled = bool(smear.get("enabled", False)) if isinstance(smear, Mapping) else False
+    return str(render.get("mode", "metadata_only" if enabled else "disabled"))
+
+
+def _smear_cfg(subblock_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    processing = subblock_cfg.get("trajectory_processing")
+    smear = processing.get("smear", {}) if isinstance(processing, Mapping) else {}
+    return dict(smear) if isinstance(smear, Mapping) else {}
+
+
+def _write_subblock_smear_templates(
+    *,
+    run_root: Path,
+    subblock_index: int,
+    model_split: CampaignModelSplit,
+    subblock_cfg: Mapping[str, Any],
+    trace_row: Mapping[str, Any],
+) -> tuple[dict[str, Path], dict[str, Any]]:
+    kernel_raw = trace_row.get("smear_representative_kernel_json")
+    if not kernel_raw:
+        raise ValueError(
+            "subblock_constant_layer requested, but no trajectory-derived smear kernel "
+            f"was prepared for subblock {subblock_index}."
+        )
+    representative_kernel = json.loads(str(kernel_raw))
+    smear_cfg = _smear_cfg(subblock_cfg)
+    truth_system, truth_policy = patch_smear_layer_for_policy(
+        model_split.truth_system_cfg,
+        smear_cfg,
+        representative_kernel=representative_kernel,
+        context=f"subblock_{subblock_index:06d}.truth",
+        strict=True,
+    )
+    inference_cfg = dict(smear_cfg)
+    inference_mode = str(
+        (inference_cfg.get("inference", {}) or {}).get("mode", "matched_subblock_constant")
+        if isinstance(inference_cfg.get("inference", {}), Mapping)
+        else "matched_subblock_constant"
+    )
+    if inference_mode == "disabled":
+        render = inference_cfg.get("render", {}) if isinstance(inference_cfg.get("render"), Mapping) else {}
+        inference_cfg = {
+            "enabled": False,
+            "render": {"mode": "disabled", "target_layer": render.get("target_layer", "smear")},
+        }
+    elif inference_mode in {"matched", "matched_subblock_constant"}:
+        pass
+    elif inference_mode in {"solve_subblock_smear", "per_frame", "mismatch_scaled", "mismatch_angle_offset"}:
+        raise ValueError(f"smear.inference.mode={inference_mode!r} is future/deferred and not implemented.")
+    else:
+        raise ValueError(f"Unsupported smear.inference.mode {inference_mode!r}.")
+    inference_system, inference_policy = patch_smear_layer_for_policy(
+        model_split.inference_system_cfg,
+        inference_cfg,
+        representative_kernel=representative_kernel,
+        context=f"subblock_{subblock_index:06d}.inference",
+        strict=True,
+    )
+    sub_split = replace(
+        model_split,
+        truth_system_cfg=truth_system,
+        inference_system_cfg=inference_system,
+        truth_config_hash=hash_campaign_model_config(truth_system),
+        inference_config_hash=hash_campaign_model_config(inference_system),
+        provenance={
+            **model_split.provenance,
+            "subblock_smear_template_patch": {
+                "subblock_index": int(subblock_index),
+                "representative_kernel": representative_kernel,
+                "truth_policy": truth_policy,
+                "inference_policy": inference_policy,
+            },
+        },
+    )
+    template_root = run_root / "trajectory" / f"subblock_{subblock_index:06d}" / "templates"
+    payloads = {
+        "trace": load_config_file(DEFAULT_SCHUR_TRACE_TEMPLATE),
+        "render": load_config_file(DEFAULT_RENDER_TEMPLATE),
+        "inference": load_config_file(DEFAULT_INFERENCE_TEMPLATE),
+    }
+    paths = write_campaign_model_split_templates(
+        template_root=template_root,
+        trace_payload=payloads["trace"],
+        render_payload=payloads["render"],
+        inference_payload=payloads["inference"],
+        split=sub_split,
+    )
+    return paths, template_hash_row(paths, sub_split)
+
+
+def _resolve_total_subblocks_for_campaign(
+    experiment_cfg: Mapping[str, Any],
+    subblock_cfg: Mapping[str, Any],
+    iterative_cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    iterative_enabled = bool(iterative_cfg.get("enabled", False))
+    raw_n = subblock_cfg.get("n_subblocks")
+    trace = subblock_cfg.get("trace_source", {}) if isinstance(subblock_cfg.get("trace_source"), Mapping) else {}
+    window = trace.get("window", {}) if isinstance(trace.get("window"), Mapping) else {}
+    trace_window_n = window.get("n_subblocks")
+    if iterative_enabled:
+        if iterative_cfg.get("subblocks_per_window") is None:
+            if raw_n is None:
+                raise ValueError(
+                    "experiment.iterative.enabled=true requires iterative.subblocks_per_window "
+                    "or an explicit subblocks.n_subblocks fallback."
+                )
+            subblocks_per_window = int(raw_n)
+        else:
+            subblocks_per_window = int(iterative_cfg["subblocks_per_window"])
+        windows_per_draw = int(iterative_cfg.get("windows_per_draw", 1))
+        total = windows_per_draw * subblocks_per_window
+        source = "experiment.iterative.windows_per_draw*subblocks_per_window"
+        if raw_n is not None and int(raw_n) != total:
+            raise ValueError(
+                "experiment.subblocks.n_subblocks conflicts with iterative grouping: "
+                f"{int(raw_n)} != {windows_per_draw}*{subblocks_per_window}={total}."
+            )
+    else:
+        windows_per_draw = int(iterative_cfg.get("windows_per_draw", 1))
+        subblocks_per_window = int(iterative_cfg.get("subblocks_per_window", raw_n or 1))
+        total = int(raw_n if raw_n is not None else 1)
+        source = "experiment.subblocks.n_subblocks" if raw_n is not None else "default:1"
+    if total <= 0:
+        raise ValueError("resolved total subblock count must be positive.")
+    if trace_window_n is not None and int(trace_window_n) != total:
+        raise ValueError(
+            "experiment.subblocks.trace_source.window.n_subblocks conflicts with resolved "
+            f"subblock count: {int(trace_window_n)} != {total}."
+        )
+    return {
+        "resolved_total_subblocks": int(total),
+        "resolved_windows_per_draw": int(windows_per_draw),
+        "resolved_subblocks_per_window": int(subblocks_per_window),
+        "subblock_count_source": source,
+        "trace_source_window_n_subblocks": None if trace_window_n is None else int(trace_window_n),
+        "consistency_status": "consistent",
+    }
 
 
 def _matrix_diagnostics(matrix: np.ndarray) -> MatrixDiagnostics:
@@ -1139,6 +1286,17 @@ def resolve_subblock_command_options(
 ) -> dict[str, Any]:
     """Validate and normalize optional flags forwarded to the subblock runner."""
 
+    subblock_cfg = dict(subblock_cfg)
+    if subblock_cfg.get("variance_floor") is None:
+        noise_cfg = subblock_cfg.get("noise")
+        if isinstance(noise_cfg, Mapping) and noise_cfg.get("variance_floor") is not None:
+            subblock_cfg["variance_floor"] = noise_cfg["variance_floor"]
+        else:
+            noise_model = subblock_cfg.get("noise_model")
+            if isinstance(noise_model, Mapping):
+                terms = noise_model.get("render_template_terms")
+                if isinstance(terms, Mapping) and terms.get("variance_floor") is not None:
+                    subblock_cfg["variance_floor"] = terms["variance_floor"]
     options: dict[str, Any] = {}
     if subblock_cfg.get("exposure_time_s") is not None:
         exposure_time_s = float(subblock_cfg["exposure_time_s"])
@@ -1483,14 +1641,12 @@ def build_campaign_plan(
     subblock_command_options = resolve_subblock_command_options(subblock_cfg)
     iterative_cfg = _resolve_iterative_config(experiment_cfg)
     seeding_cfg = _resolve_seeding_config(experiment_cfg)
-    configured_n_subblocks = int(subblock_cfg.get("n_subblocks", 3))
-    n_subblocks = (
-        int(iterative_cfg["windows_per_draw"]) * int(iterative_cfg["subblocks_per_window"])
-        if bool(iterative_cfg["enabled"])
-        else configured_n_subblocks
+    subblock_resolution = _resolve_total_subblocks_for_campaign(
+        experiment_cfg,
+        subblock_cfg,
+        iterative_cfg,
     )
-    if configured_n_subblocks <= 0 or n_subblocks <= 0:
-        raise ValueError("subblocks.n_subblocks must be positive.")
+    n_subblocks = int(subblock_resolution["resolved_total_subblocks"])
     subblock_root = run_root / "subblock_runs"
     trace_source_plan = prepare_campaign_trace_source(
         trace_source_cfg=subblock_cfg.get("trace_source"),
@@ -1526,6 +1682,8 @@ def build_campaign_plan(
     subblock_plans: dict[str, list[dict[str, Any]]] = {}
     iterative_plan_rows: list[dict[str, Any]] = []
     expected_output_rows: list[dict[str, Any]] = []
+    template_hash_rows: list[dict[str, Any]] = []
+    seen_template_hash_keys: set[tuple[str, str, str]] = set()
     for case in cases:
         commands[case.case_name] = []
         summary_paths[case.case_name] = []
@@ -1564,6 +1722,26 @@ def build_campaign_plan(
                 / "schur_summary"
                 / "subblock_summary.json"
             )
+            trace_row = dict(trace_source_plan.rows[subblock_index])
+            if _smear_render_mode(subblock_cfg) == "subblock_constant_layer":
+                active_template_paths, active_template_hashes = _write_subblock_smear_templates(
+                    run_root=run_root,
+                    subblock_index=subblock_index,
+                    model_split=model_split,
+                    subblock_cfg=subblock_cfg,
+                    trace_row=trace_row,
+                )
+            else:
+                active_template_paths = template_paths
+                active_template_hashes = template_hashes
+            template_key = (
+                str(active_template_hashes.get("trace_template_hash", "")),
+                str(active_template_hashes.get("render_template_hash", "")),
+                str(active_template_hashes.get("inference_template_hash", "")),
+            )
+            if template_key not in seen_template_hash_keys:
+                seen_template_hash_keys.add(template_key)
+                template_hash_rows.append(active_template_hashes)
             commands[case.case_name].append(
                 build_subblock_command(
                     case_root_parent=subblock_root,
@@ -1574,7 +1752,7 @@ def build_campaign_plan(
                     trace_seed=int(seeds["trace_seed"]),
                     noise_seed=int(seeds["noise_seed"]),
                     trace_subblock=trace_source_plan.subblocks[subblock_index],
-                    template_paths=template_paths,
+                    template_paths=active_template_paths,
                 )
             )
             summary_paths[case.case_name].append(summary_path)
@@ -1583,7 +1761,6 @@ def build_campaign_plan(
                 for key, value in subblock_command_options.items()
                 if key != "forwarded_flags"
             }
-            trace_row = dict(trace_source_plan.rows[subblock_index])
             subblock_plan_row = {
                     "case_name": case.case_name,
                     "subblock_index": int(subblock_index),
@@ -1607,7 +1784,7 @@ def build_campaign_plan(
                     ),
                     "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
                     "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
-                    **template_hashes,
+                    **active_template_hashes,
                     **plan_options,
                     **seeds,
                     **trace_row,
@@ -1655,7 +1832,7 @@ def build_campaign_plan(
                     "trace_source_mode": str(trace_source_plan.mode),
                     "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
                     "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
-                    **template_hashes,
+                    **active_template_hashes,
                     "theta_reference_offsets_window0_json": json.dumps(
                         dict(case.theta_reference_offsets), sort_keys=True
                     )
@@ -1691,7 +1868,7 @@ def build_campaign_plan(
                         "trace_source_mode": str(trace_source_plan.mode),
                         "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
                         "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
-                        **template_hashes,
+                        **active_template_hashes,
                         "trace_seed": int(seeds["trace_seed"]),
                         "noise_seed": int(seeds["noise_seed"]),
                     }
@@ -1704,7 +1881,8 @@ def build_campaign_plan(
     }
     resolved_config["experiment"]["high_order_wfe_summary"] = model_split.provenance.get("high_order_wfe", {})
     resolved_config["experiment"]["model_split"] = model_split.to_dict()
-    resolved_config["experiment"]["template_hashes"] = [template_hashes]
+    resolved_config["experiment"]["template_hashes"] = template_hash_rows or [template_hashes]
+    resolved_config["experiment"]["subblock_resolution"] = subblock_resolution
     return CampaignPlan(
         run_root=run_root,
         layout=layout,

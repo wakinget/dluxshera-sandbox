@@ -7,8 +7,9 @@
 #   full_fidelity_binary_iterative_smoke_config_reference.md/json
 #
 # Smoke-specific contract notes:
-# - kind=full_fidelity_binary_iterative_smoke is executable and translated to
-#   observation_bias_campaign by the wrapper.
+# - kind=full_fidelity_binary_iterative is executable and translated to
+#   observation_bias_campaign by the wrapper. The smoke filename is a scale
+#   label, not a separate parser path.
 # - spectral_model.fast is documented as smoke_only but is not needed here; this
 #   smoke uses explicit small n_lambda values instead of hidden clamping.
 # - detector_qe.enabled=false and m2_filter_response.enabled=false are deliberate
@@ -19,14 +20,14 @@
 #   smoke execution. The review config uses the structured noise request.
 # - reference_n_iter=3 and observation_theta Zernike indices [0] are smoke-only
 #   runtime reducers.
-# - SHERA_FLIGHT_3P_CONV supplies detector realism layers; this smoke removes
-#   rendered smear so the preset's default line kernel is not applied.
+# - SHERA_FLIGHT_3P_CONV supplies detector realism layers; this smoke exercises
+#   subblock_constant_layer rendered smear at tiny scale.
 # - jitter is kept as a named near-identity convolution layer for override tests.
 # - trace_jitter, when forwarded, is a downstream trace-template override and is
 #   not added to materialized trajectory frame_truth.csv.
 experiment:
-  kind: full_fidelity_binary_iterative_smoke
-  schema_version: full_fidelity_binary_iterative_smoke.v1
+  kind: full_fidelity_binary_iterative
+  schema_version: full_fidelity_binary_iterative.v1
   run_name: full_fidelity_binary_iterative_smoke
   seed: 42
   source_kind: binary_target
@@ -123,8 +124,10 @@ experiment:
       smear:
         enabled: true
         render:
-          mode: metadata_only
+          mode: subblock_constant_layer
           target_layer: smear
+        inference:
+          mode: matched_subblock_constant
     trace_jitter:
       x_sigma_as: 0.001
       y_sigma_as: 0.001

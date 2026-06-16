@@ -4,11 +4,11 @@ experiment:
   run_name: full_fidelity_binary_iterative
   source_kind: binary_target
   target: ALPHA_CEN
+  seed: 42
   system_preset: SHERA_FLIGHT_3P_CONV
 
   seeding:
     seed_policy: different_jitter_different_noise
-    base_seed: 42
 
   detector_overrides:
     layers:
@@ -29,7 +29,7 @@ experiment:
       mode: target
       generic_binary_fallback: alpha_cen
     truth:
-      label: truth_review_alpha_cen
+      label: truth_full_fidelity_alpha_cen
       mode: effective_source_spectrum
       n_lambda: 3
       wavelength_min_nm: 530.0
@@ -56,7 +56,7 @@ experiment:
           response_unit: percent_reflection
           response_scale: 0.01
     inference:
-      label: inference_review_alpha_cen
+      label: inference_full_fidelity_alpha_cen
       mode: truncated_effective_source_spectrum
       n_lambda: 3
       wavelength_min_nm: 530.0
@@ -168,6 +168,10 @@ experiment:
         render:
           mode: subblock_constant_layer
           target_layer: smear
+          require_existing_layer: false
+          allow_layer_injection: true
+        inference:
+          mode: matched_subblock_constant
     trace_jitter:
       enabled: true
       apply_to: downstream_template_override
@@ -212,7 +216,7 @@ experiment:
     center: truth
     distribution: normal
     draw_seed: 12345
-    case_name_template: full_fidelity_review_draw_{draw_index:03d}
+    case_name_template: full_fidelity_draw_{draw_index:03d}
     sigmas:
       source.separation_as:
         kind: absolute

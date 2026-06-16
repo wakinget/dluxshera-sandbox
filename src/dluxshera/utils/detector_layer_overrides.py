@@ -186,6 +186,8 @@ def patch_smear_layer_for_policy(
             warnings.warn(message, UserWarning, stacklevel=2)
         return patched, provenance
 
+    if mode == "per_frame":
+        raise ValueError("smear.render.mode='per_frame' is future/deferred and not implemented.")
     if mode != "subblock_constant_layer":
         raise ValueError(f"Unsupported smear.render.mode {mode!r}.")
 
@@ -213,6 +215,24 @@ def patch_smear_layer_for_policy(
         "kernel_size": int(representative_kernel.get("kernel_size", defaults.get("kernel_size", 11))),
         "units": str(representative_kernel.get("units", defaults.get("units", "detector_pix"))),
     }
+    if layer is None and allow_injection:
+        patched = copy.deepcopy(dict(system_config))
+        detector = patched.setdefault("detector", {})
+        if not isinstance(detector, dict):
+            raise ValueError("system.detector must be a mapping to inject smear layer.")
+        layers = detector.setdefault("layers", [])
+        if not isinstance(layers, list):
+            raise ValueError("system.detector.layers must be a list to inject smear layer.")
+        layers.append({"name": target_layer, "kind": "ApplyConvolution", "kernel": kernel_patch})
+        provenance["applied"] = {
+            "context": f"{context}.smear_patch" if context else "smear_patch",
+            "before": detector_layer_stack(system_config),
+            "applied": [{"layer": target_layer, "action": "inject", "status": "inserted"}],
+            "after": detector_layer_stack(patched),
+        }
+        provenance["after"] = detector_layer_stack(patched)
+        provenance["representative_kernel"] = kernel_patch
+        return patched, provenance
     patched, applied = apply_detector_layer_overrides(
         system_config,
         {"layers": {target_layer: {"action": "update", "kind": "ApplyConvolution", "kernel": kernel_patch}}},

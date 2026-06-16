@@ -1,6 +1,6 @@
 experiment:
-  kind: full_fidelity_binary_iterative_smoke
-  schema_version: full_fidelity_binary_iterative_smoke.v1
+  kind: full_fidelity_binary_iterative
+  schema_version: full_fidelity_binary_iterative.v1
   run_name: full_fidelity_binary_iterative_smoke
   seed: 42
   source_kind: binary_target
@@ -84,7 +84,9 @@ experiment:
     reference_optimizer_kind: sgd
     reference_base_lr: 0.4
     reference_n_iter: 3
-    variance_floor: 1.0
+    noise:
+      enabled: false
+      variance_floor: 1.0
     summary_information_scale: summed_likelihood
     trace_source:
       mode: trajectory
@@ -97,8 +99,12 @@ experiment:
       smear:
         enabled: true
         render:
-          mode: metadata_only
+          mode: subblock_constant_layer
           target_layer: smear
+          require_existing_layer: false
+          allow_layer_injection: true
+        inference:
+          mode: matched_subblock_constant
     trace_jitter:
       x_sigma_as: 0.001
       y_sigma_as: 0.001
@@ -119,7 +125,6 @@ experiment:
       reject_on_nonfinite_posterior: true
   seeding:
     seed_policy: different_jitter_different_noise
-    base_seed: 42
   observation_theta:
     source:
       separation_as: true

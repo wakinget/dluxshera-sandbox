@@ -1,10 +1,10 @@
-"""Run executable full-fidelity binary iterative review/smoke campaigns.
+"""Run executable full-fidelity binary iterative campaigns.
 
 This is a thin wrapper, not a new campaign framework. It accepts the
-``full_fidelity_binary_iterative_review`` and
-``full_fidelity_binary_iterative_smoke`` schemas, translates them into the
+canonical ``full_fidelity_binary_iterative`` schema, translates it into the
 existing ``observation_bias_campaign`` schema, and delegates execution to
-``run_observation_bias_campaign.py``. Already translated
+``run_observation_bias_campaign.py``. Deprecated review/smoke aliases are
+accepted temporarily and normalized immediately. Already translated
 ``observation_bias_campaign`` configs are also accepted for replay/debugging.
 
 The future ``full_fidelity_algorithm_campaign`` schema skeleton is intentionally
@@ -32,9 +32,14 @@ from run_observation_bias_campaign import (  # type: ignore
 )
 
 
-FULL_FIDELITY_EXECUTABLE_KINDS = (
+CANONICAL_FULL_FIDELITY_KIND = "full_fidelity_binary_iterative"
+DEPRECATED_FULL_FIDELITY_ALIASES = (
     "full_fidelity_binary_iterative_smoke",
     "full_fidelity_binary_iterative_review",
+)
+FULL_FIDELITY_EXECUTABLE_KINDS = (
+    CANONICAL_FULL_FIDELITY_KIND,
+    *DEPRECATED_FULL_FIDELITY_ALIASES,
 )
 ACCEPTED_CONFIG_KINDS = (*FULL_FIDELITY_EXECUTABLE_KINDS, "observation_bias_campaign")
 FUTURE_SKELETON_KIND = "full_fidelity_algorithm_campaign"
@@ -84,15 +89,14 @@ def validate_full_fidelity_smoke_config(
         add(
             "experiment.kind='full_fidelity_algorithm_campaign' is the future schema skeleton "
             "and is not executable by this wrapper. Use "
-            "full_fidelity_binary_iterative_review.yaml for resolved-system review "
-            "or full_fidelity_binary_iterative_smoke.yaml for tiny wiring validation."
+            "experiment.kind='full_fidelity_binary_iterative' for executable review- "
+            "or smoke-scale campaign configs."
         )
         return warnings_out
     if kind not in ACCEPTED_CONFIG_KINDS:
         add(
             "Unsupported experiment.kind for the full-fidelity wrapper. Accepted kinds are "
-            "'full_fidelity_binary_iterative_review', 'full_fidelity_binary_iterative_smoke', "
-            "and 'observation_bias_campaign'."
+            "'full_fidelity_binary_iterative' and 'observation_bias_campaign'."
         )
         return warnings_out
     if kind == "observation_bias_campaign":
@@ -111,7 +115,7 @@ def validate_full_fidelity_smoke_config(
                 "spectral_model.fast=false leaves explicit spectral grid settings in control; "
                 "runtime still depends on n_lambda, wavelength range, and enabled response components."
             )
-    if kind == "full_fidelity_binary_iterative_review" and "fast" in spectral:
+    if kind in {"full_fidelity_binary_iterative", "full_fidelity_binary_iterative_review"} and "fast" in spectral:
         add(
             "spectral_model.fast is smoke-only and should be absent from the review config; "
             "use explicit spectral grids instead."
@@ -145,10 +149,10 @@ def validate_full_fidelity_smoke_config(
         if isinstance(render, Mapping)
         else "none"
     )
-    if render_mode not in {"none", "metadata_only"}:
+    if render_mode == "per_frame":
         add(
-            "subblocks.trajectory_processing.smear.render.mode requests dynamic/per-frame smear "
-            f"mode {render_mode!r}, but the smoke wrapper only wires metadata_only sidecars today."
+            "subblocks.trajectory_processing.smear.render.mode='per_frame' is reserved for "
+            "future per-frame template/runtime detector-layer parameterization."
         )
 
     if isinstance(experiment.get("detector"), Mapping):
@@ -233,16 +237,24 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
         if str(experiment.get("kind")) == FUTURE_SKELETON_KIND:
             raise ValueError(
                 "experiment.kind='full_fidelity_algorithm_campaign' is a non-executable "
-                "schema/design skeleton. Use full_fidelity_binary_iterative_review.yaml "
-                "or full_fidelity_binary_iterative_smoke.yaml "
+                "schema/design skeleton. Use experiment.kind='full_fidelity_binary_iterative' "
                 "with this wrapper, or implement a future runner for that schema."
             )
         raise ValueError(
-            "Full-fidelity wrapper expects experiment.kind='full_fidelity_binary_iterative_review', "
-            "'full_fidelity_binary_iterative_smoke', or an already translated "
+            "Full-fidelity wrapper expects experiment.kind='full_fidelity_binary_iterative' "
+            "or an already translated "
             "observation_bias_campaign config. "
             "experiment.kind='full_fidelity_algorithm_campaign' is not accepted."
         )
+    source_alias = kind if kind in DEPRECATED_FULL_FIDELITY_ALIASES else None
+    if source_alias is not None:
+        warnings.warn(
+            f"experiment.kind={source_alias!r} is deprecated; use "
+            f"{CANONICAL_FULL_FIDELITY_KIND!r}.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    canonical_kind = CANONICAL_FULL_FIDELITY_KIND
 
     subblocks = _normalize_subblock_noise_for_observation_bias(
         _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
@@ -280,10 +292,11 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
     translated = {
         "experiment": {
             "kind": "observation_bias_campaign",
-            "source_campaign_kind": kind,
-            "schema_version": f"{kind}.translated.v1",
+            "source_campaign_kind": canonical_kind,
+            **({"source_campaign_alias": source_alias} if source_alias else {}),
+            "schema_version": f"{canonical_kind}.translated.v1",
             "seed": int(experiment.get("seed", 42)),
-            "run_name": run_name or experiment.get("run_name", kind),
+            "run_name": run_name or experiment.get("run_name", canonical_kind),
             "system": {
                 "preset": experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET),
                 "source": {"kind": source_kind, "target": target},

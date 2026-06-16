@@ -94,13 +94,13 @@ def test_full_fidelity_binary_iterative_smoke_template_is_tiny_executable_smoke(
     payload = yaml.safe_load(SMOKE_TEMPLATE_PATH.read_text())
     experiment = payload["experiment"]
 
-    assert experiment["kind"] == "full_fidelity_binary_iterative_smoke"
+    assert experiment["kind"] == "full_fidelity_binary_iterative"
     assert experiment["source_kind"] == "binary_target"
     assert experiment["target"] == "ALPHA_CEN"
     assert experiment["n_cases"] == 1
     assert experiment["subblocks"]["n_frames"] == 3
     assert experiment["subblocks"]["trace_source"]["mode"] == "trajectory"
-    assert experiment["subblocks"]["trajectory_processing"]["smear"]["render"]["mode"] == "metadata_only"
+    assert experiment["subblocks"]["trajectory_processing"]["smear"]["render"]["mode"] == "subblock_constant_layer"
     assert experiment["iterative"]["enabled"] is True
     assert experiment["iterative"]["windows_per_draw"] == 2
     assert experiment["iterative"]["subblocks_per_window"] == 1
@@ -123,7 +123,7 @@ def test_annotated_smoke_config_documents_non_obvious_blocks() -> None:
     text = ANNOTATED_SMOKE_PATH.read_text(encoding="utf-8")
     payload = yaml.safe_load(text)
 
-    assert payload["experiment"]["kind"] == "full_fidelity_binary_iterative_smoke"
+    assert payload["experiment"]["kind"] == "full_fidelity_binary_iterative"
     for needle in (
         "spectral_model.fast",
         "high_order_wfe",

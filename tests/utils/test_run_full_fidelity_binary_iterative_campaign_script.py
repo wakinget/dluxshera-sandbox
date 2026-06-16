@@ -73,7 +73,18 @@ def test_full_fidelity_binary_iterative_smoke_dry_run_writes_split_plans(tmp_pat
     assert split["truth_config_hash"] != split["inference_config_hash"]
     assert split["components"]["spectral_model"]["enabled"] is True
     assert split["components"]["high_order_wfe"]["enabled"] is True
-    assert split["components"]["trajectory_smear"]["mode"] == "metadata_only"
+    assert split["components"]["trajectory_smear"]["mode"] == "subblock_constant_layer"
+    assert (run_root / "trajectory" / "subblock_000000" / "templates" / "render_template.json").is_file()
+    assert (run_root / "trajectory" / "subblock_000000" / "templates" / "inference_template.json").is_file()
+    render_template = json.loads(
+        (run_root / "trajectory" / "subblock_000000" / "templates" / "render_template.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    layers = render_template["system"]["detector"]["layers"]
+    smear = next(layer for layer in layers if layer.get("name") == "smear")
+    assert smear["kernel"]["kind"] == "line"
+    assert smear["kernel"]["units"] == "detector_pix"
 
     rows = _read_csv(run_root / "iterative_plan.csv")
     assert len(rows) == 2

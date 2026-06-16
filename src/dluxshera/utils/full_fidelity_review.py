@@ -982,11 +982,10 @@ def resolve_subblock_plan_settings(
 ) -> tuple[dict[str, Any], list[str]]:
     """Resolve overlapping subblock/window/iterative settings for review.
 
-    ``experiment.subblocks.n_subblocks`` is the canonical number of subblocks
-    generated per prior draw. ``trace_source.window.n_subblocks`` is optional
-    and must agree when present. Iterative settings group the generated
-    subblocks into update windows; the current planner requires the product to
-    match the canonical count unless an explicit partial-window policy is set.
+    When iterative mode is enabled, ``windows_per_draw * subblocks_per_window``
+    is the canonical number of subblocks generated per prior draw.
+    ``experiment.subblocks.n_subblocks`` and ``trace_source.window.n_subblocks``
+    are optional redundant fields and must agree when present.
     """
 
     exp = _experiment(config)
@@ -997,55 +996,76 @@ def resolve_subblock_plan_settings(
     warnings_out: list[str] = []
     errors: list[str] = []
 
-    n_subblocks = int(sub.get("n_subblocks", 1))
-    if n_subblocks < 1:
+    iterative_enabled = bool(iterative.get("enabled", False))
+    raw_n_subblocks = sub.get("n_subblocks")
+    n_subblocks = None if raw_n_subblocks is None else int(raw_n_subblocks)
+    if n_subblocks is not None and n_subblocks < 1:
         errors.append(f"subblocks.n_subblocks={n_subblocks} must be >= 1.")
 
     trace_window_n = window.get("n_subblocks")
-    if trace_window_n is not None:
-        trace_window_n = int(trace_window_n)
-        if trace_window_n != n_subblocks:
-            errors.append(
-                f"trace_source.window.n_subblocks={trace_window_n} disagrees with "
-                f"subblocks.n_subblocks={n_subblocks}. Remove trace_source.window.n_subblocks "
-                "or make it match the campaign subblock count."
-            )
-        else:
-            warnings_out.append(
-                f"trace_source.window.n_subblocks={trace_window_n} is redundant but agrees "
-                f"with subblocks.n_subblocks={n_subblocks}."
-            )
+    trace_window_n = None if trace_window_n is None else int(trace_window_n)
 
     windows_per_draw = iterative.get("windows_per_draw")
     subblocks_per_window = iterative.get("subblocks_per_window")
     expected_iterative_subblocks = None
-    partial_policy = iterative.get("partial_window_policy")
-    if partial_policy is None:
-        partial_policy = iterative.get("subblock_partial_policy")
-    partial_policy_text = None if partial_policy is None else str(partial_policy)
-    partial_policy_enabled = partial_policy_text not in {None, "", "none", "strict"}
-    if windows_per_draw is not None and subblocks_per_window is not None:
-        windows_per_draw = int(windows_per_draw)
-        subblocks_per_window = int(subblocks_per_window)
+    subblock_count_source = "experiment.subblocks.n_subblocks"
+    if iterative_enabled:
+        windows_per_draw = int(windows_per_draw or 1)
+        if subblocks_per_window is None:
+            if n_subblocks is None:
+                errors.append(
+                    "iterative.enabled=true requires iterative.subblocks_per_window "
+                    "or subblocks.n_subblocks."
+                )
+                subblocks_per_window = 1
+            else:
+                subblocks_per_window = int(n_subblocks)
+                warnings_out.append(
+                    "iterative.subblocks_per_window is omitted; using subblocks.n_subblocks "
+                    f"as the fallback value ({subblocks_per_window})."
+                )
+        else:
+            subblocks_per_window = int(subblocks_per_window)
         expected_iterative_subblocks = windows_per_draw * subblocks_per_window
         if windows_per_draw < 1 or subblocks_per_window < 1:
             errors.append("iterative.windows_per_draw and iterative.subblocks_per_window must be >= 1.")
-        elif expected_iterative_subblocks != n_subblocks and not partial_policy_enabled:
+        elif n_subblocks is not None and expected_iterative_subblocks != n_subblocks:
             errors.append(
                 "iterative.windows_per_draw * iterative.subblocks_per_window = "
                 f"{expected_iterative_subblocks}, but subblocks.n_subblocks = {n_subblocks}. "
-                "The current planner does not support implicit unused subblocks. Adjust the "
-                "iterative grouping or document partial-window behavior."
+                "Remove subblocks.n_subblocks or make it match the iterative grouping."
             )
-        elif expected_iterative_subblocks != n_subblocks:
-            warnings_out.append(
-                "Iterative grouping does not cover the canonical subblock count, but "
-                f"partial-window policy {partial_policy_text!r} is configured."
+        else:
+            if n_subblocks is None:
+                warnings_out.append(
+                    "subblocks.n_subblocks is omitted; deriving total subblocks from "
+                    f"iterative grouping ({expected_iterative_subblocks})."
+                )
+            else:
+                warnings_out.append(
+                    f"iterative.windows_per_draw * iterative.subblocks_per_window = "
+                    f"{expected_iterative_subblocks}, matching subblocks.n_subblocks={n_subblocks}."
+                )
+        resolved_n_subblocks = expected_iterative_subblocks
+        subblock_count_source = "experiment.iterative.windows_per_draw*subblocks_per_window"
+    else:
+        windows_per_draw = None if windows_per_draw is None else int(windows_per_draw)
+        subblocks_per_window = None if subblocks_per_window is None else int(subblocks_per_window)
+        resolved_n_subblocks = int(n_subblocks or 1)
+        if n_subblocks is None:
+            warnings_out.append("subblocks.n_subblocks is omitted with iterative disabled; defaulting to 1.")
+
+    if trace_window_n is not None:
+        if trace_window_n != resolved_n_subblocks:
+            errors.append(
+                f"trace_source.window.n_subblocks={trace_window_n} disagrees with "
+                f"resolved total subblocks={resolved_n_subblocks}. Remove "
+                "trace_source.window.n_subblocks or make it match."
             )
         else:
             warnings_out.append(
-                f"iterative.windows_per_draw * iterative.subblocks_per_window = "
-                f"{expected_iterative_subblocks}, matching subblocks.n_subblocks={n_subblocks}."
+                f"trace_source.window.n_subblocks={trace_window_n} is redundant but agrees "
+                f"with resolved total subblocks={resolved_n_subblocks}."
             )
 
     consistency_status = "consistent" if not errors else "inconsistent"
@@ -1055,17 +1075,19 @@ def resolve_subblock_plan_settings(
         "iterative_windows_per_draw": windows_per_draw,
         "iterative_subblocks_per_window": subblocks_per_window,
         "expected_iterative_subblocks": expected_iterative_subblocks,
-        "resolved_n_subblocks": n_subblocks,
-        "canonical_source": "experiment.subblocks.n_subblocks",
-        "partial_window_policy": partial_policy_text,
-        "partial_window_policy_enabled": bool(partial_policy_enabled),
+        "resolved_n_subblocks": resolved_n_subblocks,
+        "resolved_total_subblocks": resolved_n_subblocks,
+        "resolved_windows_per_draw": windows_per_draw,
+        "resolved_subblocks_per_window": subblocks_per_window,
+        "subblock_count_source": subblock_count_source,
+        "canonical_source": subblock_count_source,
         "consistency_status": consistency_status,
         "warnings": warnings_out,
         "errors": errors,
         "policy": (
-            "experiment.subblocks.n_subblocks is canonical; trace_source.window.n_subblocks "
-            "is optional and must agree; iterative windows_per_draw * subblocks_per_window "
-            "must equal the canonical count unless an explicit partial-window policy is configured."
+            "When iterative is enabled, iterative windows_per_draw * subblocks_per_window "
+            "is canonical; subblocks.n_subblocks and trace_source.window.n_subblocks are "
+            "optional redundant fields and must agree when present."
         ),
     }
     if strict and errors:
