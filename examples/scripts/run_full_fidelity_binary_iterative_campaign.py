@@ -259,6 +259,8 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
     source_kind = str(experiment.get("source_kind", "binary_target"))
     target = experiment.get("target", "ALPHA_CEN")
     n_cases = int(experiment.get("n_cases", 1))
+    preset = experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET)
+    system_seed = {"preset": preset, "source": {"kind": source_kind, "target": target}}
 
     observation_theta = _as_mapping(experiment.get("observation_theta"), name="experiment.observation_theta") or {
         "source": {"separation_as": True, "log_flux_total": True, "contrast": True},
@@ -286,6 +288,7 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
     }
 
     translated = {
+        "system": dict(system_seed),
         "experiment": {
             "kind": "observation_bias_campaign",
             "source_campaign_kind": canonical_kind,
@@ -293,10 +296,8 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
             "schema_version": f"{canonical_kind}.translated.v1",
             "seed": int(experiment.get("seed", 42)),
             "run_name": run_name or experiment.get("run_name", canonical_kind),
-            "system": {
-                "preset": experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET),
-                "source": {"kind": source_kind, "target": target},
-            },
+            "system_preset": preset,
+            "system": dict(system_seed),
             "detector_overrides": _as_mapping(experiment.get("detector_overrides"), name="experiment.detector_overrides"),
             "spectral_model": _as_mapping(experiment.get("spectral_model"), name="experiment.spectral_model"),
             "high_order_wfe": _as_mapping(experiment.get("high_order_wfe"), name="experiment.high_order_wfe"),

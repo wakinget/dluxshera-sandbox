@@ -23,4 +23,8 @@ def test_full_fidelity_review_config_uses_conv_preset() -> None:
 def test_full_fidelity_smoke_config_uses_conv_preset() -> None:
     exp = _experiment(RECIPE_ROOT / "full_fidelity_binary_iterative_smoke.yaml")
     assert exp["system_preset"] == DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
-    assert exp["subblocks"]["trajectory_processing"]["smear"]["render"]["mode"] == "metadata_only"
+    render_smear = exp["subblocks"]["trajectory_processing"]["smear"]["render"]
+    assert render_smear["mode"] == "subblock_constant_layer"
+    assert render_smear["target_layer"] == "smear"
+    assert render_smear["require_existing_layer"] is True
+    assert render_smear["allow_layer_injection"] is False

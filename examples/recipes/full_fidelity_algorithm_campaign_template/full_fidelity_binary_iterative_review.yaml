@@ -168,8 +168,8 @@ experiment:
         render:
           mode: subblock_constant_layer
           target_layer: smear
-          require_existing_layer: false
-          allow_layer_injection: true
+          require_existing_layer: true
+          allow_layer_injection: false
         inference:
           mode: matched_subblock_constant
     trace_jitter:

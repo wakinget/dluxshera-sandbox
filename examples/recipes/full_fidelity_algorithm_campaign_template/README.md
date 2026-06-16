@@ -253,6 +253,11 @@ the full-fidelity path in a fixed order:
 5. `jitter`
 6. `smear`
 
+The full-fidelity wrapper preserves that preset when translating to the
+observation-bias runner by writing both top-level `system.preset` and
+`experiment.system_preset`; ordinary observation-bias campaigns keep the legacy
+default unless they explicitly select a different preset.
+
 Campaign scripts do not dynamically insert those standard layers when this
 preset is selected. Instead, the resolved system config is patched before
 system instantiation:

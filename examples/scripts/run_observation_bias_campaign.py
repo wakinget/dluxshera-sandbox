@@ -680,19 +680,81 @@ def _experiment_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return dict(experiment)
 
 
+def resolve_campaign_system_preset(
+    *,
+    config: Mapping[str, Any],
+    experiment_cfg: Mapping[str, Any],
+    cli_system_preset: str | None = None,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Resolve campaign preset with explicit observation-bias precedence.
+
+    Precedence is top-level ``system.preset``, ``experiment.system_preset``,
+    ``experiment.system.preset``, an explicit CLI fallback, then the legacy
+    observation-bias default.
+    """
+
+    top_system = config.get("system") if isinstance(config.get("system"), Mapping) else {}
+    exp_system = experiment_cfg.get("system") if isinstance(experiment_cfg.get("system"), Mapping) else {}
+    candidates = {
+        "cli.system_preset": cli_system_preset,
+        "top_level_system.preset": top_system.get("preset") if isinstance(top_system, Mapping) else None,
+        "experiment.system_preset": experiment_cfg.get("system_preset"),
+        "experiment.system.preset": exp_system.get("preset") if isinstance(exp_system, Mapping) else None,
+        "legacy_default": DEFAULT_SYSTEM_PRESET,
+    }
+    source = "legacy_default"
+    resolved = DEFAULT_SYSTEM_PRESET
+    for key in (
+        "top_level_system.preset",
+        "experiment.system_preset",
+        "experiment.system.preset",
+        "cli.system_preset",
+    ):
+        value = candidates.get(key)
+        if value is not None:
+            resolved = str(value)
+            source = key
+            break
+    warnings_out: list[str] = []
+    source_kind = str(experiment_cfg.get("source_campaign_kind", experiment_cfg.get("kind", "")))
+    is_full_fidelity = source_kind == "full_fidelity_binary_iterative"
+    values = {
+        key: str(value)
+        for key, value in candidates.items()
+        if key != "legacy_default" and value is not None
+    }
+    if is_full_fidelity and len(set(values.values())) > 1:
+        message = (
+            "Conflicting system preset candidates in full-fidelity translated config: "
+            + json.dumps(values, sort_keys=True)
+        )
+        if strict:
+            raise ValueError(message)
+        warnings_out.append(message)
+    return {
+        "system_preset": resolved,
+        "source": source,
+        "candidates": candidates,
+        "warnings": warnings_out,
+        "full_fidelity_source": is_full_fidelity,
+    }
+
+
 def _resolve_system_store(
     *,
     config: Mapping[str, Any],
     system_preset: str | None,
+    preset_resolution: Mapping[str, Any] | None = None,
     exposure_time_s: float | None = None,
 ) -> tuple[ParameterStore, dict[str, Any], dict[str, Any]]:
     user_cfg = dict(config)
-    preset = DEFAULT_SYSTEM_PRESET if system_preset is None else system_preset
+    preset = str((preset_resolution or {}).get("system_preset") or (DEFAULT_SYSTEM_PRESET if system_preset is None else system_preset))
     if "system" not in user_cfg:
         user_cfg = {**user_cfg, "system": {"preset": preset}}
-    elif system_preset is not None:
+    elif preset is not None:
         system_cfg = dict(user_cfg["system"])
-        system_cfg["preset"] = system_preset
+        system_cfg["preset"] = preset
         user_cfg["system"] = system_cfg
     if exposure_time_s is not None:
         exposure = float(exposure_time_s)
@@ -736,6 +798,7 @@ def _resolve_system_store(
         "detector_layer_stack_after_global_overrides": detector_layer_stack(system_cfg),
         "detector_layer_overrides": detector_override_provenance,
         "detector_blur_warnings": detector_blur_warnings(system_cfg, smear_cfg=smear_cfg),
+        "system_preset_resolution": dict(preset_resolution or {}),
     }
     return store, dict(system_cfg), provenance
 
@@ -1491,10 +1554,15 @@ def resolve_subblock_command_options(
         )
     if subblock_cfg.get("use_render_variance") is not None:
         options["use_render_variance"] = bool(subblock_cfg["use_render_variance"])
+    bool_switch_keys = {
+        "reference_preconditioning_enabled",
+        "reference_early_stopping_enabled",
+        "use_render_variance",
+    }
     forwarded_flags = [
         SUBBLOCK_OPTION_FLAG_MAP[key]
         for key in SUBBLOCK_OPTION_FLAG_MAP
-        if key in options
+        if key in options and key not in bool_switch_keys
     ]
     if options.get("use_render_variance") is True:
         forwarded_flags.append("--use-render-variance")
@@ -1611,11 +1679,17 @@ def build_campaign_plan(
         experiment_cfg["run_name"] = run_name
     resolved_run_name = str(experiment_cfg.get("run_name") or f"observation_bias_campaign_{timestamp_tag()}")
     run_root = Path(results_root).resolve() / resolved_run_name
-    effective_system_preset = system_preset or experiment_cfg.get("system_preset")
+    preset_resolution = resolve_campaign_system_preset(
+        config=config,
+        experiment_cfg=experiment_cfg,
+        cli_system_preset=system_preset,
+        strict=True,
+    )
     subblock_exposure_time_s = _subblock_exposure_time_s(experiment_cfg)
     system_store, system_cfg, system_provenance = _resolve_system_store(
         config=config,
-        system_preset=effective_system_preset,
+        system_preset=str(preset_resolution["system_preset"]),
+        preset_resolution=preset_resolution,
         exposure_time_s=subblock_exposure_time_s,
     )
     observation_theta_cfg = experiment_cfg.get("observation_theta", {}) or {}
@@ -1624,6 +1698,7 @@ def build_campaign_plan(
         config=observation_theta_cfg,
     )
     layout_metadata["system"] = system_provenance
+    layout_metadata["system_preset_resolution"] = preset_resolution
     layout_metadata["resolved_system"] = system_cfg
     partition = _validate_partition_config(experiment_cfg.get("state_partition"), layout)
     prior_truth = build_prior_mean_from_store(layout.labels, store=system_store)

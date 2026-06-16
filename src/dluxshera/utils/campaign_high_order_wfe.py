@@ -303,11 +303,6 @@ def apply_high_order_wfe_campaign_config(
         "primary": _mirror_summary(deck.primary, active="primary" in mirrors),
         "secondary": _mirror_summary(deck.secondary, active="secondary" in mirrors),
         "deck_comparison": deck.comparison,
-        "trajectory_follow_on": {
-            "high_pass_filter_enabled": False,
-            "intra_frame_smear_enabled": False,
-            "note": "Trajectory high-pass filtering and smear are reserved for a later task.",
-        },
     }
     if artifact_root is not None:
         root = Path(artifact_root)
