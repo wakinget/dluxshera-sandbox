@@ -26,6 +26,7 @@ from dluxshera.utils.detector_layer_overrides import (
     validate_no_accidental_default_smear,
 )
 from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
+from dluxshera.utils.full_fidelity_review import resolve_subblock_plan_settings
 from dluxshera.utils.full_fidelity_config_schema import (
     CONFIG_FIELD_REGISTRY,
     iter_string_fields,
@@ -402,6 +403,11 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         detector_policy_error = str(exc)
         if strict:
             raise
+    subblock_plan_summary, subblock_plan_warnings = resolve_subblock_plan_settings(
+        {"experiment": experiment},
+        strict=strict,
+    )
+    warnings_out.extend(subblock_plan_warnings)
 
     reference_rows = _field_reference_rows({"experiment": experiment})
     accepted_but_noop_used = []
@@ -449,6 +455,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         "resolved_component_summary": _component_summary(experiment),
         "detector_policy_summary": detector_policy_summary,
         "detector_policy_error": detector_policy_error,
+        "trajectory_subblock_plan": subblock_plan_summary,
     }
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -457,6 +464,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
     _write_json(outdir / "field_reference.json", reference_rows)
     _write_json(outdir / "resolved_component_summary.json", audit["resolved_component_summary"])
     _write_json(outdir / "detector_policy_summary.json", detector_policy_summary or {"error": detector_policy_error})
+    _write_json(outdir / "trajectory_subblock_plan.json", subblock_plan_summary)
     _write_csv(outdir / "field_reference.csv", reference_rows)
 
     md = _render_audit_markdown(audit)
@@ -497,6 +505,22 @@ def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
                 f"- After smear policy: `{[row.get('name') for row in detector_policy.get('detector_layer_stack_after_smear_policy', [])]}`",
                 f"- Smear: `{detector_policy.get('smear_status')}`",
                 f"- Jitter: `{detector_policy.get('jitter_status')}`",
+            ]
+        )
+    subblock_plan = audit.get("trajectory_subblock_plan")
+    if isinstance(subblock_plan, Mapping):
+        lines.extend(
+            [
+                "",
+                "## Trajectory/Subblock Plan",
+                f"- subblocks.n_subblocks: `{subblock_plan.get('subblocks_n_subblocks')}`",
+                f"- trace_source.window.n_subblocks: `{subblock_plan.get('trace_source_window_n_subblocks')}`",
+                f"- iterative.windows_per_draw: `{subblock_plan.get('iterative_windows_per_draw')}`",
+                f"- iterative.subblocks_per_window: `{subblock_plan.get('iterative_subblocks_per_window')}`",
+                f"- expected_iterative_subblocks: `{subblock_plan.get('expected_iterative_subblocks')}`",
+                f"- resolved_n_subblocks: `{subblock_plan.get('resolved_n_subblocks')}`",
+                f"- consistency_status: `{subblock_plan.get('consistency_status')}`",
+                f"- policy: {subblock_plan.get('policy')}",
             ]
         )
     lines.extend(["", "## Contract Findings"])

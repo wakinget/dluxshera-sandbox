@@ -119,7 +119,6 @@ experiment:
         path: src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv
       window:
         start_s: 60.0
-        n_subblocks: 2
     trajectory_processing:
       smear:
         enabled: true

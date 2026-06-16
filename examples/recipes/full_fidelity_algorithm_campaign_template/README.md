@@ -74,6 +74,44 @@ Primary physical-fidelity controls:
 
 `spectral_model.fast` is documented as a smoke-only shortcut. The current review config and smoke config use explicit `n_lambda` values instead of hidden clamping. If `fast: true` is introduced in an ad hoc smoke config, audit reports the clamp semantics: truth `n_lambda <= 7` and inference `n_lambda <= 5`.
 
+## Trajectory, Subblocks, And Iterative Windows
+
+`experiment.subblocks.n_subblocks` is the canonical number of subblocks generated
+per prior draw. `experiment.subblocks.trace_source.window.start_s` selects the
+start of the continuous trajectory interval. `trace_source.window.n_subblocks`
+is optional; when present it must match `subblocks.n_subblocks`. The executable
+review and smoke configs omit the redundant window value and let the trace-source
+planner use the canonical campaign count.
+
+`experiment.subblocks.n_frames` controls how many frame centers are sampled in
+each subblock. Frame times are generated from the selected trajectory window as
+clusters within each subblock: the first cluster begins at `window.start_s`, the
+next cluster begins one `subblock_duration_s` later, and so on. With small
+`n_frames` values and one-second subblock spacing, selected-frame plots appear
+as separated clusters rather than a continuous line. This is expected; it does
+not imply a discontinuity in the source trajectory.
+
+`experiment.iterative.windows_per_draw` and
+`experiment.iterative.subblocks_per_window` describe how generated subblocks are
+grouped into iterative update windows. For the current planner,
+`windows_per_draw * subblocks_per_window` must equal
+`subblocks.n_subblocks` unless an explicit partial-window policy is configured.
+The current review setting is consistent: `2 * 1 = 2`.
+
+Trajectory filtering is applied to the continuous trace before selected frame
+times are sampled when `trace_source.processing.filter.apply_stage:
+before_window`. Review plots label components by filter kind:
+
+- High-pass: filtered is the high-pass residual; removed is the low-frequency
+  trend, `raw - filtered`.
+- Low-pass: filtered is the low-pass trend; removed is the high-frequency
+  residual, `raw - filtered`.
+- Band-pass: filtered is the in-band component; removed is the out-of-band
+  component, `raw - filtered`.
+
+The notebook and config audit report the resolved subblock plan, filter
+provenance, per-subblock frame timing, and per-subblock linear-fit residuals.
+
 ## Render Noise And Inference Variance
 
 Render/data noise and the inference likelihood variance are separate controls.
@@ -91,6 +129,24 @@ set; otherwise the audit resolves the value from the detector config/spec and
 records the source. Dark-current provenance follows the same rule with
 `dark_current_e_per_s`; if dark current is enabled, the expected variance uses
 `dark_current_e_per_s * exposure_time_s`.
+
+The resolved-system review notebook renders the main noise audit through the
+resolved truth-system Binder path. It resolves `psf_npix` from any explicit
+review override first, then from `truth_system.optics.psf_npix`, then from the
+system preset/default. The recommended minimum render size for this audit is
+160 pixels; the review config normally resolves to `psf_npix: 256`. Any display
+crop is applied after the full image, noisy image, residual, and variance maps
+are rendered, and notebook output records both `rendered_psf_npix` and
+`displayed_crop_npix`.
+
+Exposure time for the review render is resolved from
+`experiment.subblocks.exposure_time_s` before source/system defaults. The same
+resolved value is used for noise rendering and expected variance diagnostics.
+Shot-noise variance follows the rendered model counts, read-noise variance is
+fixed at `read_noise_electrons**2` per pixel, and dark-current variance scales
+as `dark_current_e_per_s * exposure_time_s`. High image/colorbar count levels
+should therefore be interpreted only after checking the printed exposure-time
+provenance and image units.
 
 The current full-fidelity wrapper still delegates to a legacy subblock runner
 noise flag, so structured term-specific requests are recorded and mapped to

@@ -627,6 +627,182 @@ def _get_path(mapping: Mapping[str, Any], path: str) -> Any:
     return cur
 
 
+def _set_path(mapping: dict[str, Any], path: str, value: Any) -> None:
+    cur: dict[str, Any] = mapping
+    parts = path.split(".")
+    for key in parts[:-1]:
+        nxt = cur.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[key] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def _finite_positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out > 0.0 and math.isfinite(out):
+        return out
+    return None
+
+
+def _center_crop_array(arr: np.ndarray, crop_npix: int | None) -> np.ndarray:
+    image = np.asarray(arr)
+    if crop_npix is None:
+        return image
+    crop = int(crop_npix)
+    if crop <= 0 or min(image.shape[-2:]) <= crop:
+        return image
+    ny, nx = image.shape[-2:]
+    cy, cx = ny // 2, nx // 2
+    half = crop // 2
+    y0 = max(0, cy - half)
+    x0 = max(0, cx - half)
+    y1 = min(ny, y0 + crop)
+    x1 = min(nx, x0 + crop)
+    y0 = max(0, y1 - crop)
+    x0 = max(0, x1 - crop)
+    return image[..., y0:y1, x0:x1]
+
+
+def resolve_review_psf_npix(
+    truth_system_cfg: Mapping[str, Any],
+    review_cfg: Mapping[str, Any] | None = None,
+    *,
+    minimum: int = 160,
+    default: int = 256,
+) -> tuple[int, dict[str, Any]]:
+    """Resolve the noise-review render size from review overrides or system config."""
+
+    candidates: list[dict[str, Any]] = []
+
+    def add_candidate(path: str, value: Any) -> None:
+        parsed = None
+        if value is not None:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = None
+        candidates.append({"path": path, "value": value, "resolved": parsed})
+
+    if isinstance(review_cfg, Mapping):
+        for path in (
+            "noise_review.psf_npix",
+            "noise_review.rendered_psf_npix",
+            "render_noise.psf_npix",
+            "psf_npix",
+        ):
+            value = _get_path(review_cfg, path)
+            if value is not None:
+                add_candidate(f"review.{path}", value)
+
+    for path in (
+        "optics.psf_npix",
+        "system.optics.psf_npix",
+        "source.psf_npix",
+        "system.source.psf_npix",
+    ):
+        value = _get_path(truth_system_cfg, path)
+        if value is not None:
+            add_candidate(f"truth_system.{path}", value)
+
+    add_candidate("default", default)
+    selected = next((item for item in candidates if item["resolved"] is not None), candidates[-1])
+    requested = int(selected["resolved"] if selected["resolved"] is not None else default)
+    warnings_out: list[str] = []
+    final = requested
+    minimum_enforced = False
+    if requested < int(minimum):
+        final = int(minimum)
+        minimum_enforced = True
+        warnings_out.append(
+            f"Resolved noise-review psf_npix={requested} from {selected['path']} is below minimum {minimum}; "
+            f"using {final} for the main render."
+        )
+    return final, {
+        "requested_value": requested,
+        "minimum": int(minimum),
+        "default": int(default),
+        "minimum_enforced": minimum_enforced,
+        "final_value": int(final),
+        "source_field_path": selected["path"],
+        "all_candidate_values": candidates,
+        "warnings": warnings_out,
+    }
+
+
+def resolve_noise_review_exposure_time_s(
+    translated_config: Mapping[str, Any],
+    truth_system_cfg: Mapping[str, Any],
+    *,
+    default: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Resolve exposure time for review rendering and variance diagnostics.
+
+    Priority order is campaign/subblock exposure, translated system source
+    exposure, resolved truth-system source exposure, then an explicit fallback.
+    """
+
+    candidates: list[dict[str, Any]] = []
+
+    def add_candidate(path: str, value: Any) -> None:
+        candidates.append({"path": path, "value": value, "resolved": _finite_positive_float(value)})
+
+    for path in (
+        "experiment.subblocks.exposure_time_s",
+        "subblocks.exposure_time_s",
+        "experiment.system.source.exposure_time_s",
+        "system.source.exposure_time_s",
+        "experiment.source.exposure_time_s",
+        "source.exposure_time_s",
+    ):
+        value = _get_path(translated_config, path)
+        if value is not None:
+            add_candidate(f"translated_config.{path}", value)
+
+    for path in ("source.exposure_time_s", "system.source.exposure_time_s"):
+        value = _get_path(truth_system_cfg, path)
+        if value is not None:
+            add_candidate(f"truth_system.{path}", value)
+
+    if default is not None:
+        add_candidate("fallback.default", default)
+
+    selected = next((item for item in candidates if item["resolved"] is not None), None)
+    warnings_out: list[str] = []
+    if selected is None:
+        raise ValueError("Could not resolve a positive exposure_time_s for the noise review.")
+
+    selected_value = float(selected["resolved"])
+    valid = [item for item in candidates if item["resolved"] is not None]
+    disagree = [
+        item for item in valid
+        if not np.isclose(float(item["resolved"]), selected_value, rtol=1e-9, atol=0.0)
+    ]
+    if disagree:
+        warnings_out.append(
+            "Noise-review exposure-time candidates disagree; using "
+            f"{selected_value:g} s from {selected['path']}."
+        )
+    if selected["path"] == "fallback.default":
+        warnings_out.append(
+            f"Noise-review exposure_time_s fell back to explicit default {selected_value:g} s; no config provenance was found."
+        )
+
+    return selected_value, {
+        "exposure_time_s": selected_value,
+        "source_field_path": selected["path"],
+        "warning_if_default_used": selected["path"] == "fallback.default",
+        "all_candidate_values": candidates,
+        "warnings": warnings_out,
+    }
+
+
 def _diff_paths(base: Mapping[str, Any], truth: Mapping[str, Any], inference: Mapping[str, Any], paths: Sequence[str]) -> list[dict[str, Any]]:
     rows = []
     for path in paths:
@@ -799,7 +975,324 @@ def _trajectory_cfg(config: Mapping[str, Any]) -> dict[str, Any]:
     return dict(sub.get("trace_source", {}) or {})
 
 
-def load_trajectory_for_review(config: Mapping[str, Any]) -> dict[str, Any]:
+def resolve_subblock_plan_settings(
+    config: Mapping[str, Any],
+    *,
+    strict: bool = False,
+) -> tuple[dict[str, Any], list[str]]:
+    """Resolve overlapping subblock/window/iterative settings for review.
+
+    ``experiment.subblocks.n_subblocks`` is the canonical number of subblocks
+    generated per prior draw. ``trace_source.window.n_subblocks`` is optional
+    and must agree when present. Iterative settings group the generated
+    subblocks into update windows; the current planner requires the product to
+    match the canonical count unless an explicit partial-window policy is set.
+    """
+
+    exp = _experiment(config)
+    sub = dict(exp.get("subblocks", {}) or {})
+    trace = dict(sub.get("trace_source", {}) or {})
+    window = dict(trace.get("window", {}) or {})
+    iterative = dict(exp.get("iterative", {}) or {})
+    warnings_out: list[str] = []
+    errors: list[str] = []
+
+    n_subblocks = int(sub.get("n_subblocks", 1))
+    if n_subblocks < 1:
+        errors.append(f"subblocks.n_subblocks={n_subblocks} must be >= 1.")
+
+    trace_window_n = window.get("n_subblocks")
+    if trace_window_n is not None:
+        trace_window_n = int(trace_window_n)
+        if trace_window_n != n_subblocks:
+            errors.append(
+                f"trace_source.window.n_subblocks={trace_window_n} disagrees with "
+                f"subblocks.n_subblocks={n_subblocks}. Remove trace_source.window.n_subblocks "
+                "or make it match the campaign subblock count."
+            )
+        else:
+            warnings_out.append(
+                f"trace_source.window.n_subblocks={trace_window_n} is redundant but agrees "
+                f"with subblocks.n_subblocks={n_subblocks}."
+            )
+
+    windows_per_draw = iterative.get("windows_per_draw")
+    subblocks_per_window = iterative.get("subblocks_per_window")
+    expected_iterative_subblocks = None
+    partial_policy = iterative.get("partial_window_policy")
+    if partial_policy is None:
+        partial_policy = iterative.get("subblock_partial_policy")
+    partial_policy_text = None if partial_policy is None else str(partial_policy)
+    partial_policy_enabled = partial_policy_text not in {None, "", "none", "strict"}
+    if windows_per_draw is not None and subblocks_per_window is not None:
+        windows_per_draw = int(windows_per_draw)
+        subblocks_per_window = int(subblocks_per_window)
+        expected_iterative_subblocks = windows_per_draw * subblocks_per_window
+        if windows_per_draw < 1 or subblocks_per_window < 1:
+            errors.append("iterative.windows_per_draw and iterative.subblocks_per_window must be >= 1.")
+        elif expected_iterative_subblocks != n_subblocks and not partial_policy_enabled:
+            errors.append(
+                "iterative.windows_per_draw * iterative.subblocks_per_window = "
+                f"{expected_iterative_subblocks}, but subblocks.n_subblocks = {n_subblocks}. "
+                "The current planner does not support implicit unused subblocks. Adjust the "
+                "iterative grouping or document partial-window behavior."
+            )
+        elif expected_iterative_subblocks != n_subblocks:
+            warnings_out.append(
+                "Iterative grouping does not cover the canonical subblock count, but "
+                f"partial-window policy {partial_policy_text!r} is configured."
+            )
+        else:
+            warnings_out.append(
+                f"iterative.windows_per_draw * iterative.subblocks_per_window = "
+                f"{expected_iterative_subblocks}, matching subblocks.n_subblocks={n_subblocks}."
+            )
+
+    consistency_status = "consistent" if not errors else "inconsistent"
+    resolved = {
+        "subblocks_n_subblocks": n_subblocks,
+        "trace_source_window_n_subblocks": trace_window_n,
+        "iterative_windows_per_draw": windows_per_draw,
+        "iterative_subblocks_per_window": subblocks_per_window,
+        "expected_iterative_subblocks": expected_iterative_subblocks,
+        "resolved_n_subblocks": n_subblocks,
+        "canonical_source": "experiment.subblocks.n_subblocks",
+        "partial_window_policy": partial_policy_text,
+        "partial_window_policy_enabled": bool(partial_policy_enabled),
+        "consistency_status": consistency_status,
+        "warnings": warnings_out,
+        "errors": errors,
+        "policy": (
+            "experiment.subblocks.n_subblocks is canonical; trace_source.window.n_subblocks "
+            "is optional and must agree; iterative windows_per_draw * subblocks_per_window "
+            "must equal the canonical count unless an explicit partial-window policy is configured."
+        ),
+    }
+    if strict and errors:
+        raise ValueError("Strict subblock plan validation failed: " + " ".join(errors))
+    if errors:
+        warnings_out = warnings_out + errors
+    return resolved, warnings_out
+
+
+def _filter_component_labels(kind: str) -> dict[str, str]:
+    normalized = str(kind or "none").strip().lower()
+    if normalized == "high_pass":
+        return {
+            "filtered": "high-pass filtered residual",
+            "removed": "low-frequency component removed",
+            "removed_definition": "removed = raw - filtered = low-frequency trend removed by filter",
+        }
+    if normalized == "low_pass":
+        return {
+            "filtered": "low-pass filtered trend",
+            "removed": "high-frequency residual removed",
+            "removed_definition": "removed = raw - filtered = high-frequency residual removed by filter",
+        }
+    if normalized == "band_pass":
+        return {
+            "filtered": "band-pass filtered component",
+            "removed": "out-of-band component removed",
+            "removed_definition": "removed = raw - filtered = out-of-band component removed by filter",
+        }
+    return {
+        "filtered": "filtered trajectory",
+        "removed": "component removed by filter",
+        "removed_definition": "removed = raw - filtered",
+    }
+
+
+def trajectory_timing_summary_table(trajectory_review: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return per-subblock frame timing and fit residual diagnostics."""
+
+    rows: list[dict[str, Any]] = []
+    summary = trajectory_review.get("summary", {})
+    subblock_duration_s = None
+    if isinstance(summary, Mapping) and summary.get("subblock_duration_s") is not None:
+        subblock_duration_s = float(summary["subblock_duration_s"])
+    for block in trajectory_review.get("blocks", []) or []:
+        times = np.asarray(block.frame_times_s, dtype=float)
+        diffs = np.diff(times)
+        subblock_start = float(times[0])
+        subblock_end = (
+            subblock_start + subblock_duration_s
+            if subblock_duration_s is not None
+            else float(times[-1])
+        )
+        row = {
+            "subblock_index": int(block.subblock_index),
+            "subblock_start_s": subblock_start,
+            "subblock_end_s": subblock_end,
+            "n_frames": int(times.size),
+            "first_frame_time_s": float(times[0]),
+            "last_frame_time_s": float(times[-1]),
+            "frame_dt_s": float(np.median(diffs)) if diffs.size else None,
+            "frame_span_s": float(times[-1] - times[0]) if times.size else 0.0,
+            "fit_model": "linear per subblock",
+            "x_rms_residual_as": None,
+            "y_rms_residual_as": None,
+            "pa_rms_residual_deg": None,
+        }
+        key_map = {
+            "source.x_position_as": "x_rms_residual_as",
+            "source.y_position_as": "y_rms_residual_as",
+            "source.position_angle_deg": "pa_rms_residual_deg",
+        }
+        for key, out_key in key_map.items():
+            if key in block.diagnostics:
+                row[out_key] = float(block.diagnostics[key]["rms_residual"])
+        rows.append(row)
+    return rows
+
+
+def trajectory_filter_provenance_table(trajectory_review: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return per-key raw/filtered/removed RMS and filter metadata."""
+
+    if not trajectory_review.get("available"):
+        return []
+    traj = trajectory_review["trajectory"]
+    provenance = dict(traj.filter_provenance or {})
+    raw_values = traj.unfiltered_values or traj.values
+    filtered_values = traj.values
+    keys = list(filtered_values)
+    frame_times = np.asarray(trajectory_review.get("frame_times_s", []), dtype=float)
+    selected_start = float(frame_times[0]) if frame_times.size else None
+    selected_end = float(frame_times[-1]) if frame_times.size else None
+    t = np.asarray(traj.time_s, dtype=float)
+    selected_mask = np.ones_like(t, dtype=bool)
+    if selected_start is not None and selected_end is not None:
+        selected_mask = (t >= selected_start) & (t <= selected_end)
+    rows = []
+    for key in keys:
+        raw = np.asarray(raw_values[key], dtype=float)
+        filtered = np.asarray(filtered_values[key], dtype=float)
+        removed = raw - filtered
+        rows.append(
+            {
+                "key": key,
+                "filter_enabled": bool(provenance.get("enabled", False)),
+                "filter_kind": provenance.get("kind", "none"),
+                "method": provenance.get("method"),
+                "order": provenance.get("order"),
+                "cutoff_period_s": provenance.get("cutoff_period_s"),
+                "cutoff_hz": provenance.get("cutoff_hz"),
+                "low_cutoff_period_s": provenance.get("low_cutoff_period_s"),
+                "low_cutoff_hz": provenance.get("low_cutoff_hz"),
+                "high_cutoff_period_s": provenance.get("high_cutoff_period_s"),
+                "high_cutoff_hz": provenance.get("high_cutoff_hz"),
+                "raw_rms": float(np.sqrt(np.mean(np.square(raw)))),
+                "filtered_rms": float(np.sqrt(np.mean(np.square(filtered)))),
+                "removed_rms": float(np.sqrt(np.mean(np.square(removed)))),
+                "selected_window_raw_rms": float(np.sqrt(np.mean(np.square(raw[selected_mask])))),
+                "selected_window_filtered_rms": float(np.sqrt(np.mean(np.square(filtered[selected_mask])))),
+                "removed_component_label": _filter_component_labels(str(provenance.get("kind", "none")))["removed"],
+                "removed_component_definition": _filter_component_labels(str(provenance.get("kind", "none")))["removed_definition"],
+            }
+        )
+    return rows
+
+
+def plot_trajectory_review_components(
+    trajectory_review: Mapping[str, Any],
+    *,
+    keys: Sequence[str] | None = None,
+    max_legend_subblocks: int = 8,
+) -> list[Any]:
+    """Plot raw, filtered, removed, and selected-frame fit panels per key."""
+
+    if not trajectory_review.get("available"):
+        return []
+    import matplotlib.pyplot as plt
+
+    traj = trajectory_review["trajectory"]
+    provenance = dict(traj.filter_provenance or {})
+    labels = _filter_component_labels(str(provenance.get("kind", "none")))
+    raw_values = traj.unfiltered_values or traj.values
+    filtered_values = traj.values
+    t = np.asarray(traj.time_s, dtype=float)
+    summary = trajectory_review.get("summary", {})
+    selected_frame_times = np.asarray(trajectory_review.get("frame_times_s", []), dtype=float)
+    selected_start = summary.get("selected_window_start_s") if isinstance(summary, Mapping) else None
+    selected_end = summary.get("selected_window_end_s") if isinstance(summary, Mapping) else None
+    selected_start = float(selected_start) if selected_start is not None else (float(selected_frame_times[0]) if selected_frame_times.size else None)
+    selected_end = float(selected_end) if selected_end is not None else (float(selected_frame_times[-1]) if selected_frame_times.size else None)
+    subblock_duration_s = summary.get("subblock_duration_s") if isinstance(summary, Mapping) else None
+    subblock_duration_s = float(subblock_duration_s) if subblock_duration_s is not None else None
+    blocks = list(trajectory_review.get("blocks", []) or [])
+    plot_keys = list(keys or filtered_values.keys())
+    figures = []
+
+    for key in plot_keys:
+        fig, axes = plt.subplots(1, 4, figsize=(20, 3.8), constrained_layout=True)
+        raw = np.asarray(raw_values[key], dtype=float)
+        filtered = np.asarray(filtered_values[key], dtype=float)
+        removed = raw - filtered
+        panel_data = (
+            (raw, f"raw trajectory: {key}"),
+            (filtered, f"{labels['filtered']}: {key}"),
+            (removed, f"{labels['removed']}: {key}"),
+        )
+        for ax, (series, title) in zip(axes[:3], panel_data):
+            ax.plot(t, series, color="tab:blue", linewidth=1.2)
+            if selected_start is not None and selected_end is not None:
+                ax.axvspan(selected_start, selected_end, color="tab:orange", alpha=0.14, label="selected window")
+            for block in blocks:
+                block_times = np.asarray(block.frame_times_s, dtype=float)
+                block_end = block_times[0] + subblock_duration_s if subblock_duration_s is not None else block_times[-1]
+                ax.axvspan(block_times[0], block_end, color="tab:green", alpha=0.10)
+                ax.axvline(block_times[0], color="tab:green", alpha=0.35, linewidth=0.8)
+                if len(blocks) <= max_legend_subblocks:
+                    ax.text(
+                        block_times[0],
+                        0.98,
+                        str(int(block.subblock_index)),
+                        transform=ax.get_xaxis_transform(),
+                        ha="left",
+                        va="top",
+                        fontsize=8,
+                        color="tab:green",
+                    )
+            ax.set_title(title)
+            ax.set_xlabel("time [s]")
+            ax.grid(alpha=0.25)
+        axes[2].set_title(f"{labels['removed']}: {key}\n{labels['removed_definition']}")
+
+        ax = axes[3]
+        cmap = plt.get_cmap("tab10")
+        for idx, block in enumerate(blocks):
+            color = cmap(idx % 10)
+            times = np.asarray(block.frame_times_s, dtype=float)
+            block_end = times[0] + subblock_duration_s if subblock_duration_s is not None else times[-1]
+            ax.axvspan(times[0], block_end, color=color, alpha=0.07)
+            label_prefix = f"subblock {int(block.subblock_index)}"
+            use_label = len(blocks) <= max_legend_subblocks
+            ax.plot(
+                times,
+                np.asarray(block.truth[key], dtype=float),
+                linestyle="None",
+                marker="o",
+                color=color,
+                label=f"{label_prefix} truth" if use_label else None,
+            )
+            ax.plot(
+                times,
+                np.asarray(block.prediction[key], dtype=float),
+                linestyle="--",
+                color=color,
+                label=f"{label_prefix} linear fit" if use_label else None,
+            )
+        ax.set_title(f"selected subblock frame samples and linear fits: {key}")
+        ax.set_xlabel("time [s]")
+        ax.grid(alpha=0.25)
+        if len(blocks) <= max_legend_subblocks:
+            ax.legend(fontsize=8)
+        for ax in axes:
+            ax.set_ylabel(key)
+        figures.append(fig)
+    return figures
+
+
+def load_trajectory_for_review(config: Mapping[str, Any], *, strict: bool = False) -> dict[str, Any]:
     exp = _experiment(config)
     sub = dict(exp.get("subblocks", {}) or {})
     trace = _trajectory_cfg(config)
@@ -817,16 +1310,28 @@ def load_trajectory_for_review(config: Mapping[str, Any]) -> dict[str, Any]:
         or {}
     )
     path = resolve_repo_path(source.get("path", "src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv"))
-    n_subblocks = int(window.get("n_subblocks", sub.get("n_subblocks", 1)))
+    subblock_plan, subblock_warnings = resolve_subblock_plan_settings(config, strict=strict)
+    n_subblocks = int(subblock_plan["resolved_n_subblocks"])
+    start_s = float(window.get("start_s", 0.0))
+    frame_dt_s = float(sampling.get("frame_dt_s", sub.get("exposure_time_s", 0.05)))
+    subblock_duration_s = float(
+        sampling.get(
+            "subblock_duration_s",
+            exp.get("forecast", {}).get("subblock_duration_s", 1.0)
+            if isinstance(exp.get("forecast"), Mapping)
+            else 1.0,
+        )
+    )
+    n_frames_per_subblock = int(sampling.get("n_frames_per_subblock", sub.get("n_frames", 3)))
     trajectory, frame_times, blocks = prepare_airbus_subblocks(
         path=path,
-        start_s=float(window.get("start_s", 0.0)),
+        start_s=start_s,
         duration_s=window.get("duration_s"),
         n_subblocks=n_subblocks,
         sample_dt_s=float(source.get("sample_dt_s", 0.1)),
-        frame_dt_s=float(sampling.get("frame_dt_s", sub.get("exposure_time_s", 0.05))),
-        subblock_duration_s=float(sampling.get("subblock_duration_s", exp.get("forecast", {}).get("subblock_duration_s", 1.0) if isinstance(exp.get("forecast"), Mapping) else 1.0)),
-        n_frames_per_subblock=int(sampling.get("n_frames_per_subblock", sub.get("n_frames", 3))),
+        frame_dt_s=frame_dt_s,
+        subblock_duration_s=subblock_duration_s,
+        n_frames_per_subblock=n_frames_per_subblock,
         output_keys=trace.get("output_keys", DEFAULT_OUTPUT_KEYS),
         fit_keys=dict(trace.get("starting_guess", {}) or {}).get("fit_keys"),
         interpolation=str(sampling.get("interpolation", "linear")),
@@ -844,11 +1349,18 @@ def load_trajectory_for_review(config: Mapping[str, Any]) -> dict[str, Any]:
             "raw_sample_count": trajectory.raw.sample_count,
             "selected_start_s": float(frame_times[0]),
             "selected_end_s": float(frame_times[-1]),
+            "selected_window_start_s": start_s,
+            "selected_window_end_s": start_s + n_subblocks * subblock_duration_s,
+            "frame_dt_s": frame_dt_s,
+            "subblock_duration_s": subblock_duration_s,
+            "n_frames_per_subblock": n_frames_per_subblock,
             "n_subblocks": len(blocks),
             "n_frames": int(frame_times.size),
             "output_keys": list(trajectory.values),
             "filter": dict(trajectory.filter_provenance or {}),
         },
+        "subblock_plan": subblock_plan,
+        "warnings": subblock_warnings,
     }
 
 
@@ -904,25 +1416,32 @@ def compare_trace_jitter_enabled_disabled(config: Mapping[str, Any]) -> dict[str
     }
 
 
-def _render_truth_system_image(system_cfg: Mapping[str, Any]) -> np.ndarray:
-    spec = compose_forward_spec(system_cfg)
+def _render_truth_system_image(system_cfg: Mapping[str, Any], *, psf_npix: int | None = None) -> np.ndarray:
+    render_cfg = copy.deepcopy(dict(system_cfg))
+    if psf_npix is not None:
+        _set_path(render_cfg, "optics.psf_npix", int(psf_npix))
+    spec = compose_forward_spec(render_cfg)
     store = ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
-    binder = SheraBinder(system_cfg, spec, store)
+    binder = SheraBinder(render_cfg, spec, store)
     image = np.asarray(binder.model(), dtype=float)
     if image.ndim > 2:
         image = np.asarray(image).reshape((-1, *image.shape[-2:])).sum(axis=0)
     return image
 
 
-def render_tiny_review_images(
+def render_noise_review_images(
     config: Mapping[str, Any],
     truth_system_cfg: Mapping[str, Any],
     *,
     seed: int = 123,
-    crop_npix: int | None = 64,
+    review_cfg: Mapping[str, Any] | None = None,
+    min_psf_npix: int = 160,
+    default_psf_npix: int = 256,
+    display_crop_npix: int | None = None,
+    exposure_time_s: float | None = None,
     strict: bool = False,
 ) -> dict[str, Any]:
-    """Render the real resolved truth system and audit configured noise terms."""
+    """Render the resolved truth system at full review size and audit noise terms."""
 
     exp = _experiment(config)
     sub = dict(exp.get("subblocks", {}) or {})
@@ -930,13 +1449,28 @@ def render_tiny_review_images(
     normalized = normalize_noise_request(noise_request)
     detector_noise = resolve_detector_noise_spec(truth_system_cfg, normalized, strict=strict)
     warnings_out = list(detector_noise.get("warnings", []))
+    rendered_psf_npix, psf_provenance = resolve_review_psf_npix(
+        truth_system_cfg,
+        review_cfg,
+        minimum=min_psf_npix,
+        default=default_psf_npix,
+    )
+    resolved_exposure, exposure_provenance = resolve_noise_review_exposure_time_s(
+        config,
+        truth_system_cfg,
+        default=exposure_time_s,
+    )
+    warnings_out.extend(psf_provenance.get("warnings", []))
+    warnings_out.extend(exposure_provenance.get("warnings", []))
+    detector_exposure = _finite_positive_float(detector_noise.get("exposure_time_s"))
+    if detector_exposure is not None and not np.isclose(detector_exposure, resolved_exposure, rtol=1e-9, atol=0.0):
+        warnings_out.append(
+            f"Detector-noise exposure_time_s={detector_exposure:g} differs from resolved render exposure_time_s={resolved_exposure:g}."
+        )
+    detector_noise = dict(detector_noise)
+    detector_noise["exposure_time_s"] = resolved_exposure
 
-    noiseless = _render_truth_system_image(truth_system_cfg)
-    if crop_npix is not None and crop_npix > 0 and min(noiseless.shape[-2:]) > crop_npix:
-        ny, nx = noiseless.shape[-2:]
-        cy, cx = ny // 2, nx // 2
-        half = int(crop_npix) // 2
-        noiseless = noiseless[cy - half : cy - half + int(crop_npix), cx - half : cx - half + int(crop_npix)]
+    noiseless = _render_truth_system_image(truth_system_cfg, psf_npix=rendered_psf_npix)
 
     detector_spec = DetectorSpec(
         model_name=str(detector_noise.get("detector_model")),
@@ -949,12 +1483,13 @@ def render_tiny_review_images(
         noise_cfg=normalized,
         rng_key=key,
         detector_spec=detector_spec,
-        exposure_time_s=detector_noise.get("exposure_time_s"),
+        exposure_time_s=resolved_exposure,
     )
     expected_variance = expected_noise_variance(
         jnp.asarray(noiseless),
         noise_cfg=normalized,
         detector_noise=detector_noise,
+        exposure_time_s=resolved_exposure,
     )
     noisy_np = np.asarray(noisy)
     render_variance_np = np.asarray(render_variance)
@@ -971,7 +1506,31 @@ def render_tiny_review_images(
         "residual_variance": float(np.var(residual)),
         "normalized_residual_std": float(np.std(normalized_residual)),
         "render_expected_variance_max_abs_diff": float(np.max(np.abs(render_variance_np - expected_variance_np))),
+        "model_image_sum": float(np.sum(noiseless)),
+        "model_image_peak": float(np.max(noiseless)),
+        "expected_photon_variance_peak": float(np.max(np.maximum(noiseless, 0.0))) if normalized.get("shot_noise") else 0.0,
+        "read_noise_electrons_rms": detector_noise["read_noise_electrons"],
+        "dark_current_e_per_s_per_pix": detector_noise["dark_current_e_per_s"],
+        "expected_dark_electrons_per_pix": (
+            float(detector_noise["dark_current_e_per_s"]) * float(resolved_exposure)
+            if detector_noise.get("dark_current_e_per_s") is not None
+            else None
+        ),
+        "render_exposure_time_s": float(resolved_exposure),
+        "expected_variance_exposure_time_s": float(resolved_exposure),
     }
+    if diagnostics["model_image_peak"] <= 0.0 and normalized.get("shot_noise"):
+        warnings_out.append("Shot noise is enabled but the rendered model image has non-positive peak counts.")
+
+    display = {
+        "noiseless": _center_crop_array(noiseless, display_crop_npix),
+        "configured_noisy": _center_crop_array(noisy_np, display_crop_npix),
+        "noise_residual": _center_crop_array(residual, display_crop_npix),
+        "expected_variance": _center_crop_array(expected_variance_np, display_crop_npix),
+        "render_variance": _center_crop_array(render_variance_np, display_crop_npix),
+        "normalized_residual": _center_crop_array(normalized_residual, display_crop_npix),
+    }
+    crop_shape = tuple(int(v) for v in display["noiseless"].shape[-2:])
     return {
         "available": True,
         "source": "resolved_truth_system_binder",
@@ -987,9 +1546,16 @@ def render_tiny_review_images(
             "read_noise_source": detector_noise["read_noise_source"],
             "dark_current_e_per_s": detector_noise["dark_current_e_per_s"],
             "dark_current_source": detector_noise["dark_current_source"],
-            "exposure_time_s": detector_noise["exposure_time_s"],
+            "exposure_time_s": resolved_exposure,
+            "exposure_time_s_source": exposure_provenance["source_field_path"],
             "write_variance": bool(normalized.get("write_variance", True)),
+            "rendered_psf_npix": int(rendered_psf_npix),
+            "displayed_crop_npix": None if display_crop_npix is None else int(display_crop_npix),
+            "render_shape": tuple(int(v) for v in noiseless.shape[-2:]),
+            "display_shape": crop_shape,
         },
+        "psf_npix_provenance": psf_provenance,
+        "exposure_time_s_provenance": exposure_provenance,
         "variance_diagnostics": diagnostics,
         "warnings": warnings_out,
         "noiseless": noiseless,
@@ -998,7 +1564,33 @@ def render_tiny_review_images(
         "expected_variance": expected_variance_np,
         "render_variance": render_variance_np,
         "normalized_residual": normalized_residual,
+        "display": display,
+        "render_shape": tuple(int(v) for v in noiseless.shape[-2:]),
+        "display_shape": crop_shape,
     }
+
+
+def render_tiny_review_images(
+    config: Mapping[str, Any],
+    truth_system_cfg: Mapping[str, Any],
+    *,
+    seed: int = 123,
+    crop_npix: int | None = 64,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Compatibility wrapper for the old diagnostic crop helper."""
+
+    result = render_noise_review_images(
+        config,
+        truth_system_cfg,
+        seed=seed,
+        display_crop_npix=crop_npix,
+        strict=strict,
+    )
+    result["warnings"] = list(result.get("warnings", [])) + [
+        "render_tiny_review_images is a diagnostic compatibility wrapper; use render_noise_review_images for the main review."
+    ]
+    return result
 
 
 def write_review_artifacts(
@@ -1168,8 +1760,10 @@ __all__ = [
     "build_model_split_from_smoke", "compare_trace_jitter_enabled_disabled",
     "cmap_with_bad", "extract_spectral_arrays", "load_detector_calibration_maps", "load_smoke_config",
     "load_trajectory_for_review", "make_high_pass_trajectory_diagnostic", "noise_demo",
-    "masked_for_imshow", "optics_diff_table", "preserve_flux_review", "render_tiny_review_images",
-    "repo_root", "resolve_repo_path", "response_curve_review", "spectral_review_tables",
+    "masked_for_imshow", "optics_diff_table", "plot_trajectory_review_components", "preserve_flux_review",
+    "render_noise_review_images", "render_tiny_review_images", "repo_root", "resolve_noise_review_exposure_time_s",
+    "resolve_repo_path", "resolve_review_psf_npix", "resolve_subblock_plan_settings", "response_curve_review",
+    "spectral_review_tables", "trajectory_filter_provenance_table", "trajectory_timing_summary_table",
     "summarize_detector_config", "summarize_noise_config", "summarize_optics_config",
     "summarize_source_config", "summarize_spectral_deck", "summarize_wfe_artifacts", "symmetric_nan_limits",
     "summary_dashboard", "translate_smoke_to_observation_bias", "write_review_artifacts",

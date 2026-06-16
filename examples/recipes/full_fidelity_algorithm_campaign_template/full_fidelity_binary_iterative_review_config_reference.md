@@ -131,3 +131,53 @@ Generated from `dluxshera.utils.full_fidelity_config_schema.CONFIG_FIELD_REGISTR
 | experiment.system_preset | {"SHERA_FLIGHT_2P": {"description": "Two-plane flight preset.", "status": "implemented"}, "SHERA_FLIGHT_3P": {"description": "Legacy flight three-plane baseline preset.", "status": "implemented"}, "SHERA_FLIGHT_3P_CONV": {"description": "Full-fidelity default preset with named detector realism layers.", "status": "implemented"}, "SHERA_TESTBED_3P": {"description": "Testbed three-plane preset.", "status": "implemented"}} | SHERA_FLIGHT_3P_CONV | implemented | config resolver | none | base source/optics/detector stack | none | True |  |
 | experiment.target | {} | None | implemented | source/spectral resolver | none | target SED/source selection | none | True |  |
 | experiment.truth_realization.enabled | {} | None | implemented | observation_bias | none | optional truth scalar overrides | none | True |  |
+
+## Trajectory/Subblock Resolution Policy
+
+`experiment.subblocks.n_subblocks` is the canonical subblock count generated per
+prior draw. `experiment.subblocks.trace_source.window.start_s` selects the start
+time in the continuous trajectory source. `trace_source.window.n_subblocks` is
+optional; if present, it must match `subblocks.n_subblocks`. The review and
+smoke configs omit that redundant window field and rely on the canonical
+campaign count.
+
+`experiment.subblocks.n_frames` is the number of frame centers sampled within
+each subblock. Frame times are generated as per-subblock clusters from the
+continuous trajectory; with small `n_frames` values and one-second subblock
+spacing, selected-frame plots can look discontinuous because they show discrete
+frame centers from multiple subblocks rather than a continuous trajectory.
+
+`experiment.iterative.windows_per_draw` and
+`experiment.iterative.subblocks_per_window` group generated subblocks into
+iterative update windows. The current planner expects
+`windows_per_draw * subblocks_per_window == subblocks.n_subblocks`; otherwise the
+audit warns by default and strict audit fails unless an explicit partial-window
+policy is configured. The current review config resolves to `2 * 1 = 2`.
+
+Trajectory filter plots use explicit component semantics. For high-pass filters,
+`filtered` is the high-pass residual and `removed = raw - filtered` is the
+low-frequency trend removed by the filter. For low-pass filters, `filtered` is
+the low-pass trend and `removed` is the high-frequency residual. For band-pass
+filters, `filtered` is the band-passed component and `removed` is the
+out-of-band component. The notebook reports raw, filtered, removed, and selected
+subblock frame/fits on separate axes.
+
+## Noise Review Render Provenance
+
+The resolved-system review notebook renders the main noise audit through the
+resolved truth-system Binder path. It resolves the render size from an explicit
+review override when present, otherwise from `truth_system.optics.psf_npix`, and
+finally from the system preset/default. The recommended minimum render size is
+160 pixels and the full-fidelity review default is normally `psf_npix: 256`.
+Notebook display crops are applied only after the full image and variance maps
+are rendered; provenance records both `rendered_psf_npix` and
+`displayed_crop_npix`.
+
+The review resolves exposure time from
+`experiment.subblocks.exposure_time_s` before translated/resolved source
+defaults and uses that same value for the noisy render and expected variance
+diagnostics. Shot-noise variance follows rendered model counts, read-noise
+variance is fixed by `read_noise_electrons`, and dark-current variance scales as
+`dark_current_e_per_s * exposure_time_s`. High count or colorbar values should
+be interpreted together with the printed exposure-time provenance and image
+units.

@@ -124,3 +124,16 @@ def test_noise_demo_reproducible_shot_read_combined() -> None:
         np.testing.assert_allclose(first[key], second[key])
     assert first["diagnostics"]["read_residual_var"] > 0
     assert first["diagnostics"]["combined_residual_var"] > 0
+
+
+def test_notebook_noise_review_records_full_render_and_display_crop() -> None:
+    notebook = (REPO_ROOT / "examples/notebooks/full_fidelity_resolved_system_review.ipynb").read_text(encoding="utf-8")
+    assert "NOISE_REVIEW_MIN_PSF_NPIX = 160" in notebook
+    assert "NOISE_REVIEW_DEFAULT_PSF_NPIX = 256" in notebook
+    assert "NOISE_REVIEW_DISPLAY_CROP_NPIX = 160" in notebook
+    assert "render_noise_review_images" in notebook
+    assert "render_tiny_review_images" not in notebook
+    assert "Noise render shape:" in notebook
+    assert "Display crop shape:" in notebook
+    assert "rendered_psf_npix" in notebook
+    assert "displayed_crop_npix" in notebook
