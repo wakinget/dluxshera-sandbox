@@ -2,12 +2,14 @@ experiment:
   kind: full_fidelity_binary_iterative
   schema_version: full_fidelity_binary_iterative.v1
   run_name: full_fidelity_binary_iterative_smoke
-  seed: 42
   source_kind: binary_target
   target: ALPHA_CEN
-  n_cases: 1
-  n_draws: 1
+  seed: 42
   system_preset: SHERA_FLIGHT_3P_CONV
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+
   detector_overrides:
     layers:
       jitter:
@@ -18,24 +20,44 @@ experiment:
           theta_deg: 0.0
           kernel_size: 3
           units: detector_pix
+
   spectral_model:
     enabled: true
     preserve_flux_parameters: true
+    photometry_mode: preserve_detected_flux_parameters
     source_seds:
       mode: target
       generic_binary_fallback: alpha_cen
     truth:
-      label: truth_smoke_alpha_cen
-      n_lambda: 7
-      wavelength_min_nm: 450.0
-      wavelength_max_nm: 650.0
+      label: truth_full_fidelity_alpha_cen
+      mode: effective_source_spectrum
+      n_lambda: 3
+      wavelength_min_nm: 530.0
+      wavelength_max_nm: 570.0
       components:
         detector_qe:
-          enabled: false
+          enabled: true
+          path: data/detector_qe/LTN4323_QE.csv
+          label: LTN4323_QE_proxy_for_HWK4123
+          wavelength_column: Wavelength (nm)
+          wavelength_unit: nm
+          response_column: QE
+          response_unit: dimensionless
+          response_scale: 1.0
+          detector_model_proxy_for: HWK4123
+          assumption: LTN4323 QE curve used as near-term proxy for HWK4123 detector QE.
         m2_filter_response:
-          enabled: false
+          enabled: true
+          path: data/filter_response/SHERA Notch Filter V2.csv
+          label: SHERA_Notch_Filter_V2_reflectance
+          wavelength_column: Wavelength (nm)
+          wavelength_unit: nm
+          response_column: R (%)
+          response_unit: percent_reflection
+          response_scale: 0.01
     inference:
-      label: inference_smoke_alpha_cen
+      label: inference_full_fidelity_alpha_cen
+      mode: truncated_effective_source_spectrum
       n_lambda: 3
       wavelength_min_nm: 530.0
       wavelength_max_nm: 570.0
@@ -46,55 +68,100 @@ experiment:
           mode: same_as_truth
         m2_filter_response:
           mode: same_as_truth
+
   high_order_wfe:
     enabled: true
     truth:
       enabled: true
-      mirrors:
-      - primary
-      - secondary
+      mirrors: [ primary, secondary ]
       mode: synthetic
-      npix: 16
-      amplitude_nm_rms: 0.3
+      npix: 256
+      amplitude_nm_rms: 5.0
+      power_law_alpha: 2.5
       seed: 20260610
       pairing: independent
       remove_low_order_zernikes: true
+      remove_zernike_modes: [ 4, 5, 6, 7, 8, 9, 10, 11 ]
     inference:
       enabled: true
       mode: knowledge_error
+      use_truth_common_map: true
       knowledge_error:
         enabled: true
-        amplitude_nm_rms: 0.1
+        amplitude_nm_rms: 0.01
+        power_law_alpha: same_as_truth
+        remove_low_order_zernikes: true
+        realization_policy: additive_correlated
     artifacts:
-      write_maps: false
+      write_maps: true
       write_png_quicklooks: false
       write_summary_json: true
     validation:
       require_nonzero_difference_when_enabled: true
+      max_abs_low_order_projection_nm: 1.0e-4
+      fail_on_low_order_projection: true
+
   subblocks:
-    n_subblocks: 2
-    n_frames: 3
-    noise: disabled
+    n_frames: 5
+    noise:
+      enabled: true
+      shot_noise: true
+      read_noise: true
+      dark_current: false
+      use_detector_read_noise: true
+      read_noise_electrons: null
+      use_detector_dark_current: true
+      dark_current_e_per_s: null
+      variance_floor: 0.5
+      write_variance: true
+      seed_policy: from_subblock_noise_seed
+    use_render_variance: auto
     phi_ref: truth_when_available
     schur_curvature_method: auto
     max_dense_dim: 40
-    schur_damping: 1.0e-08
+    schur_damping: 1.0e-8
     exposure_time_s: 0.05
-    reference_diagnostics_profile: none
+    reference_diagnostics_profile: review
     reference_optimizer_kind: sgd
-    reference_base_lr: 0.4
-    reference_n_iter: 3
-    noise:
-      enabled: false
-      variance_floor: 1.0
+    reference_base_lr: 0.7
+    reference_n_iter: 80
+    reference_schedule_kind: linear_warmup
+    reference_schedule_warmup_steps: 10
+    reference_schedule_start_factor: 0.125
+    reference_early_stopping_enabled: true
+    reference_early_stopping_min_iter: 20
+    reference_early_stopping_patience: 10
+    reference_early_stopping_loss_rtol: null
+    reference_early_stopping_loss_atol: null
+    reference_early_stopping_step_atol: null
+    reference_early_stopping_grad_norm_atol: null
     summary_information_scale: summed_likelihood
+    schur_frame_quality_policy: warn
+    schur_frame_quality_missing: allow_all
+    schur_frame_mask_denominator: original
     trace_source:
       mode: trajectory
       source:
-        kind: airbus_csv
+        kind: csv
+        format: airbus_xyz_arcsec
         path: src/dluxshera/data/airbus_data/Thirty_Min_Observation_Window.csv
+      processing:
+        filter:
+          enabled: true
+          kind: high_pass
+          method: bessel
+          order: 4
+          cutoff_period_s: 10.0
+          zero_phase: true
+          apply_stage: before_window
+          columns:
+            - source.x_position_as
+            - source.y_position_as
+            - source.position_angle_deg
       window:
         start_s: 60.0
+      sampling:
+        interpolation: linear
     trajectory_processing:
       smear:
         enabled: true
@@ -106,15 +173,18 @@ experiment:
         inference:
           mode: matched_subblock_constant
     trace_jitter:
-      x_sigma_as: 0.001
-      y_sigma_as: 0.001
-      pa_sigma_deg: 0.0001
+      enabled: true
+      apply_to: downstream_template_override
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+
   iterative:
     enabled: true
     windows_per_draw: 2
-    subblocks_per_window: 1
+    subblocks_per_window: 2
     update_mode: physical_full
-    update_gain: 0.25
+    update_gain: 0.5
     carry_prior_mean_with_reference: true
     update_safety:
       enabled: true
@@ -123,8 +193,7 @@ experiment:
       max_abs_update_by_label: null
       reject_on_bad_frame_quality: true
       reject_on_nonfinite_posterior: true
-  seeding:
-    seed_policy: different_jitter_different_noise
+
   observation_theta:
     source:
       separation_as: true
@@ -170,6 +239,7 @@ experiment:
         kind: absolute
         sigma: 0.1
         unit: nm
+
   truth_realization:
     enabled: false
   eigenbasis:
