@@ -132,6 +132,13 @@ uses `enabled`, `shot_noise`, `read_noise`, `dark_current`,
 `write_variance`, and `seed_policy`. Legacy values are normalized internally and
 written to provenance.
 
+Structured noise is active in the campaign path. The observation-bias planner
+patches generated render templates under `experiment.noise` with term-specific
+settings before dry-run/execution. `shot_noise` is also written as legacy
+`photon_noise` for render-template compatibility. The subblock command uses
+`--noise inherit` for structured requests so the term-specific template
+settings are not overwritten by a coarse CLI flag.
+
 Read-noise amplitude provenance is explicit. `read_noise_electrons` wins when
 set; otherwise the audit resolves the value from the detector config/spec and
 records the source. Dark-current provenance follows the same rule with
@@ -156,22 +163,21 @@ as `dark_current_e_per_s * exposure_time_s`. High image/colorbar count levels
 should therefore be interpreted only after checking the printed exposure-time
 provenance and image units.
 
-The current full-fidelity wrapper still delegates to a legacy subblock runner
-noise flag, so structured term-specific requests are recorded and mapped to
-`noise: enabled` or `noise: disabled`. Audits warn that separate shot/read/dark
-runner controls are not fully available through that coarse flag. The notebook
-review verifies the same resolved truth system through the Binder render path,
-then applies the structured request with the project noise utility to check
-shot/read/dark variance behavior.
+Dry-run/execution writes noise provenance under the run root, including the
+original request, normalized render terms, read/dark-current amplitude sources,
+variance-floor source, and resolved `use_render_variance` behavior. The notebook
+review and strict audit use the same normalized object as the campaign path.
 
 `experiment.subblocks.noise.variance_floor` is the canonical variance floor. The
 legacy `experiment.subblocks.variance_floor` field is deprecated and should be
 removed from new configs. The value is a variance floor, not a read-noise sigma.
 
-`use_render_variance` controls the inference side. `true` requests
+`write_variance` and `use_render_variance` control different stages:
+`write_variance: true` asks the renderer to produce variance artifacts when
+supported; `use_render_variance` controls the inference objective. `true` requests
 `variance_model: provided_cube`; `false` uses the data/floor variance model;
-`auto` reports the intended policy and leaves template behavior visible in the
-audit.
+`auto` resolves explicitly from the normalized render-noise request and is
+reported in provenance/audit output.
 
 ## Data/Inference Split
 

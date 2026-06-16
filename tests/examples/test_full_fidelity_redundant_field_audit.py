@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "examples" / "scripts" / "audit_full_fidelity_config.py"
@@ -31,8 +33,15 @@ def _module():
 
 def test_audit_reports_semantic_redundant_fields(tmp_path: Path) -> None:
     module = _module()
+    cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    iterative = cfg["experiment"]["iterative"]
+    cfg["experiment"]["subblocks"]["n_subblocks"] = (
+        int(iterative["windows_per_draw"]) * int(iterative["subblocks_per_window"])
+    )
+    path = tmp_path / "redundant.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
-    audit = module.build_audit(CONFIG, tmp_path, strict=False)
+    audit = module.build_audit(path, tmp_path, strict=False)
 
     overlap_keys = {(row["field_a"], row["field_b"]) for row in audit["semantic_overlaps"]}
     assert (

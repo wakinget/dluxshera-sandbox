@@ -24,7 +24,7 @@ from typing import Any, Mapping
 
 from dluxshera.config.io import load_config_file
 from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
-from dluxshera.utils.noise import normalize_noise_request
+from dluxshera.utils.noise import normalize_noise_request, normalize_subblock_noise_config
 
 from run_observation_bias_campaign import (  # type: ignore
     DEFAULT_RESULTS_ROOT,
@@ -130,12 +130,6 @@ def validate_full_fidelity_smoke_config(
         )
 
     subblocks = _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
-    if isinstance(subblocks.get("noise"), Mapping):
-        add(
-            "subblocks.noise uses the structured review schema. The current subblock runner "
-            "receives only a legacy enabled/disabled noise flag; individual shot/read/dark "
-            "terms are recorded in provenance but not separately controlled yet."
-        )
     trajectory_processing = subblocks.get("trajectory_processing")
     smear = (
         trajectory_processing.get("smear", {})
@@ -187,6 +181,7 @@ def _normalize_subblock_noise_for_observation_bias(subblocks: Mapping[str, Any])
     out = dict(subblocks)
     noise = out.get("noise")
     if isinstance(noise, Mapping):
+        normalized_obj = normalize_subblock_noise_config(out, strict=False)
         noise_cfg = normalize_noise_request(noise)
         enabled = bool(noise_cfg.get("enabled", False))
         out["noise_model"] = {
@@ -194,33 +189,34 @@ def _normalize_subblock_noise_for_observation_bias(subblocks: Mapping[str, Any])
             "original_request": dict(noise),
             "requested": noise_cfg,
             "normalized": noise_cfg,
+            "normalized_subblock_noise": normalized_obj.to_dict(),
             "render_template_terms": {
                 "enabled": enabled,
                 "photon_noise": bool(noise_cfg.get("shot_noise", False)),
                 "shot_noise": bool(noise_cfg.get("shot_noise", False)),
-                "read_noise": bool(noise_cfg.get("read_noise", False)),
-                "dark_current": bool(noise_cfg.get("dark_current", False)),
-                "write_variance": bool(noise_cfg.get("write_variance", True)),
-                "variance_floor": noise_cfg.get("variance_floor"),
+                "read_noise": bool(normalized_obj.read_noise),
+                "dark_current": bool(normalized_obj.dark_current),
+                "read_noise_electrons": normalized_obj.read_noise_electrons,
+                "dark_current_e_per_s": normalized_obj.dark_current_e_per_s,
+                "write_variance": bool(normalized_obj.write_variance),
+                "variance_floor": normalized_obj.variance_floor,
             },
-            "legacy_runner_flag": "enabled" if enabled else "disabled",
-            "separate_term_control": False,
-            "warnings": [
-                "Structured shot/read/dark-current settings are translated to the "
-                "legacy subblock --noise enabled/disabled flag; separate per-term "
-                "runner controls are not implemented yet."
-            ],
+            "legacy_runner_flag": "inherit",
+            "separate_term_control": True,
+            "warnings": list(normalized_obj.warnings),
         }
-        out["noise"] = "enabled" if enabled else "disabled"
+        out["noise"] = "inherit"
     else:
+        normalized_obj = normalize_subblock_noise_config(out, strict=False)
         out["noise_model"] = {
             "schema_version": "structured_noise_request.v1",
             "original_request": noise,
             "requested": normalize_noise_request(noise),
             "normalized": normalize_noise_request(noise),
+            "normalized_subblock_noise": normalized_obj.to_dict(),
             "legacy_runner_flag": str(noise or "disabled"),
             "separate_term_control": False,
-            "warnings": [],
+            "warnings": list(normalized_obj.warnings),
         }
     return out
 

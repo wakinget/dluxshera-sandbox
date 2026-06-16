@@ -70,6 +70,7 @@ from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
 from dluxshera.utils.campaigns import (
     format_shell_command,
+    json_ready,
     load_existing_campaign_plan,
     write_shell_command,
 )
@@ -116,7 +117,11 @@ from dluxshera.utils.obs_subblock_keys import (
     parse_obs_subblock_key_address,
 )
 from dluxshera.utils.seeding import derive_campaign_subblock_seeds
-from dluxshera.utils.noise import make_subseed
+from dluxshera.utils.noise import (
+    NormalizedSubblockNoiseConfig,
+    make_subseed,
+    normalize_subblock_noise_config,
+)
 from dluxshera.utils.subprocess_diagnostics import (
     require_resource_time_available,
     run_subprocess_with_diagnostics,
@@ -258,6 +263,7 @@ def _write_observation_bias_templates(
     run_root: Path,
     *,
     model_split: Any,
+    normalized_noise: NormalizedSubblockNoiseConfig | None = None,
 ) -> dict[str, Path]:
     template_root = run_root / "templates"
     payloads = {
@@ -265,6 +271,8 @@ def _write_observation_bias_templates(
         "render": load_config_file(DEFAULT_RENDER_TEMPLATE),
         "inference": load_config_file(DEFAULT_INFERENCE_TEMPLATE),
     }
+    if normalized_noise is not None:
+        _patch_render_payload_noise(payloads["render"], normalized_noise)
     return write_campaign_model_split_templates(
         template_root=template_root,
         trace_payload=payloads["trace"],
@@ -272,6 +280,75 @@ def _write_observation_bias_templates(
         inference_payload=payloads["inference"],
         split=model_split,
     )
+
+
+def _patch_render_payload_noise(
+    render_payload: dict[str, Any],
+    normalized_noise: NormalizedSubblockNoiseConfig,
+) -> dict[str, Any]:
+    block = normalized_noise.render_template_noise_block()
+    if block is None:
+        return render_payload
+    experiment = render_payload.setdefault("experiment", {})
+    if not isinstance(experiment, dict):
+        raise ValueError("render template experiment block must be a mapping.")
+    noise = experiment.setdefault("noise", {})
+    if not isinstance(noise, dict):
+        raise ValueError("render template experiment.noise block must be a mapping.")
+    noise.update(block)
+    return render_payload
+
+
+def _write_noise_provenance(
+    *,
+    run_root: Path,
+    normalized_noise: NormalizedSubblockNoiseConfig,
+    render_template_noise_block: Mapping[str, Any] | None,
+) -> dict[str, Path]:
+    noise_root = run_root / "noise"
+    noise_root.mkdir(parents=True, exist_ok=True)
+    normalized_path = noise_root / "noise_request_normalized.json"
+    render_path = noise_root / "noise_render_provenance.json"
+    inference_path = noise_root / "noise_inference_provenance.json"
+    normalized_payload = normalized_noise.to_dict()
+    normalized_path.write_text(json.dumps(json_ready(normalized_payload), indent=2), encoding="utf-8")
+    render_path.write_text(
+        json.dumps(
+            json_ready(
+                {
+                    "structured_noise_supported": True,
+                    "render_terms_forwarded": render_template_noise_block is not None,
+                    "legacy_noise_mode": normalized_noise.legacy_noise_mode,
+                    "render_template_noise_block": dict(render_template_noise_block or {}),
+                    "warnings": list(normalized_noise.warnings),
+                }
+            ),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    inference_path.write_text(
+        json.dumps(
+            json_ready(
+                {
+                    "inference_variance_floor_forwarded": normalized_noise.variance_floor is not None,
+                    "inference_variance_floor": normalized_noise.variance_floor,
+                    "variance_floor_source": normalized_noise.variance_floor_source,
+                    "use_render_variance": normalized_noise.use_render_variance,
+                    "use_render_variance_resolved": normalized_noise.use_render_variance_resolved,
+                    "use_render_variance_source": normalized_noise.use_render_variance_source,
+                    "warnings": list(normalized_noise.warnings),
+                }
+            ),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "noise_request_normalized_json": normalized_path,
+        "noise_render_provenance_json": render_path,
+        "noise_inference_provenance_json": inference_path,
+    }
 
 
 def _smear_render_mode(subblock_cfg: Mapping[str, Any]) -> str:
@@ -295,6 +372,7 @@ def _write_subblock_smear_templates(
     model_split: CampaignModelSplit,
     subblock_cfg: Mapping[str, Any],
     trace_row: Mapping[str, Any],
+    normalized_noise: NormalizedSubblockNoiseConfig | None = None,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
     kernel_raw = trace_row.get("smear_representative_kernel_json")
     if not kernel_raw:
@@ -358,6 +436,8 @@ def _write_subblock_smear_templates(
         "render": load_config_file(DEFAULT_RENDER_TEMPLATE),
         "inference": load_config_file(DEFAULT_INFERENCE_TEMPLATE),
     }
+    if normalized_noise is not None:
+        _patch_render_payload_noise(payloads["render"], normalized_noise)
     paths = write_campaign_model_split_templates(
         template_root=template_root,
         trace_payload=payloads["trace"],
@@ -1409,11 +1489,15 @@ def resolve_subblock_command_options(
         options["reference_early_stopping_enabled"] = bool(
             subblock_cfg["reference_early_stopping_enabled"]
         )
+    if subblock_cfg.get("use_render_variance") is not None:
+        options["use_render_variance"] = bool(subblock_cfg["use_render_variance"])
     forwarded_flags = [
         SUBBLOCK_OPTION_FLAG_MAP[key]
         for key in SUBBLOCK_OPTION_FLAG_MAP
         if key in options
     ]
+    if options.get("use_render_variance") is True:
+        forwarded_flags.append("--use-render-variance")
     if "reference_preconditioning_enabled" in options:
         forwarded_flags.append(
             "--reference-preconditioning-enabled"
@@ -1456,7 +1540,7 @@ def build_subblock_command(
         "--n-frames",
         str(int(subblock_cfg.get("n_frames", 3))),
         "--noise",
-        str(subblock_cfg.get("noise", "disabled")),
+        "inherit" if isinstance(subblock_cfg.get("noise"), Mapping) else str(subblock_cfg.get("noise", "disabled")),
         "--theta-keys",
         ",".join(str(label) for label in theta_labels),
         "--phi-ref",
@@ -1502,6 +1586,8 @@ def build_subblock_command(
             continue
         if key in command_options:
             command.extend([flag, _format_cli_value(command_options[key])])
+    if command_options.get("use_render_variance") is True:
+        command.append("--use-render-variance")
     append_reference_optimizer_flags(command, command_options)
     append_schur_frame_quality_flags(command, command_options)
     if trace_subblock is not None:
@@ -1569,14 +1655,21 @@ def build_campaign_plan(
         if isinstance(subblock_cfg.get("trajectory_processing"), Mapping)
         else {}
     )
+    normalized_noise = normalize_subblock_noise_config(
+        subblock_cfg,
+        detector_cfg=system_cfg,
+        exposure_time_s=subblock_exposure_time_s,
+        strict=False,
+    )
     model_split = build_campaign_model_split(
         base_system_cfg=system_cfg,
         spectral_model_cfg=experiment_cfg.get("spectral_model"),
         high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
         scalar_reference_offsets=truth_realization.truth_overrides_by_label,
         detector_noise_metadata={
-            "enabled": str(subblock_cfg.get("noise", "disabled")) != "disabled",
-            "noise_mode": str(subblock_cfg.get("noise", "disabled")),
+            **normalized_noise.to_dict(),
+            "enabled": bool(normalized_noise.enabled),
+            "noise_mode": normalized_noise.legacy_noise_mode,
         },
         run_root=run_root,
         artifact_root=run_root / "model_split",
@@ -1621,8 +1714,16 @@ def build_campaign_plan(
         template_paths = _write_observation_bias_templates(
             run_root,
             model_split=model_split,
+            normalized_noise=normalized_noise,
         )
     template_hashes = template_hash_row(template_paths, model_split)
+    noise_provenance_paths = _write_noise_provenance(
+        run_root=run_root,
+        normalized_noise=normalized_noise,
+        render_template_noise_block=normalized_noise.render_template_noise_block(),
+    )
+    layout_metadata["noise"] = normalized_noise.to_dict()
+    layout_metadata["noise_provenance_paths"] = {key: str(path) for key, path in noise_provenance_paths.items()}
     configured_cases = _parse_bias_cases(
         experiment_cfg,
         layout=layout,
@@ -1638,12 +1739,22 @@ def build_campaign_plan(
         parsed_cases=configured_cases,
         prior_draw_cases=prior_draw_cases,
     )
-    subblock_command_options = resolve_subblock_command_options(subblock_cfg)
+    effective_subblock_cfg = dict(subblock_cfg)
+    effective_subblock_cfg["noise"] = normalized_noise.legacy_noise_mode
+    if normalized_noise.variance_floor is not None and normalized_noise.variance_floor != "auto":
+        effective_subblock_cfg["variance_floor"] = normalized_noise.variance_floor
+    effective_subblock_cfg["use_render_variance"] = normalized_noise.use_render_variance_resolved
+    effective_subblock_cfg["noise_model"] = {
+        **dict(effective_subblock_cfg.get("noise_model", {}) or {}),
+        "normalized_subblock_noise": normalized_noise.to_dict(),
+        "render_template_terms": normalized_noise.render_template_noise_block() or {},
+    }
+    subblock_command_options = resolve_subblock_command_options(effective_subblock_cfg)
     iterative_cfg = _resolve_iterative_config(experiment_cfg)
     seeding_cfg = _resolve_seeding_config(experiment_cfg)
     subblock_resolution = _resolve_total_subblocks_for_campaign(
         experiment_cfg,
-        subblock_cfg,
+        effective_subblock_cfg,
         iterative_cfg,
     )
     n_subblocks = int(subblock_resolution["resolved_total_subblocks"])
@@ -1655,8 +1766,8 @@ def build_campaign_plan(
         source_kind="binary",
         active_frame_keys=DEFAULT_LOCAL_ELIMINATED_KEYS,
         n_subblocks=n_subblocks,
-        n_frames_per_subblock=int(subblock_cfg.get("n_frames", 3)),
-        frame_dt_s=float(subblock_cfg.get("exposure_time_s", 0.05)),
+        n_frames_per_subblock=int(effective_subblock_cfg.get("n_frames", 3)),
+        frame_dt_s=float(effective_subblock_cfg.get("exposure_time_s", 0.05)),
         subblock_duration_s=float(
             experiment_cfg.get("forecast", {}).get("subblock_duration_s", 1.0)
         ),
@@ -1671,7 +1782,7 @@ def build_campaign_plan(
                 )
             )
         ),
-        trajectory_processing_cfg=subblock_cfg.get("trajectory_processing"),
+        trajectory_processing_cfg=effective_subblock_cfg.get("trajectory_processing"),
         plate_scale_as_per_pix=_store_scalar_value(
             system_store,
             "optics.plate_scale_as_per_pix",
@@ -1723,13 +1834,14 @@ def build_campaign_plan(
                 / "subblock_summary.json"
             )
             trace_row = dict(trace_source_plan.rows[subblock_index])
-            if _smear_render_mode(subblock_cfg) == "subblock_constant_layer":
+            if _smear_render_mode(effective_subblock_cfg) == "subblock_constant_layer":
                 active_template_paths, active_template_hashes = _write_subblock_smear_templates(
                     run_root=run_root,
                     subblock_index=subblock_index,
                     model_split=model_split,
-                    subblock_cfg=subblock_cfg,
+                    subblock_cfg=effective_subblock_cfg,
                     trace_row=trace_row,
+                    normalized_noise=normalized_noise,
                 )
             else:
                 active_template_paths = template_paths
@@ -1748,7 +1860,7 @@ def build_campaign_plan(
                     case_subblock_name=subblock_name,
                     theta_labels=layout.labels,
                     offsets=case.theta_reference_offsets,
-                    subblock_cfg=subblock_cfg,
+                    subblock_cfg=effective_subblock_cfg,
                     trace_seed=int(seeds["trace_seed"]),
                     noise_seed=int(seeds["noise_seed"]),
                     trace_subblock=trace_source_plan.subblocks[subblock_index],
@@ -1771,14 +1883,24 @@ def build_campaign_plan(
                     "subblock_name": subblock_name,
                     "summary_path": str(summary_path),
                     "case_origin": case.case_origin,
-                    "n_frames": int(subblock_cfg.get("n_frames", 3)),
-                    "noise": str(subblock_cfg.get("noise", "disabled")),
-                    "phi_ref": str(subblock_cfg.get("phi_ref", "truth_when_available")),
+                    "n_frames": int(effective_subblock_cfg.get("n_frames", 3)),
+                    "noise": str(effective_subblock_cfg.get("noise", "disabled")),
+                    "phi_ref": str(effective_subblock_cfg.get("phi_ref", "truth_when_available")),
                     "schur_curvature_method": str(
-                        subblock_cfg.get("schur_curvature_method", "auto")
+                        effective_subblock_cfg.get("schur_curvature_method", "auto")
                     ),
-                    "max_dense_dim": int(subblock_cfg.get("max_dense_dim", 40)),
-                    "schur_damping": float(subblock_cfg.get("schur_damping", 1.0e-8)),
+                    "max_dense_dim": int(effective_subblock_cfg.get("max_dense_dim", 40)),
+                    "schur_damping": float(effective_subblock_cfg.get("schur_damping", 1.0e-8)),
+                    "noise_enabled": bool(normalized_noise.enabled),
+                    "shot_noise": bool(normalized_noise.shot_noise),
+                    "read_noise": bool(normalized_noise.read_noise),
+                    "dark_current": bool(normalized_noise.dark_current),
+                    "read_noise_electrons": normalized_noise.read_noise_electrons,
+                    "dark_current_e_per_s": normalized_noise.dark_current_e_per_s,
+                    "variance_floor": normalized_noise.variance_floor,
+                    "variance_floor_source": normalized_noise.variance_floor_source,
+                    "use_render_variance": normalized_noise.use_render_variance_resolved,
+                    "noise_request_normalized_json": str(noise_provenance_paths["noise_request_normalized_json"]),
                     "forwarded_flags": ",".join(
                         str(flag) for flag in subblock_command_options["forwarded_flags"]
                     ),
@@ -1827,7 +1949,7 @@ def build_campaign_plan(
                         iterative_cfg["carry_prior_mean_with_reference"]
                     ),
                     "summary_information_scale": str(
-                        subblock_cfg.get("summary_information_scale", "")
+                        effective_subblock_cfg.get("summary_information_scale", "")
                     ),
                     "trace_source_mode": str(trace_source_plan.mode),
                     "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
@@ -1863,7 +1985,7 @@ def build_campaign_plan(
                             iterative_cfg.get("update_safety", {}), sort_keys=True
                         ),
                         "summary_information_scale": str(
-                            subblock_cfg.get("summary_information_scale", "")
+                            effective_subblock_cfg.get("summary_information_scale", "")
                         ),
                         "trace_source_mode": str(trace_source_plan.mode),
                         "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
@@ -1879,10 +2001,16 @@ def build_campaign_plan(
         "system": system_cfg,
         "reference_system": reference_system_cfg,
     }
+    resolved_config["experiment"]["subblocks"] = effective_subblock_cfg
     resolved_config["experiment"]["high_order_wfe_summary"] = model_split.provenance.get("high_order_wfe", {})
     resolved_config["experiment"]["model_split"] = model_split.to_dict()
     resolved_config["experiment"]["template_hashes"] = template_hash_rows or [template_hashes]
     resolved_config["experiment"]["subblock_resolution"] = subblock_resolution
+    resolved_config["experiment"]["noise"] = {
+        "structured_noise_supported": True,
+        "normalized": normalized_noise.to_dict(),
+        "artifact_paths": {key: str(path) for key, path in noise_provenance_paths.items()},
+    }
     return CampaignPlan(
         run_root=run_root,
         layout=layout,

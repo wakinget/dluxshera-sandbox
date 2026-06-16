@@ -27,6 +27,7 @@ from dluxshera.utils.detector_layer_overrides import (
 )
 from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
 from dluxshera.utils.full_fidelity_review import resolve_subblock_plan_settings
+from dluxshera.utils.noise import normalize_subblock_noise_config
 from dluxshera.utils.full_fidelity_config_schema import (
     CONFIG_FIELD_REGISTRY,
     iter_string_fields,
@@ -386,6 +387,7 @@ def _semantic_overlaps(experiment: Mapping[str, Any], subblock_plan_summary: Map
             )
         )
     if subblocks.get("variance_floor") is not None and noise.get("variance_floor") is not None:
+        floors_match = subblocks.get("variance_floor") == noise.get("variance_floor")
         overlaps.append(
             _semantic_overlap(
                 field_a="experiment.subblocks.variance_floor",
@@ -397,7 +399,7 @@ def _semantic_overlaps(experiment: Mapping[str, Any], subblock_plan_summary: Map
                 canonical_field="experiment.subblocks.noise.variance_floor",
                 precedence="nested noise.variance_floor is canonical",
                 action="remove experiment.subblocks.variance_floor",
-                severity="warning",
+                severity="warning" if floors_match else "strict_error",
             )
         )
     if str(experiment.get("kind")) in {"full_fidelity_binary_iterative_review", "full_fidelity_binary_iterative_smoke"}:
@@ -478,6 +480,53 @@ def _detector_policy_summary(experiment: Mapping[str, Any], *, strict: bool) -> 
     }
 
 
+def _resolved_system_for_audit(experiment: Mapping[str, Any]) -> dict[str, Any]:
+    selected_preset = str(experiment.get("system_preset", DEFAULT_FULL_FIDELITY_SYSTEM_PRESET))
+    subblocks = experiment.get("subblocks", {}) if isinstance(experiment.get("subblocks"), Mapping) else {}
+    system_seed: dict[str, Any] = {"preset": selected_preset}
+    if subblocks.get("exposure_time_s") is not None:
+        system_seed["source"] = {"exposure_time_s": float(subblocks["exposure_time_s"])}
+    system_cfg = dict(resolve_config({"system": system_seed})["system"])
+    detector_overrides = experiment.get("detector_overrides")
+    if isinstance(detector_overrides, Mapping):
+        system_cfg, _ = apply_detector_layer_overrides(
+            system_cfg,
+            detector_overrides,
+            context="full_fidelity_config_audit.noise",
+        )
+    return system_cfg
+
+
+def _noise_policy_summary(experiment: Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
+    subblocks = experiment.get("subblocks", {}) if isinstance(experiment.get("subblocks"), Mapping) else {}
+    system_cfg = _resolved_system_for_audit(experiment)
+    normalized = normalize_subblock_noise_config(
+        subblocks,
+        detector_cfg=system_cfg,
+        exposure_time_s=float(subblocks["exposure_time_s"]) if subblocks.get("exposure_time_s") is not None else None,
+        strict=strict,
+    )
+    render_block = normalized.render_template_noise_block()
+    return {
+        "structured_noise_supported": True,
+        "render_terms_forwarded": render_block is not None,
+        "inference_variance_floor_forwarded": normalized.variance_floor is not None,
+        "original_noise_request": normalized.original,
+        "normalized_noise": normalized.to_dict(),
+        "legacy_noise_mode": normalized.legacy_noise_mode,
+        "render_template_noise_block": render_block,
+        "inference_variance_floor": normalized.variance_floor,
+        "variance_floor_source": normalized.variance_floor_source,
+        "use_render_variance_resolved": normalized.use_render_variance_resolved,
+        "read_noise_electrons": normalized.read_noise_electrons,
+        "read_noise_source": normalized.read_noise_source,
+        "dark_current_e_per_s": normalized.dark_current_e_per_s,
+        "dark_current_source": normalized.dark_current_source,
+        "exposure_time_s": subblocks.get("exposure_time_s"),
+        "warnings": list(normalized.warnings),
+    }
+
+
 def _config_tier(experiment: Mapping[str, Any], config_path: Path) -> str:
     kind = str(experiment.get("kind", ""))
     if "review" in kind or "review" in config_path.name:
@@ -534,12 +583,27 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         detector_policy_error = str(exc)
         if strict:
             raise
+    noise_policy_summary: dict[str, Any] | None = None
+    noise_policy_error: str | None = None
+    try:
+        noise_policy_summary = _noise_policy_summary(experiment, strict=strict)
+    except Exception as exc:
+        noise_policy_error = str(exc)
+        if strict:
+            raise
     subblock_plan_summary, subblock_plan_warnings = resolve_subblock_plan_settings(
         {"experiment": experiment},
         strict=strict,
     )
     warnings_out.extend(subblock_plan_warnings)
     semantic_overlaps = _semantic_overlaps(experiment, subblock_plan_summary)
+    if strict:
+        strict_errors = [row for row in semantic_overlaps if row.get("severity") == "strict_error"]
+        if strict_errors:
+            raise ValueError(
+                "Strict full-fidelity config audit failed semantic overlap checks: "
+                + "; ".join(f"{row['field_a']} vs {row['field_b']}" for row in strict_errors)
+            )
 
     reference_rows = _field_reference_rows({"experiment": experiment})
     accepted_but_noop_used = []
@@ -588,6 +652,8 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         "resolved_component_summary": _component_summary(experiment),
         "detector_policy_summary": detector_policy_summary,
         "detector_policy_error": detector_policy_error,
+        "noise_policy_summary": noise_policy_summary,
+        "noise_policy_error": noise_policy_error,
         "trajectory_subblock_plan": subblock_plan_summary,
     }
 
@@ -597,6 +663,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
     _write_json(outdir / "field_reference.json", reference_rows)
     _write_json(outdir / "resolved_component_summary.json", audit["resolved_component_summary"])
     _write_json(outdir / "detector_policy_summary.json", detector_policy_summary or {"error": detector_policy_error})
+    _write_json(outdir / "noise_policy_summary.json", noise_policy_summary or {"error": noise_policy_error})
     _write_json(outdir / "trajectory_subblock_plan.json", subblock_plan_summary)
     _write_csv(outdir / "field_reference.csv", reference_rows)
 
@@ -638,6 +705,21 @@ def _render_audit_markdown(audit: Mapping[str, Any]) -> str:
                 f"- After smear policy: `{[row.get('name') for row in detector_policy.get('detector_layer_stack_after_smear_policy', [])]}`",
                 f"- Smear: `{detector_policy.get('smear_status')}`",
                 f"- Jitter: `{detector_policy.get('jitter_status')}`",
+            ]
+        )
+    noise_policy = audit.get("noise_policy_summary")
+    if isinstance(noise_policy, Mapping):
+        lines.extend(
+            [
+                "",
+                "## Noise Policy",
+                f"- Structured noise supported: `{noise_policy.get('structured_noise_supported')}`",
+                f"- Render terms forwarded: `{noise_policy.get('render_terms_forwarded')}`",
+                f"- Inference variance floor forwarded: `{noise_policy.get('inference_variance_floor_forwarded')}`",
+                f"- Read noise source: `{noise_policy.get('read_noise_source')}`",
+                f"- Dark current source: `{noise_policy.get('dark_current_source')}`",
+                f"- Variance floor: `{noise_policy.get('inference_variance_floor')}` from `{noise_policy.get('variance_floor_source')}`",
+                f"- Use render variance resolved: `{noise_policy.get('use_render_variance_resolved')}`",
             ]
         )
     subblock_plan = audit.get("trajectory_subblock_plan")

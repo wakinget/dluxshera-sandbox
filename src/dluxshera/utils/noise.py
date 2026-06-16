@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import asdict, dataclass
+from typing import Literal
 from typing import Any, Mapping, Tuple, Optional
 
 import jax.numpy as jnp
@@ -20,6 +22,49 @@ from ..components.detectors import DetectorSpec
 Array = jnp.ndarray
 
 _MISSING = object()
+
+
+@dataclass(frozen=True)
+class NormalizedSubblockNoiseConfig:
+    original: Any
+    enabled: bool
+    legacy_noise_mode: Literal["enabled", "disabled", "inherit"]
+    shot_noise: bool
+    photon_noise: bool
+    read_noise: bool
+    dark_current: bool
+    use_detector_read_noise: bool
+    read_noise_electrons: float | None
+    read_noise_source: str
+    use_detector_dark_current: bool
+    dark_current_e_per_s: float | None
+    dark_current_source: str
+    variance_floor: float | Literal["auto"] | None
+    variance_floor_source: str
+    write_variance: bool
+    use_render_variance: bool | Literal["auto"]
+    use_render_variance_resolved: bool
+    use_render_variance_source: str
+    seed_policy: str
+    warnings: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def render_template_noise_block(self) -> dict[str, Any] | None:
+        if self.legacy_noise_mode == "inherit" and not isinstance(self.original, Mapping):
+            return None
+        return {
+            "enabled": bool(self.enabled),
+            "photon_noise": bool(self.photon_noise),
+            "shot_noise": bool(self.shot_noise),
+            "read_noise": bool(self.read_noise),
+            "dark_current": bool(self.dark_current),
+            "read_noise_electrons": self.read_noise_electrons,
+            "dark_current_e_per_s": self.dark_current_e_per_s,
+            "write_variance": bool(self.write_variance),
+            "seed_policy": self.seed_policy,
+        }
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -221,6 +266,153 @@ def resolve_detector_noise_spec(
         "dark_current_enabled": bool(normalized["enabled"] and normalized["dark_current"]),
         "warnings": warnings_out,
     }
+
+
+def normalize_subblock_noise_config(
+    subblock_cfg: Mapping[str, Any],
+    *,
+    detector_cfg: Mapping[str, Any] | None = None,
+    exposure_time_s: float | None = None,
+    strict: bool = False,
+) -> NormalizedSubblockNoiseConfig:
+    """Normalize campaign subblock noise controls for render/inference paths."""
+
+    subblock = dict(subblock_cfg or {})
+    original = subblock.get("noise", "disabled")
+    noise_model = subblock.get("noise_model")
+    if (
+        not isinstance(original, Mapping)
+        and str(original).strip().lower() == "inherit"
+        and isinstance(noise_model, Mapping)
+        and isinstance(noise_model.get("original_request"), Mapping)
+    ):
+        original = noise_model["original_request"]
+    structured = isinstance(original, Mapping)
+    legacy_raw = str(original if not structured else "").strip().lower()
+    warnings_out: list[str] = []
+    if structured:
+        normalized = normalize_noise_request(original)
+        legacy_mode: Literal["enabled", "disabled", "inherit"] = "inherit"
+    elif legacy_raw in {"inherit", ""}:
+        normalized = normalize_noise_request("inherit")
+        legacy_mode = "inherit"
+    elif legacy_raw in {"enabled", "enable", "true", "on", "yes"}:
+        normalized = normalize_noise_request("enabled")
+        legacy_mode = "enabled"
+    else:
+        normalized = normalize_noise_request("disabled")
+        legacy_mode = "disabled"
+
+    info = resolve_detector_noise_spec(
+        detector_cfg,
+        {**normalized, "exposure_time_s": exposure_time_s},
+        strict=False,
+    )
+    warnings_out.extend(str(item) for item in info.get("warnings", []))
+    read_noise = info.get("read_noise_electrons")
+    dark_current = info.get("dark_current_e_per_s")
+    read_source = str(info.get("read_noise_source", "missing"))
+    dark_source = str(info.get("dark_current_source", "missing"))
+
+    enabled = bool(normalized.get("enabled", False))
+    shot_noise = bool(enabled and normalized.get("shot_noise", False))
+    read_enabled = bool(enabled and normalized.get("read_noise", False))
+    dark_enabled = bool(enabled and normalized.get("dark_current", False))
+    if not enabled:
+        read_noise = None
+        dark_current = None
+        read_source = "disabled"
+        dark_source = "disabled"
+    elif not read_enabled:
+        read_source = "disabled"
+        read_noise = None
+    elif read_noise is None:
+        read_source = "missing"
+    if not enabled or not dark_enabled:
+        dark_source = "disabled"
+        dark_current = None
+    elif dark_current is None:
+        dark_source = "missing"
+
+    explicit_floor = None
+    floor_source = "default"
+    noise_floor = normalized.get("variance_floor")
+    legacy_floor = subblock.get("variance_floor")
+    if noise_floor is not None:
+        explicit_floor = noise_floor
+        floor_source = "experiment.subblocks.noise.variance_floor"
+        if legacy_floor is not None and legacy_floor != noise_floor:
+            warnings_out.append(
+                "experiment.subblocks.variance_floor is deprecated and disagrees with "
+                "experiment.subblocks.noise.variance_floor; using the nested canonical value."
+            )
+    elif legacy_floor is not None:
+        explicit_floor = legacy_floor
+        floor_source = "experiment.subblocks.variance_floor"
+        warnings_out.append(
+            "experiment.subblocks.variance_floor is deprecated; use "
+            "experiment.subblocks.noise.variance_floor."
+        )
+    variance_floor: float | Literal["auto"] | None
+    if explicit_floor == "auto":
+        if read_enabled and read_noise is None:
+            warnings_out.append("variance_floor=auto requires resolved read_noise_electrons.")
+            variance_floor = "auto"
+        elif dark_enabled and (dark_current is None or exposure_time_s is None):
+            warnings_out.append("variance_floor=auto requires dark_current_e_per_s and exposure_time_s.")
+            variance_floor = "auto"
+        else:
+            read_term = float(read_noise or 0.0) ** 2 if read_enabled else 0.0
+            dark_term = float(dark_current or 0.0) * float(exposure_time_s or 0.0) if dark_enabled else 0.0
+            variance_floor = float(read_term + dark_term)
+            floor_source = "auto"
+    elif explicit_floor is None:
+        variance_floor = None
+    else:
+        variance_floor = float(explicit_floor)
+
+    use_render_raw = subblock.get("use_render_variance", normalized.get("use_render_variance", "auto"))
+    if isinstance(use_render_raw, str) and use_render_raw.strip().lower() == "auto":
+        use_render_variance: bool | Literal["auto"] = "auto"
+        use_render_resolved = bool(enabled and normalized.get("write_variance", True))
+        use_render_source = "auto:write_variance" if use_render_resolved else "auto:false"
+    else:
+        use_render_variance = _bool(use_render_raw, False)
+        use_render_resolved = bool(use_render_variance)
+        use_render_source = "explicit"
+
+    if read_enabled and read_noise is None:
+        warnings_out.append("read_noise=true but no read-noise amplitude was resolved.")
+    if dark_enabled and dark_current is None:
+        warnings_out.append("dark_current=true but no dark-current amplitude was resolved.")
+    if dark_enabled and exposure_time_s is None:
+        warnings_out.append("dark_current=true but exposure_time_s is missing.")
+    if strict and warnings_out:
+        raise ValueError("; ".join(warnings_out))
+
+    return NormalizedSubblockNoiseConfig(
+        original=original,
+        enabled=enabled,
+        legacy_noise_mode=legacy_mode,
+        shot_noise=shot_noise,
+        photon_noise=shot_noise,
+        read_noise=read_enabled,
+        dark_current=dark_enabled,
+        use_detector_read_noise=bool(normalized.get("use_detector_read_noise", True)),
+        read_noise_electrons=None if read_noise is None else float(read_noise),
+        read_noise_source=read_source,
+        use_detector_dark_current=bool(normalized.get("use_detector_dark_current", True)),
+        dark_current_e_per_s=None if dark_current is None else float(dark_current),
+        dark_current_source=dark_source,
+        variance_floor=variance_floor,
+        variance_floor_source=floor_source,
+        write_variance=bool(normalized.get("write_variance", True)),
+        use_render_variance=use_render_variance,
+        use_render_variance_resolved=use_render_resolved,
+        use_render_variance_source=use_render_source,
+        seed_policy=str(normalized.get("seed_policy", "from_subblock_noise_seed")),
+        warnings=tuple(dict.fromkeys(warnings_out)),
+    )
 
 
 def expected_noise_variance(

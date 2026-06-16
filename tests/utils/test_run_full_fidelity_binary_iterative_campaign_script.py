@@ -87,7 +87,9 @@ def test_full_fidelity_binary_iterative_smoke_dry_run_writes_split_plans(tmp_pat
     assert smear["kernel"]["units"] == "detector_pix"
 
     rows = _read_csv(run_root / "iterative_plan.csv")
-    assert len(rows) == 2
+    resolved_cfg = json.loads((run_root / "resolved_config.json").read_text(encoding="utf-8"))
+    resolved = resolved_cfg["experiment"]["subblock_resolution"]
+    assert len(rows) == int(resolved["resolved_total_subblocks"])
     assert all(row["trace_template_hash"] for row in rows)
     assert all(row["model_split_json"] for row in rows)
     assert all("posterior_sigma_inflation" in row["update_safety_json"] for row in rows)

@@ -51,6 +51,7 @@ from dluxshera.utils.noise import (
     apply_observation_noise,
     detector_spec_for_model,
     expected_noise_variance,
+    normalize_subblock_noise_config,
     normalize_noise_request,
     resolve_detector_noise_spec,
 )
@@ -877,67 +878,67 @@ def load_detector_calibration_maps(system_cfg: Mapping[str, Any]) -> dict[str, n
 def summarize_noise_config(config: Mapping[str, Any], system_cfg: Mapping[str, Any]) -> dict[str, Any]:
     exp = _experiment(config)
     sub = dict(exp.get("subblocks", {}) or {})
-    original = sub.get("noise", "disabled")
-    structured = sub.get("noise_model", {}).get("requested", {}) if isinstance(sub.get("noise_model"), Mapping) else original
-    normalized = normalize_noise_request(structured)
-    detector_noise = resolve_detector_noise_spec(system_cfg, normalized)
-    warnings_out = list(detector_noise.get("warnings", []))
-    separate_term_control = (
-        sub.get("noise_model", {}).get("separate_term_control")
+    original = (
+        sub.get("noise_model", {}).get("original_request")
         if isinstance(sub.get("noise_model"), Mapping)
-        else True
+        else sub.get("noise", "disabled")
     )
-    if separate_term_control is False and normalized.get("enabled") and any(
-        bool(normalized.get(key)) for key in ("read_noise", "dark_current")
-    ):
-        warnings_out.append(
-            "Structured shot/read/dark-current request is translated through a coarse legacy noise flag; "
-            "term-specific runner controls are not fully available in the campaign wrapper."
-        )
-    use_render_variance = sub.get("use_render_variance", "auto")
-    variance_model = "provided_cube" if use_render_variance is True else "data"
-    if str(use_render_variance).lower() == "true":
-        variance_model = "provided_cube"
+    noise_sub = dict(sub)
+    if original is not None:
+        noise_sub["noise"] = original
+    normalized_obj = normalize_subblock_noise_config(
+        noise_sub,
+        detector_cfg=system_cfg,
+        exposure_time_s=sub.get("exposure_time_s"),
+        strict=False,
+    )
+    normalized = normalize_noise_request(original)
+    warnings_out = list(normalized_obj.warnings)
+    variance_model = "provided_cube" if normalized_obj.use_render_variance_resolved else "data"
     return {
         "noise_request_original": original,
         "noise_request_normalized": normalized,
+        "normalized_subblock_noise": normalized_obj.to_dict(),
         "render_noise": {
-            "enabled": bool(normalized["enabled"]),
-            "shot_noise": bool(detector_noise["shot_noise_enabled"]),
-            "read_noise": bool(detector_noise["read_noise_enabled"]),
-            "dark_current": bool(detector_noise["dark_current_enabled"]),
-            "read_noise_electrons": detector_noise["read_noise_electrons"],
-            "read_noise_source": detector_noise["read_noise_source"],
-            "dark_current_e_per_s": detector_noise["dark_current_e_per_s"],
-            "dark_current_source": detector_noise["dark_current_source"],
-            "exposure_time_s": detector_noise["exposure_time_s"],
-            "write_variance": bool(normalized.get("write_variance", True)),
-            "separate_term_control": separate_term_control,
+            "enabled": bool(normalized_obj.enabled),
+            "shot_noise": bool(normalized_obj.shot_noise),
+            "photon_noise": bool(normalized_obj.photon_noise),
+            "read_noise": bool(normalized_obj.read_noise),
+            "dark_current": bool(normalized_obj.dark_current),
+            "read_noise_electrons": normalized_obj.read_noise_electrons,
+            "read_noise_source": normalized_obj.read_noise_source,
+            "dark_current_e_per_s": normalized_obj.dark_current_e_per_s,
+            "dark_current_source": normalized_obj.dark_current_source,
+            "exposure_time_s": sub.get("exposure_time_s"),
+            "write_variance": bool(normalized_obj.write_variance),
+            "separate_term_control": True,
         },
         "inference_noise_model": {
             "variance_model": variance_model,
-            "variance_floor": normalized.get("variance_floor", sub.get("variance_floor")),
-            "use_render_variance": use_render_variance,
+            "variance_floor": normalized_obj.variance_floor,
+            "variance_floor_source": normalized_obj.variance_floor_source,
+            "use_render_variance": normalized_obj.use_render_variance,
+            "use_render_variance_resolved": normalized_obj.use_render_variance_resolved,
         },
-        "shot_noise_signal_dependent": bool(detector_noise["shot_noise_enabled"]),
-        "read_noise_signal_independent": bool(detector_noise["read_noise_enabled"]),
-        "dark_current_expected_variance_included": bool(detector_noise["dark_current_enabled"]),
+        "shot_noise_signal_dependent": bool(normalized_obj.shot_noise),
+        "read_noise_signal_independent": bool(normalized_obj.read_noise),
+        "dark_current_expected_variance_included": bool(normalized_obj.dark_current),
         "warnings": warnings_out,
-        "noise_mode": str(original) if not isinstance(original, Mapping) else ("enabled" if normalized["enabled"] else "disabled"),
-        "structured_request": structured,
-        "shot_noise_enabled": bool(detector_noise["shot_noise_enabled"]),
-        "read_noise_enabled": bool(detector_noise["read_noise_enabled"]),
-        "read_noise": detector_noise["read_noise_electrons"],
+        "noise_mode": normalized_obj.legacy_noise_mode,
+        "structured_request": original,
+        "shot_noise_enabled": bool(normalized_obj.shot_noise),
+        "read_noise_enabled": bool(normalized_obj.read_noise),
+        "read_noise": normalized_obj.read_noise_electrons,
         "read_noise_unit": "electrons RMS per pixel",
-        "read_noise_source": detector_noise["read_noise_source"],
-        "dark_current_enabled": bool(detector_noise["dark_current_enabled"]),
-        "dark_current": detector_noise["dark_current_e_per_s"],
+        "read_noise_source": normalized_obj.read_noise_source,
+        "dark_current_enabled": bool(normalized_obj.dark_current),
+        "dark_current": normalized_obj.dark_current_e_per_s,
         "dark_current_unit": "electrons / s / pixel",
-        "dark_current_source": detector_noise["dark_current_source"],
-        "exposure_time_s": detector_noise["exposure_time_s"],
-        "variance_floor": normalized.get("variance_floor", sub.get("variance_floor")),
-        "use_render_variance": use_render_variance,
-        "separate_term_control": separate_term_control,
+        "dark_current_source": normalized_obj.dark_current_source,
+        "exposure_time_s": sub.get("exposure_time_s"),
+        "variance_floor": normalized_obj.variance_floor,
+        "use_render_variance": normalized_obj.use_render_variance,
+        "separate_term_control": True,
     }
 
 
