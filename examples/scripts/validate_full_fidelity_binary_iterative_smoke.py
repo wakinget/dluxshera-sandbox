@@ -313,7 +313,12 @@ def validate_dry_run_artifacts(
     experiment = config.get("experiment", {})
     source = experiment.get("system", {}).get("source", {})
     _check(stage, "resolved_config_is_observation_bias", experiment.get("kind") == "observation_bias_campaign")
-    _check(stage, "resolved_config_preserves_source_campaign_kind", experiment.get("source_campaign_kind") == "full_fidelity_binary_iterative_smoke")
+    _check(
+        stage,
+        "resolved_config_preserves_source_campaign_kind",
+        experiment.get("source_campaign_kind")
+        in {"full_fidelity_binary_iterative", "full_fidelity_binary_iterative_smoke"},
+    )
     _check(stage, "resolved_source_kind_present", bool(source.get("kind")))
     _check(stage, "resolved_source_target_present", bool(source.get("target")))
 
@@ -349,8 +354,22 @@ def validate_dry_run_artifacts(
         row = template_rows[0]
         for key in ("trace_template_hash", "render_template_hash", "inference_template_hash"):
             _check(stage, f"{key}_present", bool(row.get(key)))
-        _check(stage, "render_template_tied_to_truth_system", row.get("truth_system_hash") == _template_system_hash(run_root / "templates" / "render_template.json"))
-        _check(stage, "inference_template_tied_to_inference_system", row.get("inference_system_hash") == _template_system_hash(run_root / "templates" / "inference_template.json"))
+        render_system_hash = _template_system_hash(
+            run_root / "templates" / "render_template.json"
+        )
+        inference_system_hash = _template_system_hash(
+            run_root / "templates" / "inference_template.json"
+        )
+        _check(
+            stage,
+            "render_template_tied_to_truth_system",
+            truth_hash == render_system_hash,
+        )
+        _check(
+            stage,
+            "inference_template_tied_to_inference_system",
+            inference_hash == inference_system_hash,
+        )
 
     subblock_rows = _read_csv(run_root / "subblock_plan.csv")
     iterative_rows = _read_csv(run_root / "iterative_plan.csv")

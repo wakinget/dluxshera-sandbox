@@ -46,12 +46,14 @@ from dluxshera.inference.observation_belief import (
     MatrixDiagnostics,
     ObservationBeliefState,
     ObservationThetaLayout,
+    ObservationUpdatePolicy,
     SubblockSummary,
     accumulate_summary_information,
     build_observation_eigenbasis,
     build_prior_whitened_information_gain_matrix,
     build_system_observation_theta_layout,
     update_observation_belief,
+    update_observation_belief_with_policy,
 )
 from dluxshera.inference.observation_forecast import (
     DEFAULT_SYSTEM_PRESET,
@@ -1233,6 +1235,7 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
     update_gain = float(raw_cfg.get("update_gain", 1.0))
     safety_cfg = dict(raw_cfg.get("update_safety", raw_cfg.get("safety", {})) or {})
     update_mode = str(raw_cfg.get("update_mode", "physical_full"))
+    eigen_cfg = dict(raw_cfg.get("eigenbasis", {}) or {})
     min_sigma_by_label = safety_cfg.get("min_sigma_by_label")
     max_abs_update_by_label = safety_cfg.get("max_abs_update_by_label")
     posterior_sigma_policy = str(
@@ -1268,24 +1271,66 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
             + ", ".join(SUPPORTED_ITERATIVE_UPDATE_MODES)
             + "."
         )
-    if enabled and update_mode != "physical_full":
-        raise NotImplementedError(
-            "Only experiment.iterative.update_mode='physical_full' is implemented. "
-            f"{update_mode!r} is reserved for the next eigenbasis-aware "
-            "update-control patch."
-        )
     if windows_per_draw <= 0:
         raise ValueError("experiment.iterative.windows_per_draw must be positive.")
     if subblocks_per_window <= 0:
         raise ValueError("experiment.iterative.subblocks_per_window must be positive.")
     if not math.isfinite(update_gain):
         raise ValueError("experiment.iterative.update_gain must be finite.")
+    policy = ObservationUpdatePolicy(
+        update_mode=update_mode,
+        update_gain=update_gain,
+        basis_source=str(eigen_cfg.get("basis_source", "posterior_precision")),
+        gate_source=eigen_cfg.get("gate_source", "accumulated_information"),
+        whiten=bool(eigen_cfg.get("whiten", True)),
+        eig_floor_abs=float(eigen_cfg.get("eig_floor_abs", 0.0)),
+        eig_floor_rel=float(eigen_cfg.get("eig_floor_rel", 0.0)),
+        damping_mode=str(eigen_cfg.get("damping_mode", "none")),
+        damping_value=float(eigen_cfg.get("damping_value", 1.0)),
+        min_kept_modes=(
+            None
+            if eigen_cfg.get("min_kept_modes") is None
+            else int(eigen_cfg["min_kept_modes"])
+        ),
+        max_kept_modes=(
+            None
+            if eigen_cfg.get("max_kept_modes") is None
+            else int(eigen_cfg["max_kept_modes"])
+        ),
+        top_k_contributors=int(eigen_cfg.get("top_k_contributors", 8)),
+    )
     return {
         "enabled": enabled,
         "windows_per_draw": windows_per_draw,
         "subblocks_per_window": subblocks_per_window,
         "update_gain": update_gain,
         "update_mode": update_mode,
+        "eigenbasis": {
+            "basis_source": policy.basis_source,
+            "gate_source": policy.gate_source,
+            "whiten": policy.whiten,
+            "eig_floor_abs": policy.eig_floor_abs,
+            "eig_floor_rel": policy.eig_floor_rel,
+            "damping_mode": policy.damping_mode,
+            "damping_value": policy.damping_value,
+            "min_kept_modes": policy.min_kept_modes,
+            "max_kept_modes": policy.max_kept_modes,
+            "top_k_contributors": policy.top_k_contributors,
+        },
+        "update_policy": {
+            "update_mode": policy.update_mode,
+            "update_gain": policy.update_gain,
+            "basis_source": policy.basis_source,
+            "gate_source": policy.gate_source,
+            "whiten": policy.whiten,
+            "eig_floor_abs": policy.eig_floor_abs,
+            "eig_floor_rel": policy.eig_floor_rel,
+            "damping_mode": policy.damping_mode,
+            "damping_value": policy.damping_value,
+            "min_kept_modes": policy.min_kept_modes,
+            "max_kept_modes": policy.max_kept_modes,
+            "top_k_contributors": policy.top_k_contributors,
+        },
         "carry_prior_mean_with_reference": bool(
             raw_cfg.get("carry_prior_mean_with_reference", True)
         ),
@@ -1298,11 +1343,9 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
             "max_abs_update_by_label": dict(max_abs_update_by_label or {}),
             "reject_on_bad_frame_quality": bool(safety_cfg.get("reject_on_bad_frame_quality", True)),
             "reject_on_nonfinite_posterior": bool(safety_cfg.get("reject_on_nonfinite_posterior", True)),
-            "policy_note": "Plan-time conservative update audit only; physical_full update remains the existing bounded implementation.",
+            "policy_note": "Physical-label safety limits are applied after the policy-controlled physical update.",
         },
-        "future_update_modes": [
-            mode for mode in SUPPORTED_ITERATIVE_UPDATE_MODES if mode != "physical_full"
-        ],
+        "future_update_modes": [],
     }
 
 
@@ -2145,6 +2188,10 @@ def build_campaign_plan(
                 window_summary_path = window_case_root / "science_summary.csv"
                 reference_update_path = window_case_root / "iterative_reference_update.json"
                 window_diagnostic_path = window_case_root / "iterative_window_diagnostics.csv"
+                eigen_update_diagnostics_path = (
+                    window_case_root / "eigen_update_diagnostics.json"
+                )
+                eigen_update_modes_path = window_case_root / "eigen_update_modes.csv"
                 realized_command_path = (
                     window_case_root
                     / "commands"
@@ -2159,6 +2206,10 @@ def build_campaign_plan(
                     "window_summary_path": str(window_summary_path),
                     "iterative_reference_update_path": str(reference_update_path),
                     "window_diagnostic_path": str(window_diagnostic_path),
+                    "eigen_update_diagnostics_path": str(
+                        eigen_update_diagnostics_path
+                    ),
+                    "eigen_update_modes_path": str(eigen_update_modes_path),
                     "window_case_name": window_case_name,
                     "planned_command_template": " ".join(commands[case.case_name][-1]),
                     "realized_command_path": str(realized_command_path),
@@ -2199,6 +2250,10 @@ def build_campaign_plan(
                         "window_summary_path": str(window_summary_path),
                         "iterative_reference_update_path": str(reference_update_path),
                         "window_diagnostic_path": str(window_diagnostic_path),
+                        "eigen_update_diagnostics_path": str(
+                            eigen_update_diagnostics_path
+                        ),
+                        "eigen_update_modes_path": str(eigen_update_modes_path),
                         "window_case_name": window_case_name,
                         "realized_command_path": str(realized_command_path),
                         "realized_after_reference_update": True,
@@ -3573,6 +3628,29 @@ def run_case_forecast(
     }
 
 
+def _observation_update_policy(plan: CampaignPlan) -> ObservationUpdatePolicy:
+    return ObservationUpdatePolicy(**dict(plan.iterative.get("update_policy", {})))
+
+
+def _write_eigen_update_artifacts(
+    *,
+    case_root: Path,
+    labels: Sequence[str],
+    result: Any,
+) -> None:
+    diagnostics = dict(result.diagnostics)
+    diagnostics["physical_update_full_by_label"] = {
+        label: float(result.physical_update_full[index])
+        for index, label in enumerate(labels)
+    }
+    diagnostics["physical_update_applied_by_label"] = {
+        label: float(result.physical_update_applied[index])
+        for index, label in enumerate(labels)
+    }
+    _write_json(case_root / "eigen_update_diagnostics.json", diagnostics)
+    _write_csv_rows(case_root / "eigen_update_modes.csv", result.mode_rows)
+
+
 def aggregate_case(
     *,
     plan: CampaignPlan,
@@ -3642,7 +3720,17 @@ def aggregate_case(
             "case_origin": case.case_origin,
         },
     )
-    update = update_observation_belief(prior, summaries)
+    update_policy = _observation_update_policy(plan)
+    update = update_observation_belief_with_policy(
+        prior,
+        summaries,
+        policy=update_policy,
+    )
+    _write_eigen_update_artifacts(
+        case_root=case_root,
+        labels=plan.layout.labels,
+        result=update,
+    )
     accumulated = accumulate_summary_information(plan.layout.labels, summaries)
     posterior_sigma = update.posterior.sigma()
     truth, reference, offsets = _truth_reference_maps(
@@ -3756,7 +3844,8 @@ def aggregate_case(
         "n_summaries": len(summaries),
         "prior": prior.to_dict(),
         "posterior": update.posterior.to_dict(),
-        "information_vector": update.information_vector.tolist(),
+        "update_policy": dict(update.diagnostics),
+        "posterior_full": update.posterior_full.to_dict(),
         "prior_context": {
             "prior_mean_source": prior_mean_source,
             "provenance": prior_mean_provenance,
@@ -4266,6 +4355,7 @@ def _binary_iterative_diagnostic_row(
     previous_residual_norm: float | None,
     previous_next_reference_norm: float | None,
     n_subblocks: int,
+    eigen_update_diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     labels = tuple(plan.layout.labels)
     base = vector_update_diagnostics(
@@ -4286,6 +4376,34 @@ def _binary_iterative_diagnostic_row(
     missing_labels = [
         label for label in labels if posterior_offset_status.get(label) != "ok"
     ]
+    eigen_diag = dict(eigen_update_diagnostics or {})
+    relative = np.asarray(eigen_diag.get("eigenvalue_relative", []), dtype=float)
+    kept = np.asarray(eigen_diag.get("kept_mode_mask", []), dtype=bool)
+    min_kept = (
+        float(np.min(relative[kept]))
+        if relative.size and kept.size == relative.size and np.any(kept)
+        else float("nan")
+    )
+    max_rejected = (
+        float(np.max(relative[~kept]))
+        if relative.size and kept.size == relative.size and np.any(~kept)
+        else float("nan")
+    )
+    physical_full = np.asarray(eigen_diag.get("physical_update_full", []), dtype=float)
+    physical_applied = np.asarray(
+        eigen_diag.get("physical_update_applied", []),
+        dtype=float,
+    )
+    physical_after_safety = np.asarray(
+        [
+            float(next_offsets.get(label, 0.0))
+            - float(current_offsets.get(label, 0.0))
+            for label in labels
+        ],
+        dtype=float,
+    )
+    eigen_full = np.asarray(eigen_diag.get("eigen_update_full", []), dtype=float)
+    eigen_applied = np.asarray(eigen_diag.get("eigen_update_applied", []), dtype=float)
     return {
         "case_name": case.case_name,
         "case_origin": case.case_origin,
@@ -4293,6 +4411,36 @@ def _binary_iterative_diagnostic_row(
         "window_index": int(window_index),
         "update_gain": float(plan.iterative["update_gain"]),
         "update_mode": str(plan.iterative["update_mode"]),
+        "eigen_basis_source": eigen_diag.get(
+            "basis_source",
+            plan.iterative.get("eigenbasis", {}).get("basis_source", ""),
+        ),
+        "eigen_gate_source": eigen_diag.get(
+            "gate_source",
+            plan.iterative.get("eigenbasis", {}).get("gate_source", ""),
+        ),
+        "eigen_whiten": eigen_diag.get(
+            "whiten",
+            plan.iterative.get("eigenbasis", {}).get("whiten", False),
+        ),
+        "eigen_n_modes_total": int(eigen_diag.get("n_modes_total", 0)),
+        "eigen_n_modes_kept": int(eigen_diag.get("n_modes_kept", 0)),
+        "eigen_min_kept_eigenvalue_rel": min_kept,
+        "eigen_max_rejected_eigenvalue_rel": max_rejected,
+        "physical_update_norm_full": float(np.linalg.norm(physical_full)),
+        "physical_update_norm_applied": float(
+            np.linalg.norm(physical_after_safety)
+            if physical_after_safety.size
+            else np.linalg.norm(physical_applied)
+        ),
+        "eigen_update_norm_full": (
+            float(np.linalg.norm(eigen_full)) if eigen_full.size else float("nan")
+        ),
+        "eigen_update_norm_applied": (
+            float(np.linalg.norm(eigen_applied))
+            if eigen_applied.size
+            else float("nan")
+        ),
         "n_subblocks": int(n_subblocks),
         **base,
         **separation_update_diagnostics(
@@ -4331,6 +4479,67 @@ def _binary_iterative_diagnostic_row(
             labels, posterior_offsets, "optics.secondary.zernike_coeffs_nm"
         ),
     }
+
+
+def _apply_iterative_update_safety(
+    *,
+    labels: Sequence[str],
+    current_offsets: Mapping[str, float],
+    proposed_offsets: Mapping[str, float],
+    safety_cfg: Mapping[str, Any],
+) -> dict[str, float]:
+    next_offsets = {
+        str(label): float(proposed_offsets.get(label, current_offsets.get(label, 0.0)))
+        for label in labels
+    }
+    if not bool(safety_cfg.get("enabled", False)):
+        return next_offsets
+    limits = dict(safety_cfg.get("max_abs_update_by_label", {}) or {})
+    for label in labels:
+        raw_limit = limits.get(label)
+        if raw_limit is None:
+            continue
+        limit = float(raw_limit)
+        if not math.isfinite(limit) or limit < 0.0:
+            raise ValueError(
+                "experiment.iterative.update_safety.max_abs_update_by_label "
+                f"contains invalid limit for {label!r}."
+            )
+        current = float(current_offsets.get(label, 0.0))
+        delta = float(next_offsets[label] - current)
+        next_offsets[label] = current + float(np.clip(delta, -limit, limit))
+    return next_offsets
+
+
+def _resolved_next_offsets(
+    *,
+    plan: CampaignPlan,
+    current_offsets: Mapping[str, float],
+    posterior_offsets: Mapping[str, float],
+    posterior_rows: Mapping[str, Mapping[str, Any]],
+    posterior_truth: Mapping[str, float],
+    eigen_update_diagnostics: Mapping[str, Any],
+) -> dict[str, float]:
+    if eigen_update_diagnostics:
+        proposed = dict(posterior_offsets)
+    elif str(plan.iterative.get("update_mode", "physical_full")) == "physical_full":
+        proposed = apply_physical_reference_update(
+            current_offsets=current_offsets,
+            posterior_rows_by_label=posterior_rows,
+            truth_by_label=posterior_truth,
+            update_gain=float(plan.iterative["update_gain"]),
+        )
+    else:
+        raise RuntimeError(
+            "Eigen update mode requires eigen_update_diagnostics.json for "
+            "resume or aggregate-only processing."
+        )
+    return _apply_iterative_update_safety(
+        labels=plan.layout.labels,
+        current_offsets=current_offsets,
+        proposed_offsets=proposed,
+        safety_cfg=plan.iterative.get("update_safety", {}),
+    )
 
 
 def _scalar_nested_value(payload: Mapping[str, Any], path: Sequence[str]) -> float | None:
@@ -4568,12 +4777,34 @@ def execute_iterative_campaign(
                 truth_by_label=posterior_truth,
                 fallback_offsets=current_offsets,
             )
-            next_offsets = apply_physical_reference_update(
-                current_offsets=current_offsets,
-                posterior_rows_by_label=posterior_rows,
-                truth_by_label=posterior_truth,
-                update_gain=float(plan.iterative["update_gain"]),
+            realized_root = plan.run_root / "cases" / window_case.case_name
+            eigen_update_path = realized_root / "eigen_update_diagnostics.json"
+            eigen_update_diagnostics = (
+                json.loads(eigen_update_path.read_text(encoding="utf-8"))
+                if eigen_update_path.exists()
+                else {}
             )
+            next_offsets = _resolved_next_offsets(
+                plan=plan,
+                current_offsets=current_offsets,
+                posterior_offsets=posterior_offsets,
+                posterior_rows=posterior_rows,
+                posterior_truth=posterior_truth,
+                eigen_update_diagnostics=eigen_update_diagnostics,
+            )
+            if eigen_update_diagnostics:
+                safety_applied = {
+                    label: float(next_offsets.get(label, 0.0))
+                    - float(current_offsets.get(label, 0.0))
+                    for label in plan.layout.labels
+                }
+                eigen_update_diagnostics["physical_update_after_safety_by_label"] = (
+                    safety_applied
+                )
+                eigen_update_diagnostics["physical_update_norm_after_safety"] = float(
+                    np.linalg.norm(list(safety_applied.values()))
+                )
+                _write_json(eigen_update_path, eigen_update_diagnostics)
             row = _binary_iterative_diagnostic_row(
                 plan=plan,
                 case=case,
@@ -4586,6 +4817,7 @@ def execute_iterative_campaign(
                 previous_residual_norm=previous_residual_by_case.get(case.case_name),
                 previous_next_reference_norm=previous_next_reference_by_case.get(case.case_name),
                 n_subblocks=int(plan.iterative["subblocks_per_window"]),
+                eigen_update_diagnostics=eigen_update_diagnostics,
             )
             diagnostics.append(row)
             previous_residual_by_case[case.case_name] = float(
@@ -4594,7 +4826,6 @@ def execute_iterative_campaign(
             previous_next_reference_by_case[case.case_name] = float(
                 row["next_reference_error_norm"]
             )
-            realized_root = plan.run_root / "cases" / window_case.case_name
             _write_csv_rows(realized_root / "iterative_window_diagnostics.csv", [row])
             _write_json(
                 realized_root / "iterative_reference_update.json",
@@ -4608,6 +4839,10 @@ def execute_iterative_campaign(
                     "current_offsets": dict(current_offsets),
                     "posterior_offsets": dict(posterior_offsets),
                     "next_offsets": dict(next_offsets),
+                    "eigen_update_diagnostics_path": str(eigen_update_path),
+                    "eigen_update_modes_path": str(
+                        realized_root / "eigen_update_modes.csv"
+                    ),
                     "truth_by_label": dict(posterior_truth),
                     "posterior_table_path": str(expected_posterior),
                     "diagnostics": row,
@@ -4633,6 +4868,8 @@ def _iterative_inventory_rows(plan: CampaignPlan) -> tuple[list[dict[str, Any]],
         ("window_summary", "window_summary_path"),
         ("iterative_reference_update", "iterative_reference_update_path"),
         ("window_diagnostic", "window_diagnostic_path"),
+        ("eigen_update_diagnostics", "eigen_update_diagnostics_path"),
+        ("eigen_update_modes", "eigen_update_modes_path"),
         ("realized_command", "realized_command_path"),
     )
     for row in plan.expected_output_rows:
@@ -4757,11 +4994,20 @@ def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
             truth_by_label=posterior_truth,
             fallback_offsets=current_offsets,
         )
-        next_offsets = apply_physical_reference_update(
+        window_root = posterior_path.parent
+        eigen_update_path = window_root / "eigen_update_diagnostics.json"
+        eigen_update_diagnostics = (
+            json.loads(eigen_update_path.read_text(encoding="utf-8"))
+            if eigen_update_path.exists()
+            else {}
+        )
+        next_offsets = _resolved_next_offsets(
+            plan=plan,
             current_offsets=current_offsets,
-            posterior_rows_by_label=posterior_rows,
-            truth_by_label=posterior_truth,
-            update_gain=float(plan.iterative["update_gain"]),
+            posterior_offsets=posterior_offsets,
+            posterior_rows=posterior_rows,
+            posterior_truth=posterior_truth,
+            eigen_update_diagnostics=eigen_update_diagnostics,
         )
         row = _binary_iterative_diagnostic_row(
             plan=plan,
@@ -4775,6 +5021,7 @@ def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
             previous_residual_norm=previous_residual_by_case.get(case_name),
             previous_next_reference_norm=previous_next_reference_by_case.get(case_name),
             n_subblocks=int(plan.iterative["subblocks_per_window"]),
+            eigen_update_diagnostics=eigen_update_diagnostics,
         )
         diagnostics.append(row)
         previous_residual_by_case[case_name] = float(row["posterior_error_norm_after"])
@@ -5057,35 +5304,64 @@ def _validate_stored_replay_plan(
     plan: CampaignPlan,
     stored_plan: Mapping[str, Any],
     stored_plan_path: Path,
+    config_path: Path | None,
 ) -> dict[str, Any]:
     validate_stored_trace_source_artifacts(stored_plan)
     validate_campaign_model_split_artifacts(stored_plan)
+    current_config = _load_campaign_config(config_path)
+    current_experiment = current_config.get("experiment", {})
+    current_iterative = _resolve_iterative_config(current_experiment)
+    current_prior_draws = dict(current_experiment.get("prior_draws", {}) or {})
+    current_case_count = (
+        int(current_prior_draws.get("n_cases", 0))
+        if bool(current_prior_draws.get("enabled", False))
+        else len(current_experiment.get("bias_cases", []) or [])
+    )
+    current_expected_outputs = (
+        current_case_count
+        * int(current_iterative["windows_per_draw"])
+        * int(current_iterative["subblocks_per_window"])
+    )
+    validations = [
+        {
+            "field": "case_count",
+            "stored": len(plan.cases),
+            "current": current_case_count,
+            "match": len(plan.cases) == current_case_count,
+        },
+        {
+            "field": "expected_outputs_count",
+            "stored": len(plan.expected_output_rows),
+            "current": current_expected_outputs,
+            "match": len(plan.expected_output_rows) == current_expected_outputs,
+        },
+        {
+            "field": "iterative_plan_count",
+            "stored": len(plan.iterative_plan_rows),
+            "current": current_expected_outputs,
+            "match": len(plan.iterative_plan_rows) == current_expected_outputs,
+        },
+    ]
+    mismatches = [row for row in validations if not bool(row["match"])]
     payload = {
         "schema_version": "observation_bias_aggregate_only_plan_validation.v1",
         "created_at": now_iso_local_ms(),
         "stored_plan_used": True,
         "stored_plan_path": str(stored_plan_path),
         "replay_mode": "stored_plan_subblock_constant_smear",
-        "validated_fields": [
-            {"field": "case_count", "stored": len(plan.cases), "current": len(plan.cases), "match": True},
-            {
-                "field": "expected_outputs_count",
-                "stored": len(plan.expected_output_rows),
-                "current": len(plan.expected_output_rows),
-                "match": True,
-            },
-            {
-                "field": "iterative_plan_count",
-                "stored": len(plan.iterative_plan_rows),
-                "current": len(plan.iterative_plan_rows),
-                "match": True,
-            },
+        "validated_fields": validations
+        + [
             {"field": "theta_layout.labels", "stored": list(plan.layout.labels), "current": list(plan.layout.labels), "match": True},
         ],
-        "mismatches": [],
-        "status": "ok",
+        "mismatches": mismatches,
+        "status": "ok" if not mismatches else "mismatch",
     }
     _write_json(plan.run_root / "analysis" / "aggregate_only_plan_validation.json", payload)
+    if mismatches:
+        raise ValueError(
+            "Aggregate-only config does not match the stored campaign plan: "
+            + ", ".join(str(row["field"]) for row in mismatches)
+        )
     return payload
 
 
@@ -5148,6 +5424,7 @@ def run_observation_bias_campaign(
                     plan=plan,
                     stored_plan=stored_plan,
                     stored_plan_path=stored_plan_path,
+                    config_path=config_path,
                 )
                 if bool(plan.iterative.get("enabled", False)):
                     return aggregate_iterative_outputs(plan)

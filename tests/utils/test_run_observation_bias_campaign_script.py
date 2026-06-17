@@ -216,6 +216,87 @@ def test_bias_case_parsing_validates_layout_keys(tmp_path: Path):
         )
 
 
+@pytest.mark.parametrize(
+    "update_mode",
+    ["physical_full", "eigen_full", "eigen_damped", "eigen_truncated"],
+)
+def test_iterative_update_policy_accepts_supported_modes(update_mode: str):
+    module = load_module()
+    resolved = module._resolve_iterative_config(
+        {
+            "subblocks": {"n_subblocks": 1},
+            "iterative": {
+                "enabled": True,
+                "windows_per_draw": 1,
+                "subblocks_per_window": 1,
+                "update_mode": update_mode,
+                "update_gain": 0.5,
+                "eigenbasis": {
+                    "basis_source": "posterior_precision",
+                    "gate_source": "accumulated_information",
+                    "whiten": True,
+                    "eig_floor_rel": 1.0e-10,
+                    "damping_mode": "information",
+                    "damping_value": 1.0,
+                    "min_kept_modes": 1,
+                },
+            },
+        }
+    )
+
+    assert resolved["update_mode"] == update_mode
+    assert resolved["update_policy"]["update_mode"] == update_mode
+    assert resolved["update_policy"]["min_kept_modes"] == 1
+
+
+def test_iterative_update_policy_defaults_to_physical_full():
+    module = load_module()
+    resolved = module._resolve_iterative_config(
+        {"subblocks": {"n_subblocks": 1}}
+    )
+
+    assert resolved["update_mode"] == "physical_full"
+    assert resolved["update_policy"]["update_mode"] == "physical_full"
+
+
+def test_campaign_plan_records_resolved_iterative_update_policy(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["iterative"] = {
+        "enabled": True,
+        "windows_per_draw": 1,
+        "subblocks_per_window": 1,
+        "update_mode": "eigen_truncated",
+        "update_gain": 0.25,
+        "eigenbasis": {
+            "basis_source": "posterior_precision",
+            "gate_source": "accumulated_information",
+            "whiten": True,
+            "eig_floor_rel": 1.0e-8,
+            "min_kept_modes": 1,
+        },
+    }
+    payload["experiment"]["subblocks"]["n_subblocks"] = 1
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="policy_plan",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    plan_payload = module._plan_payload(plan)
+
+    assert plan_payload["iterative"]["update_mode"] == "eigen_truncated"
+    assert plan_payload["iterative"]["update_policy"]["update_gain"] == 0.25
+    assert (
+        plan_payload["iterative"]["update_policy"]["gate_source"]
+        == "accumulated_information"
+    )
+
+
 def test_trajectory_smear_dry_run_records_sidecars(tmp_path: Path):
     module = load_module()
     config_path = tmp_path / "campaign.json"
@@ -935,6 +1016,8 @@ def test_aggregate_update_from_synthetic_summaries(tmp_path: Path):
 
     case_root = Path(result["case_root"])
     assert (case_root / "posterior_by_label.csv").exists()
+    assert (case_root / "eigen_update_diagnostics.json").exists()
+    assert (case_root / "eigen_update_modes.csv").exists()
     assert (case_root / "eigenvalues_accumulated_information.csv").exists()
     assert (case_root / "eigenvalues_posterior_precision.csv").exists()
     assert (case_root / "weak_mode_summary_accumulated_information.csv").exists()
@@ -949,6 +1032,52 @@ def test_aggregate_update_from_synthetic_summaries(tmp_path: Path):
     )
     assert "accumulated_information" in matrix_diag
     assert "posterior_precision" in matrix_diag
+
+
+def test_aggregate_case_routes_eigen_truncated_policy(tmp_path: Path):
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["iterative"] = {
+        "enabled": True,
+        "windows_per_draw": 1,
+        "subblocks_per_window": 2,
+        "update_mode": "eigen_truncated",
+        "update_gain": 0.5,
+        "eigenbasis": {
+            "basis_source": "accumulated_information",
+            "gate_source": "accumulated_information",
+            "whiten": False,
+            "eig_floor_abs": 2.0,
+            "min_kept_modes": 1,
+        },
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="aggregate_eigen",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    case = plan.cases[1]
+    truth = plan.prior_truth.copy()
+    theta_ref = truth.copy()
+    theta_ref[1:] += 5.0
+    for path in plan.summary_paths[case.case_name]:
+        write_summary(path, plan.layout.labels, theta_ref, truth)
+
+    result = module.aggregate_case(
+        plan=plan,
+        case=case,
+        prior_source="summary_theta_ref",
+    )
+    diagnostics = json.loads(
+        (Path(result["case_root"]) / "eigen_update_diagnostics.json").read_text()
+    )
+
+    assert diagnostics["update_mode"] == "eigen_truncated"
+    assert diagnostics["n_modes_kept"] < diagnostics["n_modes_total"]
 
 
 def test_forecast_grid_inserts_actual_count_and_rejects_invalid():

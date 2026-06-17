@@ -85,6 +85,21 @@ experiment:
 
   history_prefixes: [1, 2, 3, 5, 10, 30, 100, 300, 1000, 1800]
 
+  update_policy:
+    update_mode: physical_full
+    update_gain: 1.0
+    eigenbasis:
+      basis_source: posterior_precision
+      gate_source: accumulated_information
+      whiten: true
+      eig_floor_abs: 0.0
+      eig_floor_rel: 1.0e-10
+      damping_mode: none
+      damping_value: 1.0
+      min_kept_modes: 1
+      max_kept_modes: null
+      top_k_contributors: 8
+
   eigenbasis:
     enabled: true
     sources:

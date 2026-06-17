@@ -33,6 +33,17 @@ experiment:
     update_gain: 1.0
     update_mode: physical_full
     carry_prior_mean_with_reference: true
+    eigenbasis:
+      basis_source: posterior_precision
+      gate_source: accumulated_information
+      whiten: true
+      eig_floor_abs: 0.0
+      eig_floor_rel: 1.0e-10
+      damping_mode: none
+      damping_value: 1.0
+      min_kept_modes: 1
+      max_kept_modes: null
+      top_k_contributors: 8
 
   seeding:
     seed_policy: different_jitter_different_noise

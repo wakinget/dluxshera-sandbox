@@ -63,6 +63,27 @@ def test_config_translation_accepts_full_fidelity_smoke() -> None:
         assert key in experiment
 
 
+def test_config_translation_preserves_iterative_eigenbasis_policy() -> None:
+    module = load_module()
+    raw = module.load_config_file(CONFIG_PATH)
+    raw["experiment"]["iterative"]["update_mode"] = "eigen_truncated"
+    raw["experiment"]["iterative"]["update_gain"] = 0.25
+    raw["experiment"]["iterative"]["eigenbasis"] = {
+        "basis_source": "posterior_precision",
+        "gate_source": "accumulated_information",
+        "whiten": True,
+        "eig_floor_rel": 1.0e-8,
+        "min_kept_modes": 1,
+    }
+
+    translated = module._full_fidelity_to_observation_bias(raw, run_name="unit")
+    iterative = translated["experiment"]["iterative"]
+
+    assert iterative["update_mode"] == "eigen_truncated"
+    assert iterative["update_gain"] == 0.25
+    assert iterative["eigenbasis"]["min_kept_modes"] == 1
+
+
 def test_config_translation_rejects_unsupported_kind() -> None:
     module = load_module()
     try:

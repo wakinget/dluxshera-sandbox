@@ -109,6 +109,40 @@ def write_config(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    "update_mode",
+    ["physical_full", "eigen_full", "eigen_damped", "eigen_truncated"],
+)
+def test_update_policy_parser_accepts_supported_modes(update_mode: str):
+    module = load_module()
+    policy = module._resolve_update_policy(
+        {
+            "update_policy": {
+                "update_mode": update_mode,
+                "update_gain": 0.5,
+                "eigenbasis": {
+                    "basis_source": "posterior_precision",
+                    "gate_source": "accumulated_information",
+                    "eig_floor_rel": 1.0e-9,
+                    "min_kept_modes": 1,
+                },
+            }
+        }
+    )
+
+    assert policy.update_mode == update_mode
+    assert policy.update_gain == 0.5
+    assert policy.min_kept_modes == 1
+
+
+def test_update_policy_parser_defaults_to_physical_full():
+    module = load_module()
+    policy = module._resolve_update_policy({})
+
+    assert policy.update_mode == "physical_full"
+    assert policy.update_gain == 1.0
+
+
 def write_truth_realization_config(
     path: Path,
     *,
@@ -805,6 +839,15 @@ def test_aggregate_math_does_not_assume_binary_labels(tmp_path: Path) -> None:
     assert "posterior_error_over_sigma" in rows[0]
     assert "source.separation_as" not in posterior_csv.read_text(encoding="utf-8")
     assert (plan.run_root / "cases" / case.case_name / "posterior_history.csv").exists()
+    assert (
+        plan.run_root
+        / "cases"
+        / case.case_name
+        / "eigen_update_diagnostics.json"
+    ).exists()
+    assert (
+        plan.run_root / "cases" / case.case_name / "eigen_update_modes.csv"
+    ).exists()
 
 
 def test_zero_bias_posterior_metrics_mark_fractions_undefined(tmp_path: Path) -> None:

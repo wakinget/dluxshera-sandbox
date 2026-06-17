@@ -256,6 +256,16 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
         _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
     )
     iterative = _as_mapping(experiment.get("iterative"), name="experiment.iterative")
+    iterative_eigenbasis = _as_mapping(
+        iterative.get("eigenbasis"),
+        name="experiment.iterative.eigenbasis",
+    )
+    iterative = {
+        **iterative,
+        "update_mode": str(iterative.get("update_mode", "physical_full")),
+        "update_gain": float(iterative.get("update_gain", 1.0)),
+        "eigenbasis": iterative_eigenbasis,
+    }
     source_kind = str(experiment.get("source_kind", "binary_target"))
     target = experiment.get("target", "ALPHA_CEN")
     n_cases = int(experiment.get("n_cases", 1))

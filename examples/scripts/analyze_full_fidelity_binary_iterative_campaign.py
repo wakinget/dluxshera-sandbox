@@ -184,6 +184,18 @@ def display_offset(label: str, value: float) -> str:
 
 def validate_required(run_root: Path, strict: bool) -> list[str]:
     missing = [p for p in REQUIRED_ARTIFACTS if not (run_root / p).exists()]
+    summary = read_json(run_root / "campaign_summary.json", {})
+    update_mode = str(summary.get("update_mode", "physical_full"))
+    if strict and update_mode.startswith("eigen_"):
+        eigen_paths = list(
+            run_root.glob(
+                "cases/*/windows/window_*/eigen_update_diagnostics.json"
+            )
+        )
+        if not eigen_paths:
+            missing.append(
+                "cases/*/windows/window_*/eigen_update_diagnostics.json"
+            )
     if strict and missing:
         raise FileNotFoundError("Missing required campaign artifacts: " + ", ".join(missing))
     return missing
@@ -218,6 +230,10 @@ def iterative_window_progress(run_root: Path) -> pd.DataFrame:
         "n_subblocks",
         "update_gain",
         "update_mode",
+        "eigen_n_modes_kept",
+        "eigen_n_modes_total",
+        "eigen_min_kept_eigenvalue_rel",
+        "eigen_max_rejected_eigenvalue_rel",
         "reference_error_norm_before",
         "posterior_error_norm_after",
         "next_reference_error_norm",
@@ -244,6 +260,99 @@ def iterative_window_progress(run_root: Path) -> pd.DataFrame:
         if col not in top.columns:
             top[col] = np.nan
     return top[wanted].sort_values(["case_name", "window_index"], na_position="last")
+
+
+def eigen_update_tables(
+    run_root: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    mode_frames: list[pd.DataFrame] = []
+    summary_rows: list[dict[str, Any]] = []
+    contribution_rows: list[dict[str, Any]] = []
+    for path in sorted(
+        run_root.glob("cases/*/windows/window_*/eigen_update_diagnostics.json")
+    ):
+        data = read_json(path, {})
+        case_name, window_index = parse_window_path(path)
+        relative = np.asarray(data.get("eigenvalue_relative", []), dtype=float)
+        kept = np.asarray(data.get("kept_mode_mask", []), dtype=bool)
+        summary_rows.append(
+            {
+                "case_name": case_name,
+                "window_index": window_index,
+                "update_mode": data.get("update_mode", ""),
+                "basis_source": data.get("basis_source", ""),
+                "gate_source": data.get("gate_source", ""),
+                "whiten": data.get("whiten", False),
+                "n_modes_total": data.get("n_modes_total", 0),
+                "n_modes_kept": data.get("n_modes_kept", 0),
+                "min_kept_relative_eigenvalue": (
+                    float(np.min(relative[kept]))
+                    if relative.size and kept.size == relative.size and np.any(kept)
+                    else np.nan
+                ),
+                "max_rejected_relative_eigenvalue": (
+                    float(np.max(relative[~kept]))
+                    if relative.size
+                    and kept.size == relative.size
+                    and np.any(~kept)
+                    else np.nan
+                ),
+                "physical_update_norm_full": float(
+                    np.linalg.norm(data.get("physical_update_full", []))
+                ),
+                "physical_update_norm_applied": float(
+                    np.linalg.norm(data.get("physical_update_applied", []))
+                ),
+                "eigen_update_norm_full": float(
+                    np.linalg.norm(data.get("eigen_update_full", []))
+                ),
+                "eigen_update_norm_applied": float(
+                    np.linalg.norm(data.get("eigen_update_applied", []))
+                ),
+                "source_path": rel(path, run_root),
+            }
+        )
+        modes_path = path.with_name("eigen_update_modes.csv")
+        modes = read_csv(modes_path)
+        if modes.empty:
+            modes = pd.DataFrame(data.get("mode_rows", []))
+        if modes.empty:
+            continue
+        modes.insert(0, "source_path", rel(modes_path, run_root))
+        modes.insert(0, "window_index", window_index)
+        modes.insert(0, "case_name", case_name)
+        mode_frames.append(modes)
+        for _, row in modes.iterrows():
+            contribution_rows.append(
+                {
+                    "case_name": case_name,
+                    "window_index": window_index,
+                    "mode_index": row.get("mode_index", np.nan),
+                    "kept": row.get("kept", np.nan),
+                    "dominant_labels": row.get("top_contributors", ""),
+                    "source_group_norm": row.get("group_norm_source", np.nan),
+                    "plate_scale_group_norm": row.get(
+                        "group_norm_optics.plate_scale",
+                        np.nan,
+                    ),
+                    "m1_group_norm": row.get(
+                        "group_norm_optics.primary_zernikes",
+                        np.nan,
+                    ),
+                    "m2_group_norm": row.get(
+                        "group_norm_optics.secondary_zernikes",
+                        np.nan,
+                    ),
+                }
+            )
+    combined_modes = (
+        pd.concat(mode_frames, ignore_index=True) if mode_frames else pd.DataFrame()
+    )
+    return (
+        combined_modes,
+        pd.DataFrame(summary_rows),
+        pd.DataFrame(contribution_rows),
+    )
 
 
 def iterative_parameter_progress(run_root: Path) -> pd.DataFrame:
@@ -869,6 +978,9 @@ def run(args: argparse.Namespace) -> int:
     }
 
     win = iterative_window_progress(run_root)
+    eigen_update_modes, eigen_update_summary, eigen_update_contributions = (
+        eigen_update_tables(run_root)
+    )
     param = iterative_parameter_progress(run_root)
     posterior = combine_window_tables(run_root, "posterior_by_label.csv")
     science = combine_window_tables(run_root, "science_summary.csv")
@@ -887,6 +999,9 @@ def run(args: argparse.Namespace) -> int:
         "campaign_dashboard.csv": dashboard,
         "execution_status.csv": exec_status,
         "iterative_window_progress.csv": win,
+        "eigen_update_modes.csv": eigen_update_modes,
+        "eigen_update_window_summary.csv": eigen_update_summary,
+        "eigen_update_mode_contributions.csv": eigen_update_contributions,
         "iterative_parameter_progress.csv": param,
         "posterior_by_label_combined.csv": posterior,
         "science_summary_combined.csv": science,

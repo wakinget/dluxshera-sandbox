@@ -47,12 +47,13 @@ from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.observation_belief import (
     ObservationBeliefState,
     ObservationThetaLayout,
+    ObservationUpdatePolicy,
     SubblockSummary,
     accumulate_summary_information,
     build_observation_eigenbasis,
     build_prior_whitened_information_gain_matrix,
     build_system_observation_theta_layout,
-    update_observation_belief,
+    update_observation_belief_with_policy,
 )
 from dluxshera.inference.observation_forecast import (
     DEFAULT_SYSTEM_PRESET,
@@ -290,6 +291,22 @@ def _default_experiment_config() -> dict[str, Any]:
             "include_zero_bias_case": True,
         },
         "history_prefixes": [1, 2, 3, 5, 10, 30, 100, 300, 1000, 1800],
+        "update_policy": {
+            "update_mode": "physical_full",
+            "update_gain": 1.0,
+            "eigenbasis": {
+                "basis_source": "posterior_precision",
+                "gate_source": "accumulated_information",
+                "whiten": True,
+                "eig_floor_abs": 0.0,
+                "eig_floor_rel": 0.0,
+                "damping_mode": "none",
+                "damping_value": 1.0,
+                "min_kept_modes": None,
+                "max_kept_modes": None,
+                "top_k_contributors": 8,
+            },
+        },
         "eigenbasis": {
             "enabled": True,
             "sources": ["accumulated_information", "posterior_precision"],
@@ -1612,6 +1629,33 @@ def _posterior_metric_rows(
     return rows
 
 
+def _resolve_update_policy(experiment_cfg: Mapping[str, Any]) -> ObservationUpdatePolicy:
+    raw = dict(experiment_cfg.get("update_policy", {}) or {})
+    eigen = dict(raw.get("eigenbasis", {}) or {})
+    return ObservationUpdatePolicy(
+        update_mode=str(raw.get("update_mode", "physical_full")),
+        update_gain=float(raw.get("update_gain", 1.0)),
+        basis_source=str(eigen.get("basis_source", "posterior_precision")),
+        gate_source=eigen.get("gate_source", "accumulated_information"),
+        whiten=bool(eigen.get("whiten", True)),
+        eig_floor_abs=float(eigen.get("eig_floor_abs", 0.0)),
+        eig_floor_rel=float(eigen.get("eig_floor_rel", 0.0)),
+        damping_mode=str(eigen.get("damping_mode", "none")),
+        damping_value=float(eigen.get("damping_value", 1.0)),
+        min_kept_modes=(
+            None
+            if eigen.get("min_kept_modes") is None
+            else int(eigen["min_kept_modes"])
+        ),
+        max_kept_modes=(
+            None
+            if eigen.get("max_kept_modes") is None
+            else int(eigen["max_kept_modes"])
+        ),
+        top_k_contributors=int(eigen.get("top_k_contributors", 8)),
+    )
+
+
 def _history_rows(
     *,
     case_name: str,
@@ -1630,8 +1674,13 @@ def _history_rows(
         prefixes.append(len(summaries))
     subblock_duration = float(plan.config["experiment"].get("forecast", {}).get("subblock_duration_s", 1.0))
     rows: list[dict[str, Any]] = []
+    policy = _resolve_update_policy(plan.config["experiment"])
     for count in sorted(set(prefixes)):
-        update = update_observation_belief(prior, summaries[:count])
+        update = update_observation_belief_with_policy(
+            prior,
+            summaries[:count],
+            policy=policy,
+        )
         sigma = update.posterior.sigma()
         for index, label in enumerate(plan.layout.labels):
             posterior_error = float(update.posterior.mean[index] - truth[index])
@@ -1641,6 +1690,9 @@ def _history_rows(
                     "case_name": case_name,
                     "n_subblocks": int(count),
                     "calibration_time_s": float(count * subblock_duration),
+                    "update_mode": policy.update_mode,
+                    "n_modes_kept": update.diagnostics.get("n_modes_kept"),
+                    "n_modes_total": update.diagnostics.get("n_modes_total"),
                     "theta_label": label,
                     "posterior_mean": float(update.posterior.mean[index]),
                     "posterior_sigma": float(sigma[index]),
@@ -1746,6 +1798,7 @@ def _write_forecast_outputs(
     subblock_duration = float(cfg.get("subblock_duration_s", 1.0))
     by_parameter: list[dict[str, Any]] = []
     trial_rows: list[dict[str, Any]] = []
+    update_policy = _resolve_update_policy(plan.config["experiment"])
 
     def append_rows(mode: str, count: int, update: Any, trial_index: int | None = None) -> None:
         sigma = update.posterior.sigma()
@@ -1755,6 +1808,7 @@ def _write_forecast_outputs(
             row = {
                 "case_name": case_name,
                 "forecast_mode": mode,
+                "update_mode": update_policy.update_mode,
                 "n_subblocks": int(count),
                 "calibration_time_s": float(count * subblock_duration),
                 "theta_label": label,
@@ -1782,7 +1836,11 @@ def _write_forecast_outputs(
 
     if "replicate" in modes:
         for count in grid:
-            update = update_observation_belief(prior, _replicate_summaries(summaries, count))
+            update = update_observation_belief_with_policy(
+                prior,
+                _replicate_summaries(summaries, count),
+                policy=update_policy,
+            )
             append_rows("replicate", count, update)
 
     if "fixed_information_score_noise" in modes:
@@ -1816,7 +1874,11 @@ def _write_forecast_outputs(
                         )
                     )
                 for count in grid:
-                    update = update_observation_belief(prior, synthetic[:count])
+                    update = update_observation_belief_with_policy(
+                        prior,
+                        synthetic[:count],
+                        policy=update_policy,
+                    )
                     append_rows("fixed_information_score_noise", count, update, trial_index)
 
     _write_csv(case_root / "forecast_by_parameter.csv", by_parameter)
@@ -1884,7 +1946,12 @@ def aggregate_case(
         summary_scale_policy=summary_scale_policy,
     )
     prior, truth, reference, prior_sigma = _prior_for_case(plan, case, summaries)
-    update = update_observation_belief(prior, summaries)
+    update_policy = _resolve_update_policy(plan.config["experiment"])
+    update = update_observation_belief_with_policy(
+        prior,
+        summaries,
+        policy=update_policy,
+    )
     accumulated = accumulate_summary_information(plan.layout.labels, summaries)
     history = _history_rows(
         case_name=case.case_name,
@@ -1906,6 +1973,17 @@ def aggregate_case(
     )
     _write_csv(case_root / "posterior_by_parameter.csv", posterior_rows)
     _write_csv(case_root / "posterior_history.csv", history)
+    update_diagnostics = dict(update.diagnostics)
+    update_diagnostics["physical_update_full_by_label"] = {
+        label: float(update.physical_update_full[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+    update_diagnostics["physical_update_applied_by_label"] = {
+        label: float(update.physical_update_applied[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+    _write_json(case_root / "eigen_update_diagnostics.json", update_diagnostics)
+    _write_csv(case_root / "eigen_update_modes.csv", update.mode_rows)
     _write_json(
         case_root / "single_star_consistency_diagnostics.json",
         _single_star_consistency_diagnostics(
@@ -1924,6 +2002,8 @@ def aggregate_case(
             "case_name": case.case_name,
             "n_summaries": len(summaries),
             "posterior": update.posterior.to_dict(),
+            "posterior_full": update.posterior_full.to_dict(),
+            "update_policy": update_diagnostics,
             "prior": prior.to_dict(),
             "summary_paths": [str(path) for path in plan.summary_paths[case.case_name]],
             "summary_scale_validation": summary_scale_validation,

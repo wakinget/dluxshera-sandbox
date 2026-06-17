@@ -286,3 +286,68 @@ def test_dashboard_progress_slow_state_mismatch_and_smear_outputs(tmp_path):
 
     report = (outdir / "review_summary.md").read_text()
     assert "Full-fidelity binary iterative campaign review" in report
+
+
+def test_analysis_reads_eigen_update_artifacts(tmp_path):
+    run_root = make_run_root(tmp_path)
+    window = run_root / "cases/case_000/windows/window_000"
+    diagnostics = {
+        "update_mode": "eigen_truncated",
+        "basis_source": "posterior_precision",
+        "gate_source": "accumulated_information",
+        "whiten": True,
+        "n_modes_total": 2,
+        "n_modes_kept": 1,
+        "eigenvalue_relative": [1.0, 1.0e-9],
+        "kept_mode_mask": [True, False],
+        "physical_update_full": [1.0, 2.0],
+        "physical_update_applied": [1.0, 0.0],
+        "eigen_update_full": [1.0, 2.0],
+        "eigen_update_applied": [1.0, 0.0],
+    }
+    write_json(window / "eigen_update_diagnostics.json", diagnostics)
+    write_df(
+        window / "eigen_update_modes.csv",
+        pd.DataFrame(
+            [
+                {
+                    "mode_index": 0,
+                    "kept": True,
+                    "top_contributors": "source.separation_as:+1.0",
+                    "group_norm_source": 1.0,
+                    "group_norm_optics.plate_scale": 0.0,
+                    "group_norm_optics.primary_zernikes": 0.0,
+                    "group_norm_optics.secondary_zernikes": 0.0,
+                }
+            ]
+        ),
+    )
+
+    outdir = tmp_path / "review"
+    result = run_script(run_root, outdir, "--no-plots")
+
+    assert result.returncode == 0, result.stderr
+    modes = pd.read_csv(outdir / "eigen_update_modes.csv")
+    summary = pd.read_csv(outdir / "eigen_update_window_summary.csv")
+    contributions = pd.read_csv(outdir / "eigen_update_mode_contributions.csv")
+    assert len(modes) == 1
+    assert summary.loc[0, "n_modes_kept"] == 1
+    assert contributions.loc[0, "source_group_norm"] == pytest.approx(1.0)
+
+
+def test_strict_eigen_mode_requires_eigen_update_artifacts(tmp_path):
+    run_root = make_run_root(tmp_path)
+    summary_path = run_root / "campaign_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["update_mode"] = "eigen_full"
+    write_json(summary_path, summary)
+
+    result = run_script(
+        run_root,
+        tmp_path / "review",
+        "--strict",
+        "--no-plots",
+    )
+
+    assert result.returncode != 0
+    assert "eigen_update_diagnostics.json" in result.stderr
