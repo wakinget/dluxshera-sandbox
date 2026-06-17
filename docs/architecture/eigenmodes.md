@@ -12,6 +12,29 @@ Some parameter combinations are far better constrained than others. Working in a
 - `dluxshera.inference.inference.run_shera_image_gd_eigen(...)` is the turnkey eigen-GD runner built for SHERA image inference.
 - `dluxshera.inference.optimization.run_shera_gd(...)` can also run eigen-GD with the right preparation; see `examples/recipes/canonical_astrometry.py` for a complete workflow.
 
+## Observation belief update policy
+`dluxshera.inference.observation_belief.update_observation_belief_with_policy`
+applies the same eigenmode idea to observation-level Schur summaries without
+changing the storage basis. `SubblockSummary` objects remain physical-basis,
+label-addressed Schur summaries, and `ObservationBeliefState` remains a physical
+parameter-space state. The eigenbasis is only an update-control transform
+layered between the full physical posterior update and the applied mean update.
+
+The `physical_full` policy reproduces the legacy `update_observation_belief`
+mean update, apart from an optional scalar `update_gain`. `eigen_full` is
+intended as an equivalence and validation mode: it projects the full update into
+the requested eigenbasis, keeps every mode, and maps back to physical
+parameters. `eigen_truncated` and `eigen_damped` are intended for degenerate
+M1/M2 slow-state updates where weak information directions should either stay at
+the prior/current reference mean or move more cautiously.
+
+When whitening is enabled, the policy builds the basis from the prior-whitened
+information matrix using the observation helper for diagonal prior sigmas.
+Diagnostics report whether eigenvalues are physical-basis or prior-whitened, the
+gate source used for mode retention, per-mode damping factors, retained/rejected
+masks, update vectors in both coordinate systems, and dominant physical
+contributors.
+
 ## Math sketch
 Let θ ∈ R^D be the primitive parameter vector used by the optimiser. Choose a reference point θ_ref and evaluate a local Fisher Information Matrix F(θ_ref). With eigen-decomposition
 

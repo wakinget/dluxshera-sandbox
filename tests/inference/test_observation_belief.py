@@ -6,6 +6,7 @@ import pytest
 from dluxshera.inference.observation_belief import (
     ObservationBeliefState,
     ObservationThetaLayout,
+    ObservationUpdatePolicy,
     SubblockSummary,
     build_observation_eigenbasis,
     build_prior_whitened_information_gain_matrix,
@@ -13,6 +14,7 @@ from dluxshera.inference.observation_belief import (
     infer_indexed_parameter_indices,
     schur_reduce_information,
     update_observation_belief,
+    update_observation_belief_with_policy,
 )
 
 
@@ -367,3 +369,279 @@ def test_observation_eigenbasis_rows_report_raw_and_floored_fields():
     assert rows[1]["was_floored"] is True
     assert "raw_sigma_along_mode" in rows[1]
     assert "floored_sigma_along_mode" in rows[1]
+
+
+def _synthetic_policy_summary(
+    *,
+    labels: tuple[str, ...],
+    information: np.ndarray,
+    theta_target: np.ndarray,
+    theta_ref: np.ndarray | None = None,
+) -> SubblockSummary:
+    if theta_ref is None:
+        theta_ref = np.zeros(len(labels), dtype=float)
+    return SubblockSummary.from_reduced_form(
+        subblock_id="subblock_000000",
+        theta_labels=labels,
+        theta_ref=theta_ref,
+        reduced_information=information,
+        reduced_score=information @ (theta_ref - theta_target),
+    )
+
+
+def test_policy_physical_full_matches_existing_update_for_diagonal_case():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.0, 0.0]),
+        sigma=np.array([2.0, 3.0]),
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=np.diag([4.0, 2.0]),
+        theta_target=np.array([1.0, -0.5]),
+    )
+
+    legacy = update_observation_belief(prior, [summary])
+    policy_result = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy=ObservationUpdatePolicy(update_mode="physical_full"),
+    )
+
+    np.testing.assert_allclose(policy_result.posterior.mean, legacy.posterior.mean)
+    np.testing.assert_allclose(
+        policy_result.posterior.precision,
+        legacy.posterior.precision,
+    )
+    np.testing.assert_allclose(
+        policy_result.physical_update_full,
+        legacy.posterior.mean - prior.mean,
+    )
+
+
+def test_policy_eigen_full_matches_physical_full_for_coupled_matrix():
+    labels = (
+        "source.separation_as",
+        "source.log_flux_total",
+        "source.contrast",
+    )
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.1, -0.2, 0.3]),
+        sigma=np.array([2.0, 1.5, 3.0]),
+    )
+    information = np.array(
+        [
+            [5.0, 1.2, -0.4],
+            [1.2, 4.0, 0.8],
+            [-0.4, 0.8, 3.0],
+        ]
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=information,
+        theta_target=np.array([0.7, -0.1, 0.9]),
+    )
+
+    physical = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={"update_mode": "physical_full"},
+    )
+    eigen = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={"update_mode": "eigen_full", "basis_source": "posterior_precision"},
+    )
+
+    np.testing.assert_allclose(
+        eigen.posterior.mean,
+        physical.posterior.mean,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        eigen.physical_update_applied,
+        physical.physical_update_applied,
+        atol=1e-12,
+    )
+    assert eigen.diagnostics["n_modes_kept"] == len(labels)
+
+
+def test_policy_eigen_truncated_removes_weak_mode_component():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.array([100.0, 100.0]),
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=np.diag([10.0, 0.01]),
+        theta_target=np.array([2.0, 3.0]),
+    )
+
+    result = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={
+            "update_mode": "eigen_truncated",
+            "basis_source": "accumulated_information",
+            "gate_source": "accumulated_information",
+            "whiten": False,
+            "eig_floor_abs": 1.0,
+        },
+    )
+
+    assert result.kept_mode_mask.tolist() == [True, False]
+    assert result.posterior.mean[0] == pytest.approx(result.posterior_full.mean[0])
+    assert result.posterior.mean[1] == pytest.approx(prior.mean[1])
+    assert result.diagnostics["n_modes_kept"] == 1
+
+
+def test_policy_eigen_damped_reduces_update_norm_relative_to_eigen_full():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.array([2.0, 2.0]),
+    )
+    information = np.array([[3.0, 0.4], [0.4, 1.5]])
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=information,
+        theta_target=np.array([1.0, -2.0]),
+    )
+
+    full = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={"update_mode": "eigen_full", "whiten": False},
+    )
+    damped = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={
+            "update_mode": "eigen_damped",
+            "whiten": False,
+            "damping_mode": "information",
+            "damping_value": 5.0,
+        },
+    )
+
+    assert np.linalg.norm(damped.physical_update_applied) < np.linalg.norm(
+        full.physical_update_applied
+    )
+    assert np.all(damped.damping_factors < 1.0)
+
+
+@pytest.mark.parametrize(
+    "policy_kwargs, match",
+    [
+        ({"update_mode": "bad"}, "update_mode"),
+        ({"basis_source": "bad"}, "basis_source"),
+        ({"gate_source": "bad"}, "gate_source"),
+        ({"eig_floor_abs": -1.0}, "non-negative"),
+        ({"eig_floor_rel": -1.0}, "non-negative"),
+        ({"min_kept_modes": 3, "max_kept_modes": 2}, "cannot exceed"),
+    ],
+)
+def test_observation_update_policy_rejects_invalid_configuration(
+    policy_kwargs,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        ObservationUpdatePolicy(**policy_kwargs)
+
+
+def test_policy_rejects_impossible_kept_mode_count_for_layout():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.ones(2),
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=np.eye(2),
+        theta_target=np.ones(2),
+    )
+
+    with pytest.raises(ValueError, match="min_kept_modes"):
+        update_observation_belief_with_policy(
+            prior,
+            [summary],
+            policy={
+                "update_mode": "eigen_truncated",
+                "min_kept_modes": 3,
+            },
+        )
+
+
+def test_policy_preserves_label_order_and_vector_shapes():
+    labels = (
+        "source.contrast",
+        "source.separation_as",
+        "optics.plate_scale_as_per_pix",
+    )
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.0, 1.0, -1.0]),
+        sigma=np.array([1.0, 2.0, 3.0]),
+    )
+    summary = _synthetic_policy_summary(
+        labels=(labels[2], labels[0], labels[1]),
+        information=np.diag([2.0, 3.0, 4.0]),
+        theta_ref=np.array([-1.0, 0.0, 1.0]),
+        theta_target=np.array([-0.5, 0.4, 1.5]),
+    )
+
+    result = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={"update_mode": "eigen_full", "whiten": False},
+    )
+
+    assert result.posterior.theta_labels == labels
+    assert result.physical_update_full.shape == (len(labels),)
+    assert result.physical_update_applied.shape == (len(labels),)
+    assert result.eigen_update_full.shape == (len(labels),)
+    assert result.eigenvectors.shape == (len(labels), len(labels))
+
+
+def test_policy_whitening_path_uses_non_uniform_prior_sigma():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.array([0.5, 4.0]),
+    )
+    information = np.diag([4.0, 1.0])
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=information,
+        theta_target=np.array([1.0, 1.0]),
+    )
+
+    result = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={
+            "update_mode": "eigen_full",
+            "basis_source": "accumulated_information",
+            "gate_source": "accumulated_information",
+            "whiten": True,
+        },
+    )
+
+    expected_gain = build_prior_whitened_information_gain_matrix(
+        information,
+        prior.sigma(),
+    )
+    np.testing.assert_allclose(result.eigenvalues, np.array([16.0, 1.0]))
+    np.testing.assert_allclose(
+        np.linalg.eigvalsh(expected_gain)[::-1],
+        result.eigenvalues,
+    )
+    np.testing.assert_allclose(result.posterior.mean, result.posterior_full.mean)
+    assert result.diagnostics["eigenvalue_basis"] == "prior_whitened"

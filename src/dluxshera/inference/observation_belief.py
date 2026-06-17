@@ -12,7 +12,9 @@ __all__ = [
     "MatrixDiagnostics",
     "ObservationBeliefState",
     "ObservationEigenBasis",
+    "ObservationPolicyUpdateResult",
     "ObservationThetaLayout",
+    "ObservationUpdatePolicy",
     "ObservationUpdateResult",
     "ObservationUpdateStep",
     "SchurReductionResult",
@@ -22,6 +24,7 @@ __all__ = [
     "infer_system_zernike_indices",
     "schur_reduce_information",
     "update_observation_belief",
+    "update_observation_belief_with_policy",
 ]
 
 
@@ -978,6 +981,186 @@ class ObservationUpdateResult:
         object.__setattr__(self, "metadata", dict(self.metadata))
 
 
+@dataclass(frozen=True)
+class ObservationUpdatePolicy:
+    """Configure how an observation update is applied to the mean.
+
+    The prior, summaries, and returned belief states stay in the physical
+    parameter basis. Eigen modes are used only as an update-control transform:
+    the full physical update is projected into the requested eigenbasis,
+    optionally damped or truncated, then mapped back to physical parameters.
+
+    Parameters
+    ----------
+    update_mode :
+        Update application mode. Supported values are ``"physical_full"``,
+        ``"eigen_full"``, ``"eigen_damped"``, and ``"eigen_truncated"``.
+    update_gain :
+        Scalar multiplier applied to the final update vector.
+    basis_source :
+        Matrix used to build the eigenbasis. ``"posterior_precision"`` uses
+        prior precision plus accumulated Schur information;
+        ``"accumulated_information"`` uses only the accumulated Schur
+        information.
+    gate_source :
+        Matrix used to decide which modes are trustworthy. It may be ``None``,
+        ``"posterior_precision"``, or ``"accumulated_information"``.
+    whiten :
+        If true, build the basis from the prior-whitened source matrix using
+        :func:`build_prior_whitened_information_gain_matrix`. Physical updates
+        are projected as ``delta / prior_sigma`` and reconstructed as
+        ``prior_sigma * whitened_delta``.
+    eig_floor_abs, eig_floor_rel :
+        Absolute and relative eigenvalue floors used by
+        ``"eigen_truncated"``. A mode is rejected when its gate value is less
+        than or equal to ``max(eig_floor_abs, eig_floor_rel * max_gate)``.
+    damping_mode :
+        Damping rule for ``"eigen_damped"``. ``"scalar"`` uses
+        ``damping_value`` for every mode. ``"information"`` uses
+        ``max(lambda, 0) / (max(lambda, 0) + damping_value)``.
+        ``"none"`` leaves every factor at one.
+    damping_value :
+        Scalar damping parameter. It must be non-negative for
+        ``"information"`` damping.
+    min_kept_modes, max_kept_modes :
+        Optional lower and upper bounds for retained modes in
+        ``"eigen_truncated"``.
+    top_k_contributors :
+        Number of dominant physical labels to report per mode.
+    """
+
+    update_mode: str = "physical_full"
+    update_gain: float = 1.0
+    basis_source: str = "posterior_precision"
+    gate_source: str | None = "accumulated_information"
+    whiten: bool = True
+    eig_floor_abs: float = 0.0
+    eig_floor_rel: float = 0.0
+    damping_mode: str = "none"
+    damping_value: float = 1.0
+    min_kept_modes: int | None = None
+    max_kept_modes: int | None = None
+    top_k_contributors: int = 8
+
+    def __post_init__(self) -> None:
+        allowed_update_modes = {
+            "physical_full",
+            "eigen_full",
+            "eigen_damped",
+            "eigen_truncated",
+        }
+        allowed_sources = {"posterior_precision", "accumulated_information"}
+        allowed_damping_modes = {"none", "scalar", "information"}
+
+        if self.update_mode not in allowed_update_modes:
+            raise ValueError(
+                "update_mode must be one of "
+                + ", ".join(sorted(allowed_update_modes))
+                + f"; received {self.update_mode!r}."
+            )
+        if self.basis_source not in allowed_sources:
+            raise ValueError(
+                "basis_source must be one of "
+                + ", ".join(sorted(allowed_sources))
+                + f"; received {self.basis_source!r}."
+            )
+        if self.gate_source is not None and self.gate_source not in allowed_sources:
+            raise ValueError(
+                "gate_source must be None or one of "
+                + ", ".join(sorted(allowed_sources))
+                + f"; received {self.gate_source!r}."
+            )
+        if self.damping_mode not in allowed_damping_modes:
+            raise ValueError(
+                "damping_mode must be one of "
+                + ", ".join(sorted(allowed_damping_modes))
+                + f"; received {self.damping_mode!r}."
+            )
+        if not np.isfinite(float(self.update_gain)):
+            raise ValueError("update_gain must be finite.")
+        if self.eig_floor_abs < 0.0 or self.eig_floor_rel < 0.0:
+            raise ValueError("eig_floor_abs and eig_floor_rel must be non-negative.")
+        if not np.isfinite(float(self.damping_value)):
+            raise ValueError("damping_value must be finite.")
+        if self.damping_mode == "information" and self.damping_value < 0.0:
+            raise ValueError(
+                "damping_value must be non-negative for information damping."
+            )
+        if self.min_kept_modes is not None and self.min_kept_modes < 0:
+            raise ValueError("min_kept_modes must be non-negative when provided.")
+        if self.max_kept_modes is not None and self.max_kept_modes < 0:
+            raise ValueError("max_kept_modes must be non-negative when provided.")
+        if (
+            self.min_kept_modes is not None
+            and self.max_kept_modes is not None
+            and self.min_kept_modes > self.max_kept_modes
+        ):
+            raise ValueError("min_kept_modes cannot exceed max_kept_modes.")
+        if self.top_k_contributors <= 0:
+            raise ValueError("top_k_contributors must be positive.")
+
+
+@dataclass(frozen=True)
+class ObservationPolicyUpdateResult:
+    """Return a full and policy-filtered observation belief update.
+
+    Parameters
+    ----------
+    posterior :
+        Belief state after applying the policy-controlled update vector.
+    posterior_full :
+        Belief state from the unfiltered physical update.
+    policy :
+        Normalized policy used for the update.
+    physical_update_full, physical_update_applied :
+        Full and applied mean deltas in physical parameter coordinates.
+    eigen_update_full, eigen_update_applied :
+        Full and applied mean deltas in eigen coordinates, or ``None`` for
+        ``"physical_full"``.
+    eigenvalues, eigenvectors :
+        Eigenbasis spectrum and vectors, or ``None`` for ``"physical_full"``.
+        When ``policy.whiten`` is true, these are prior-whitened quantities.
+    kept_mode_mask :
+        Boolean mask of retained modes for eigen modes, or ``None`` for
+        ``"physical_full"``.
+    damping_factors :
+        Per-mode multiplicative factors for eigen modes, or ``None`` for
+        ``"physical_full"``.
+    mode_rows :
+        Per-mode diagnostics with contributors and group norms.
+    diagnostics :
+        JSON-friendly diagnostic payload for campaign artifacts.
+    """
+
+    posterior: ObservationBeliefState
+    posterior_full: ObservationBeliefState
+    policy: ObservationUpdatePolicy
+    physical_update_full: np.ndarray
+    physical_update_applied: np.ndarray
+    eigen_update_full: np.ndarray | None
+    eigen_update_applied: np.ndarray | None
+    eigenvalues: np.ndarray | None
+    eigenvectors: np.ndarray | None
+    kept_mode_mask: np.ndarray | None
+    damping_factors: np.ndarray | None
+    mode_rows: list[dict[str, Any]]
+    diagnostics: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        full = _as_vector(self.physical_update_full, name="physical_update_full")
+        applied = _as_vector(
+            self.physical_update_applied,
+            name="physical_update_applied",
+        )
+        expected = (self.posterior.theta_size,)
+        if full.shape != expected or applied.shape != expected:
+            raise ValueError("physical update shapes must match posterior size.")
+        object.__setattr__(self, "physical_update_full", full)
+        object.__setattr__(self, "physical_update_applied", applied)
+        object.__setattr__(self, "mode_rows", list(self.mode_rows))
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics))
+
+
 def accumulate_summary_information(
     theta_labels: Sequence[str],
     summaries: Sequence[SubblockSummary],
@@ -1362,4 +1545,419 @@ def build_observation_eigenbasis(
         condition_number=float(diagnostics.condition_number),
         eig_floor_abs=float(eig_floor_abs),
         eig_floor_rel=float(eig_floor_rel),
+    )
+
+
+def _coerce_update_policy(
+    policy: ObservationUpdatePolicy | Mapping[str, Any] | None,
+) -> ObservationUpdatePolicy:
+    if policy is None:
+        return ObservationUpdatePolicy()
+    if isinstance(policy, ObservationUpdatePolicy):
+        return policy
+    if isinstance(policy, Mapping):
+        return ObservationUpdatePolicy(**dict(policy))
+    raise TypeError("policy must be an ObservationUpdatePolicy, mapping, or None.")
+
+
+def _source_matrix_for_policy(
+    *,
+    source: str,
+    prior: ObservationBeliefState,
+    accumulated_information: np.ndarray,
+) -> np.ndarray:
+    if source == "posterior_precision":
+        return prior.precision + accumulated_information
+    if source == "accumulated_information":
+        return accumulated_information.copy()
+    raise ValueError(f"Unsupported source {source!r}.")
+
+
+def _policy_matrix_for_eigen(
+    matrix: np.ndarray,
+    *,
+    prior_sigma: np.ndarray,
+    whiten: bool,
+) -> np.ndarray:
+    if not whiten:
+        return 0.5 * (matrix + matrix.T)
+    return build_prior_whitened_information_gain_matrix(matrix, prior_sigma)
+
+
+def _project_physical_update_to_policy_coordinates(
+    physical_update: np.ndarray,
+    *,
+    prior_sigma: np.ndarray,
+    whiten: bool,
+) -> np.ndarray:
+    if not whiten:
+        return physical_update
+    return physical_update / prior_sigma
+
+
+def _map_policy_coordinates_to_physical_update(
+    coordinate_update: np.ndarray,
+    *,
+    prior_sigma: np.ndarray,
+    whiten: bool,
+) -> np.ndarray:
+    if not whiten:
+        return coordinate_update
+    return coordinate_update * prior_sigma
+
+
+def _rayleigh_values_in_basis(matrix: np.ndarray, eigenvectors: np.ndarray) -> np.ndarray:
+    values = np.sum(eigenvectors * (matrix @ eigenvectors), axis=0)
+    return np.asarray(values, dtype=float)
+
+
+def _mode_group_norms(
+    labels: Sequence[str],
+    vector: np.ndarray,
+) -> dict[str, float]:
+    groups = {
+        "source": 0.0,
+        "optics.plate_scale": 0.0,
+        "optics.primary_zernikes": 0.0,
+        "optics.secondary_zernikes": 0.0,
+    }
+    for label, coefficient in zip(labels, vector, strict=True):
+        value = float(coefficient)
+        if label.startswith("source."):
+            groups["source"] += value * value
+        elif label == "optics.plate_scale_as_per_pix":
+            groups["optics.plate_scale"] += value * value
+        elif label.startswith("optics.primary.zernike_coeffs_nm"):
+            groups["optics.primary_zernikes"] += value * value
+        elif label.startswith("optics.secondary.zernike_coeffs_nm"):
+            groups["optics.secondary_zernikes"] += value * value
+    return {key: float(np.sqrt(value)) for key, value in groups.items()}
+
+
+def _select_kept_modes(
+    gate_values: np.ndarray,
+    *,
+    policy: ObservationUpdatePolicy,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    n_modes = int(gate_values.size)
+    if policy.min_kept_modes is not None and policy.min_kept_modes > n_modes:
+        raise ValueError("min_kept_modes cannot exceed the number of modes.")
+    if policy.max_kept_modes is not None and policy.max_kept_modes > n_modes:
+        raise ValueError("max_kept_modes cannot exceed the number of modes.")
+
+    positive_max = float(np.max(np.clip(gate_values, 0.0, None))) if n_modes else 0.0
+    floor = max(float(policy.eig_floor_abs), float(policy.eig_floor_rel) * positive_max)
+    keep = gate_values > floor
+    if floor == 0.0:
+        keep = gate_values > 0.0
+
+    strength_order = np.argsort(gate_values)[::-1]
+    if (
+        policy.min_kept_modes is not None
+        and int(np.count_nonzero(keep)) < policy.min_kept_modes
+    ):
+        keep[strength_order[: policy.min_kept_modes]] = True
+    if (
+        policy.max_kept_modes is not None
+        and int(np.count_nonzero(keep)) > policy.max_kept_modes
+    ):
+        selected = [index for index in strength_order if keep[index]][
+            : policy.max_kept_modes
+        ]
+        new_keep = np.zeros(n_modes, dtype=bool)
+        new_keep[np.asarray(selected, dtype=int)] = True
+        keep = new_keep
+
+    relative = np.zeros_like(gate_values, dtype=float)
+    if positive_max > 0.0:
+        relative = gate_values / positive_max
+    return keep, relative, floor
+
+
+def _policy_damping_factors(
+    gate_values: np.ndarray,
+    *,
+    policy: ObservationUpdatePolicy,
+) -> tuple[np.ndarray, str]:
+    if policy.damping_mode == "none":
+        return np.ones_like(gate_values, dtype=float), "none"
+    if policy.damping_mode == "scalar":
+        return (
+            np.full_like(gate_values, float(policy.damping_value), dtype=float),
+            "scalar: factor = damping_value",
+        )
+    clipped = np.clip(gate_values, 0.0, None)
+    denominator = clipped + float(policy.damping_value)
+    factors = np.zeros_like(clipped, dtype=float)
+    positive = denominator > 0.0
+    factors[positive] = clipped[positive] / denominator[positive]
+    return (
+        factors,
+        "information: factor = max(lambda, 0) / "
+        "(max(lambda, 0) + damping_value)",
+    )
+
+
+def _policy_mode_rows(
+    *,
+    basis: ObservationEigenBasis,
+    gate_values: np.ndarray,
+    eigenvalue_relative: np.ndarray,
+    kept_mode_mask: np.ndarray,
+    damping_factors: np.ndarray,
+    eigen_update_full: np.ndarray,
+    eigen_update_applied: np.ndarray,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    rows = basis.to_rows(top_k=top_k)
+    for mode_index, row in enumerate(rows):
+        vector = basis.eigenvectors[:, mode_index]
+        group_norms = _mode_group_norms(basis.labels, vector)
+        row.update(
+            {
+                "gate_eigenvalue": float(gate_values[mode_index]),
+                "eigenvalue_relative": float(eigenvalue_relative[mode_index]),
+                "kept": bool(kept_mode_mask[mode_index]),
+                "rejected": bool(not kept_mode_mask[mode_index]),
+                "damping_factor": float(damping_factors[mode_index]),
+                "eigen_update_full": float(eigen_update_full[mode_index]),
+                "eigen_update_applied": float(eigen_update_applied[mode_index]),
+                "group_norms": group_norms,
+            }
+        )
+        for group_name, norm in group_norms.items():
+            row[f"group_norm_{group_name}"] = float(norm)
+    return rows
+
+
+def update_observation_belief_with_policy(
+    prior: ObservationBeliefState,
+    summaries: Sequence[SubblockSummary],
+    *,
+    policy: ObservationUpdatePolicy | Mapping[str, Any] | None = None,
+    damping: float = 0.0,
+) -> ObservationPolicyUpdateResult:
+    """Apply an observation belief update under a configurable policy.
+
+    This function first computes the ordinary physical-basis posterior with
+    :func:`update_observation_belief`. The resulting full mean update is then
+    either applied directly or controlled in an eigenbasis. Summaries and both
+    returned :class:`ObservationBeliefState` objects remain in physical
+    parameter space.
+
+    ``"physical_full"`` reproduces :func:`update_observation_belief` when
+    ``update_gain=1``. ``"eigen_full"`` is an equivalence mode: it projects the
+    update into the requested eigenbasis, keeps every mode, and maps back.
+    ``"eigen_truncated"`` drops weak modes according to the gate spectrum, so
+    discarded components remain at the prior mean. ``"eigen_damped"`` keeps all
+    modes and applies the configured damping factors in eigen coordinates.
+
+    Parameters
+    ----------
+    prior :
+        Prior belief state in physical parameter space.
+    summaries :
+        Reduced sub-block summaries in physical parameter space.
+    policy :
+        Optional policy object or mapping. ``None`` uses
+        :class:`ObservationUpdatePolicy` defaults.
+    damping :
+        Optional non-negative diagonal damping forwarded to the full physical
+        update solve.
+
+    Returns
+    -------
+    ObservationPolicyUpdateResult
+        Full posterior, applied posterior, update vectors, eigen diagnostics,
+        and JSON-friendly policy diagnostics.
+    """
+
+    update_policy = _coerce_update_policy(policy)
+    full_result = update_observation_belief(prior, summaries, damping=damping)
+    posterior_full = full_result.posterior
+    physical_update_full = posterior_full.mean - prior.mean
+    accumulated_information = accumulate_summary_information(
+        prior.theta_labels,
+        summaries,
+    )
+
+    physical_update_applied: np.ndarray
+    eigen_update_full: np.ndarray | None = None
+    eigen_update_applied: np.ndarray | None = None
+    eigenvalues: np.ndarray | None = None
+    eigenvectors: np.ndarray | None = None
+    kept_mode_mask: np.ndarray | None = None
+    damping_factors: np.ndarray | None = None
+    mode_rows: list[dict[str, Any]] = []
+    diagnostics: dict[str, Any]
+
+    if update_policy.update_mode == "physical_full":
+        physical_update_applied = float(update_policy.update_gain) * physical_update_full
+        diagnostics = {
+            "update_mode": update_policy.update_mode,
+            "basis_source": update_policy.basis_source,
+            "gate_source": update_policy.gate_source,
+            "whiten": bool(update_policy.whiten),
+            "eig_floor_abs": float(update_policy.eig_floor_abs),
+            "eig_floor_rel": float(update_policy.eig_floor_rel),
+            "update_gain": float(update_policy.update_gain),
+            "n_modes_total": int(prior.theta_size),
+            "n_modes_kept": int(prior.theta_size),
+            "eigenvalue_basis": None,
+            "physical_update_full": physical_update_full.tolist(),
+            "physical_update_applied": physical_update_applied.tolist(),
+        }
+    else:
+        prior_sigma = prior.sigma()
+        basis_source_matrix = _source_matrix_for_policy(
+            source=update_policy.basis_source,
+            prior=prior,
+            accumulated_information=accumulated_information,
+        )
+        basis_matrix = _policy_matrix_for_eigen(
+            basis_source_matrix,
+            prior_sigma=prior_sigma,
+            whiten=update_policy.whiten,
+        )
+        basis = build_observation_eigenbasis(
+            basis_matrix,
+            prior.theta_labels,
+            eig_floor_abs=update_policy.eig_floor_abs,
+            eig_floor_rel=update_policy.eig_floor_rel,
+        )
+
+        if update_policy.gate_source is None:
+            gate_values = basis.eigenvalues.copy()
+            gate_matrix_source = update_policy.basis_source
+        else:
+            gate_source_matrix = _source_matrix_for_policy(
+                source=update_policy.gate_source,
+                prior=prior,
+                accumulated_information=accumulated_information,
+            )
+            gate_matrix = _policy_matrix_for_eigen(
+                gate_source_matrix,
+                prior_sigma=prior_sigma,
+                whiten=update_policy.whiten,
+            )
+            gate_values = _rayleigh_values_in_basis(gate_matrix, basis.eigenvectors)
+            gate_matrix_source = update_policy.gate_source
+
+        coordinate_update_full = _project_physical_update_to_policy_coordinates(
+            physical_update_full,
+            prior_sigma=prior_sigma,
+            whiten=update_policy.whiten,
+        )
+        eigen_update_full = basis.physical_delta_to_eigen(coordinate_update_full)
+
+        if update_policy.update_mode == "eigen_truncated":
+            kept_mode_mask, eigenvalue_relative, eig_floor = _select_kept_modes(
+                gate_values,
+                policy=update_policy,
+            )
+            damping_factors = kept_mode_mask.astype(float)
+            eigen_update_applied = eigen_update_full * damping_factors
+            damping_formula = "truncated: factor = 1 for kept modes, else 0"
+        else:
+            kept_mode_mask = np.ones_like(gate_values, dtype=bool)
+            positive_max = (
+                float(np.max(np.clip(gate_values, 0.0, None)))
+                if gate_values.size
+                else 0.0
+            )
+            eigenvalue_relative = (
+                gate_values / positive_max
+                if positive_max > 0.0
+                else np.zeros_like(gate_values, dtype=float)
+            )
+            eig_floor = max(
+                float(update_policy.eig_floor_abs),
+                float(update_policy.eig_floor_rel) * positive_max,
+            )
+            if update_policy.update_mode == "eigen_damped":
+                damping_factors, damping_formula = _policy_damping_factors(
+                    gate_values,
+                    policy=update_policy,
+                )
+            else:
+                damping_factors = np.ones_like(gate_values, dtype=float)
+                damping_formula = "none"
+            eigen_update_applied = eigen_update_full * damping_factors
+
+        eigen_update_applied = float(update_policy.update_gain) * eigen_update_applied
+        coordinate_update_applied = basis.eigen_delta_to_physical(eigen_update_applied)
+        physical_update_applied = _map_policy_coordinates_to_physical_update(
+            coordinate_update_applied,
+            prior_sigma=prior_sigma,
+            whiten=update_policy.whiten,
+        )
+        eigenvalues = basis.eigenvalues.copy()
+        eigenvectors = basis.eigenvectors.copy()
+        mode_rows = _policy_mode_rows(
+            basis=basis,
+            gate_values=gate_values,
+            eigenvalue_relative=eigenvalue_relative,
+            kept_mode_mask=kept_mode_mask,
+            damping_factors=damping_factors,
+            eigen_update_full=eigen_update_full,
+            eigen_update_applied=eigen_update_applied,
+            top_k=update_policy.top_k_contributors,
+        )
+        diagnostics = {
+            "update_mode": update_policy.update_mode,
+            "basis_source": update_policy.basis_source,
+            "gate_source": update_policy.gate_source,
+            "gate_matrix_source": gate_matrix_source,
+            "whiten": bool(update_policy.whiten),
+            "eigenvalue_basis": (
+                "prior_whitened" if update_policy.whiten else "physical"
+            ),
+            "eig_floor_abs": float(update_policy.eig_floor_abs),
+            "eig_floor_rel": float(update_policy.eig_floor_rel),
+            "eig_floor_effective": float(eig_floor),
+            "update_gain": float(update_policy.update_gain),
+            "damping_mode": update_policy.damping_mode,
+            "damping_value": float(update_policy.damping_value),
+            "damping_formula": damping_formula,
+            "n_modes_total": int(gate_values.size),
+            "n_modes_kept": int(np.count_nonzero(kept_mode_mask)),
+            "eigenvalues": eigenvalues.tolist(),
+            "gate_eigenvalues": gate_values.tolist(),
+            "eigenvalue_relative": eigenvalue_relative.tolist(),
+            "kept_mode_mask": kept_mode_mask.tolist(),
+            "rejected_mode_mask": np.logical_not(kept_mode_mask).tolist(),
+            "damping_factors": damping_factors.tolist(),
+            "eigen_update_full": eigen_update_full.tolist(),
+            "eigen_update_applied": eigen_update_applied.tolist(),
+            "physical_update_full": physical_update_full.tolist(),
+            "physical_update_applied": physical_update_applied.tolist(),
+            "mode_rows": mode_rows,
+        }
+
+    posterior = ObservationBeliefState(
+        theta_labels=prior.theta_labels,
+        mean=prior.mean + physical_update_applied,
+        precision=posterior_full.precision,
+        covariance=posterior_full.covariance,
+        metadata={
+            **posterior_full.metadata,
+            "update_policy": diagnostics,
+            "posterior_kind": "policy_applied",
+        },
+    )
+
+    return ObservationPolicyUpdateResult(
+        posterior=posterior,
+        posterior_full=posterior_full,
+        policy=update_policy,
+        physical_update_full=physical_update_full,
+        physical_update_applied=physical_update_applied,
+        eigen_update_full=eigen_update_full,
+        eigen_update_applied=eigen_update_applied,
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        kept_mode_mask=kept_mode_mask,
+        damping_factors=damping_factors,
+        mode_rows=mode_rows,
+        diagnostics=diagnostics,
     )
