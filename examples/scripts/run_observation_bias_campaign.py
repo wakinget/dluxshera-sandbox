@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import shlex
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -126,6 +127,7 @@ from dluxshera.utils.smear_audit import (
     build_smear_summary_rows,
     kernel_matches,
     load_named_smear_kernel,
+    plan_smear_rows,
 )
 from dluxshera.utils.subprocess_diagnostics import (
     require_resource_time_available,
@@ -4738,6 +4740,7 @@ def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
         "update_mode": str(plan.iterative.get("update_mode", "")),
     }
     _write_json(analysis_root / "aggregate_status.json", status)
+    _write_json(plan.run_root / "campaign_summary.json", status)
     return status
 
 
@@ -4834,6 +4837,193 @@ def _validate_aggregate_only_stored_plan(
     return payload
 
 
+def _resolve_aggregate_only_run_root(
+    *,
+    config_path: Path | None,
+    results_root: Path,
+    run_name: str | None,
+) -> Path | None:
+    if run_name:
+        return Path(results_root).resolve() / str(run_name)
+    if config_path is None:
+        return None
+    try:
+        cfg = load_config_file(config_path)
+    except Exception:
+        return None
+    experiment = cfg.get("experiment", {}) if isinstance(cfg, Mapping) else {}
+    if isinstance(experiment, Mapping) and experiment.get("run_name"):
+        return Path(results_root).resolve() / str(experiment["run_name"])
+    return None
+
+
+def _stored_plan_has_subblock_constant_smear(stored_plan: Mapping[str, Any]) -> bool:
+    for row in plan_smear_rows(stored_plan):
+        if row.get("smear_representative_kernel_json"):
+            return True
+    return False
+
+
+def _layout_from_stored_plan(stored_plan: Mapping[str, Any]) -> ObservationThetaLayout:
+    theta = stored_plan.get("theta_layout", {})
+    if not isinstance(theta, Mapping):
+        raise ValueError("Stored campaign_plan.json does not contain theta_layout.")
+    labels = tuple(str(label) for label in theta.get("labels", ()))
+    groups = tuple(str(group) for group in theta.get("label_groups", ()))
+    return ObservationThetaLayout(labels=labels, label_groups=groups)
+
+
+def _rehydrate_trace_source_plan(
+    *,
+    stored_plan: Mapping[str, Any],
+    run_root: Path,
+) -> PreparedTraceSourcePlan:
+    rows = plan_smear_rows(stored_plan)
+    trace_summary = stored_plan.get("trace_source", {})
+    if not isinstance(trace_summary, Mapping):
+        trace_summary = {}
+    subblocks: list[PreparedTraceSubblock] = []
+    for row in rows:
+        subblocks.append(
+            PreparedTraceSubblock(
+                subblock_index=int(row.get("subblock_index", len(subblocks))),
+                frame_truth_path=Path(str(row["frame_truth_path"])) if row.get("frame_truth_path") else None,
+                starting_guess_prediction_path=Path(str(row["starting_guess_prediction_path"])) if row.get("starting_guess_prediction_path") else None,
+                smear_truth_path=Path(str(row["smear_truth_csv"])) if row.get("smear_truth_csv") else None,
+                smear_model_path=Path(str(row["smear_model_csv"])) if row.get("smear_model_csv") else None,
+                smear_provenance_path=Path(str(row["smear_provenance_json"])) if row.get("smear_provenance_json") else None,
+                trace_source_mode=str(row.get("trace_source_mode", trace_summary.get("mode", ""))),
+                time_start_s=float(row["trajectory_time_start_s"]) if row.get("trajectory_time_start_s") not in (None, "") else None,
+                time_end_s=float(row["trajectory_time_end_s"]) if row.get("trajectory_time_end_s") not in (None, "") else None,
+                n_frames=int(row.get("n_frames", 0) or 0),
+                output_keys=tuple(str(row.get("trajectory_output_keys", "")).split(",")) if row.get("trajectory_output_keys") else (),
+                active_frame_keys=tuple(str(row.get("trajectory_active_frame_keys", "")).split(",")) if row.get("trajectory_active_frame_keys") else (),
+                diagnostics={},
+                provenance=dict(row),
+            )
+        )
+    return PreparedTraceSourcePlan(
+        mode=str(trace_summary.get("mode", "")),
+        run_root=run_root,
+        source_kind=str(trace_summary.get("source_kind", "")),
+        output_keys=tuple(),
+        active_frame_keys=tuple(),
+        subblocks=tuple(subblocks),
+        summary=dict(trace_summary),
+        rows=tuple(dict(row) for row in rows),
+    )
+
+
+def _rehydrate_campaign_plan_from_stored(
+    *,
+    stored_plan: Mapping[str, Any],
+    run_root: Path,
+) -> CampaignPlan:
+    resolved_config_path = run_root / "resolved_config.json"
+    if resolved_config_path.exists():
+        config = json.loads(resolved_config_path.read_text(encoding="utf-8"))
+    else:
+        config = {
+            "experiment": {
+                "subblocks": {},
+                "model_split": stored_plan.get("model_split", {}),
+                "template_hashes": stored_plan.get("template_hashes", []),
+                "high_order_wfe_summary": stored_plan.get("high_order_wfe", {}),
+            }
+        }
+    layout = _layout_from_stored_plan(stored_plan)
+    truth_by_label = stored_plan.get("prior_truth_by_label", {})
+    prior_truth = np.asarray(
+        [float(truth_by_label.get(label, 0.0)) for label in layout.labels],
+        dtype=float,
+    )
+    bias_cases_payload = stored_plan.get("bias_cases", [])
+    cases = tuple(
+        BiasCase(
+            case_name=str(row.get("case_name", "")),
+            theta_reference_offsets=dict(row.get("theta_reference_offsets", {}) or {}),
+            case_origin=str(row.get("case_origin", "explicit")),
+        )
+        for row in bias_cases_payload
+        if isinstance(row, Mapping)
+    )
+    summary_paths_payload = stored_plan.get("summary_paths", {})
+    summary_paths = {
+        str(case): [Path(str(path)) for path in paths]
+        for case, paths in summary_paths_payload.items()
+        if isinstance(paths, list)
+    } if isinstance(summary_paths_payload, Mapping) else {}
+    subblock_commands_payload = stored_plan.get("subblock_commands", {})
+    subblock_commands = {
+        str(case): [shlex.split(str(command)) for command in commands]
+        for case, commands in subblock_commands_payload.items()
+        if isinstance(commands, list)
+    } if isinstance(subblock_commands_payload, Mapping) else {}
+    subblock_plan_payload = stored_plan.get("subblock_plan", {})
+    subblock_plans = {
+        str(case): list(rows)
+        for case, rows in subblock_plan_payload.items()
+        if isinstance(rows, list)
+    } if isinstance(subblock_plan_payload, Mapping) else {}
+    return CampaignPlan(
+        run_root=run_root,
+        layout=layout,
+        layout_metadata=dict(stored_plan.get("layout_metadata", {}) or {}),
+        prior_truth=prior_truth,
+        cases=cases,
+        subblock_commands=subblock_commands,
+        summary_paths=summary_paths,
+        subblock_plans=subblock_plans,
+        prior_draw_rows_by_case=dict(stored_plan.get("prior_draw_rows_by_case", {}) or {}),
+        config=config,
+        partition=dict(stored_plan.get("state_partition", {}) or {}),
+        case_generation=dict(stored_plan.get("case_generation", {}) or {}),
+        truth_realization=dict(stored_plan.get("truth_realization", {}) or {}),
+        truth_realization_rows=_read_csv_rows(run_root / "truth_realization_by_label.csv"),
+        trace_source_plan=_rehydrate_trace_source_plan(stored_plan=stored_plan, run_root=run_root),
+        iterative=dict(stored_plan.get("iterative", {}) or {}),
+        iterative_plan_rows=list(stored_plan.get("iterative_plan", []) or []),
+        expected_output_rows=list(stored_plan.get("expected_outputs", []) or []),
+    )
+
+
+def _validate_stored_replay_plan(
+    *,
+    plan: CampaignPlan,
+    stored_plan: Mapping[str, Any],
+    stored_plan_path: Path,
+) -> dict[str, Any]:
+    validate_stored_trace_source_artifacts(stored_plan)
+    validate_campaign_model_split_artifacts(stored_plan)
+    payload = {
+        "schema_version": "observation_bias_aggregate_only_plan_validation.v1",
+        "created_at": now_iso_local_ms(),
+        "stored_plan_used": True,
+        "stored_plan_path": str(stored_plan_path),
+        "replay_mode": "stored_plan_subblock_constant_smear",
+        "validated_fields": [
+            {"field": "case_count", "stored": len(plan.cases), "current": len(plan.cases), "match": True},
+            {
+                "field": "expected_outputs_count",
+                "stored": len(plan.expected_output_rows),
+                "current": len(plan.expected_output_rows),
+                "match": True,
+            },
+            {
+                "field": "iterative_plan_count",
+                "stored": len(plan.iterative_plan_rows),
+                "current": len(plan.iterative_plan_rows),
+                "match": True,
+            },
+            {"field": "theta_layout.labels", "stored": list(plan.layout.labels), "current": list(plan.layout.labels), "match": True},
+        ],
+        "mismatches": [],
+        "status": "ok",
+    }
+    _write_json(plan.run_root / "analysis" / "aggregate_only_plan_validation.json", payload)
+    return payload
+
+
 def run_observation_bias_campaign(
     *,
     config_path: Path | None,
@@ -4875,6 +5065,32 @@ def run_observation_bias_campaign(
             seed_policy=None,
             base_seed=None,
         )
+    if aggregate_only:
+        replay_run_root = _resolve_aggregate_only_run_root(
+            config_path=config_path,
+            results_root=results_root,
+            run_name=run_name,
+        )
+        if replay_run_root is not None:
+            stored_plan_path = replay_run_root / "campaign_plan.json"
+            stored_plan = load_existing_campaign_plan(stored_plan_path)
+            if stored_plan is not None and _stored_plan_has_subblock_constant_smear(stored_plan):
+                plan = _rehydrate_campaign_plan_from_stored(
+                    stored_plan=stored_plan,
+                    run_root=replay_run_root,
+                )
+                _validate_stored_replay_plan(
+                    plan=plan,
+                    stored_plan=stored_plan,
+                    stored_plan_path=stored_plan_path,
+                )
+                if bool(plan.iterative.get("enabled", False)):
+                    return aggregate_iterative_outputs(plan)
+                return aggregate_campaign(
+                    plan,
+                    prior_source=prior_source,
+                    allow_optimizer_scale_summaries=allow_optimizer_scale_summaries,
+                )
     plan = build_campaign_plan(
         config_path=config_path,
         results_root=results_root,

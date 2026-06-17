@@ -397,6 +397,12 @@ PYTHONPATH=src python3 examples/scripts/run_full_fidelity_binary_iterative_campa
   --no-resource-time
 ```
 
+Normal execution builds the plan, runs the subblocks, and aggregates the
+campaign in one command. `--aggregate-only` is only a replay/recovery mode for a
+run root that already contains `campaign_plan.json` and completed subblock
+summary artifacts; it reuses stored trajectory/smear/template paths instead of
+regenerating per-subblock smear templates.
+
 Aggregate-only replay after a completed execution:
 
 ```bash
