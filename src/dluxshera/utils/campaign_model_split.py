@@ -66,6 +66,21 @@ def _cfg(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     return copy.deepcopy(dict(raw or {}))
 
 
+def _label_subblock_constant_seed_policy(
+    policy: Mapping[str, Any],
+    *,
+    note: str,
+) -> dict[str, Any]:
+    labelled = copy.deepcopy(dict(policy))
+    seed = labelled.pop("representative_kernel", None)
+    if seed is not None:
+        labelled["global_template_seed_kernel"] = seed
+    labelled["representative_kernel_scope"] = "per_subblock"
+    labelled["representative_kernel_source"] = "subblock_plan.smear_representative_kernel_json"
+    labelled["note"] = note
+    return labelled
+
+
 def _extract_source(system_cfg: Mapping[str, Any]) -> Mapping[str, Any]:
     system = system_cfg.get("system") if isinstance(system_cfg.get("system"), Mapping) else system_cfg
     source = system.get("source") if isinstance(system, Mapping) else None
@@ -348,6 +363,15 @@ def build_campaign_model_split(
         "target_layer": render_cfg.get("target_layer", render_cfg.get("layer_name", "smear")),
         "warnings": smear_warnings,
     }
+    if smear_render_mode == "subblock_constant_layer":
+        truth_smear_prov = _label_subblock_constant_seed_policy(
+            truth_smear_prov,
+            note="Actual rendered smear kernels are patched per subblock.",
+        )
+        inference_smear_prov = _label_subblock_constant_seed_policy(
+            inference_smear_prov,
+            note="Actual inference smear kernels are patched per subblock for matched_subblock_constant.",
+        )
     provenance["trajectory_smear"] = {
         "config": smear,
         "truth_policy": truth_smear_prov,

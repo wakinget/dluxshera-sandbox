@@ -122,6 +122,11 @@ from dluxshera.utils.noise import (
     make_subseed,
     normalize_subblock_noise_config,
 )
+from dluxshera.utils.smear_audit import (
+    build_smear_summary_rows,
+    kernel_matches,
+    load_named_smear_kernel,
+)
 from dluxshera.utils.subprocess_diagnostics import (
     require_resource_time_available,
     run_subprocess_with_diagnostics,
@@ -365,10 +370,77 @@ def _smear_cfg(subblock_cfg: Mapping[str, Any]) -> dict[str, Any]:
     return dict(smear) if isinstance(smear, Mapping) else {}
 
 
+def _update_subblock_smear_provenance(
+    *,
+    trace_row: Mapping[str, Any],
+    subblock_index: int,
+    window_index: int | str,
+    subblock_cfg: Mapping[str, Any],
+    template_paths: Mapping[str, Path],
+    representative_kernel: Mapping[str, Any],
+) -> None:
+    provenance_raw = trace_row.get("smear_provenance_json")
+    if not provenance_raw:
+        return
+    provenance_path = Path(str(provenance_raw))
+    if not provenance_path.exists():
+        return
+    payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+    smear_cfg = _smear_cfg(subblock_cfg)
+    render_cfg = smear_cfg.get("render", {}) if isinstance(smear_cfg.get("render"), Mapping) else {}
+    inference_cfg = smear_cfg.get("inference", {}) if isinstance(smear_cfg.get("inference"), Mapping) else {}
+    target_layer = str(render_cfg.get("target_layer", render_cfg.get("layer_name", "smear")))
+    render_path = Path(template_paths["render"]).resolve()
+    inference_path = Path(template_paths["inference"]).resolve()
+    render_kernel = load_named_smear_kernel(render_path, layer_name=target_layer)
+    inference_kernel = load_named_smear_kernel(inference_path, layer_name=target_layer)
+    render_match = kernel_matches(representative_kernel, render_kernel)
+    inference_match = kernel_matches(representative_kernel, inference_kernel)
+    warnings_out = list(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else []
+    if not render_match:
+        warnings_out.append("render_template_smear_kernel_mismatch")
+    if not inference_match:
+        warnings_out.append("inference_template_smear_kernel_mismatch")
+    payload.update(
+        {
+            "subblock_index": int(subblock_index),
+            "window_index": window_index,
+            "render_mode": str(render_cfg.get("mode", payload.get("render_mode", ""))),
+            "inference_mode": str(inference_cfg.get("mode", payload.get("inference_mode", "matched_subblock_constant"))),
+            "target_layer": target_layer,
+            "source": representative_kernel.get("source", payload.get("source", "")),
+            "exposure_time_s": representative_kernel.get("exposure_time_s", payload.get("exposure_time_s")),
+            "plate_scale_as_per_pix": representative_kernel.get(
+                "plate_scale_as_per_pix",
+                payload.get("plate_scale_as_per_pix"),
+            ),
+            "representative_kernel": dict(representative_kernel),
+            "truth_kernel": dict(representative_kernel),
+            "model_kernel": dict(representative_kernel)
+            if str(inference_cfg.get("mode", "matched_subblock_constant")) in {"matched", "matched_subblock_constant"}
+            else dict(payload.get("model_kernel", representative_kernel)),
+            "matched_model": bool(inference_match),
+            "pa_smear_mode": "ignored_for_line_kernel",
+            "input_frame_truth_csv": str(trace_row.get("frame_truth_path", payload.get("input_frame_truth_csv", ""))),
+            "frame_smear_truth_csv": str(trace_row.get("smear_truth_csv", payload.get("frame_smear_truth_csv", ""))),
+            "frame_smear_model_csv": str(trace_row.get("smear_model_csv", payload.get("frame_smear_model_csv", ""))),
+            "render_template_path": str(render_path),
+            "inference_template_path": str(inference_path),
+            "render_template_kernel": render_kernel,
+            "inference_template_kernel": inference_kernel,
+            "render_template_match": bool(render_match),
+            "inference_template_match": bool(inference_match),
+            "warnings": warnings_out,
+        }
+    )
+    provenance_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _write_subblock_smear_templates(
     *,
     run_root: Path,
     subblock_index: int,
+    window_index: int | str,
     model_split: CampaignModelSplit,
     subblock_cfg: Mapping[str, Any],
     trace_row: Mapping[str, Any],
@@ -444,6 +516,14 @@ def _write_subblock_smear_templates(
         render_payload=payloads["render"],
         inference_payload=payloads["inference"],
         split=sub_split,
+    )
+    _update_subblock_smear_provenance(
+        trace_row=trace_row,
+        subblock_index=subblock_index,
+        window_index=window_index,
+        subblock_cfg=subblock_cfg,
+        template_paths=paths,
+        representative_kernel=representative_kernel,
     )
     return paths, template_hash_row(paths, sub_split)
 
@@ -1913,6 +1993,7 @@ def build_campaign_plan(
                 active_template_paths, active_template_hashes = _write_subblock_smear_templates(
                     run_root=run_root,
                     subblock_index=subblock_index,
+                    window_index=int(window_index) if bool(iterative_cfg["enabled"]) else "",
                     model_split=model_split,
                     subblock_cfg=effective_subblock_cfg,
                     trace_row=trace_row,
@@ -2118,6 +2199,7 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
     forecast_cfg = _forecast_config(plan.config["experiment"])
     iterative_cfg = _resolve_iterative_config(plan.config["experiment"])
     actual_n_summaries = int(plan.config["experiment"].get("subblocks", {}).get("n_subblocks", 3))
+    smear_summary_rows = _smear_summary_rows_for_plan(plan, strict=True)
     forecast_grid = parse_forecast_grid(
         forecast_cfg.get("n_subblocks_grid"),
         actual_n_summaries=actual_n_summaries,
@@ -2142,6 +2224,16 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "template_hashes": list(
             plan.config["experiment"].get("template_hashes", [])
         ),
+        "smear_audit": {
+            "summary_csv": str((plan.run_root / "trajectory" / "smear_summary.csv").resolve()),
+            "n_subblocks": len(smear_summary_rows),
+            "rows": smear_summary_rows,
+            "notes": [
+                "Actual subblock_constant_layer kernels are audited from per-subblock render/inference templates.",
+            ]
+            if smear_summary_rows
+            else [],
+        },
         "high_order_wfe": dict(
             plan.config["experiment"].get("high_order_wfe_summary", {})
         ),
@@ -2352,6 +2444,13 @@ def _flatten_subblock_plan_rows(plan: CampaignPlan) -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def _smear_summary_rows_for_plan(plan: CampaignPlan, *, strict: bool = False) -> list[dict[str, Any]]:
+    rows = _flatten_subblock_plan_rows(plan)
+    if not any(row.get("smear_representative_kernel_json") for row in rows):
+        return []
+    return build_smear_summary_rows(rows, run_root=plan.run_root, strict=strict)
 
 
 def _flatten_prior_draw_rows(plan: CampaignPlan) -> list[dict[str, Any]]:
@@ -3835,6 +3934,7 @@ def aggregate_campaign(
     _write_csv_rows(plan.run_root / "posterior_by_label.csv", all_posterior_rows)
     _write_csv_rows(plan.run_root / "science_summary.csv", all_science_rows)
     _write_csv_rows(plan.run_root / "subblock_plan.csv", all_subblock_plan_rows)
+    _write_csv_rows(plan.run_root / "trajectory" / "smear_summary.csv", _smear_summary_rows_for_plan(plan, strict=True))
     _write_csv_rows(plan.run_root / "forecast_results.csv", all_forecast_rows)
     _write_csv_rows(plan.run_root / "forecast_trial_results.csv", all_forecast_trial_rows)
     _write_csv_rows(
@@ -4884,6 +4984,7 @@ def run_observation_bias_campaign(
         _write_csv_rows(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
         _write_json(plan.run_root / "resolved_config.json", plan.config)
         _write_csv_rows(plan.run_root / "subblock_plan.csv", _flatten_subblock_plan_rows(plan))
+        _write_csv_rows(plan.run_root / "trajectory" / "smear_summary.csv", _smear_summary_rows_for_plan(plan, strict=True))
         _write_csv_rows(plan.run_root / "iterative_plan.csv", plan.iterative_plan_rows)
         _write_csv_rows(plan.run_root / "template_hashes.csv", plan.config["experiment"].get("template_hashes", []))
         _write_csv_rows(plan.run_root / "expected_outputs.csv", plan.expected_output_rows)

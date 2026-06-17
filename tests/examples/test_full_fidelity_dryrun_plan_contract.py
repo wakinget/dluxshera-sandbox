@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import csv
 from pathlib import Path
 
 from dluxshera.utils.full_fidelity_defaults import DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
@@ -61,6 +62,8 @@ def test_full_fidelity_smoke_dryrun_uses_conv_preset_and_smear_layer(tmp_path: P
     assert resolved_system["preset"] == DEFAULT_FULL_FIDELITY_SYSTEM_PRESET
     assert "smear" in names
     assert flags.count("--reference-early-stopping") == 1
+    assert plan["smear_audit"]["n_subblocks"] == 4
+    assert Path(plan["smear_audit"]["summary_csv"]).exists()
 
     render_templates = sorted((run_root / "trajectory").glob("subblock_*/templates/render_template.json"))
     inference_templates = sorted((run_root / "trajectory").glob("subblock_*/templates/inference_template.json"))
@@ -72,3 +75,7 @@ def test_full_fidelity_smoke_dryrun_uses_conv_preset_and_smear_layer(tmp_path: P
     render_layers = render_system["detector"]["layers"]
     render_names = [layer.get("name") for layer in render_layers]
     assert "smear" in render_names
+
+    summary_rows = list(csv.DictReader((run_root / "trajectory" / "smear_summary.csv").open("r", encoding="utf-8", newline="")))
+    assert len(summary_rows) == 4
+    assert {row["template_status"] for row in summary_rows} == {"ok"}

@@ -436,9 +436,36 @@ def write_smear_sidecars(
         if cfg.render_mode == "subblock_constant_layer"
         else representative_line_kernel(truth_rows, representative=cfg.render_representative)
     )
+    model_representative = (
+        dict(representative)
+        if cfg.inference_mode in {"matched", "matched_subblock_constant"}
+        else representative_line_kernel(model_rows, representative=cfg.render_representative)
+    )
+    matched_model = (
+        float(representative.get("length", 0.0)) == float(model_representative.get("length", 0.0))
+        and float(representative.get("theta_deg", 0.0)) == float(model_representative.get("theta_deg", 0.0))
+    )
     provenance = {
         "schema_version": "trajectory_smear_provenance.v1",
         "subblock_index": int(block.subblock_index),
+        "window_index": (processing_context or {}).get("window_index"),
+        "render_mode": cfg.render_mode,
+        "inference_mode": cfg.inference_mode,
+        "target_layer": cfg.render_layer_name,
+        "source": representative.get("source", cfg.source),
+        "exposure_time_s": float(cfg.exposure_time_s),
+        "plate_scale_as_per_pix": cfg.plate_scale_as_per_pix,
+        "representative_kernel": representative,
+        "truth_kernel": representative,
+        "model_kernel": model_representative,
+        "matched_model": bool(matched_model),
+        "pa_smear_mode": "ignored_for_line_kernel",
+        "input_frame_truth_csv": str((processing_context or {}).get("input_frame_truth_csv", "")),
+        "frame_smear_truth_csv": str(truth_path),
+        "frame_smear_model_csv": str(model_path),
+        "render_template_path": str((processing_context or {}).get("render_template_path", "")),
+        "inference_template_path": str((processing_context or {}).get("inference_template_path", "")),
+        "warnings": [],
         "source_trajectory_path": str(trajectory.raw.source_path),
         "source_trajectory_sha256": _file_sha256(trajectory.raw.source_path),
         "source_kind": trajectory.raw.source_kind,

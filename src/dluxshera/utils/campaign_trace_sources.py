@@ -327,7 +327,10 @@ def _trajectory_plan(
                     trajectory=trajectory,
                     block=block,
                     cfg=smear_cfg,
-                    processing_context={"caller": "campaign_trace_sources"},
+                    processing_context={
+                        "caller": "campaign_trace_sources",
+                        "input_frame_truth_csv": str(paths["frame_truth_csv"]),
+                    },
                 )
         elif smear_cfg.enabled:
             smear_artifacts = {

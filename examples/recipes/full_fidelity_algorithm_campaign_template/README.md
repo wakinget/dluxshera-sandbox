@@ -288,11 +288,19 @@ layer with trajectory-derived `length`, `theta_deg`, `sigma_perp`,
 The same smear kernel is used for every rendered frame/image in a subblock.
 Per-subblock render and inference templates are written under each trajectory
 subblock artifact directory and their paths/hashes are recorded in plan CSVs.
+The global model-split template contains only a seed line-kernel for the named
+layer; actual `subblock_constant_layer` kernels live in
+`trajectory/subblock_*/templates/{render,inference}_template.json` and are
+summarized in `trajectory/smear_summary.csv`.
 `inference.mode: matched_subblock_constant` patches the inference template with
 the same subblock-level kernel; `inference.mode: disabled` removes the smear
 layer from the inference/reference template. `render.mode: per_frame` and
 inference modes such as `solve_subblock_smear` remain future/deferred and fail
 clearly if requested before implementation.
+
+Use `examples/scripts/inspect_full_fidelity_smear.py --run-root <run_root>
+--strict` to audit the per-subblock representative kernels against the render
+and inference templates.
 
 ## Preset Migration Table
 
