@@ -1425,65 +1425,130 @@ def _generate_prior_draw_cases(
     distribution = str(raw_cfg.get("distribution", "normal"))
     if distribution != "normal":
         raise ValueError("prior_draws.distribution currently supports only 'normal'.")
-    n_cases = int(raw_cfg.get("n_cases", 0))
+    conditions_raw = raw_cfg.get("conditions")
+    has_conditions = conditions_raw is not None
+    n_cases = int(
+        raw_cfg.get(
+            "n_cases",
+            raw_cfg.get("draws_per_condition", raw_cfg.get("prior_draws_per_condition", 0)),
+        )
+    )
     if n_cases <= 0:
-        raise ValueError("prior_draws.n_cases must be positive when enabled.")
+        raise ValueError(
+            "prior_draws.n_cases must be positive when enabled. For conditional draws, "
+            "n_cases is interpreted as draws per condition."
+        )
     draw_seed = int(raw_cfg.get("draw_seed", 12345))
     case_name_template = str(raw_cfg.get("case_name_template", "prior_draw_{draw_index:03d}"))
-    sigmas_cfg = raw_cfg.get("sigmas", {})
-    sigma_by_label, sigma_meta = _resolve_prior_draw_sigmas(
-        labels=labels,
-        truth_by_label=truth_by_label,
-        sigmas_cfg=sigmas_cfg,
-    )
     label_order = tuple(labels)
-    sigma_vector = np.asarray([sigma_by_label[label] for label in label_order], dtype=float)
     rng = np.random.default_rng(draw_seed)
     cases: list[BiasCase] = []
     rows_by_case: dict[str, list[dict[str, Any]]] = {}
-    for draw_index in range(n_cases):
-        z_vector = rng.normal(loc=0.0, scale=1.0, size=len(label_order))
-        delta = z_vector * sigma_vector
-        case_name = case_name_template.format(draw_index=draw_index)
-        offsets = {label: float(delta[i]) for i, label in enumerate(label_order)}
-        case = BiasCase(
-            case_name=case_name,
-            theta_reference_offsets=offsets,
-            case_origin="prior_draw",
-            prior_sigma_by_label={label: float(sigma_by_label[label]) for label in label_order},
-            prior_draw_metadata={
-                "draw_seed": int(draw_seed),
-                "draw_index": int(draw_index),
-                "distribution": distribution,
-                "center": center,
-            },
-        )
-        cases.append(case)
-        rows: list[dict[str, Any]] = []
-        for i, label in enumerate(label_order):
-            truth_value = float(truth_by_label[label])
-            offset = float(delta[i])
-            sigma = float(sigma_vector[i])
-            z_value = float(z_vector[i])
-            rows.append(
+    condition_entries: list[dict[str, Any]]
+    if has_conditions:
+        if not isinstance(conditions_raw, Sequence) or isinstance(conditions_raw, (str, bytes)):
+            raise ValueError("prior_draws.conditions must be a list when provided.")
+        condition_entries = []
+        seen_conditions: set[str] = set()
+        for condition_index, raw_condition in enumerate(conditions_raw):
+            if not isinstance(raw_condition, Mapping):
+                raise ValueError("Each prior_draws.conditions entry must be a mapping.")
+            condition_name = str(raw_condition.get("condition_name", "")).strip()
+            if not condition_name:
+                raise ValueError("Each prior_draws.conditions entry requires condition_name.")
+            if condition_name in seen_conditions:
+                raise ValueError(f"Duplicate prior draw condition_name: {condition_name}.")
+            seen_conditions.add(condition_name)
+            condition_sigmas = dict(raw_cfg.get("sigmas", {}) or {})
+            condition_sigmas.update(dict(raw_condition.get("sigmas", {}) or {}))
+            condition_entries.append(
                 {
-                    "case_name": case_name,
-                    "theta_label": label,
-                    "truth_value": truth_value,
-                    "prior_mean": truth_value + offset,
-                    "reference_value": truth_value + offset,
-                    "prior_sigma": sigma,
-                    "draw_z": z_value,
-                    "theta_reference_offset": offset,
-                    "sigma_kind": sigma_meta[label]["sigma_kind"],
-                    "sigma_source_rule": sigma_meta[label]["sigma_source_rule"],
-                    "unit": sigma_meta[label]["unit"],
-                    "sigma_config_value": sigma_meta[label]["sigma_config_value"],
-                    "draw_seed": int(draw_seed),
-                    "draw_index": int(draw_index),
+                    "condition_index": int(condition_index),
+                    "condition_name": condition_name,
+                    "sigmas": condition_sigmas,
                 }
             )
-        rows_by_case[case_name] = rows
+    else:
+        condition_entries = [
+            {
+                "condition_index": 0,
+                "condition_name": "",
+                "sigmas": raw_cfg.get("sigmas", {}),
+            }
+        ]
+    for condition in condition_entries:
+        sigma_by_label, sigma_meta = _resolve_prior_draw_sigmas(
+            labels=labels,
+            truth_by_label=truth_by_label,
+            sigmas_cfg=condition["sigmas"],
+        )
+        sigma_vector = np.asarray([sigma_by_label[label] for label in label_order], dtype=float)
+        condition_name = str(condition["condition_name"])
+        condition_index = int(condition["condition_index"])
+        for draw_index in range(n_cases):
+            global_draw_index = condition_index * n_cases + draw_index if has_conditions else draw_index
+            format_kwargs = {
+                "draw_index": int(draw_index),
+                "global_draw_index": int(global_draw_index),
+                "condition_index": int(condition_index),
+                "condition_name": condition_name,
+            }
+            try:
+                case_name = case_name_template.format(**format_kwargs)
+            except KeyError as exc:
+                raise ValueError(
+                    "prior_draws.case_name_template may use draw_index, global_draw_index, "
+                    "condition_index, and condition_name."
+                ) from exc
+            if has_conditions and "{condition_name" not in case_name_template:
+                case_name = f"{condition_name}_{case_name}"
+            z_vector = rng.normal(loc=0.0, scale=1.0, size=len(label_order))
+            delta = z_vector * sigma_vector
+            offsets = {label: float(delta[i]) for i, label in enumerate(label_order)}
+            case = BiasCase(
+                case_name=case_name,
+                theta_reference_offsets=offsets,
+                case_origin="prior_draw",
+                prior_sigma_by_label={label: float(sigma_by_label[label]) for label in label_order},
+                prior_draw_metadata={
+                    "draw_seed": int(draw_seed),
+                    "draw_index": int(draw_index),
+                    "global_draw_index": int(global_draw_index),
+                    "condition_index": int(condition_index),
+                    "condition_name": condition_name,
+                    "distribution": distribution,
+                    "center": center,
+                },
+            )
+            cases.append(case)
+            rows: list[dict[str, Any]] = []
+            for i, label in enumerate(label_order):
+                truth_value = float(truth_by_label[label])
+                offset = float(delta[i])
+                sigma = float(sigma_vector[i])
+                z_value = float(z_vector[i])
+                rows.append(
+                    {
+                        "case_name": case_name,
+                        "theta_label": label,
+                        "truth_value": truth_value,
+                        "prior_mean": truth_value + offset,
+                        "reference_value": truth_value + offset,
+                        "prior_sigma": sigma,
+                        "draw_z": z_value,
+                        "theta_reference_offset": offset,
+                        "sigma_kind": sigma_meta[label]["sigma_kind"],
+                        "sigma_source_rule": sigma_meta[label]["sigma_source_rule"],
+                        "unit": sigma_meta[label]["unit"],
+                        "sigma_config_value": sigma_meta[label]["sigma_config_value"],
+                        "draw_seed": int(draw_seed),
+                        "draw_index": int(draw_index),
+                        "global_draw_index": int(global_draw_index),
+                        "condition_index": int(condition_index),
+                        "condition_name": condition_name,
+                    }
+                )
+            rows_by_case[case_name] = rows
     return cases, rows_by_case
 
 

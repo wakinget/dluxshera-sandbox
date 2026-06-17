@@ -102,7 +102,7 @@ DEFERRED_FIELDS = (
 )
 
 FIELD_REFERENCE: list[dict[str, Any]] = [
-    {"field_path": "experiment.kind", "required": True, "consumed_by": "wrapper", "runtime_effect": "selects translator", "fidelity_effect": "none", "provenance_effect": "records source schema", "safe_to_omit": False, "notes": "Must be full_fidelity_binary_iterative_smoke for executable smoke configs."},
+    {"field_path": "experiment.kind", "required": True, "consumed_by": "wrapper", "runtime_effect": "selects translator", "fidelity_effect": "none", "provenance_effect": "records source schema", "safe_to_omit": False, "notes": "Use full_fidelity_binary_iterative for executable full-fidelity binary iterative configs."},
     {"field_path": "experiment.schema_version", "required": True, "consumed_by": "wrapper/provenance", "runtime_effect": "none", "fidelity_effect": "none", "provenance_effect": "schema label", "safe_to_omit": False, "notes": "Used by reviewers to distinguish the smoke schema from the future skeleton."},
     {"field_path": "experiment.run_name", "required": False, "consumed_by": "wrapper", "runtime_effect": "output path only", "fidelity_effect": "none", "provenance_effect": "run identity", "safe_to_omit": True, "notes": "CLI --run-name overrides this value."},
     {"field_path": "experiment.seed", "required": False, "consumed_by": "wrapper/observation-bias", "runtime_effect": "deterministic seeding", "fidelity_effect": "changes random realization", "provenance_effect": "base seed", "safe_to_omit": True, "notes": "Default is 42 in the wrapper."},
@@ -618,7 +618,7 @@ def build_audit(config_path: Path, outdir: Path, *, run_name: str | None = None,
         "config_kind": kind,
         "config_tier": tier,
         "strict": bool(strict),
-        "executable_today": kind in {"full_fidelity_binary_iterative_smoke", "full_fidelity_binary_iterative_review", "observation_bias_campaign"} and translation_error is None,
+        "executable_today": kind in {"full_fidelity_binary_iterative", "full_fidelity_binary_iterative_smoke", "full_fidelity_binary_iterative_review", "observation_bias_campaign"} and translation_error is None,
         "future_schema_skeleton": kind == "full_fidelity_algorithm_campaign",
         "translation_error": translation_error,
         "warnings": warnings_out,
