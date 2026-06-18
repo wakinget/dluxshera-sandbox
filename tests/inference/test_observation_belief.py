@@ -535,6 +535,81 @@ def test_policy_eigen_damped_reduces_update_norm_relative_to_eigen_full():
     assert np.all(damped.damping_factors < 1.0)
 
 
+def test_policy_bottom_n_damps_only_weakest_modes_without_truncation():
+    labels = tuple(f"source.parameter_{index}" for index in range(4))
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(4),
+        sigma=np.ones(4),
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=np.diag([8.0, 4.0, 2.0, 1.0]),
+        theta_target=np.ones(4),
+    )
+
+    result = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={
+            "update_mode": "eigen_damped",
+            "update_gain": 0.5,
+            "basis_source": "accumulated_information",
+            "gate_source": "accumulated_information",
+            "whiten": False,
+            "damping_mode": "bottom_n",
+            "damping_n_modes": 2,
+            "damping_value": 0.1,
+        },
+    )
+
+    np.testing.assert_allclose(result.damping_factors, [1.0, 1.0, 0.1, 0.1])
+    assert np.all(result.kept_mode_mask)
+    assert result.diagnostics["n_modes_kept"] == 4
+    assert result.diagnostics["n_modes_total"] == 4
+    assert result.diagnostics["damping_n_modes"] == 2
+    np.testing.assert_allclose(
+        result.eigen_update_applied,
+        0.5 * result.damping_factors * result.eigen_update_full,
+    )
+
+
+def test_policy_bottom_n_zero_modes_matches_eigen_full():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.ones(2),
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=np.diag([3.0, 1.0]),
+        theta_target=np.array([1.0, -1.0]),
+    )
+    full = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={"update_mode": "eigen_full", "whiten": False},
+    )
+    bottom_zero = update_observation_belief_with_policy(
+        prior,
+        [summary],
+        policy={
+            "update_mode": "eigen_damped",
+            "whiten": False,
+            "damping_mode": "bottom_n",
+            "damping_n_modes": 0,
+            "damping_value": 0.1,
+        },
+    )
+
+    np.testing.assert_allclose(bottom_zero.damping_factors, np.ones(2))
+    np.testing.assert_allclose(
+        bottom_zero.physical_update_applied,
+        full.physical_update_applied,
+    )
+
+
 @pytest.mark.parametrize(
     "policy_kwargs, match",
     [
@@ -543,6 +618,17 @@ def test_policy_eigen_damped_reduces_update_norm_relative_to_eigen_full():
         ({"gate_source": "bad"}, "gate_source"),
         ({"eig_floor_abs": -1.0}, "non-negative"),
         ({"eig_floor_rel": -1.0}, "non-negative"),
+        ({"damping_value": np.nan}, "finite"),
+        ({"damping_n_modes": -1}, "damping_n_modes"),
+        ({"damping_n_modes": 1.5}, "integer"),
+        (
+            {
+                "damping_mode": "bottom_n",
+                "damping_n_modes": 1,
+                "damping_value": 1.1,
+            },
+            "between 0 and 1",
+        ),
         ({"min_kept_modes": 3, "max_kept_modes": 2}, "cannot exceed"),
     ],
 )
@@ -552,6 +638,32 @@ def test_observation_update_policy_rejects_invalid_configuration(
 ):
     with pytest.raises(ValueError, match=match):
         ObservationUpdatePolicy(**policy_kwargs)
+
+
+def test_policy_bottom_n_rejects_count_larger_than_basis():
+    labels = ("source.separation_as", "source.log_flux_total")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.ones(2),
+    )
+    summary = _synthetic_policy_summary(
+        labels=labels,
+        information=np.eye(2),
+        theta_target=np.ones(2),
+    )
+
+    with pytest.raises(ValueError, match="damping_n_modes"):
+        update_observation_belief_with_policy(
+            prior,
+            [summary],
+            policy={
+                "update_mode": "eigen_damped",
+                "damping_mode": "bottom_n",
+                "damping_n_modes": 3,
+                "damping_value": 0.1,
+            },
+        )
 
 
 def test_policy_rejects_impossible_kept_mode_count_for_layout():

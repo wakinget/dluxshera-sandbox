@@ -259,6 +259,35 @@ def test_iterative_update_policy_defaults_to_physical_full():
     assert resolved["update_policy"]["update_mode"] == "physical_full"
 
 
+def test_iterative_update_policy_resolves_bottom_n_damping():
+    module = load_module()
+    resolved = module._resolve_iterative_config(
+        {
+            "subblocks": {"n_subblocks": 1},
+            "iterative": {
+                "enabled": True,
+                "windows_per_draw": 1,
+                "subblocks_per_window": 1,
+                "update_mode": "eigen_damped",
+                "update_gain": 0.5,
+                "eigenbasis": {
+                    "basis_source": "posterior_precision",
+                    "gate_source": "accumulated_information",
+                    "whiten": True,
+                    "damping_mode": "bottom_n",
+                    "damping_n_modes": 8,
+                    "damping_value": 0.1,
+                },
+            },
+        }
+    )
+
+    assert resolved["update_policy"]["damping_mode"] == "bottom_n"
+    assert resolved["update_policy"]["damping_n_modes"] == 8
+    assert resolved["update_policy"]["damping_value"] == pytest.approx(0.1)
+    assert resolved["eigenbasis"]["damping_n_modes"] == 8
+
+
 def test_campaign_plan_records_resolved_iterative_update_policy(tmp_path: Path):
     module = load_module()
     config_path = tmp_path / "campaign.json"

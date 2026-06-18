@@ -302,6 +302,7 @@ def _default_experiment_config() -> dict[str, Any]:
                 "eig_floor_rel": 0.0,
                 "damping_mode": "none",
                 "damping_value": 1.0,
+                "damping_n_modes": 0,
                 "min_kept_modes": None,
                 "max_kept_modes": None,
                 "top_k_contributors": 8,
@@ -1642,6 +1643,7 @@ def _resolve_update_policy(experiment_cfg: Mapping[str, Any]) -> ObservationUpda
         eig_floor_rel=float(eigen.get("eig_floor_rel", 0.0)),
         damping_mode=str(eigen.get("damping_mode", "none")),
         damping_value=float(eigen.get("damping_value", 1.0)),
+        damping_n_modes=eigen.get("damping_n_modes", 0),
         min_kept_modes=(
             None
             if eigen.get("min_kept_modes") is None

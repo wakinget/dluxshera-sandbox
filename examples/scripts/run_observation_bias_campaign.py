@@ -1287,6 +1287,7 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
         eig_floor_rel=float(eigen_cfg.get("eig_floor_rel", 0.0)),
         damping_mode=str(eigen_cfg.get("damping_mode", "none")),
         damping_value=float(eigen_cfg.get("damping_value", 1.0)),
+        damping_n_modes=eigen_cfg.get("damping_n_modes", 0),
         min_kept_modes=(
             None
             if eigen_cfg.get("min_kept_modes") is None
@@ -1313,6 +1314,7 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
             "eig_floor_rel": policy.eig_floor_rel,
             "damping_mode": policy.damping_mode,
             "damping_value": policy.damping_value,
+            "damping_n_modes": policy.damping_n_modes,
             "min_kept_modes": policy.min_kept_modes,
             "max_kept_modes": policy.max_kept_modes,
             "top_k_contributors": policy.top_k_contributors,
@@ -1327,6 +1329,7 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
             "eig_floor_rel": policy.eig_floor_rel,
             "damping_mode": policy.damping_mode,
             "damping_value": policy.damping_value,
+            "damping_n_modes": policy.damping_n_modes,
             "min_kept_modes": policy.min_kept_modes,
             "max_kept_modes": policy.max_kept_modes,
             "top_k_contributors": policy.top_k_contributors,

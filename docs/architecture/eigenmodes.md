@@ -58,6 +58,13 @@ The single-star calibration demo uses the same fields under
 mode components, and `eigen_damped` reduces them smoothly. Schur summaries and
 belief states remain in the physical basis in every mode.
 
+For fixed weakest-mode damping, use `damping_mode: bottom_n` with
+`damping_n_modes` and `damping_value`. The weakest modes are selected by
+increasing gate-source information. This retains the full basis and is separate
+from truncation; for example, `damping_n_modes: 8` and `damping_value: 0.1`
+reduce only the weakest eight eigen-coordinate updates by 10x before applying
+the global `update_gain`.
+
 Each case or iterative window writes `eigen_update_diagnostics.json` and
 `eigen_update_modes.csv`. Full-fidelity analysis combines these into
 `eigen_update_modes.csv`, `eigen_update_window_summary.csv`, and

@@ -1018,10 +1018,15 @@ class ObservationUpdatePolicy:
         Damping rule for ``"eigen_damped"``. ``"scalar"`` uses
         ``damping_value`` for every mode. ``"information"`` uses
         ``max(lambda, 0) / (max(lambda, 0) + damping_value)``.
-        ``"none"`` leaves every factor at one.
+        ``"bottom_n"`` uses ``damping_value`` for the weakest
+        ``damping_n_modes`` modes and one for every other mode. ``"none"``
+        leaves every factor at one.
     damping_value :
         Scalar damping parameter. It must be non-negative for
-        ``"information"`` damping.
+        ``"information"`` damping and between zero and one for ``"bottom_n"``.
+    damping_n_modes :
+        Number of weakest gate modes damped by ``"bottom_n"``. Ties are ordered
+        deterministically by their existing mode order.
     min_kept_modes, max_kept_modes :
         Optional lower and upper bounds for retained modes in
         ``"eigen_truncated"``.
@@ -1038,6 +1043,7 @@ class ObservationUpdatePolicy:
     eig_floor_rel: float = 0.0
     damping_mode: str = "none"
     damping_value: float = 1.0
+    damping_n_modes: int = 0
     min_kept_modes: int | None = None
     max_kept_modes: int | None = None
     top_k_contributors: int = 8
@@ -1050,7 +1056,7 @@ class ObservationUpdatePolicy:
             "eigen_truncated",
         }
         allowed_sources = {"posterior_precision", "accumulated_information"}
-        allowed_damping_modes = {"none", "scalar", "information"}
+        allowed_damping_modes = {"none", "scalar", "information", "bottom_n"}
 
         if self.update_mode not in allowed_update_modes:
             raise ValueError(
@@ -1085,6 +1091,17 @@ class ObservationUpdatePolicy:
         if self.damping_mode == "information" and self.damping_value < 0.0:
             raise ValueError(
                 "damping_value must be non-negative for information damping."
+            )
+        if (
+            isinstance(self.damping_n_modes, bool)
+            or not isinstance(self.damping_n_modes, (int, np.integer))
+        ):
+            raise ValueError("damping_n_modes must be an integer.")
+        if self.damping_n_modes < 0:
+            raise ValueError("damping_n_modes must be non-negative.")
+        if self.damping_mode == "bottom_n" and not 0.0 <= self.damping_value <= 1.0:
+            raise ValueError(
+                "damping_value must be between 0 and 1 for bottom_n damping."
             )
         if self.min_kept_modes is not None and self.min_kept_modes < 0:
             raise ValueError("min_kept_modes must be non-negative when provided.")
@@ -1686,6 +1703,21 @@ def _policy_damping_factors(
             np.full_like(gate_values, float(policy.damping_value), dtype=float),
             "scalar: factor = damping_value",
         )
+    if policy.damping_mode == "bottom_n":
+        n_modes = int(gate_values.size)
+        if policy.damping_n_modes > n_modes:
+            raise ValueError("damping_n_modes cannot exceed the number of modes.")
+        factors = np.ones_like(gate_values, dtype=float)
+        if policy.damping_n_modes:
+            weakest = np.argsort(gate_values, kind="stable")[
+                : policy.damping_n_modes
+            ]
+            factors[weakest] = float(policy.damping_value)
+        return (
+            factors,
+            "bottom_n: factor = damping_value for the weakest "
+            "damping_n_modes gate values, else 1",
+        )
     clipped = np.clip(gate_values, 0.0, None)
     denominator = clipped + float(policy.damping_value)
     factors = np.zeros_like(clipped, dtype=float)
@@ -1918,6 +1950,7 @@ def update_observation_belief_with_policy(
             "update_gain": float(update_policy.update_gain),
             "damping_mode": update_policy.damping_mode,
             "damping_value": float(update_policy.damping_value),
+            "damping_n_modes": int(update_policy.damping_n_modes),
             "damping_formula": damping_formula,
             "n_modes_total": int(gate_values.size),
             "n_modes_kept": int(np.count_nonzero(kept_mode_mask)),

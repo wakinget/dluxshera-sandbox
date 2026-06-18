@@ -23,6 +23,13 @@ SKELETON_PATH = (
     / "full_fidelity_algorithm_campaign_template"
     / "full_fidelity_algorithm_campaign_v1.yaml"
 )
+DAMPED_CONFIG_PATH = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "full_fidelity_algorithm_campaign_template"
+    / "full_fidelity_zernike_2x2_self_correction_hpc_v1_eigen_damped.yaml"
+)
 
 
 def load_module() -> Any:
@@ -74,6 +81,9 @@ def test_config_translation_preserves_iterative_eigenbasis_policy() -> None:
         "whiten": True,
         "eig_floor_rel": 1.0e-8,
         "min_kept_modes": 1,
+        "damping_mode": "bottom_n",
+        "damping_n_modes": 8,
+        "damping_value": 0.1,
     }
 
     translated = module._full_fidelity_to_observation_bias(raw, run_name="unit")
@@ -82,6 +92,26 @@ def test_config_translation_preserves_iterative_eigenbasis_policy() -> None:
     assert iterative["update_mode"] == "eigen_truncated"
     assert iterative["update_gain"] == 0.25
     assert iterative["eigenbasis"]["min_kept_modes"] == 1
+    assert iterative["eigenbasis"]["damping_mode"] == "bottom_n"
+    assert iterative["eigenbasis"]["damping_n_modes"] == 8
+    assert iterative["eigenbasis"]["damping_value"] == 0.1
+
+
+def test_damped_hpc_config_translates_bottom_n_policy() -> None:
+    module = load_module()
+    raw = module.load_config_file(DAMPED_CONFIG_PATH)
+
+    translated = module._full_fidelity_to_observation_bias(raw, run_name="unit")
+    iterative = translated["experiment"]["iterative"]
+
+    assert iterative["update_mode"] == "eigen_damped"
+    assert iterative["eigenbasis"]["damping_mode"] == "bottom_n"
+    assert iterative["eigenbasis"]["damping_n_modes"] == 8
+    assert iterative["eigenbasis"]["damping_value"] == 0.1
+    assert iterative["eigenbasis"]["eig_floor_abs"] == 0.0
+    assert iterative["eigenbasis"]["eig_floor_rel"] == 0.0
+    assert iterative["eigenbasis"]["min_kept_modes"] is None
+    assert iterative["eigenbasis"]["max_kept_modes"] is None
 
 
 def test_config_translation_rejects_unsupported_kind() -> None:
