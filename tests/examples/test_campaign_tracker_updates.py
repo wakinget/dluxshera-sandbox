@@ -14,12 +14,11 @@ def test_campaign_tracker_contains_new_full_fidelity_hpc_entries() -> None:
         "full_fidelity_zernike_2x2_self_correction_hpc_v1",
     ):
         assert name in text
-        assert "Config/preflight pending" in text
-    assert "local X/Y/PA registration solve" in text
+    assert "recovered X/Y/PA registration" in text
     assert "must" not in text.lower() or "truth_when_available" in text
     assert "12 subblocks" in text
     assert "physical_full" in text
-    assert "small high-order WFE knowledge-error" in text
-    assert "2x2 M1/M2 Zernike sigma matrix" in text
+    assert "Preserves the full science config" in text
     assert "300 subblocks" in text
-    assert "eigenbasis-update campaign should rerun the same matrix" in text
+    assert "condition shards" in text
+    assert "shard_manifest.csv" in text

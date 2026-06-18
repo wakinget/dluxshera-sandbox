@@ -1485,9 +1485,30 @@ def _generate_prior_draw_cases(
             "n_cases is interpreted as draws per condition."
         )
     draw_seed = int(raw_cfg.get("draw_seed", 12345))
+    draw_index_start = int(raw_cfg.get("draw_index_start", 0))
+    condition_index_start = int(raw_cfg.get("condition_index_start", 0))
+    global_draw_index_start_raw = raw_cfg.get("global_draw_index_start")
+    global_draw_index_start = (
+        int(global_draw_index_start_raw)
+        if global_draw_index_start_raw is not None
+        else None
+    )
+    rng_skip_draws = int(raw_cfg.get("rng_skip_draws", 0))
+    if draw_index_start < 0:
+        raise ValueError("prior_draws.draw_index_start must be non-negative.")
+    if condition_index_start < 0:
+        raise ValueError("prior_draws.condition_index_start must be non-negative.")
+    if global_draw_index_start is not None and global_draw_index_start < 0:
+        raise ValueError("prior_draws.global_draw_index_start must be non-negative.")
+    if rng_skip_draws < 0:
+        raise ValueError("prior_draws.rng_skip_draws must be non-negative.")
     case_name_template = str(raw_cfg.get("case_name_template", "prior_draw_{draw_index:03d}"))
     label_order = tuple(labels)
     rng = np.random.default_rng(draw_seed)
+    if rng_skip_draws:
+        # Sharded campaigns use this opt-in offset to reproduce the exact RNG
+        # stream position of draws selected from a larger parent campaign.
+        rng.normal(loc=0.0, scale=1.0, size=rng_skip_draws * len(label_order))
     cases: list[BiasCase] = []
     rows_by_case: dict[str, list[dict[str, Any]]] = {}
     condition_entries: list[dict[str, Any]]
@@ -1496,7 +1517,7 @@ def _generate_prior_draw_cases(
             raise ValueError("prior_draws.conditions must be a list when provided.")
         condition_entries = []
         seen_conditions: set[str] = set()
-        for condition_index, raw_condition in enumerate(conditions_raw):
+        for local_condition_index, raw_condition in enumerate(conditions_raw):
             if not isinstance(raw_condition, Mapping):
                 raise ValueError("Each prior_draws.conditions entry must be a mapping.")
             condition_name = str(raw_condition.get("condition_name", "")).strip()
@@ -1509,7 +1530,7 @@ def _generate_prior_draw_cases(
             condition_sigmas.update(dict(raw_condition.get("sigmas", {}) or {}))
             condition_entries.append(
                 {
-                    "condition_index": int(condition_index),
+                    "condition_index": int(condition_index_start + local_condition_index),
                     "condition_name": condition_name,
                     "sigmas": condition_sigmas,
                 }
@@ -1517,11 +1538,12 @@ def _generate_prior_draw_cases(
     else:
         condition_entries = [
             {
-                "condition_index": 0,
+                "condition_index": int(condition_index_start),
                 "condition_name": "",
                 "sigmas": raw_cfg.get("sigmas", {}),
             }
         ]
+    generated_draw_ordinal = 0
     for condition in condition_entries:
         sigma_by_label, sigma_meta = _resolve_prior_draw_sigmas(
             labels=labels,
@@ -1531,8 +1553,16 @@ def _generate_prior_draw_cases(
         sigma_vector = np.asarray([sigma_by_label[label] for label in label_order], dtype=float)
         condition_name = str(condition["condition_name"])
         condition_index = int(condition["condition_index"])
-        for draw_index in range(n_cases):
-            global_draw_index = condition_index * n_cases + draw_index if has_conditions else draw_index
+        for local_draw_index in range(n_cases):
+            draw_index = draw_index_start + local_draw_index
+            if global_draw_index_start is not None:
+                global_draw_index = global_draw_index_start + generated_draw_ordinal
+            else:
+                global_draw_index = (
+                    condition_index * n_cases + draw_index
+                    if has_conditions
+                    else draw_index
+                )
             format_kwargs = {
                 "draw_index": int(draw_index),
                 "global_draw_index": int(global_draw_index),
@@ -1595,6 +1625,7 @@ def _generate_prior_draw_cases(
                     }
                 )
             rows_by_case[case_name] = rows
+            generated_draw_ordinal += 1
     return cases, rows_by_case
 
 
