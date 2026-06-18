@@ -203,12 +203,10 @@ experiment:
       plate_scale_as_per_pix: true
       primary_zernikes:
         enabled: true
-        indices:
-        - 0
+        indices: [ 0, 1, 2, 3, 4, 5, 6, 7 ]
       secondary_zernikes:
         enabled: true
-        indices:
-        - 0
+        indices: [ 0, 1, 2, 3, 4, 5, 6, 7 ]
   prior_draws:
     enabled: true
     n_cases: 2
