@@ -209,7 +209,6 @@ experiment:
       damping_n_modes: 8
       damping_value: 0.1
       top_k_contributors: 8
-      save_diagnostics: true
   observation_theta:
     source:
       separation_as: true
