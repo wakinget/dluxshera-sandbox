@@ -317,6 +317,10 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
             "high_order_wfe": _as_mapping(experiment.get("high_order_wfe"), name="experiment.high_order_wfe"),
             "subblocks": subblocks,
             "iterative": iterative,
+            "iterative_forecast": _as_mapping(
+                experiment.get("iterative_forecast"),
+                name="experiment.iterative_forecast",
+            ),
             "seeding": _as_mapping(experiment.get("seeding"), name="experiment.seeding") or {
                 "seed_policy": "different_jitter_different_noise",
                 "base_seed": int(experiment.get("seed", 42)),

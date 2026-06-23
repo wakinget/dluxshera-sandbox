@@ -180,6 +180,10 @@ SUPPORTED_FORECAST_MODES = (
     "replicate",
     "fixed_information_score_noise",
 )
+SUPPORTED_ITERATIVE_FORECAST_MODES = (
+    "replicate_information",
+    "stochastic_score_noise",
+)
 SUPPORTED_REFERENCE_DIAGNOSTICS_PROFILES = ("none", "basic", "review", "full")
 SUPPORTED_SCHUR_FRAME_QUALITY_POLICIES = ("warn", "mask", "reject")
 SUPPORTED_SCHUR_FRAME_QUALITY_MISSING = ("allow_all", "error")
@@ -1352,6 +1356,73 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _resolve_iterative_forecast_config(experiment_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    raw_cfg = experiment_cfg.get("iterative_forecast", {}) or {}
+    if not isinstance(raw_cfg, Mapping):
+        raise ValueError("experiment.iterative_forecast must be a mapping when provided.")
+    enabled = bool(raw_cfg.get("enabled", False))
+    iterative_cfg = _resolve_iterative_config(experiment_cfg)
+    actual_windows = int(raw_cfg.get("actual_windows", iterative_cfg.get("windows_per_draw", 1)))
+    projected_windows = int(raw_cfg.get("projected_windows", actual_windows))
+    subblocks_per_window = int(
+        raw_cfg.get(
+            "subblocks_per_window",
+            iterative_cfg.get("subblocks_per_window", 1),
+        )
+    )
+    modes = tuple(str(mode) for mode in raw_cfg.get("modes", ["replicate_information"]))
+    invalid = sorted(set(modes) - set(SUPPORTED_ITERATIVE_FORECAST_MODES))
+    if invalid:
+        raise ValueError(
+            "Unsupported iterative_forecast mode(s): " + ", ".join(invalid)
+        )
+    stochastic_trials = int(raw_cfg.get("stochastic_trials", raw_cfg.get("n_trials", 128)))
+    if actual_windows <= 0:
+        raise ValueError("experiment.iterative_forecast.actual_windows must be positive.")
+    if projected_windows < actual_windows:
+        raise ValueError(
+            "experiment.iterative_forecast.projected_windows must be >= actual_windows."
+        )
+    if subblocks_per_window <= 0:
+        raise ValueError(
+            "experiment.iterative_forecast.subblocks_per_window must be positive."
+        )
+    if "stochastic_score_noise" in modes and stochastic_trials <= 0:
+        raise ValueError(
+            "experiment.iterative_forecast.stochastic_trials must be positive "
+            "when stochastic_score_noise is enabled."
+        )
+    prefixes = tuple(
+        int(value)
+        for value in raw_cfg.get("output_prefixes", [actual_windows, projected_windows])
+    )
+    if any(value <= 0 for value in prefixes):
+        raise ValueError("experiment.iterative_forecast.output_prefixes must be positive.")
+    observation_duration_s = float(
+        raw_cfg.get(
+            "observation_duration_s",
+            float(projected_windows * subblocks_per_window)
+            * float(raw_cfg.get("subblock_duration_s", 1.0)),
+        )
+    )
+    seed = int(raw_cfg.get("seed", experiment_cfg.get("seed", 42)))
+    return {
+        "enabled": enabled,
+        "actual_windows": actual_windows,
+        "projected_windows": projected_windows,
+        "subblocks_per_window": subblocks_per_window,
+        "projected_subblocks_total": int(projected_windows * subblocks_per_window),
+        "actual_subblocks_total_per_case": int(actual_windows * subblocks_per_window),
+        "observation_duration_s": observation_duration_s,
+        "modes": list(modes),
+        "stochastic_trials": stochastic_trials,
+        "seed": seed,
+        "forecast_from": str(raw_cfg.get("forecast_from", "realized_windows")),
+        "output_prefixes": sorted(set(prefixes)),
+        "plots": bool(raw_cfg.get("plots", True)),
+    }
+
+
 def _case_draw_index(case: BiasCase) -> int | str:
     if case.prior_draw_metadata and case.prior_draw_metadata.get("draw_index") is not None:
         return int(case.prior_draw_metadata["draw_index"])
@@ -2053,6 +2124,21 @@ def build_campaign_plan(
     }
     subblock_command_options = resolve_subblock_command_options(effective_subblock_cfg)
     iterative_cfg = _resolve_iterative_config(experiment_cfg)
+    iterative_forecast_cfg = _resolve_iterative_forecast_config(experiment_cfg)
+    if bool(iterative_forecast_cfg.get("enabled", False)):
+        if not bool(iterative_cfg.get("enabled", False)):
+            raise ValueError("experiment.iterative_forecast.enabled=true requires iterative.enabled=true.")
+        if int(iterative_forecast_cfg["subblocks_per_window"]) != int(iterative_cfg["subblocks_per_window"]):
+            raise ValueError(
+                "experiment.iterative_forecast.subblocks_per_window must match "
+                "experiment.iterative.subblocks_per_window."
+            )
+        iterative_cfg = {
+            **iterative_cfg,
+            "windows_per_draw": int(iterative_forecast_cfg["actual_windows"]),
+        }
+        experiment_cfg["iterative"] = iterative_cfg
+        experiment_cfg["iterative_forecast"] = iterative_forecast_cfg
     seeding_cfg = _resolve_seeding_config(experiment_cfg)
     subblock_resolution = _resolve_total_subblocks_for_campaign(
         experiment_cfg,
@@ -2357,6 +2443,7 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
     eigen_cfg = dict(plan.config["experiment"].get("eigenbasis", {}) or {})
     forecast_cfg = _forecast_config(plan.config["experiment"])
     iterative_cfg = _resolve_iterative_config(plan.config["experiment"])
+    iterative_forecast_cfg = _resolve_iterative_forecast_config(plan.config["experiment"])
     actual_n_summaries = int(plan.config["experiment"].get("subblocks", {}).get("n_subblocks", 3))
     smear_summary_rows = _smear_summary_rows_for_plan(plan, strict=True)
     forecast_grid = parse_forecast_grid(
@@ -2399,6 +2486,27 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
         "subblock_command_options": dict(subblock_command_options),
         "seeding": _resolve_seeding_config(plan.config["experiment"]),
         "iterative": dict(plan.iterative),
+        "iterative_forecast": {
+            **dict(iterative_forecast_cfg),
+            "enabled": bool(iterative_forecast_cfg.get("enabled", False)),
+            "rendered_subblocks_total": int(
+                len(plan.cases)
+                * int(iterative_forecast_cfg.get("actual_windows", iterative_cfg.get("windows_per_draw", 1)))
+                * int(iterative_forecast_cfg.get("subblocks_per_window", iterative_cfg.get("subblocks_per_window", 1)))
+            )
+            if bool(iterative_forecast_cfg.get("enabled", False))
+            else 0,
+            "projected_endpoint_subblocks_per_case": int(
+                iterative_forecast_cfg.get("projected_subblocks_total", 0)
+            ),
+            "case_output_dir": str(plan.run_root / "analysis"),
+            "artifacts": [
+                "analysis/final_observation_summary.csv",
+                "analysis/final_observation_summary.json",
+                "analysis/projected_observation_forecast.csv",
+                "analysis/window_evolution_actual_and_projected.csv",
+            ],
+        },
         "eigenbasis": {
             **eigen_cfg,
             "resolved_sources": list(_resolve_eigen_sources(eigen_cfg)),
@@ -4974,6 +5082,350 @@ def _iterative_status_summary(plan: CampaignPlan) -> dict[str, Any]:
     }
 
 
+def _finite_float(value: Any, default: float = float("nan")) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
+
+
+def _iterative_forecast_detector_ke_fields(plan: CampaignPlan) -> dict[str, Any]:
+    cfg = plan.config.get("experiment", {}).get("detector_calibration_knowledge_error", {})
+    if not isinstance(cfg, Mapping):
+        cfg = {}
+    offsets = cfg.get("pixel_offsets", {}) if isinstance(cfg.get("pixel_offsets"), Mapping) else {}
+    response = cfg.get("pixel_response", {}) if isinstance(cfg.get("pixel_response"), Mapping) else {}
+    return {
+        "detector_ke_pixel_offsets_sigma_pix": offsets.get("sigma_pix", ""),
+        "detector_ke_pixel_response_sigma_fractional": response.get("sigma_fractional", ""),
+    }
+
+
+def _iterative_forecast_prior_sigma_microas(plan: CampaignPlan, case: BiasCase) -> float:
+    if case.prior_sigma_by_label and "source.separation_as" in case.prior_sigma_by_label:
+        return float(case.prior_sigma_by_label["source.separation_as"]) * 1.0e6
+    prior_draws = plan.config.get("experiment", {}).get("prior_draws", {})
+    if isinstance(prior_draws, Mapping):
+        sigmas = prior_draws.get("sigmas", {})
+        if isinstance(sigmas, Mapping):
+            sep = sigmas.get("source.separation_as", {})
+            if isinstance(sep, Mapping) and sep.get("sigma") is not None:
+                return float(sep["sigma"]) * 1.0e6
+    return float("nan")
+
+
+def _project_iterative_case_rows(
+    *,
+    plan: CampaignPlan,
+    case: BiasCase,
+    actual_rows: Sequence[Mapping[str, Any]],
+    forecast_cfg: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = sorted(actual_rows, key=lambda row: int(row.get("window_index", 0)))
+    if not rows:
+        return [], {}
+    actual_windows = int(forecast_cfg["actual_windows"])
+    projected_windows = int(forecast_cfg["projected_windows"])
+    subblocks_per_window = int(forecast_cfg["subblocks_per_window"])
+    final_actual = rows[-1]
+    first_actual = rows[0]
+    actual_final_error = _finite_float(
+        final_actual.get("separation_next_reference_error_microas"),
+        _finite_float(final_actual.get("separation_posterior_error_after_microas")),
+    )
+    actual_sigma = _finite_float(final_actual.get("posterior_sigma_separation_microas"))
+    initial_error = _finite_float(first_actual.get("separation_reference_error_before_microas"))
+    final_vector_norm_actual = _finite_float(final_actual.get("next_reference_error_norm"))
+    ratios: list[float] = []
+    for row in rows:
+        before = _finite_float(row.get("separation_reference_error_before_microas"))
+        after = _finite_float(row.get("separation_next_reference_error_microas"))
+        if math.isfinite(before) and abs(before) > 1.0e-12 and math.isfinite(after):
+            ratios.append(float(after / before))
+    if not ratios:
+        ratios = [1.0]
+    vector_ratios: list[float] = []
+    for row in rows:
+        before = _finite_float(row.get("reference_error_norm_before"))
+        after = _finite_float(row.get("next_reference_error_norm"))
+        if math.isfinite(before) and before > 1.0e-30 and math.isfinite(after):
+            vector_ratios.append(float(after / before))
+    if not vector_ratios:
+        vector_ratios = [1.0]
+
+    evolution: list[dict[str, Any]] = []
+    for row in rows:
+        idx = int(row.get("window_index", 0))
+        evolution.append(
+            {
+                "case_name": case.case_name,
+                "condition_name": (case.prior_draw_metadata or {}).get("condition_name", ""),
+                "draw_index": _case_draw_index(case),
+                "window_index": idx,
+                "window_kind": "actual",
+                "forecast_mode": "realized",
+                "n_subblocks_cumulative": int((idx + 1) * subblocks_per_window),
+                "separation_error_microas": _finite_float(row.get("separation_next_reference_error_microas")),
+                "posterior_sigma_separation_microas": _finite_float(row.get("posterior_sigma_separation_microas")),
+                "vector_norm": _finite_float(row.get("next_reference_error_norm")),
+                "update_cosine": _finite_float(row.get("update_cosine_with_ideal")),
+            }
+        )
+
+    projected_error = actual_final_error
+    projected_vector_norm = final_vector_norm_actual
+    for idx in range(actual_windows, projected_windows):
+        ratio = ratios[(idx - actual_windows) % len(ratios)]
+        vector_ratio = vector_ratios[(idx - actual_windows) % len(vector_ratios)]
+        projected_error = float(projected_error * ratio) if math.isfinite(projected_error) else projected_error
+        projected_vector_norm = (
+            float(projected_vector_norm * vector_ratio)
+            if math.isfinite(projected_vector_norm)
+            else projected_vector_norm
+        )
+        sigma = (
+            float(actual_sigma * math.sqrt(actual_windows / float(idx + 1)))
+            if math.isfinite(actual_sigma) and actual_windows > 0
+            else float("nan")
+        )
+        evolution.append(
+            {
+                "case_name": case.case_name,
+                "condition_name": (case.prior_draw_metadata or {}).get("condition_name", ""),
+                "draw_index": _case_draw_index(case),
+                "window_index": idx,
+                "window_kind": "projected",
+                "forecast_mode": "replicate_information",
+                "n_subblocks_cumulative": int((idx + 1) * subblocks_per_window),
+                "separation_error_microas": projected_error,
+                "posterior_sigma_separation_microas": sigma,
+                "vector_norm": projected_vector_norm,
+                "update_cosine": "",
+            }
+        )
+    projected_sigma = (
+        float(actual_sigma * math.sqrt(actual_windows / float(projected_windows)))
+        if math.isfinite(actual_sigma) and actual_windows > 0
+        else float("nan")
+    )
+    actual_abs = [
+        abs(_finite_float(row.get("separation_next_reference_error_microas")))
+        for row in rows
+        if math.isfinite(_finite_float(row.get("separation_next_reference_error_microas")))
+    ]
+    projected_abs = [
+        abs(_finite_float(row.get("separation_error_microas")))
+        for row in evolution
+        if str(row.get("window_kind")) == "projected"
+        and math.isfinite(_finite_float(row.get("separation_error_microas")))
+    ]
+    all_projected_abs = actual_abs + projected_abs
+    final = {
+        "case_name": case.case_name,
+        "condition_name": (case.prior_draw_metadata or {}).get("condition_name", ""),
+        "draw_index": _case_draw_index(case),
+        "actual_windows": actual_windows,
+        "projected_windows": projected_windows,
+        "subblocks_per_window": subblocks_per_window,
+        "actual_subblocks_total": int(actual_windows * subblocks_per_window),
+        "projected_subblocks_total": int(projected_windows * subblocks_per_window),
+        "observation_duration_s": float(forecast_cfg["observation_duration_s"]),
+        "phi_ref": str(plan.config.get("experiment", {}).get("subblocks", {}).get("phi_ref", "")),
+        "update_mode": str(plan.iterative.get("update_mode", "")),
+        "eigen_damping_mode": str(plan.iterative.get("eigenbasis", {}).get("damping_mode", "")),
+        "separation_prior_sigma_microas": _iterative_forecast_prior_sigma_microas(plan, case),
+        "initial_separation_error_microas": initial_error,
+        "actual_final_window_index": int(rows[-1].get("window_index", actual_windows - 1)),
+        "actual_final_separation_error_microas": actual_final_error,
+        "actual_final_abs_separation_error_microas": abs(actual_final_error) if math.isfinite(actual_final_error) else float("nan"),
+        "actual_final_posterior_sigma_separation_microas": actual_sigma,
+        "projected_final_separation_error_microas": projected_error,
+        "projected_final_abs_separation_error_microas": abs(projected_error) if math.isfinite(projected_error) else float("nan"),
+        "projected_final_posterior_sigma_separation_microas": projected_sigma,
+        "projected_error_over_sigma": (
+            float(projected_error / projected_sigma)
+            if math.isfinite(projected_error) and math.isfinite(projected_sigma) and projected_sigma > 0.0
+            else float("nan")
+        ),
+        "diverged_flag": bool(
+            not math.isfinite(projected_error)
+            or (
+                math.isfinite(initial_error)
+                and abs(projected_error) > max(abs(initial_error) * 10.0, 1.0e6)
+            )
+        ),
+        "max_abs_separation_error_actual_microas": max(actual_abs) if actual_abs else float("nan"),
+        "max_abs_separation_error_projected_microas": max(all_projected_abs) if all_projected_abs else float("nan"),
+        "n_actual_windows_separation_worsened": int(
+            sum(
+                1
+                for prev, cur in zip(actual_abs, actual_abs[1:])
+                if math.isfinite(prev) and math.isfinite(cur) and cur > prev
+            )
+        ),
+        "n_projected_windows_separation_worsened": int(
+            sum(
+                1
+                for prev, cur in zip(all_projected_abs, all_projected_abs[1:])
+                if math.isfinite(prev) and math.isfinite(cur) and cur > prev
+            )
+        ),
+        "median_actual_update_cosine": float(
+            np.nanmedian([_finite_float(row.get("update_cosine_with_ideal")) for row in rows])
+        ),
+        "median_projected_update_cosine": "",
+        "final_vector_norm_actual": final_vector_norm_actual,
+        "final_vector_norm_projected": projected_vector_norm,
+        **_iterative_forecast_detector_ke_fields(plan),
+        "forecast_mode": "replicate_information",
+        "forecast_notes": (
+            "Projected from realized iterative windows by cycling observed "
+            "separation/reference transition ratios and scaling posterior sigma "
+            "with accumulated projected window count."
+        ),
+    }
+    return evolution, final
+
+
+def _stochastic_iterative_forecast_trials(
+    *,
+    final_rows: Sequence[Mapping[str, Any]],
+    forecast_cfg: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    if "stochastic_score_noise" not in set(forecast_cfg.get("modes", [])):
+        return [], {}
+    rng = np.random.default_rng(int(forecast_cfg.get("seed", 42)))
+    n_trials = int(forecast_cfg.get("stochastic_trials", 128))
+    trial_rows: list[dict[str, Any]] = []
+    quantiles: dict[str, dict[str, float]] = {}
+    for final in final_rows:
+        case_name = str(final.get("case_name", ""))
+        mean = _finite_float(final.get("projected_final_separation_error_microas"), 0.0)
+        sigma = _finite_float(final.get("projected_final_posterior_sigma_separation_microas"), 0.0)
+        samples = rng.normal(loc=mean, scale=max(sigma, 0.0), size=n_trials)
+        for trial_index, sample in enumerate(samples):
+            trial_rows.append(
+                {
+                    "case_name": case_name,
+                    "condition_name": final.get("condition_name", ""),
+                    "draw_index": final.get("draw_index", ""),
+                    "forecast_mode": "stochastic_score_noise",
+                    "trial_index": int(trial_index),
+                    "projected_final_separation_error_microas": float(sample),
+                    "projected_final_abs_separation_error_microas": float(abs(sample)),
+                    "projected_final_posterior_sigma_separation_microas": sigma,
+                    "projected_error_over_sigma": float(sample / sigma) if sigma > 0.0 else float("nan"),
+                    "seed": int(forecast_cfg.get("seed", 42)),
+                }
+            )
+        quantiles[case_name] = {
+            "projected_p16_separation_error_microas": float(np.percentile(samples, 16)),
+            "projected_p50_separation_error_microas": float(np.percentile(samples, 50)),
+            "projected_p84_separation_error_microas": float(np.percentile(samples, 84)),
+            "projected_p95_abs_separation_error_microas": float(np.percentile(np.abs(samples), 95)),
+        }
+    return trial_rows, quantiles
+
+
+def _plot_iterative_forecast_evolution(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    if not _HAVE_MATPLOTLIB or plt is None or not rows:
+        return
+    by_case: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        by_case.setdefault(str(row.get("case_name", "")), []).append(row)
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for case_name, case_rows in sorted(by_case.items()):
+        ordered = sorted(case_rows, key=lambda row: int(row.get("window_index", 0)))
+        x = [int(row.get("window_index", 0)) + 1 for row in ordered]
+        y = [_finite_float(row.get("separation_error_microas")) for row in ordered]
+        ax.plot(x, y, marker="o", linewidth=1.2, label=case_name)
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_xlabel("Window")
+    ax.set_ylabel("Separation error (microas)")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def write_iterative_observation_forecast_artifacts(
+    plan: CampaignPlan,
+    diagnostics: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    forecast_cfg = _resolve_iterative_forecast_config(plan.config["experiment"])
+    analysis_root = plan.run_root / "analysis"
+    if not bool(forecast_cfg.get("enabled", False)):
+        return {"enabled": False}
+    by_case: dict[str, list[Mapping[str, Any]]] = {}
+    for row in diagnostics:
+        by_case.setdefault(str(row.get("case_name", "")), []).append(row)
+    evolution_rows: list[dict[str, Any]] = []
+    final_rows: list[dict[str, Any]] = []
+    for case in plan.cases:
+        case_evolution, final = _project_iterative_case_rows(
+            plan=plan,
+            case=case,
+            actual_rows=by_case.get(case.case_name, []),
+            forecast_cfg=forecast_cfg,
+        )
+        evolution_rows.extend(case_evolution)
+        if final:
+            final_rows.append(final)
+    trial_rows, quantiles = _stochastic_iterative_forecast_trials(
+        final_rows=final_rows,
+        forecast_cfg=forecast_cfg,
+    )
+    for row in final_rows:
+        row.update(quantiles.get(str(row.get("case_name", "")), {}))
+        if quantiles.get(str(row.get("case_name", ""))):
+            row["forecast_notes"] = (
+                str(row["forecast_notes"])
+                + " Stochastic score-noise trials sample the projected endpoint "
+                "residual with the projected separation sigma."
+            )
+    _write_csv_rows(analysis_root / "window_evolution_actual_and_projected.csv", evolution_rows)
+    _write_csv_rows(analysis_root / "projected_observation_forecast.csv", final_rows)
+    _write_csv_rows(analysis_root / "final_observation_summary.csv", final_rows)
+    if trial_rows:
+        _write_csv_rows(analysis_root / "projected_observation_forecast_trials.csv", trial_rows)
+    _write_json(
+        analysis_root / "final_observation_summary.json",
+        {
+            "schema_version": "iterative_observation_forecast_summary.v1",
+            "created_at": now_iso_local_ms(),
+            "forecast_config": dict(forecast_cfg),
+            "rows": final_rows,
+            "trial_rows": int(len(trial_rows)),
+            "notes": [
+                "Projected rows are forecasts from actual realized iterative windows, not fully rendered later windows.",
+            ],
+        },
+    )
+    if bool(forecast_cfg.get("plots", True)):
+        _plot_iterative_forecast_evolution(
+            analysis_root / "actual_vs_projected_separation_evolution.png",
+            evolution_rows,
+        )
+    return {
+        "enabled": True,
+        "forecast_config": dict(forecast_cfg),
+        "n_final_rows": int(len(final_rows)),
+        "n_evolution_rows": int(len(evolution_rows)),
+        "n_trial_rows": int(len(trial_rows)),
+        "artifacts": {
+            "final_observation_summary_csv": str(analysis_root / "final_observation_summary.csv"),
+            "final_observation_summary_json": str(analysis_root / "final_observation_summary.json"),
+            "projected_observation_forecast_csv": str(analysis_root / "projected_observation_forecast.csv"),
+            "projected_observation_forecast_trials_csv": str(analysis_root / "projected_observation_forecast_trials.csv") if trial_rows else "",
+            "window_evolution_actual_and_projected_csv": str(analysis_root / "window_evolution_actual_and_projected.csv"),
+            "actual_vs_projected_plot": str(analysis_root / "actual_vs_projected_separation_evolution.png"),
+        },
+    }
+
+
 def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
     analysis_root = plan.run_root / "analysis"
     inventory, missing = _iterative_inventory_rows(plan)
@@ -5065,6 +5517,10 @@ def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
         previous_next_reference_by_case[case_name] = float(row["next_reference_error_norm"])
         current_offsets_by_case[case_name] = next_offsets
     _write_csv_rows(analysis_root / "iterative_window_diagnostics.csv", diagnostics)
+    iterative_forecast_summary = write_iterative_observation_forecast_artifacts(
+        plan,
+        diagnostics,
+    )
     status = {
         "schema_version": "observation_bias_iterative_aggregate_status.v1",
         "created_at": now_iso_local_ms(),
@@ -5087,6 +5543,7 @@ def aggregate_iterative_outputs(plan: CampaignPlan) -> dict[str, Any]:
         "subblocks_per_window": int(plan.iterative.get("subblocks_per_window", 0)),
         "update_gain": float(plan.iterative.get("update_gain", 1.0)),
         "update_mode": str(plan.iterative.get("update_mode", "")),
+        "iterative_forecast": iterative_forecast_summary,
     }
     _write_json(analysis_root / "aggregate_status.json", status)
     _write_json(plan.run_root / "campaign_summary.json", status)

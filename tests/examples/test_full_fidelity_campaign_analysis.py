@@ -132,6 +132,46 @@ def make_run_root(tmp_path: Path) -> Path:
             }
         )
     write_df(root / "analysis/iterative_window_diagnostics.csv", pd.DataFrame(win_rows))
+    write_df(
+        root / "analysis/final_observation_summary.csv",
+        pd.DataFrame(
+            [
+                {
+                    "case_name": "case_000",
+                    "actual_windows": 2,
+                    "projected_windows": 60,
+                    "subblocks_per_window": 30,
+                    "phi_ref": "truth_when_available",
+                    "detector_ke_pixel_offsets_sigma_pix": 0.001,
+                    "detector_ke_pixel_response_sigma_fractional": 0.001,
+                    "projected_final_separation_error_microas": -0.2,
+                    "projected_final_posterior_sigma_separation_microas": 0.5,
+                }
+            ]
+        ),
+    )
+    write_df(
+        root / "analysis/projected_observation_forecast.csv",
+        pd.DataFrame(
+            [
+                {
+                    "case_name": "case_000",
+                    "forecast_mode": "replicate_information",
+                    "projected_final_separation_error_microas": -0.2,
+                    "projected_final_posterior_sigma_separation_microas": 0.5,
+                }
+            ]
+        ),
+    )
+    write_df(
+        root / "analysis/window_evolution_actual_and_projected.csv",
+        pd.DataFrame(
+            [
+                {"case_name": "case_000", "window_index": 0, "window_kind": "actual", "separation_error_microas": -1.0},
+                {"case_name": "case_000", "window_index": 59, "window_kind": "projected", "separation_error_microas": -0.2},
+            ]
+        ),
+    )
 
     truth = {label: 0.0 for label in labels}
     truth["source.separation_as"] = 1.0
@@ -250,6 +290,9 @@ def test_analysis_script_runs_and_writes_review_bundle(tmp_path):
     assert (outdir / "review_summary.md").exists()
     assert (outdir / "campaign_dashboard.csv").exists()
     assert (outdir / "mismatch_dashboard.csv").exists()
+    assert (outdir / "final_observation_summary.csv").exists()
+    assert (outdir / "projected_observation_forecast.csv").exists()
+    assert (outdir / "window_evolution_actual_and_projected.csv").exists()
     assert (outdir / "representative_image_comparison_status.json").exists() is False
 
 
@@ -329,6 +372,10 @@ def test_dashboard_progress_slow_state_mismatch_and_smear_outputs(tmp_path):
 
     report = (outdir / "review_summary.md").read_text()
     assert "Full-fidelity binary iterative campaign review" in report
+    assert "Projected 30-minute observation forecast" in report
+    forecast = pd.read_csv(outdir / "final_observation_summary.csv")
+    assert forecast.loc[0, "phi_ref"] == "truth_when_available"
+    assert forecast.loc[0, "detector_ke_pixel_offsets_sigma_pix"] == pytest.approx(0.001)
 
 
 def test_analysis_reads_eigen_update_artifacts(tmp_path):

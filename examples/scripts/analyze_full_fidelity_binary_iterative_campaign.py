@@ -928,7 +928,59 @@ def pivot_plot(df: pd.DataFrame, filename: str, plotdir: Path, value: str, ylabe
     plt.close(fig)
 
 
-def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.DataFrame, final: pd.DataFrame, policy: str, image_plots: list[str]) -> None:
+def forecast_tables(run_root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    final = read_csv(run_root / "analysis/final_observation_summary.csv")
+    forecast = read_csv(run_root / "analysis/projected_observation_forecast.csv")
+    evolution = read_csv(run_root / "analysis/window_evolution_actual_and_projected.csv")
+    return final, forecast, evolution
+
+
+def plot_forecast_outputs(outdir: Path, final_forecast: pd.DataFrame, evolution: pd.DataFrame) -> None:
+    if plt is None:
+        return
+    plotdir = outdir / "plots"
+    if not final_forecast.empty:
+        if "projected_final_separation_error_microas" in final_forecast.columns:
+            fig, ax = plt.subplots(figsize=(7, 4))
+            values = pd.to_numeric(final_forecast["projected_final_separation_error_microas"], errors="coerce").dropna()
+            ax.hist(values, bins=min(12, max(3, len(values))), color="#4C78A8", alpha=0.8)
+            ax.axvline(0.0, color="black", linewidth=0.8)
+            ax.set_xlabel("Projected final separation error (microas)")
+            ax.set_ylabel("Cases")
+            fig.tight_layout()
+            fig.savefig(plotdir / "projected_30min_separation_residual_distribution.png", dpi=150)
+            plt.close(fig)
+        if "projected_final_posterior_sigma_separation_microas" in final_forecast.columns:
+            fig, ax = plt.subplots(figsize=(7, 4))
+            values = pd.to_numeric(final_forecast["projected_final_posterior_sigma_separation_microas"], errors="coerce").dropna()
+            ax.hist(values, bins=min(12, max(3, len(values))), color="#59A14F", alpha=0.8)
+            ax.set_xlabel("Projected final posterior sigma (microas)")
+            ax.set_ylabel("Cases")
+            fig.tight_layout()
+            fig.savefig(plotdir / "projected_30min_posterior_sigma_distribution.png", dpi=150)
+            plt.close(fig)
+    if not evolution.empty and {"case_name", "window_index", "separation_error_microas"}.issubset(evolution.columns):
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        for case_name, group in evolution.groupby("case_name"):
+            ordered = group.sort_values("window_index")
+            ax.plot(
+                pd.to_numeric(ordered["window_index"], errors="coerce") + 1,
+                pd.to_numeric(ordered["separation_error_microas"], errors="coerce"),
+                marker="o",
+                linewidth=1.2,
+                label=str(case_name),
+            )
+        ax.axhline(0.0, color="black", linewidth=0.8)
+        ax.set_xlabel("Window")
+        ax.set_ylabel("Separation error (microas)")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=7, ncol=2)
+        fig.tight_layout()
+        fig.savefig(plotdir / "actual_vs_projected_window_evolution.png", dpi=150)
+        plt.close(fig)
+
+
+def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.DataFrame, final: pd.DataFrame, policy: str, image_plots: list[str], final_forecast: pd.DataFrame) -> None:
     completed = summary.get("completed_subblocks", "")
     failed = summary.get("failed_subblocks", "")
     missing = summary.get("missing_output_rows", "")
@@ -963,6 +1015,9 @@ def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.
         "",
         "## Iterative progress",
         "See [iterative_window_progress.csv](iterative_window_progress.csv) and plots [iterative_error_norm.png](plots/iterative_error_norm.png), [update_alignment_by_window.png](plots/update_alignment_by_window.png), and [separation_error_by_window.png](plots/separation_error_by_window.png).",
+        "",
+        "## Projected 30-minute observation forecast",
+        "See [final_observation_summary.csv](final_observation_summary.csv), [projected_observation_forecast.csv](projected_observation_forecast.csv), and [window_evolution_actual_and_projected.csv](window_evolution_actual_and_projected.csv). These results are projected from the realized actual windows, not from a fully rendered 60-window observation.",
         "",
         "## Slow-state evolution",
         "See [slow_state_evolution.csv](slow_state_evolution.csv) and [slow_state_final_summary.csv](slow_state_final_summary.csv).",
@@ -1030,6 +1085,7 @@ def run(args: argparse.Namespace) -> int:
     traj, resid, smear = trajectory_tables(run_root)
     slow_evo, slow_final = slow_state_tables(param)
     sloppy, corr, eig = sloppiness_tables(run_root, param)
+    final_forecast, projected_forecast, forecast_evolution = forecast_tables(run_root)
     dashboard = campaign_dashboard(run_root, artifacts)
     mismatch = mismatch_dashboard(run_root, artifacts, local_policy)
     exec_status = execution_status(run_root, artifacts["campaign_summary"])
@@ -1055,6 +1111,9 @@ def run(args: argparse.Namespace) -> int:
         "smear_summary_review.csv": smear,
         "slow_state_evolution.csv": slow_evo,
         "slow_state_final_summary.csv": slow_final,
+        "final_observation_summary.csv": final_forecast,
+        "projected_observation_forecast.csv": projected_forecast,
+        "window_evolution_actual_and_projected.csv": forecast_evolution,
         "parameter_sloppiness_summary.csv": sloppy,
         "correlation_top_pairs.csv": corr,
         "eigenmode_summary.csv": eig,
@@ -1066,10 +1125,11 @@ def run(args: argparse.Namespace) -> int:
 
     if not args.no_plots:
         plot_outputs(outdir, win, param, smear, traj, resid, subblock_metrics)
+        plot_forecast_outputs(outdir, final_forecast, forecast_evolution)
     image_plots = []
     if not args.no_plots:
         image_plots = image_comparisons(run_root, outdir, args.max_image_examples, args.image_examples, args.include_subblock_images, args.include_frame_images)
-    write_report(outdir, run_root, artifacts["campaign_summary"], win, slow_final, local_policy, image_plots)
+    write_report(outdir, run_root, artifacts["campaign_summary"], win, slow_final, local_policy, image_plots, final_forecast)
     write_index(outdir)
     if args.open_report:
         webbrowser.open((outdir / "index.html").as_uri())

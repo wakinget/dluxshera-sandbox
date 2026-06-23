@@ -21,6 +21,10 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 - Experiment metadata tracking improved: experiment-level notes and per-run notes now propagate into manifest/aggregate outputs.
 - Near-term focus remains optimizer robustness, regression depth, and doc/tutorial cleanup rather than major architecture rewrites.
 
+## Progress refresh (2026-06-23)
+
+- Added projected iterative observation forecasting for full-fidelity campaigns. The campaign can run the first K actual info-damped update windows and project to a 60-window / 1800-subblock / 30-minute observation endpoint, producing final separation residual and uncertainty summaries without rendering every subblock in the full observation. This is intended for deadline-sensitive production-ish campaigns where the first several windows are used to characterize update behavior and accumulated information.
+
 ---
 
 ## 1) Context & Problem Statement

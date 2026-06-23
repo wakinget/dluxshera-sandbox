@@ -21,6 +21,13 @@ CONFIG_PATH = (
     / "full_fidelity_algorithm_campaign_template"
     / "full_fidelity_binary_iterative_smoke.yaml"
 )
+PROJECTED_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "recipes"
+    / "full_fidelity_algorithm_campaign_template"
+    / "full_fidelity_info_damped_detector_ke_projected_30min_v1.yaml"
+)
 
 
 def load_module() -> Any:
@@ -93,3 +100,39 @@ def test_full_fidelity_binary_iterative_smoke_dry_run_writes_split_plans(tmp_pat
     assert all(row["trace_template_hash"] for row in rows)
     assert all(row["model_split_json"] for row in rows)
     assert all("posterior_sigma_inflation" in row["update_safety_json"] for row in rows)
+
+
+def test_projected_30min_config_dry_run_plans_actual_windows_only(tmp_path: Path) -> None:
+    module = load_module()
+    status = module.run_full_fidelity_binary_iterative_campaign(
+        config_path=PROJECTED_CONFIG_PATH,
+        results_root=tmp_path,
+        run_name="projected_30min_unit_dryrun",
+        dry_run=True,
+        aggregate_only=False,
+        resume=False,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+    )
+    run_root = Path(status["run_root"])
+    plan = json.loads((run_root / "campaign_plan.json").read_text(encoding="utf-8"))
+    resolved = json.loads((run_root / "resolved_config.json").read_text(encoding="utf-8"))
+    rows = _read_csv(run_root / "iterative_plan.csv")
+
+    assert len(plan["bias_cases"]) == 6
+    assert len(rows) == 6 * 10 * 30
+    assert plan["iterative"]["windows_per_draw"] == 10
+    assert plan["iterative"]["subblocks_per_window"] == 30
+    forecast = plan["iterative_forecast"]
+    assert forecast["enabled"] is True
+    assert forecast["rendered_subblocks_total"] == 1800
+    assert forecast["projected_endpoint_subblocks_per_case"] == 1800
+    assert forecast["actual_windows"] == 10
+    assert forecast["projected_windows"] == 60
+    assert resolved["experiment"]["subblocks"]["phi_ref"] == "truth_when_available"
+    assert resolved["experiment"]["detector_calibration_knowledge_error"]["apply_to"] == "inference"
+    assert resolved["experiment"]["detector_calibration_knowledge_error"]["pixel_offsets"]["sigma_pix"] == 0.001
+    assert resolved["experiment"]["detector_calibration_knowledge_error"]["pixel_response"]["sigma_fractional"] == 0.001
+    assert resolved["experiment"]["prior_draws"]["sigmas"]["source.separation_as"]["sigma"] == 1.0e-04
