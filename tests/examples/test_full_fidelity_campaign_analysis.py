@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,14 @@ import pytest
 
 
 SCRIPT = Path("examples/scripts/analyze_full_fidelity_binary_iterative_campaign.py")
+
+
+def load_analyzer_module():
+    spec = importlib.util.spec_from_file_location("analyze_full_fidelity_binary_iterative_campaign", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -242,6 +251,40 @@ def test_analysis_script_runs_and_writes_review_bundle(tmp_path):
     assert (outdir / "campaign_dashboard.csv").exists()
     assert (outdir / "mismatch_dashboard.csv").exists()
     assert (outdir / "representative_image_comparison_status.json").exists() is False
+
+
+def test_combine_window_tables_skips_empty_optional_csv_sidecars(tmp_path):
+    analyzer = load_analyzer_module()
+    run_root = tmp_path / "run"
+    window_000 = run_root / "cases/example_case/windows/window_000"
+    window_001 = run_root / "cases/example_case/windows/window_001"
+    window_002 = run_root / "cases/example_case/windows/window_002"
+    window_000.mkdir(parents=True)
+    window_001.mkdir(parents=True)
+    window_002.mkdir(parents=True)
+
+    (window_000 / "posterior_by_label.csv").write_text("")
+    (window_002 / "posterior_by_label.csv").write_text(" \n\t\n")
+    write_df(
+        window_001 / "posterior_by_label.csv",
+        pd.DataFrame(
+            {
+                "theta_label": ["source.separation_as"],
+                "posterior_sigma": [1.5],
+            }
+        ),
+    )
+
+    combined = analyzer.combine_window_tables(run_root, "posterior_by_label.csv")
+
+    assert analyzer.read_csv(run_root / "missing.csv").empty
+    assert analyzer.read_csv(window_000 / "posterior_by_label.csv").empty
+    assert analyzer.read_csv(window_002 / "posterior_by_label.csv").empty
+    assert len(combined) == 1
+    assert combined.loc[0, "case_name_root"] == "example_case"
+    assert combined.loc[0, "window_index"] == 1
+    assert combined.loc[0, "theta_label"] == "source.separation_as"
+    assert combined.loc[0, "posterior_sigma"] == pytest.approx(1.5)
 
 
 def test_missing_optional_image_artifacts_do_not_fail_with_plots(tmp_path):

@@ -105,10 +105,26 @@ def read_json(path: Path, default: Any = None) -> Any:
         return json.load(f)
 
 
+def _has_non_whitespace_content(path: Path) -> bool:
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            if chunk.strip():
+                return True
+    return False
+
+
 def read_csv(path: Path) -> pd.DataFrame:
+    path = Path(path)
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_csv(path)
+    # Partial/failed HPC post-processing can leave zero-byte optional sidecars;
+    # the analyzer treats those like missing optional tables.
+    if path.stat().st_size == 0 or not _has_non_whitespace_content(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def write_csv(df: pd.DataFrame, path: Path) -> None:
