@@ -170,6 +170,8 @@ experiment:
     trajectory_processing:
       smear:
         enabled: true
+        edge_policy: symmetric_linear_extrapolate
+        max_extrapolation_s: auto
         render:
           mode: subblock_constant_layer
           target_layer: smear

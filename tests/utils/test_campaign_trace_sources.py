@@ -124,6 +124,49 @@ def test_trajectory_trace_source_single_star_xy_only_does_not_require_pa(tmp_pat
     assert "source.position_angle_deg" not in text
 
 
+def test_trajectory_trace_source_smear_start_zero_uses_endpoint_extrapolation(tmp_path):
+    plan = prepare_campaign_trace_source(
+        trace_source_cfg={
+            "mode": "trajectory",
+            "source": {"kind": "airbus_csv", "path": str(_write_airbus_fixture(tmp_path / "airbus.csv"))},
+            "window": {"start_s": 0.0, "n_subblocks": 1},
+            "sampling": {
+                "frame_dt_s": 0.05,
+                "subblock_duration_s": 0.05,
+                "n_frames_per_subblock": 1,
+            },
+            "output_keys": ["source.x_position_as", "source.y_position_as"],
+        },
+        run_root=tmp_path,
+        source_kind="single_star",
+        active_frame_keys=("source.x_position_as", "source.y_position_as"),
+        n_subblocks=1,
+        n_frames_per_subblock=1,
+        frame_dt_s=0.05,
+        subblock_duration_s=0.05,
+        default_output_keys=("source.x_position_as", "source.y_position_as"),
+        trajectory_processing_cfg={
+            "smear": {
+                "enabled": True,
+                "edge_policy": "symmetric_linear_extrapolate",
+                "max_extrapolation_s": "auto",
+                "exposure": {"time_s": 0.05},
+            }
+        },
+        plate_scale_as_per_pix=0.1,
+    )
+
+    row = plan.rows[0]
+    assert Path(row["smear_truth_csv"]).exists()
+    assert Path(row["smear_model_csv"]).exists()
+    provenance = json.loads(Path(row["smear_provenance_json"]).read_text(encoding="utf-8"))
+    endpoint = provenance["endpoint_extrapolation"]
+    assert endpoint["used"] is True
+    assert endpoint["leading_used"] is True
+    assert endpoint["exposures"][0]["exposure_start_s"] == pytest.approx(-0.025)
+    assert endpoint["exposures"][0]["exposure_mid_s"] == pytest.approx(0.0)
+
+
 def test_external_plan_reuses_existing_paths_and_fails_when_missing(tmp_path):
     source = prepare_campaign_trace_source(
         trace_source_cfg={

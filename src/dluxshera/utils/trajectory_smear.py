@@ -17,6 +17,11 @@ from .obs_subblock_trajectory import CanonicalTrajectory, SubblockTrajectory, wr
 SMEAR_TRUTH_FILENAME = "frame_smear_truth.csv"
 SMEAR_MODEL_FILENAME = "frame_smear_model.csv"
 SMEAR_PROVENANCE_FILENAME = "smear_provenance.json"
+LINEAR_EXTRAPOLATE_EDGE_POLICIES = {
+    "linear_extrapolate",
+    "nearest_segment_extrapolate",
+    "symmetric_linear_extrapolate",
+}
 SMEAR_FIELDNAMES: tuple[str, ...] = (
     "frame_index",
     "time_s",
@@ -52,8 +57,12 @@ class SmearConfig:
         ``end_aligned``. ``smear_theta_deg`` is measured counter-clockwise from
         detector +X toward detector +Y using the trajectory X/Y convention.
     edge_policy
-        Out-of-domain exposure handling policy: ``error``, ``clamp``, or
-        ``drop``.
+        Out-of-domain exposure handling policy: ``error``, ``clamp``,
+        ``drop``, or symmetric endpoint linear extrapolation.
+    max_extrapolation_s
+        Maximum leading/trailing extrapolation duration for linear endpoint
+        extrapolation, or ``auto`` for the larger of one exposure duration and
+        one nearest trajectory sample interval.
     plate_scale_as_per_pix
         Detector plate scale used to convert arcseconds to detector pixels.
     """
@@ -62,6 +71,7 @@ class SmearConfig:
     exposure_time_s: float = 0.05
     exposure_interval: str = "centered"
     edge_policy: str = "error"
+    max_extrapolation_s: float | str | None = "auto"
     plate_scale_as_per_pix: float | None = None
     truth_sigma_perp_detector_pix: float = 0.25
     truth_kernel_size: int = 9
@@ -85,8 +95,18 @@ class SmearConfig:
             raise ValueError("trajectory_processing.smear.exposure.time_s must be finite and non-negative.")
         if self.exposure_interval not in {"centered", "start_aligned", "end_aligned"}:
             raise ValueError("trajectory_processing.smear.exposure.interval is unsupported.")
-        if self.edge_policy not in {"error", "clamp", "drop"}:
-            raise ValueError("trajectory_processing.smear.exposure.edge_policy must be error, clamp, or drop.")
+        if self.edge_policy not in {"error", "clamp", "drop", *LINEAR_EXTRAPOLATE_EDGE_POLICIES}:
+            raise ValueError(
+                "trajectory_processing.smear.exposure.edge_policy must be error, clamp, drop, "
+                "symmetric_linear_extrapolate, linear_extrapolate, or nearest_segment_extrapolate."
+            )
+        if isinstance(self.max_extrapolation_s, str):
+            if self.max_extrapolation_s != "auto":
+                raise ValueError("trajectory_processing.smear.exposure.max_extrapolation_s must be auto or non-negative.")
+        elif self.max_extrapolation_s is not None:
+            max_extrap = float(self.max_extrapolation_s)
+            if max_extrap < 0.0 or not math.isfinite(max_extrap):
+                raise ValueError("trajectory_processing.smear.exposure.max_extrapolation_s must be auto or non-negative.")
         if self.angle_convention != "image_x_to_y_deg":
             raise ValueError("Only angle_convention='image_x_to_y_deg' is supported.")
         if self.enabled and (self.plate_scale_as_per_pix is None or self.plate_scale_as_per_pix <= 0.0):
@@ -137,7 +157,8 @@ def parse_smear_config(
         enabled=bool(smear.get("enabled", False)),
         exposure_time_s=resolved_exposure,
         exposure_interval=str(exposure.get("interval", "centered")),
-        edge_policy=str(exposure.get("edge_policy", "error")),
+        edge_policy=str(exposure.get("edge_policy", smear.get("edge_policy", "error"))),
+        max_extrapolation_s=exposure.get("max_extrapolation_s", smear.get("max_extrapolation_s", "auto")),
         plate_scale_as_per_pix=plate_scale_as_per_pix,
         truth_sigma_perp_detector_pix=float(truth.get("sigma_perp_detector_pix", 0.25)),
         truth_kernel_size=int(truth.get("kernel_size", 9)),
@@ -183,18 +204,96 @@ def _exposure_bounds(time_s: float, cfg: SmearConfig) -> tuple[float, float]:
     return float(time_s - dt), float(time_s)
 
 
-def _apply_edge_policy(start: float, end: float, domain: tuple[float, float], cfg: SmearConfig) -> tuple[float, float] | None:
+@dataclass(frozen=True)
+class _EdgeDecision:
+    start_eval_s: float
+    end_eval_s: float
+    leading_extrapolation_s: float = 0.0
+    trailing_extrapolation_s: float = 0.0
+    note: str = ""
+
+
+def _nearest_sample_interval_s(times: np.ndarray, *, leading: bool) -> float:
+    if times.size < 2:
+        raise ValueError("Endpoint linear extrapolation requires at least two trajectory samples.")
+    if leading:
+        return float(times[1] - times[0])
+    return float(times[-1] - times[-2])
+
+
+def _resolved_max_extrapolation_s(times: np.ndarray, cfg: SmearConfig, *, leading: bool) -> float:
+    if cfg.max_extrapolation_s in (None, "auto"):
+        return max(float(cfg.exposure_time_s), _nearest_sample_interval_s(times, leading=leading))
+    return float(cfg.max_extrapolation_s)
+
+
+def _apply_edge_policy(
+    start: float,
+    end: float,
+    domain: tuple[float, float],
+    cfg: SmearConfig,
+    *,
+    trajectory_time_s: np.ndarray | None = None,
+) -> _EdgeDecision | None:
     lo, hi = domain
     if start >= lo - 1.0e-12 and end <= hi + 1.0e-12:
-        return start, end
+        return _EdgeDecision(max(start, lo), min(end, hi))
     if cfg.edge_policy == "drop":
         return None
     if cfg.edge_policy == "clamp":
-        return max(start, lo), min(end, hi)
+        return _EdgeDecision(max(start, lo), min(end, hi), note="edge_policy_clamp")
+    if cfg.edge_policy in LINEAR_EXTRAPOLATE_EDGE_POLICIES:
+        if trajectory_time_s is None:
+            raise ValueError("Endpoint linear extrapolation requires trajectory sample times.")
+        times = np.asarray(trajectory_time_s, dtype=float)
+        leading = max(0.0, lo - start)
+        trailing = max(0.0, end - hi)
+        if end < lo - 1.0e-12 or start > hi + 1.0e-12:
+            raise ValueError(
+                "Exposure interval does not overlap trajectory domain and cannot be endpoint-extrapolated: "
+                f"exposure=[{start}, {end}], domain=[{lo}, {hi}]."
+            )
+        max_leading = _resolved_max_extrapolation_s(times, cfg, leading=True)
+        max_trailing = _resolved_max_extrapolation_s(times, cfg, leading=False)
+        if leading > max_leading + 1.0e-12 or trailing > max_trailing + 1.0e-12:
+            raise ValueError(
+                "Exposure interval requires endpoint extrapolation beyond the allowed margin: "
+                f"exposure=[{start}, {end}], domain=[{lo}, {hi}], "
+                f"leading_extrapolation_s={leading}, trailing_extrapolation_s={trailing}, "
+                f"max_leading_extrapolation_s={max_leading}, max_trailing_extrapolation_s={max_trailing}."
+            )
+        note_parts: list[str] = []
+        if leading > 0.0:
+            note_parts.append(f"leading={leading:.12g}s")
+        if trailing > 0.0:
+            note_parts.append(f"trailing={trailing:.12g}s")
+        note = (
+            f"endpoint_linear_extrapolated({', '.join(note_parts)})"
+            if note_parts
+            else ""
+        )
+        return _EdgeDecision(start, end, leading_extrapolation_s=leading, trailing_extrapolation_s=trailing, note=note)
     raise ValueError(
         "Exposure interval falls outside trajectory domain: "
         f"exposure=[{start}, {end}], domain=[{lo}, {hi}]."
     )
+
+
+def _interp_with_endpoint_linear_extrapolation(
+    time_s: float,
+    trajectory_time_s: np.ndarray,
+    values: np.ndarray,
+) -> float:
+    t = float(time_s)
+    times = np.asarray(trajectory_time_s, dtype=float)
+    series = np.asarray(values, dtype=float)
+    if t < float(times[0]):
+        dt = float(times[1] - times[0])
+        return float(series[0] + (series[1] - series[0]) / dt * (t - times[0]))
+    if t > float(times[-1]):
+        dt = float(times[-1] - times[-2])
+        return float(series[-1] + (series[-1] - series[-2]) / dt * (t - times[-1]))
+    return float(np.interp(t, times, series))
 
 
 def derive_truth_smear_rows(
@@ -214,21 +313,23 @@ def derive_truth_smear_rows(
         raise ValueError("Trajectory times must be strictly increasing for smear derivation.")
     cfg.validate()
     rows: list[dict[str, Any]] = []
-    domain = (float(trajectory.time_s[0]), float(trajectory.time_s[-1]))
+    trajectory_time_s = np.asarray(trajectory.time_s, dtype=float)
+    domain = (float(trajectory_time_s[0]), float(trajectory_time_s[-1]))
     x = np.asarray(trajectory.values["source.x_position_as"], dtype=float)
     y = np.asarray(trajectory.values["source.y_position_as"], dtype=float)
     assert cfg.plate_scale_as_per_pix is not None
     for frame_index, mid in enumerate(np.asarray(block.frame_times_s, dtype=float)):
         start, end = _exposure_bounds(float(mid), cfg)
-        bounded = _apply_edge_policy(start, end, domain, cfg)
-        if bounded is None:
+        edge = _apply_edge_policy(start, end, domain, cfg, trajectory_time_s=trajectory_time_s)
+        if edge is None:
             rows.append(_disabled_row(frame_index, float(mid), start, end, cfg, "edge_policy_drop"))
             continue
-        start_eval, end_eval = bounded
-        x_start = float(np.interp(start_eval, trajectory.time_s, x))
-        x_end = float(np.interp(end_eval, trajectory.time_s, x))
-        y_start = float(np.interp(start_eval, trajectory.time_s, y))
-        y_end = float(np.interp(end_eval, trajectory.time_s, y))
+        start_eval = edge.start_eval_s
+        end_eval = edge.end_eval_s
+        x_start = _interp_with_endpoint_linear_extrapolation(start_eval, trajectory_time_s, x)
+        x_end = _interp_with_endpoint_linear_extrapolation(end_eval, trajectory_time_s, x)
+        y_start = _interp_with_endpoint_linear_extrapolation(start_eval, trajectory_time_s, y)
+        y_end = _interp_with_endpoint_linear_extrapolation(end_eval, trajectory_time_s, y)
         dx = x_end - x_start
         dy = y_end - y_start
         length_as = float(math.hypot(dx, dy))
@@ -251,7 +352,12 @@ def derive_truth_smear_rows(
                 "smear_enabled": True,
                 "smear_source": cfg.source,
                 "smear_policy": "truth",
-                "notes": "",
+                "notes": edge.note,
+                "_edge_policy": cfg.edge_policy,
+                "_edge_leading_extrapolation_s": float(edge.leading_extrapolation_s),
+                "_edge_trailing_extrapolation_s": float(edge.trailing_extrapolation_s),
+                "_trajectory_domain_start_s": domain[0],
+                "_trajectory_domain_end_s": domain[1],
             }
         )
     return rows
@@ -336,6 +442,53 @@ def summarize_smear_rows(rows: Sequence[Mapping[str, Any]], *, prefix: str) -> d
         f"{prefix}_length_pix_median": float(np.median(nonzero)) if nonzero.size else 0.0,
         f"{prefix}_length_pix_max": float(np.max(lengths)) if lengths.size else 0.0,
         f"{prefix}_enabled_frame_count": int(np.count_nonzero(enabled)),
+    }
+
+
+def summarize_endpoint_extrapolation(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    trajectory: CanonicalTrajectory,
+    cfg: SmearConfig,
+) -> dict[str, Any]:
+    times = np.asarray(trajectory.time_s, dtype=float)
+    domain = (float(times[0]), float(times[-1]))
+    leading_values = [float(row.get("_edge_leading_extrapolation_s", 0.0) or 0.0) for row in rows]
+    trailing_values = [float(row.get("_edge_trailing_extrapolation_s", 0.0) or 0.0) for row in rows]
+    exposure_rows = []
+    for row, leading, trailing in zip(rows, leading_values, trailing_values):
+        if leading <= 0.0 and trailing <= 0.0:
+            continue
+        exposure_rows.append(
+            {
+                "frame_index": int(row.get("frame_index", -1)),
+                "exposure_start_s": float(row.get("exposure_start_s", 0.0)),
+                "exposure_mid_s": float(row.get("exposure_mid_s", row.get("time_s", 0.0))),
+                "exposure_end_s": float(row.get("exposure_end_s", 0.0)),
+                "leading_extrapolation_s": leading,
+                "trailing_extrapolation_s": trailing,
+            }
+        )
+    leading_max = _resolved_max_extrapolation_s(times, cfg, leading=True) if cfg.edge_policy in LINEAR_EXTRAPOLATE_EDGE_POLICIES else None
+    trailing_max = _resolved_max_extrapolation_s(times, cfg, leading=False) if cfg.edge_policy in LINEAR_EXTRAPOLATE_EDGE_POLICIES else None
+    return {
+        "edge_policy": cfg.edge_policy,
+        "max_extrapolation_s": cfg.max_extrapolation_s,
+        "resolved_max_leading_extrapolation_s": leading_max,
+        "resolved_max_trailing_extrapolation_s": trailing_max,
+        "used": bool(exposure_rows),
+        "leading_used": any(value > 0.0 for value in leading_values),
+        "trailing_used": any(value > 0.0 for value in trailing_values),
+        "leading_extrapolation_s_max": max(leading_values) if leading_values else 0.0,
+        "trailing_extrapolation_s_max": max(trailing_values) if trailing_values else 0.0,
+        "trajectory_domain_start_s": domain[0],
+        "trajectory_domain_end_s": domain[1],
+        "exposures": exposure_rows,
+        "note": (
+            "Endpoint trajectory values were linearly extrapolated from the nearest trajectory segment."
+            if exposure_rows
+            else ""
+        ),
     }
 
 
@@ -474,8 +627,16 @@ def write_smear_sidecars(
             "time_s": float(cfg.exposure_time_s),
             "interval": cfg.exposure_interval,
             "edge_policy": cfg.edge_policy,
+            "max_extrapolation_s": cfg.max_extrapolation_s,
         },
-        "interpolation_policy": "linear",
+        "interpolation_policy": "linear_with_endpoint_extrapolation"
+        if cfg.edge_policy in LINEAR_EXTRAPOLATE_EDGE_POLICIES
+        else "linear",
+        "endpoint_extrapolation": summarize_endpoint_extrapolation(
+            truth_rows,
+            trajectory=trajectory,
+            cfg=cfg,
+        ),
         "plate_scale": {
             "source": "system_config_or_geometry",
             "key": "optics.plate_scale_as_per_pix",
@@ -569,6 +730,7 @@ __all__ = [
     "inject_subblock_smear_layer",
     "parse_smear_config",
     "representative_line_kernel",
+    "summarize_endpoint_extrapolation",
     "subblock_constant_line_kernel_from_fit",
     "summarize_smear_rows",
     "write_smear_sidecars",

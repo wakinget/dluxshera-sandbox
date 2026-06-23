@@ -148,6 +148,20 @@ def _linear_xy_trajectory() -> CanonicalTrajectory:
     return map_trajectory(raw)
 
 
+def _short_linear_xy_trajectory() -> CanonicalTrajectory:
+    raw = RawTrajectory(
+        time_s=np.asarray([0.0, 0.1, 0.2], dtype=float),
+        columns={
+            "x_as": np.asarray([0.0, 1.0, 2.0], dtype=float),
+            "y_as": np.asarray([0.0, 2.0, 4.0], dtype=float),
+            "z_as": np.asarray([0.0, 0.0, 0.0], dtype=float),
+        },
+        source_path=Path("short_linear.csv"),
+        source_kind="airbus_csv",
+    )
+    return map_trajectory(raw)
+
+
 def test_smear_derivation_from_linear_trajectory_matches_expected_dx_dy_angle():
     trajectory = _linear_xy_trajectory()
     block = split_subblocks(
@@ -179,6 +193,71 @@ def test_smear_derivation_from_linear_trajectory_matches_expected_dx_dy_angle():
     assert np.isclose(rows[0]["smear_theta_deg"], np.degrees(np.arctan2(0.2, 0.4)))
 
 
+def test_smear_leading_edge_symmetric_linear_extrapolation_stays_centered():
+    trajectory = _short_linear_xy_trajectory()
+    block = split_subblocks(
+        frame_times_s=[0.0],
+        truth_values={"source.x_position_as": [0.0], "source.y_position_as": [0.0]},
+        n_frames_per_subblock=1,
+    )[0]
+    cfg = parse_smear_config(
+        {
+            "smear": {
+                "enabled": True,
+                "exposure": {
+                    "time_s": 0.05,
+                    "edge_policy": "symmetric_linear_extrapolate",
+                    "max_extrapolation_s": "auto",
+                },
+            }
+        },
+        exposure_time_s=0.05,
+        plate_scale_as_per_pix=0.1,
+    )
+
+    rows = derive_truth_smear_rows(trajectory, block, cfg)
+
+    assert rows[0]["exposure_start_s"] == pytest.approx(-0.025)
+    assert rows[0]["exposure_mid_s"] == pytest.approx(0.0)
+    assert rows[0]["exposure_end_s"] == pytest.approx(0.025)
+    assert rows[0]["smear_dx_as"] == pytest.approx(0.5)
+    assert rows[0]["smear_dy_as"] == pytest.approx(1.0)
+    assert rows[0]["_edge_leading_extrapolation_s"] == pytest.approx(0.025)
+    assert rows[0]["_edge_trailing_extrapolation_s"] == pytest.approx(0.0)
+    assert "endpoint_linear_extrapolated" in rows[0]["notes"]
+
+
+def test_smear_trailing_edge_symmetric_linear_extrapolation_stays_centered():
+    trajectory = _short_linear_xy_trajectory()
+    block = split_subblocks(
+        frame_times_s=[0.2],
+        truth_values={"source.x_position_as": [2.0], "source.y_position_as": [4.0]},
+        n_frames_per_subblock=1,
+    )[0]
+    cfg = parse_smear_config(
+        {
+            "smear": {
+                "enabled": True,
+                "edge_policy": "linear_extrapolate",
+                "max_extrapolation_s": "auto",
+                "exposure": {"time_s": 0.05},
+            }
+        },
+        exposure_time_s=0.05,
+        plate_scale_as_per_pix=0.1,
+    )
+
+    rows = derive_truth_smear_rows(trajectory, block, cfg)
+
+    assert rows[0]["exposure_start_s"] == pytest.approx(0.175)
+    assert rows[0]["exposure_mid_s"] == pytest.approx(0.2)
+    assert rows[0]["exposure_end_s"] == pytest.approx(0.225)
+    assert rows[0]["smear_dx_as"] == pytest.approx(0.5)
+    assert rows[0]["smear_dy_as"] == pytest.approx(1.0)
+    assert rows[0]["_edge_leading_extrapolation_s"] == pytest.approx(0.0)
+    assert rows[0]["_edge_trailing_extrapolation_s"] == pytest.approx(0.025)
+
+
 def test_zero_motion_smear_sidecars_are_valid(tmp_path):
     raw = RawTrajectory(
         time_s=np.asarray([0.0, 1.0], dtype=float),
@@ -207,6 +286,44 @@ def test_zero_motion_smear_sidecars_are_valid(tmp_path):
     assert artifacts["smear_truth_length_pix_max"] == 0.0
 
 
+def test_smear_sidecar_provenance_records_endpoint_extrapolation(tmp_path):
+    trajectory = _short_linear_xy_trajectory()
+    raw_path = tmp_path / "short_linear.csv"
+    raw_path.write_text("0,0,0,0\n0.1,1,2,0\n0.2,2,4,0\n", encoding="utf-8")
+    trajectory = CanonicalTrajectory(
+        time_s=trajectory.time_s,
+        values=trajectory.values,
+        raw=RawTrajectory(
+            time_s=trajectory.raw.time_s,
+            columns=trajectory.raw.columns,
+            source_path=raw_path,
+            source_kind=trajectory.raw.source_kind,
+        ),
+        mapping=trajectory.mapping,
+    )
+    block = split_subblocks(
+        frame_times_s=[0.0],
+        truth_values={"source.x_position_as": [0.0], "source.y_position_as": [0.0]},
+        n_frames_per_subblock=1,
+    )[0]
+    cfg = parse_smear_config(
+        {"smear": {"enabled": True, "exposure": {"time_s": 0.05, "edge_policy": "symmetric_linear_extrapolate"}}},
+        exposure_time_s=0.05,
+        plate_scale_as_per_pix=0.1,
+    )
+
+    artifacts = write_smear_sidecars(outdir=tmp_path / "subblock", trajectory=trajectory, block=block, cfg=cfg)
+
+    endpoint = artifacts["provenance"]["endpoint_extrapolation"]
+    assert endpoint["edge_policy"] == "symmetric_linear_extrapolate"
+    assert endpoint["used"] is True
+    assert endpoint["leading_used"] is True
+    assert endpoint["trailing_used"] is False
+    assert endpoint["leading_extrapolation_s_max"] == pytest.approx(0.025)
+    assert endpoint["trajectory_domain_start_s"] == pytest.approx(0.0)
+    assert endpoint["exposures"][0]["exposure_start_s"] == pytest.approx(-0.025)
+
+
 def test_smear_edge_policy_error_and_kernel_validation():
     cfg = parse_smear_config({"smear": {"enabled": True}}, exposure_time_s=0.2, plate_scale_as_per_pix=0.1)
     trajectory = _linear_xy_trajectory()
@@ -224,6 +341,32 @@ def test_smear_edge_policy_error_and_kernel_validation():
             exposure_time_s=0.2,
             plate_scale_as_per_pix=0.1,
         )
+
+
+def test_smear_linear_extrapolation_rejects_excessive_margin():
+    cfg = parse_smear_config(
+        {
+            "smear": {
+                "enabled": True,
+                "exposure": {
+                    "time_s": 0.05,
+                    "edge_policy": "symmetric_linear_extrapolate",
+                    "max_extrapolation_s": 0.02,
+                },
+            }
+        },
+        exposure_time_s=0.05,
+        plate_scale_as_per_pix=0.1,
+    )
+    trajectory = _short_linear_xy_trajectory()
+    block = split_subblocks(
+        frame_times_s=[0.0],
+        truth_values={"source.x_position_as": [0.0], "source.y_position_as": [0.0]},
+        n_frames_per_subblock=1,
+    )[0]
+
+    with pytest.raises(ValueError, match="beyond the allowed margin"):
+        derive_truth_smear_rows(trajectory, block, cfg)
 
 
 def test_model_smear_mismatch_modes_and_representative_are_deterministic():
