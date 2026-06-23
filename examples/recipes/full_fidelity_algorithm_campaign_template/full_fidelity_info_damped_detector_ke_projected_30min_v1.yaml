@@ -164,7 +164,7 @@ experiment:
           - source.y_position_as
           - source.position_angle_deg
       window:
-        start_s: 60.0
+        start_s: 0.0
       sampling:
         interpolation: linear
     trajectory_processing:
@@ -188,7 +188,7 @@ experiment:
     windows_per_draw: 10
     subblocks_per_window: 30
     update_mode: eigen_damped
-    update_gain: 0.5
+    update_gain: 0.8
     carry_prior_mean_with_reference: true
     update_safety:
       enabled: true
@@ -250,14 +250,14 @@ experiment:
         unit: arcsec
       source.log_flux_total:
         kind: absolute
-        sigma: 1.0e-05
+        sigma: 1.0e-04
         unit: log_flux
       source.contrast:
         kind: fractional
-        sigma: 1.0e-05
+        sigma: 1.0e-04
       optics.plate_scale_as_per_pix:
         kind: fractional
-        sigma: 1.0e-05
+        sigma: 1.0e-04
     conditions:
     - condition_name: m1_0p3nm_m2_0p3nm
       sigmas:
