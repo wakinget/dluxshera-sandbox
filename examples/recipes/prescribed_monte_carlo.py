@@ -109,6 +109,11 @@ from dluxshera.utils.noise import (
     apply_observation_noise,
     make_subseed,
 )
+from dluxshera.utils.detector_knowledge_error import (
+    detector_ke_has_per_run_realization,
+    normalize_realization_policy,
+    seed_detector_layer_knowledge_errors,
+)
 from dluxshera.utils.chi2_diagnostics import (
     reduced_chi2_between_images as _reduced_chi2_between_images,
 )
@@ -691,27 +696,7 @@ def _hash_array_bytes(value: Any) -> str:
 
 def _normalize_ke_realization_policy(value: Any) -> str:
     """Normalize detector knowledge-error realization policy strings."""
-    if value is None:
-        return "fixed_per_experiment"
-    policy = str(value).strip().lower()
-    if policy not in {"fixed_per_experiment", "per_run"}:
-        raise ValueError(
-            "detector.layers[*].knowledge_error.realization_policy must be "
-            "'fixed_per_experiment' or 'per_run'."
-        )
-    return policy
-
-
-def _layer_metadata_key(layer_name: str | None, idx: int, *, used: set[str]) -> str:
-    """Build a stable layer metadata key, disambiguating duplicate layer names."""
-    base = (layer_name or f"layer_{idx}").strip() if layer_name is not None else f"layer_{idx}"
-    if not base:
-        base = f"layer_{idx}"
-    key = base
-    if key in used:
-        key = f"{base}_{idx}"
-    used.add(key)
-    return key
+    return normalize_realization_policy(value)
 
 
 def _seed_detector_knowledge_errors_with_policy(
@@ -734,84 +719,12 @@ def _seed_detector_knowledge_errors_with_policy(
     config each time. Once a concrete seed is attached to a layer, it is treated
     as explicit and preserved on subsequent calls.
     """
-    cfg = copy.deepcopy(system_cfg)
-    detector_cfg = cfg.get("detector", {}) if isinstance(cfg, dict) else {}
-    layers = detector_cfg.get("layers", []) if isinstance(detector_cfg, dict) else []
-
-    seeded_layers = []
-    metadata_layers: dict[str, dict[str, Any]] = {}
-    used_meta_keys: set[str] = set()
-    has_per_run = False
-
-    for idx, layer in enumerate(layers):
-        if not isinstance(layer, dict):
-            seeded_layers.append(layer)
-            continue
-
-        layer_copy = dict(layer)
-        layer_name = layer_copy.get("name")
-        knowledge_error = layer_copy.get("knowledge_error")
-
-        if isinstance(knowledge_error, dict):
-            seeded_ke = dict(knowledge_error)
-            policy = _normalize_ke_realization_policy(seeded_ke.get("realization_policy"))
-            seeded_ke["realization_policy"] = policy
-            has_per_run = has_per_run or policy == "per_run"
-
-            explicit_seed = seeded_ke.get("seed") is not None
-            if not explicit_seed:
-                seed_base = (
-                    run_seed
-                    if policy == "per_run" and run_seed is not None
-                    else experiment_seed
-                )
-                seed_token = f"{token_prefix}.{layer_name or 'layer'}.{idx}"
-                seeded_ke["seed"] = make_subseed(seed_base, seed_token)
-
-            layer_copy["knowledge_error"] = seeded_ke
-
-            layer_name_text = None
-            if layer_name is not None:
-                raw_name = str(layer_name).strip()
-                layer_name_text = raw_name if raw_name else None
-            meta_key = _layer_metadata_key(
-                layer_name_text,
-                idx,
-                used=used_meta_keys,
-            )
-            metadata_layers[meta_key] = {
-                "name": layer_name,
-                "index": idx,
-                "model": seeded_ke.get("model"),
-                "scale": seeded_ke.get("scale"),
-                "realization_policy": policy,
-                "seed": seeded_ke.get("seed"),
-                "seed_source": (
-                    "explicit"
-                    if explicit_seed
-                    else (
-                        "run_seed"
-                        if policy == "per_run" and run_seed is not None
-                        else "experiment_seed"
-                    )
-                ),
-            }
-
-        seeded_layers.append(layer_copy)
-
-    if isinstance(detector_cfg, dict):
-        detector_cfg = dict(detector_cfg)
-        detector_cfg["layers"] = seeded_layers
-        cfg["detector"] = detector_cfg
-
-    metadata = {
-        "token_prefix": token_prefix,
-        "experiment_seed": experiment_seed,
-        "run_seed": run_seed,
-        "has_per_run_realization": has_per_run,
-        "layers": metadata_layers,
-    }
-    return cfg, metadata
+    return seed_detector_layer_knowledge_errors(
+        system_cfg,
+        experiment_seed=experiment_seed,
+        token_prefix=token_prefix,
+        run_seed=run_seed,
+    )
 
 
 def _detector_ke_has_per_run_realization(system_cfg: dict[str, Any]) -> bool:
@@ -820,19 +733,7 @@ def _detector_ke_has_per_run_realization(system_cfg: dict[str, Any]) -> bool:
     This is intentionally read-only so callers can inspect the configured
     policy without materializing detector knowledge-error seeds.
     """
-    detector_cfg = system_cfg.get("detector", {}) if isinstance(system_cfg, dict) else {}
-    layers = detector_cfg.get("layers", []) if isinstance(detector_cfg, dict) else []
-
-    for layer in layers:
-        if not isinstance(layer, dict):
-            continue
-        knowledge_error = layer.get("knowledge_error")
-        if not isinstance(knowledge_error, dict):
-            continue
-        policy = _normalize_ke_realization_policy(knowledge_error.get("realization_policy"))
-        if policy == "per_run":
-            return True
-    return False
+    return detector_ke_has_per_run_realization(system_cfg)
 
 
 def _seed_detector_knowledge_errors(

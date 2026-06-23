@@ -1964,6 +1964,9 @@ def build_campaign_plan(
         base_system_cfg=system_cfg,
         spectral_model_cfg=experiment_cfg.get("spectral_model"),
         high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
+        detector_calibration_knowledge_error_cfg=experiment_cfg.get(
+            "detector_calibration_knowledge_error"
+        ),
         scalar_reference_offsets=truth_realization.truth_overrides_by_label,
         detector_noise_metadata={
             **normalized_noise.to_dict(),

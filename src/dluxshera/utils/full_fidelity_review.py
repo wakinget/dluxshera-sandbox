@@ -202,6 +202,9 @@ def build_model_split_from_smoke(
         base_system_cfg=base_system_cfg,
         spectral_model_cfg=exp.get("spectral_model"),
         high_order_wfe_cfg=exp.get("high_order_wfe"),
+        detector_calibration_knowledge_error_cfg=exp.get(
+            "detector_calibration_knowledge_error"
+        ),
         detector_noise_metadata={
             "enabled": str(sub.get("noise", "disabled")) != "disabled",
             "noise_mode": str(sub.get("noise", "disabled")),

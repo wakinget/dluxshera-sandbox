@@ -222,3 +222,31 @@ This allows gradual migration while avoiding breaking existing examples and bind
 3. **Calibration maps:** file-loaded from `.npy/.npz`; default identity maps when missing; all conditioned through `_condition_detector_map`.
 4. **Path handling:** repo-root-relative resolution already exists in detector builder; not CWD-based there.
 5. **Best hook for future `system.detector.layers`:** detector builder layer assembly in `build_detector`, preserving existing helpers/defaults and introducing an ordered layer-construction helper.
+
+## 2026-06-23 update: detector calibration-map knowledge error
+
+Detector calibration-map knowledge errors are now wired into the
+full-fidelity/observation-bias campaign model split. The campaign-level
+`experiment.detector_calibration_knowledge_error` block can independently add
+seeded Gaussian inference-side perturbations to `pixel_offsets.dx_map`,
+`pixel_offsets.dy_map`, and `pixel_response.pixel_response` while leaving
+truth/render maps nominal by default.
+
+The implementation reuses the detector builder's existing
+`detector.layers[*].knowledge_error` path and centralizes normalization,
+realization-policy seeding, campaign-side patching, and provenance summaries in
+`src/dluxshera/utils/detector_knowledge_error.py`. The older prescribed Monte
+Carlo script now delegates detector KE seed policy helpers to that shared
+module while retaining its existing private wrapper names for compatibility.
+
+Nominal full-fidelity detector KE values are `0.001` detector pixels RMS for
+pixel offsets and `0.001` fractional response RMS for pixel response. Model
+split provenance records the perturbed side, layer names, field names, seeds,
+realization policy, requested RMS values, and realized map hashes/statistics
+when map files are available. Because full-fidelity trace/render/inference
+templates are global model-split artifacts, campaign-level detector KE is
+fixed across cases and subblocks. The older prescribed-MC layer-level path
+continues to support `per_run` realizations through the shared seed helper.
+Pixel-response campaign KE writes an explicit `clip_min: 0.0` bound into the
+layer `knowledge_error` block so larger response-map experiments cannot
+silently produce negative multiplicative responses.

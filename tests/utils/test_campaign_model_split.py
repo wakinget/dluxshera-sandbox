@@ -23,6 +23,27 @@ BASE_SYSTEM = {
 }
 
 
+def _detector_system(tmp_path: Path) -> dict:
+    import numpy as np
+
+    dx_path = tmp_path / "dx.npy"
+    dy_path = tmp_path / "dy.npy"
+    prf_path = tmp_path / "prf.npy"
+    np.save(dx_path, np.zeros((4, 4), dtype=float))
+    np.save(dy_path, np.zeros((4, 4), dtype=float))
+    np.save(prf_path, np.ones((4, 4), dtype=float))
+    out = copy.deepcopy(BASE_SYSTEM)
+    out["optics"]["psf_npix"] = 4
+    out["optics"]["oversample"] = 1
+    out["detector"] = {
+        "layers": [
+            {"name": "pixel_offsets", "kind": "ApplyPixelOffsets", "dx_path": str(dx_path), "dy_path": str(dy_path)},
+            {"name": "pixel_response", "kind": "ApplyPixelResponse", "prf_path": str(prf_path)},
+        ]
+    }
+    return out
+
+
 def test_hash_campaign_model_config_is_stable_and_sensitive() -> None:
     cfg = copy.deepcopy(BASE_SYSTEM)
     assert hash_campaign_model_config(cfg) == hash_campaign_model_config(copy.deepcopy(cfg))
@@ -44,6 +65,34 @@ def test_disabled_components_preserve_existing_configs(tmp_path: Path) -> None:
     assert split.truth_config_hash == split.inference_config_hash
     assert split.enabled_components["spectral_model"]["enabled"] is False
     assert split.enabled_components["high_order_wfe"]["enabled"] is False
+
+
+def test_detector_calibration_knowledge_error_patches_inference_only(tmp_path: Path) -> None:
+    base = _detector_system(tmp_path)
+    split = build_campaign_model_split(
+        base_system_cfg=base,
+        detector_calibration_knowledge_error_cfg={
+            "enabled": True,
+            "apply_to": "inference",
+            "realization_policy": "fixed_per_experiment",
+            "pixel_offsets": {"enabled": True, "sigma_pix": 0.001},
+            "pixel_response": {"enabled": True, "sigma_fractional": 0.001},
+        },
+        run_root=tmp_path,
+        artifact_root=tmp_path / "model_split",
+        seed_context={"base_seed": 42},
+        write_artifacts=True,
+    )
+    assert "knowledge_error" not in split.truth_system_cfg["detector"]["layers"][0]
+    assert split.inference_system_cfg["detector"]["layers"][0]["knowledge_error"]["scale"] == 0.001
+    assert split.inference_system_cfg["detector"]["layers"][1]["knowledge_error"]["scale"] == 0.001
+    assert split.inference_system_cfg["detector"]["layers"][1]["knowledge_error"]["clip_min"] == 0.0
+    assert split.truth_config_hash != split.inference_config_hash
+    component = split.enabled_components["detector_calibration_knowledge_error"]
+    assert component["enabled"] is True
+    assert component["truth_label"] == "nominal"
+    assert component["inference_label"] == "knowledge_error"
+    assert Path(split.artifact_paths["detector_knowledge_error_provenance_json"]).exists()
 
 
 def test_spectral_mismatch_returns_distinct_configs(tmp_path: Path) -> None:

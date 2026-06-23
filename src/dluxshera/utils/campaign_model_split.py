@@ -17,6 +17,9 @@ from .detector_layer_overrides import (
     patch_smear_layer_for_policy,
     validate_no_accidental_default_smear,
 )
+from .detector_knowledge_error import (
+    apply_campaign_detector_calibration_knowledge_error,
+)
 from .spectral_response import (
     build_target_aware_spectral_deck,
     build_truth_inference_spectral_deck,
@@ -202,6 +205,7 @@ def build_campaign_model_split(
     high_order_wfe_cfg: Mapping[str, Any] | None = None,
     scalar_reference_offsets: Mapping[str, Any] | None = None,
     detector_noise_metadata: Mapping[str, Any] | None = None,
+    detector_calibration_knowledge_error_cfg: Mapping[str, Any] | None = None,
     run_root: Path | None = None,
     artifact_root: Path | None = None,
     seed_context: Mapping[str, Any] | None = None,
@@ -233,6 +237,7 @@ def build_campaign_model_split(
             "high_order_wfe",
             "scalar_reference_offsets",
             "trajectory_smear_policy",
+            "detector_calibration_knowledge_error",
             "detector_noise",
         ],
         "invariant": "trace/render use truth_system_cfg; inference/reference use inference_system_cfg",
@@ -388,6 +393,35 @@ def build_campaign_model_split(
         "inference": detector_layer_stack(inference_system),
     }
 
+    detector_ke_root = artifact_root / "detector_knowledge_error"
+    truth_system, inference_system, detector_ke_prov, detector_ke_paths = (
+        apply_campaign_detector_calibration_knowledge_error(
+            truth_system_cfg=truth_system,
+            inference_system_cfg=inference_system,
+            request=detector_calibration_knowledge_error_cfg,
+            seed_context=seed_context,
+            artifact_root=artifact_root,
+            write_artifacts=write_artifacts,
+        )
+    )
+    artifact_paths.update(detector_ke_paths)
+    provenance["detector_calibration_knowledge_error"] = detector_ke_prov
+    provenance["detector_layers_after_detector_calibration_knowledge_error"] = {
+        "truth": detector_layer_stack(truth_system),
+        "inference": detector_layer_stack(inference_system),
+    }
+    detector_ke_summary = _component_summary(
+        enabled=bool(detector_ke_prov.get("enabled", False)),
+        truth_label="knowledge_error" if detector_ke_prov.get("truth_patched") else "nominal",
+        inference_label="knowledge_error" if detector_ke_prov.get("inference_patched") else "nominal",
+        matched=not bool(detector_ke_prov.get("truth_patched") or detector_ke_prov.get("inference_patched")),
+        artifact_root=detector_ke_root if detector_ke_prov.get("enabled") else None,
+        extra={
+            "apply_to": detector_ke_prov.get("apply_to"),
+            "patched_layers": detector_ke_prov.get("patched_layers", {}),
+        },
+    )
+
     detector_noise = _cfg(detector_noise_metadata)
     detector_noise_summary = {
         "enabled": bool(detector_noise.get("enabled", False)),
@@ -402,6 +436,7 @@ def build_campaign_model_split(
         "high_order_wfe": high_order_summary,
         "scalar_reference_offsets": scalar_summary,
         "trajectory_smear": smear_summary,
+        "detector_calibration_knowledge_error": detector_ke_summary,
         "detector_noise": detector_noise_summary,
     }
     split = CampaignModelSplit(

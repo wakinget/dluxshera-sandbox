@@ -508,7 +508,20 @@ def campaign_dashboard(run_root: Path, artifacts: dict[str, Any]) -> pd.DataFram
     add("low-order Zernike coefficients", "configured", "truth low-order CSV", "knowledge low-order CSV", "active theta labels include selected M1/M2 terms", "review matched M1/M2 behavior", rel(paths.get("high_order_wfe_low_order_zernike_errors.csv", "model_split/high_order_wfe/maps/low_order_zernike_errors.csv"), run_root))
     add("optics preset", "configured", system.get("system_preset"), system.get("optics_kind"), "preset resolved before run", "ok", "campaign_plan.json")
     add("detector layers", "enabled", f"{len(detector_layers)} truth/render layers", f"{len(detector_layers)} inference layers", [layer.get("name") for layer in detector_layers], "confirm smear/jitter/calibration layers", "campaign_plan.json")
-    add("detector calibration maps", "enabled", "pixel offsets/PRF from resolved detector", "same unless model split changed", "see layer paths", "review calibration map provenance", "campaign_plan.json")
+    detector_ke = comps.get("detector_calibration_knowledge_error", {})
+    detector_ke_path = paths.get(
+        "detector_knowledge_error_provenance_json",
+        "model_split/detector_knowledge_error/detector_knowledge_error_provenance.json",
+    )
+    add(
+        "detector calibration maps",
+        "intentionally_mismatched" if detector_ke.get("enabled") and not detector_ke.get("matched", True) else "matched_or_disabled",
+        detector_ke.get("truth_label", "nominal"),
+        detector_ke.get("inference_label", "nominal"),
+        f"apply_to={detector_ke.get('apply_to', '')}; patched={compact(detector_ke.get('patched_layers', {}))}",
+        "inspect seeds, RMS, hashes, and map summary stats",
+        rel(detector_ke_path, run_root),
+    )
     add("detector noise", "enabled" if noise.get("enabled") else "disabled", artifacts["noise_render"].get("mode", noise.get("legacy_noise_mode", "")), artifacts["noise_inference"].get("mode", noise.get("legacy_noise_mode", "")), f"variance_floor={noise.get('variance_floor')}", "confirm variance model and seed policy", "noise/noise_request_normalized.json")
     add("trajectory source", "configured", "trajectory/frame_truth or subblock frame_truth", "starting_guess_prediction", "external trajectory CSVs supplied to subblocks", "review residual solve demand", "trajectory/")
     add("high-pass filter", "enabled" if (run_root / "trajectory/trajectory_filter_summary.csv").exists() else "missing", "trajectory_raw.csv", "trajectory_filtered.csv", "filter summary available", "inspect removed RMS", "trajectory/trajectory_filter_summary.csv")
@@ -556,7 +569,20 @@ def mismatch_dashboard(run_root: Path, artifacts: dict[str, Any], local_policy: 
     add("high_order_wfe_knowledge_error", "truth maps", "knowledge + error maps", "intentional_small_mismatch" if wfe.get("enabled") else "not_applicable", "tests robustness to small map knowledge error", "model_split/high_order_wfe/config_maps", "Primary/secondary error arrays are indexed in model_split.")
     add("low_order_zernike_mapping", "truth low-order CSV", "knowledge low-order CSV", "review", "M1/M2 degeneracy can appear as correlated or opposite updates", "model_split/high_order_wfe/maps/low_order_zernike_errors.csv", "See zernike_m1_m2_offsets.png.")
     add("detector_layer_stack", "render detector layers", "inference detector layers", "configured", "layer mismatch can bias astrometry and WFE", "campaign_plan.json", "Review detector layer stack rows.")
-    add("detector_calibration_maps", "truth calibration maps", "inference calibration maps", "configured", "PRF/pixel offset mismatch can couple to trace", "campaign_plan.json", "Map paths are in detector layer config when enabled.")
+    detector_ke = comps.get("detector_calibration_knowledge_error", {})
+    detector_ke_path = paths.get(
+        "detector_knowledge_error_provenance_json",
+        "model_split/detector_knowledge_error/detector_knowledge_error_provenance.json",
+    )
+    add(
+        "detector_calibration_maps",
+        detector_ke.get("truth_label", "nominal truth maps"),
+        detector_ke.get("inference_label", "nominal inference maps"),
+        "intentional_small_mismatch" if detector_ke.get("enabled") and not detector_ke.get("matched", True) else "matched_or_disabled",
+        "PRF/pixel offset mismatch can couple to trace",
+        rel(detector_ke_path, run_root),
+        "Detector KE provenance records seeds, RMS requests, hashes, and summary stats.",
+    )
     add("detector_noise_model", noise.get("legacy_noise_mode", ""), noise.get("use_render_variance_resolved", ""), "matched_or_inherited" if noise.get("enabled") else "disabled", "noise affects posterior scale and convergence", "noise/noise_request_normalized.json", f"variance_floor={noise.get('variance_floor')}")
     traj = comps.get("trajectory_smear", {})
     add("trajectory_truth_model", "frame_truth.csv", "starting_guess_prediction.csv", "intentional_residual", "local phi/registration solve must absorb trajectory residuals", "trajectory/", "Review trajectory_residual_summary.csv.")

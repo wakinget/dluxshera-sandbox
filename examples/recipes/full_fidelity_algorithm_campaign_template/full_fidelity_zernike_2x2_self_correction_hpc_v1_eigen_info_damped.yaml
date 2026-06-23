@@ -18,6 +18,18 @@ experiment:
           theta_deg: 0.0
           kernel_size: 3
           units: detector_pix
+  detector_calibration_knowledge_error:
+    enabled: false
+    apply_to: inference
+    realization_policy: fixed_per_experiment
+    pixel_offsets:
+      enabled: true
+      sigma_pix: 0.001
+      distribution: normal
+    pixel_response:
+      enabled: true
+      sigma_fractional: 0.001
+      distribution: normal
   spectral_model:
     enabled: true
     preserve_flux_parameters: true

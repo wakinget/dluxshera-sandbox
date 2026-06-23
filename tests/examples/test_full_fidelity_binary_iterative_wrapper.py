@@ -28,7 +28,7 @@ DAMPED_CONFIG_PATH = (
     / "examples"
     / "recipes"
     / "full_fidelity_algorithm_campaign_template"
-    / "full_fidelity_zernike_2x2_self_correction_hpc_v1_eigen_damped.yaml"
+    / "full_fidelity_zernike_2x2_self_correction_hpc_v1_eigen_bottom_damped.yaml"
 )
 
 
@@ -95,6 +95,26 @@ def test_config_translation_preserves_iterative_eigenbasis_policy() -> None:
     assert iterative["eigenbasis"]["damping_mode"] == "bottom_n"
     assert iterative["eigenbasis"]["damping_n_modes"] == 8
     assert iterative["eigenbasis"]["damping_value"] == 0.1
+
+
+def test_config_translation_forwards_detector_calibration_knowledge_error() -> None:
+    module = load_module()
+    raw = module.load_config_file(CONFIG_PATH)
+    raw["experiment"]["detector_calibration_knowledge_error"] = {
+        "enabled": True,
+        "apply_to": "inference",
+        "realization_policy": "fixed_per_experiment",
+        "pixel_offsets": {"enabled": True, "sigma_pix": 0.001},
+        "pixel_response": {"enabled": True, "sigma_fractional": 0.001},
+    }
+
+    translated = module._full_fidelity_to_observation_bias(raw, run_name="unit")
+
+    detector_ke = translated["experiment"]["detector_calibration_knowledge_error"]
+    assert detector_ke["enabled"] is True
+    assert detector_ke["apply_to"] == "inference"
+    assert detector_ke["pixel_offsets"]["sigma_pix"] == 0.001
+    assert detector_ke["pixel_response"]["sigma_fractional"] == 0.001
 
 
 def test_damped_hpc_config_translates_bottom_n_policy() -> None:

@@ -309,6 +309,10 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
             "system_preset": preset,
             "system": dict(system_seed),
             "detector_overrides": _as_mapping(experiment.get("detector_overrides"), name="experiment.detector_overrides"),
+            "detector_calibration_knowledge_error": _as_mapping(
+                experiment.get("detector_calibration_knowledge_error"),
+                name="experiment.detector_calibration_knowledge_error",
+            ),
             "spectral_model": _as_mapping(experiment.get("spectral_model"), name="experiment.spectral_model"),
             "high_order_wfe": _as_mapping(experiment.get("high_order_wfe"), name="experiment.high_order_wfe"),
             "subblocks": subblocks,

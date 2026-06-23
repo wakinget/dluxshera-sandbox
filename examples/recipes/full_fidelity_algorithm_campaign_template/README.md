@@ -239,6 +239,7 @@ Fields consumed directly by the wrapper include:
 - `n_cases`
 - `system_preset`
 - `detector_overrides`
+- `detector_calibration_knowledge_error`
 
 ## Detector Layer Policy
 
@@ -274,6 +275,24 @@ The review and smoke configs keep the named `jitter` layer but reduce it to
 for audits/notebooks without adding a large extra pointing blur. Audits warn if
 `jitter` exceeds `0.05` detector pixels while trajectory-derived frame truth or
 smear is enabled, because that may double-count pointing blur.
+
+Detector calibration-map knowledge errors are wired through
+`experiment.detector_calibration_knowledge_error`. The default example block is
+disabled and applies to `inference` when enabled, leaving truth/render detector
+calibration maps nominal. Supported map errors are independent Gaussian
+additive perturbations to `pixel_offsets.dx_map`, `pixel_offsets.dy_map`
+(`sigma_pix`, nominal `0.001` detector pixels RMS), and
+`pixel_response.pixel_response` (`sigma_fractional`, nominal `0.001`
+fractional response RMS). The model split writes detector KE provenance under
+`model_split/detector_knowledge_error/`, including side patched, seeds, layer
+fields, requested RMS values, and realized map hashes/statistics when map files
+are available. Pixel-response KE includes an explicit `clip_min: 0.0` constraint
+in the realized detector-layer `knowledge_error` block to prevent negative
+response values; at the nominal 0.001 fractional RMS level this should be
+inert for ordinary flat fields. Full-fidelity campaign templates are global artifacts, so
+campaign-level detector KE currently supports `fixed_per_experiment` static
+calibration mismatch; the older prescribed-MC layer-level detector KE path
+continues to support `per_run` realizations.
 
 Smear policy is explicit because `SHERA_FLIGHT_3P_CONV` contains a nonzero
 default line-smear layer. `render.mode: disabled` removes the named `smear`
@@ -502,7 +521,8 @@ The smoke should focus on wiring source target, spectral truth/reference split, 
 Deferred implementation areas remain explicit non-goals for this directory:
 
 - make `full_fidelity_algorithm_campaign_v1.yaml` executable;
-- implement detector pixel-offset or flat-field decks;
+- implement general detector pixel-offset or flat-field deck selection beyond
+  the supported calibration-map knowledge-error mismatch block;
 - implement dynamic crop / ROI-origin realism;
 - implement per-frame dynamic smear kernels;
 - implement active high-order WFE map inference;
@@ -515,6 +535,6 @@ Do not pass `full_fidelity_algorithm_campaign_v1.yaml` to the smoke wrapper. The
 
 Do not assume `spectral_model.fast` is a vague label. It is implemented and clamps effective spectral grids. Set it deliberately and still review explicit `n_lambda`, wavelength range, and response components.
 
-Do not add skeleton-only fields to the smoke config expecting them to work. The wrapper warns for future-only copied blocks, detector pixel-offset/flat-field blocks, unsupported dynamic smear modes, and high-order map-pixel observation-theta requests.
+Do not add skeleton-only fields to the smoke config expecting them to work. The wrapper warns for future-only copied blocks, unsupported detector blocks outside `detector_overrides` and `detector_calibration_knowledge_error`, unsupported dynamic smear modes, and high-order map-pixel observation-theta requests.
 
 Do not interpret the tiny smoke output as proposal-grade performance. The configuration is intentionally small so reviewers can validate wiring and artifacts quickly.

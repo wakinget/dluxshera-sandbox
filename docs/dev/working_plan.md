@@ -960,3 +960,19 @@ move toward truth across repeated windows without missing summaries, failed
 subblocks, or aggregate-only plan mismatches. Eigenbasis-aware update modes are
 reserved for a later update-control patch and intentionally raise
 `NotImplementedError` when enabled.
+
+### Full-fidelity detector KE readiness update
+
+Detector calibration-map knowledge errors are now wired into the full-fidelity
+campaign path. The campaign config can perturb inference-side pixel-offset and
+pixel-response calibration maps while truth/render maps remain nominal by
+default. Nominal validation values are `0.001` detector pixels RMS for
+`pixel_offsets.dx_map`/`dy_map` and `0.001` fractional RMS for
+`pixel_response.pixel_response`.
+
+The next full-fidelity binary iterative campaign should enable this detector
+calibration KE block for the inference model, use `eigen_info_damped` as the
+default iterative update policy, and prefer larger update windows such as 10 or
+20 subblocks per window if runtime allows. A larger prior separation stress
+test, roughly 100-300 microarcseconds RMS, should remain a later follow-up
+after detector KE dry-run/smoke artifacts are validated.

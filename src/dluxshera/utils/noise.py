@@ -539,6 +539,12 @@ def apply_knowledge_error(
 
     rng_key = make_subkey(int(seed), token)
     perturbed = perturb_array(arr, model=str(model), scale=float(scale), rng_key=rng_key)
+    clip_min = knowledge_cfg.get("clip_min")
+    clip_max = knowledge_cfg.get("clip_max")
+    if clip_min is not None or clip_max is not None:
+        min_value = -jnp.inf if clip_min is None else float(clip_min)
+        max_value = jnp.inf if clip_max is None else float(clip_max)
+        perturbed = jnp.clip(perturbed, min_value, max_value)
     return perturbed, int(jnp.asarray(rng_key)[0])
 
 
