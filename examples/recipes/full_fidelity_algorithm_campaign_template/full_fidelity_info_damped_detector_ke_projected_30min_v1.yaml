@@ -24,11 +24,11 @@ experiment:
     realization_policy: fixed_per_experiment
     pixel_offsets:
       enabled: true
-      sigma_pix: 0.001
+      sigma_pix: 1e-5
       distribution: normal
     pixel_response:
       enabled: true
-      sigma_fractional: 0.001
+      sigma_fractional: 1e-5
       distribution: normal
   spectral_model:
     enabled: true
@@ -98,7 +98,7 @@ experiment:
       use_truth_common_map: true
       knowledge_error:
         enabled: true
-        amplitude_nm_rms: 1.0
+        amplitude_nm_rms: 0.01
         power_law_alpha: same_as_truth
         remove_low_order_zernikes: true
         realization_policy: additive_correlated
