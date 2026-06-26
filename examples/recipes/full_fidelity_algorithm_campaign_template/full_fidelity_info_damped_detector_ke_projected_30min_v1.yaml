@@ -187,6 +187,9 @@ experiment:
       pa_sigma_deg: 0.0001
   iterative:
     enabled: true
+    # Realized cadence for cadence sweeps. Edit these two fields plus run_name.
+    # The wrapper derives subblocks.n_subblocks and iterative_forecast realized
+    # cadence from this product.
     windows_per_draw: 10
     subblocks_per_window: 30
     update_mode: eigen_damped
@@ -212,9 +215,9 @@ experiment:
       top_k_contributors: 8
   iterative_forecast:
     enabled: true
-    actual_windows: 10
+    # Projection target only. Realized actual_windows and subblocks_per_window
+    # are derived from experiment.iterative during wrapper translation.
     projected_windows: 60
-    subblocks_per_window: 30
     observation_duration_s: 1800.0
     modes:
     - replicate_information
@@ -292,6 +295,8 @@ experiment:
     eig_floor_abs: 0.0
     eig_floor_rel: 0.0
     top_k_contributors: 8
+  # Legacy non-iterative forecast path. Keep disabled for this template;
+  # iterative_forecast is the active projection path.
   forecast:
     enabled: false
     plots: false

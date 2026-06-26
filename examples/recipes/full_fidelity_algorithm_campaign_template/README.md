@@ -84,13 +84,24 @@ Primary physical-fidelity controls:
 ## Trajectory, Subblocks, And Iterative Windows
 
 When `experiment.iterative.enabled: true`,
-`iterative.windows_per_draw * iterative.subblocks_per_window` is the canonical
-total number of subblocks generated per prior draw. `subblocks.n_subblocks` is
+`iterative.windows_per_draw` and `iterative.subblocks_per_window` are the
+canonical realized update cadence. Their product is the total number of
+realized subblocks generated per prior draw. For full-fidelity wrapper configs,
+edit those two fields plus `run_name` for cadence sweeps; the wrapper derives
+`subblocks.n_subblocks`, trajectory `trace_source.window.n_subblocks`, and
+`iterative_forecast.actual_windows/subblocks_per_window` during translation.
+If redundant realized cadence fields are present and disagree, translation
+fails before the observation-bias runner starts. `subblocks.n_subblocks` is
 optional in this mode; when present it must match the iterative product.
 `experiment.subblocks.trace_source.window.start_s` selects the start of the
 continuous trajectory interval. `trace_source.window.n_subblocks` is optional;
 when present it must match the resolved total subblock count. The executable
 review and smoke configs omit the redundant window value.
+
+`experiment.iterative_forecast.projected_windows` is separate: it is the
+projection target for forecast artifacts, not the realized cadence. Keep the
+disabled legacy `experiment.forecast` block disabled in iterative full-fidelity
+templates; `experiment.iterative_forecast` is the active projection path.
 
 `experiment.subblocks.n_frames` controls how many frame centers are sampled in
 each subblock. Frame times are generated from the selected trajectory window as

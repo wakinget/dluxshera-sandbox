@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "examples" / "scripts" / "run_full_fidelity_binary_iterative_campaign.py"
@@ -29,6 +31,13 @@ DAMPED_CONFIG_PATH = (
     / "recipes"
     / "full_fidelity_algorithm_campaign_template"
     / "full_fidelity_zernike_2x2_self_correction_hpc_v1_eigen_bottom_damped.yaml"
+)
+INFO_DAMPED_CONFIG_PATH = (
+    REPO_ROOT
+    / "examples"
+    / "recipes"
+    / "full_fidelity_algorithm_campaign_template"
+    / "full_fidelity_info_damped_detector_ke_projected_30min_v1.yaml"
 )
 
 
@@ -95,6 +104,52 @@ def test_config_translation_preserves_iterative_eigenbasis_policy() -> None:
     assert iterative["eigenbasis"]["damping_mode"] == "bottom_n"
     assert iterative["eigenbasis"]["damping_n_modes"] == 8
     assert iterative["eigenbasis"]["damping_value"] == 0.1
+
+
+@pytest.mark.parametrize(
+    ("windows_per_draw", "subblocks_per_window", "total_subblocks"),
+    [(10, 30, 300), (5, 60, 300), (3, 100, 300)],
+)
+def test_config_translation_derives_full_fidelity_cadence(
+    windows_per_draw: int,
+    subblocks_per_window: int,
+    total_subblocks: int,
+) -> None:
+    module = load_module()
+    raw = module.load_config_file(INFO_DAMPED_CONFIG_PATH)
+    raw["experiment"]["iterative"]["windows_per_draw"] = windows_per_draw
+    raw["experiment"]["iterative"]["subblocks_per_window"] = subblocks_per_window
+    raw["experiment"].setdefault("iterative_forecast", {}).pop("actual_windows", None)
+    raw["experiment"].setdefault("iterative_forecast", {}).pop("subblocks_per_window", None)
+
+    translated = module._full_fidelity_to_observation_bias(raw, run_name="unit")
+    experiment = translated["experiment"]
+
+    assert experiment["iterative"]["windows_per_draw"] == windows_per_draw
+    assert experiment["iterative"]["subblocks_per_window"] == subblocks_per_window
+    assert experiment["subblocks"]["n_subblocks"] == total_subblocks
+    assert (
+        experiment["subblocks"]["trace_source"]["window"]["n_subblocks"]
+        == total_subblocks
+    )
+    assert experiment["iterative_forecast"]["actual_windows"] == windows_per_draw
+    assert experiment["iterative_forecast"]["subblocks_per_window"] == subblocks_per_window
+    assert (
+        experiment["iterative_forecast"]["projected_windows"]
+        == raw["experiment"]["iterative_forecast"]["projected_windows"]
+    )
+
+
+def test_config_translation_rejects_stale_iterative_forecast_actual_windows() -> None:
+    module = load_module()
+    raw = module.load_config_file(INFO_DAMPED_CONFIG_PATH)
+    raw["experiment"]["iterative"]["windows_per_draw"] = 5
+    raw["experiment"]["iterative"]["subblocks_per_window"] = 60
+    raw["experiment"]["iterative_forecast"]["actual_windows"] = 10
+    raw["experiment"]["iterative_forecast"]["subblocks_per_window"] = 60
+
+    with pytest.raises(ValueError, match="actual_windows conflicts"):
+        module._full_fidelity_to_observation_bias(raw, run_name="unit")
 
 
 def test_config_translation_forwards_detector_calibration_knowledge_error() -> None:

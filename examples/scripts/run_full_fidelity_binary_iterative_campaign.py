@@ -70,6 +70,75 @@ def _warn(message: str, *, emit: bool) -> None:
         warnings.warn(message, UserWarning, stacklevel=3)
 
 
+def _positive_int(value: Any, *, name: str) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if out <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return out
+
+
+def resolve_full_fidelity_iterative_cadence(experiment_cfg: Mapping[str, Any]) -> dict[str, int]:
+    """Resolve the realized cadence for full-fidelity iterative campaigns.
+
+    ``experiment.iterative`` is the canonical source for realized cadence.
+    ``iterative_forecast.projected_windows`` remains a projection target, while
+    redundant realized forecast fields are accepted only when they agree.
+    """
+
+    iterative = _as_mapping(experiment_cfg.get("iterative"), name="experiment.iterative")
+    forecast = _as_mapping(
+        experiment_cfg.get("iterative_forecast"),
+        name="experiment.iterative_forecast",
+    )
+    windows_per_draw = _positive_int(
+        iterative.get("windows_per_draw", 1),
+        name="experiment.iterative.windows_per_draw",
+    )
+    subblocks_per_window = _positive_int(
+        iterative.get("subblocks_per_window", 1),
+        name="experiment.iterative.subblocks_per_window",
+    )
+    if "actual_windows" in forecast:
+        forecast_actual = _positive_int(
+            forecast["actual_windows"],
+            name="experiment.iterative_forecast.actual_windows",
+        )
+        if forecast_actual != windows_per_draw:
+            raise ValueError(
+                "experiment.iterative_forecast.actual_windows conflicts with "
+                "experiment.iterative.windows_per_draw: "
+                f"{forecast_actual} != {windows_per_draw}. Remove the redundant "
+                "iterative_forecast.actual_windows field or set it to match the "
+                "realized cadence."
+            )
+    if "subblocks_per_window" in forecast:
+        forecast_subblocks = _positive_int(
+            forecast["subblocks_per_window"],
+            name="experiment.iterative_forecast.subblocks_per_window",
+        )
+        if forecast_subblocks != subblocks_per_window:
+            raise ValueError(
+                "experiment.iterative_forecast.subblocks_per_window conflicts with "
+                "experiment.iterative.subblocks_per_window: "
+                f"{forecast_subblocks} != {subblocks_per_window}. Remove the redundant "
+                "iterative_forecast.subblocks_per_window field or set it to match the "
+                "realized cadence."
+            )
+    projected_windows = _positive_int(
+        forecast.get("projected_windows", windows_per_draw),
+        name="experiment.iterative_forecast.projected_windows",
+    )
+    return {
+        "windows_per_draw": windows_per_draw,
+        "subblocks_per_window": subblocks_per_window,
+        "total_subblocks": windows_per_draw * subblocks_per_window,
+        "projected_windows": projected_windows,
+    }
+
+
 def validate_full_fidelity_smoke_config(
     config: Mapping[str, Any],
     *,
@@ -101,6 +170,7 @@ def validate_full_fidelity_smoke_config(
         return warnings_out
     if kind == "observation_bias_campaign":
         return warnings_out
+    resolve_full_fidelity_iterative_cadence(experiment)
 
     spectral = _as_mapping(experiment.get("spectral_model"), name="experiment.spectral_model")
     if "fast" in spectral:
@@ -256,6 +326,18 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
         _as_mapping(experiment.get("subblocks"), name="experiment.subblocks")
     )
     iterative = _as_mapping(experiment.get("iterative"), name="experiment.iterative")
+    cadence = resolve_full_fidelity_iterative_cadence(experiment)
+    subblocks["n_subblocks"] = cadence["total_subblocks"]
+    trace_source = subblocks.get("trace_source")
+    if isinstance(trace_source, Mapping):
+        trace_source_out = dict(trace_source)
+        window = trace_source_out.get("window")
+        if isinstance(window, Mapping):
+            trace_source_out["window"] = {
+                **dict(window),
+                "n_subblocks": cadence["total_subblocks"],
+            }
+        subblocks["trace_source"] = trace_source_out
     iterative_eigenbasis = _as_mapping(
         iterative.get("eigenbasis"),
         name="experiment.iterative.eigenbasis",
@@ -264,8 +346,21 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
         **iterative,
         "update_mode": str(iterative.get("update_mode", "physical_full")),
         "update_gain": float(iterative.get("update_gain", 1.0)),
+        "windows_per_draw": cadence["windows_per_draw"],
+        "subblocks_per_window": cadence["subblocks_per_window"],
         "eigenbasis": iterative_eigenbasis,
     }
+    iterative_forecast = _as_mapping(
+        experiment.get("iterative_forecast"),
+        name="experiment.iterative_forecast",
+    )
+    if iterative_forecast:
+        iterative_forecast = {
+            **iterative_forecast,
+            "actual_windows": cadence["windows_per_draw"],
+            "subblocks_per_window": cadence["subblocks_per_window"],
+            "projected_windows": cadence["projected_windows"],
+        }
     source_kind = str(experiment.get("source_kind", "binary_target"))
     target = experiment.get("target", "ALPHA_CEN")
     n_cases = int(experiment.get("n_cases", 1))
@@ -317,10 +412,7 @@ def _full_fidelity_to_observation_bias(config: Mapping[str, Any], *, run_name: s
             "high_order_wfe": _as_mapping(experiment.get("high_order_wfe"), name="experiment.high_order_wfe"),
             "subblocks": subblocks,
             "iterative": iterative,
-            "iterative_forecast": _as_mapping(
-                experiment.get("iterative_forecast"),
-                name="experiment.iterative_forecast",
-            ),
+            "iterative_forecast": iterative_forecast,
             "seeding": _as_mapping(experiment.get("seeding"), name="experiment.seeding") or {
                 "seed_policy": "different_jitter_different_noise",
                 "base_seed": int(experiment.get("seed", 42)),
