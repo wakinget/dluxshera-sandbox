@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -330,6 +331,36 @@ def test_combine_window_tables_skips_empty_optional_csv_sidecars(tmp_path):
     assert combined.loc[0, "posterior_sigma"] == pytest.approx(1.5)
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        [np.nan, np.inf],
+        [1.0],
+        [1.0, 1.0, 1.0],
+        [1.0, 1.0 + 1e-16],
+        [0, 1],
+    ],
+)
+def test_safe_hist_handles_degenerate_numeric_ranges(values):
+    analyzer = load_analyzer_module()
+    if analyzer.plt is None:
+        pytest.skip("matplotlib unavailable")
+    fig, ax = analyzer.plt.subplots()
+    warnings = []
+
+    analyzer.safe_hist(
+        ax,
+        values,
+        requested_bins=20,
+        min_bins=3,
+        warnings_list=warnings,
+        context="test",
+    )
+
+    analyzer.plt.close(fig)
+
+
 def test_missing_optional_image_artifacts_do_not_fail_with_plots(tmp_path):
     run_root = make_run_root(tmp_path)
     outdir = tmp_path / "review"
@@ -337,6 +368,34 @@ def test_missing_optional_image_artifacts_do_not_fail_with_plots(tmp_path):
     assert result.returncode == 0, result.stderr
     status = json.loads((outdir / "representative_image_comparison_status.json").read_text())
     assert status["available"] is False
+    warnings = json.loads((outdir / "review_warnings.json").read_text())
+    assert warnings["warning_count"] >= 1
+
+
+def test_analysis_plots_degenerate_forecast_columns_without_failing(tmp_path):
+    run_root = make_run_root(tmp_path)
+    write_df(
+        run_root / "analysis/final_observation_summary.csv",
+        pd.DataFrame(
+            [
+                {
+                    "case_name": "case_000",
+                    "projected_final_separation_error_microas": value,
+                    "projected_final_posterior_sigma_separation_microas": 1.0,
+                }
+                for value in [np.nan, np.inf, 1.0, 1.0 + 1e-16]
+            ]
+        ),
+    )
+    outdir = tmp_path / "review"
+
+    result = run_script(run_root, outdir, "--max-image-examples", "0")
+
+    assert result.returncode == 0, result.stderr
+    assert (outdir / "plots/projected_30min_separation_residual_distribution.png").exists()
+    warnings = json.loads((outdir / "review_warnings.json").read_text())
+    assert warnings["warning_count"] >= 1
+    assert any("constant or nearly constant" in item["message"] for item in warnings["warnings"])
 
 
 def test_strict_mode_fails_when_required_artifact_missing(tmp_path):

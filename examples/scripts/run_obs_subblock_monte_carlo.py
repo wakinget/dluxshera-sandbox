@@ -2230,6 +2230,64 @@ def _build_aggregate_summary(
     }
 
 
+def _finite_numeric_array(values: Any) -> np.ndarray:
+    try:
+        arr = np.asarray(values, dtype=float).ravel()
+    except (TypeError, ValueError):
+        return np.asarray([], dtype=float)
+    return arr[np.isfinite(arr)]
+
+
+def _safe_histogram_bins(
+    values: Any,
+    requested_bins: int,
+    min_bins: int = 1,
+) -> tuple[int, tuple[float, float] | None]:
+    finite = _finite_numeric_array(values)
+    if finite.size == 0:
+        return 0, None
+    lo = float(np.min(finite))
+    hi = float(np.max(finite))
+    if finite.size == 1 or np.isclose(lo, hi, rtol=1e-12, atol=0.0):
+        center = float(finite[0])
+        pad = max(abs(center) * 1e-6, 1e-12)
+        return 1, (center - pad, center + pad)
+    unique = np.unique(finite)
+    max_bins = max(1, min(int(requested_bins), int(finite.size), int(unique.size)))
+    bins = min(max(int(min_bins), 1), max_bins)
+    return bins, (lo, hi)
+
+
+def _safe_hist(
+    ax: Any,
+    values: Any,
+    *,
+    requested_bins: int = 20,
+    min_bins: int = 3,
+) -> None:
+    finite = _finite_numeric_array(values)
+    bins, value_range = _safe_histogram_bins(
+        finite,
+        requested_bins=requested_bins,
+        min_bins=min_bins,
+    )
+    if finite.size == 0 or bins <= 0 or value_range is None:
+        ax.text(0.5, 0.5, "no finite data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+    if bins == 1:
+        ax.axvline(float(finite[0]), linewidth=2.0)
+        ax.set_xlim(value_range)
+        return
+    try:
+        ax.hist(finite, bins=bins, range=value_range)
+    except ValueError as exc:
+        ax.text(0.5, 0.5, f"histogram unavailable: {exc}", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+
 def write_aggregate_plots(
     *,
     aggregate_root: Path,
@@ -2258,7 +2316,7 @@ def write_aggregate_plots(
     fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3 * rows), squeeze=False)
     for index, label in enumerate(theta_labels):
         ax = axes[index // cols][index % cols]
-        ax.hist(info_arr[:, index, index], bins=min(20, max(3, len(info_arr))))
+        _safe_hist(ax, info_arr[:, index, index], requested_bins=20, min_bins=3)
         ax.set_title(label)
     _hide_unused_axes(axes, n)
     fig.tight_layout()
@@ -2268,7 +2326,7 @@ def write_aggregate_plots(
     fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3 * rows), squeeze=False)
     for index, label in enumerate(theta_labels):
         ax = axes[index // cols][index % cols]
-        ax.hist(score_arr[:, index], bins=min(20, max(3, len(score_arr))))
+        _safe_hist(ax, score_arr[:, index], requested_bins=20, min_bins=3)
         ax.set_title(label)
     _hide_unused_axes(axes, n)
     fig.tight_layout()
@@ -2276,7 +2334,7 @@ def write_aggregate_plots(
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5, 3.5))
-    ax.hist(np.linalg.norm(score_arr, axis=1), bins=min(20, max(3, len(score_arr))))
+    _safe_hist(ax, np.linalg.norm(score_arr, axis=1), requested_bins=20, min_bins=3)
     ax.set_xlabel("score norm")
     ax.set_ylabel("count")
     fig.tight_layout()
@@ -2314,7 +2372,7 @@ def write_aggregate_plots(
     ]
     if values:
         fig, ax = plt.subplots(figsize=(5, 3.5))
-        ax.hist(values, bins=min(30, max(4, len(values))))
+        _safe_hist(ax, values, requested_bins=30, min_bins=4)
         ax.set_xlabel("whitened residual component")
         ax.set_ylabel("count")
         fig.tight_layout()

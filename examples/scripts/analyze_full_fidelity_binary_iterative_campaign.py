@@ -132,6 +132,128 @@ def write_csv(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=False)
 
 
+def finite_numeric_array(values: Any) -> np.ndarray:
+    """Return finite values as a flat float array for plotting helpers."""
+
+    try:
+        arr = np.asarray(values, dtype=float).ravel()
+    except (TypeError, ValueError):
+        return np.asarray([], dtype=float)
+    return arr[np.isfinite(arr)]
+
+
+def _append_plot_warning(
+    warnings_list: list[dict[str, Any]] | None,
+    message: str,
+    *,
+    context: str | None = None,
+) -> None:
+    if warnings_list is None:
+        return
+    warning = {"message": message}
+    if context:
+        warning["context"] = context
+    warnings_list.append(warning)
+
+
+def _placeholder_plot(
+    ax: Any,
+    message: str,
+    *,
+    warnings_list: list[dict[str, Any]] | None = None,
+    context: str | None = None,
+) -> None:
+    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    _append_plot_warning(warnings_list, message, context=context)
+
+
+def safe_histogram_bins(
+    values: Any,
+    requested_bins: int,
+    min_bins: int = 1,
+) -> tuple[int, tuple[float, float] | None]:
+    finite = finite_numeric_array(values)
+    if finite.size == 0:
+        return 0, None
+    lo = float(np.min(finite))
+    hi = float(np.max(finite))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return 0, None
+    if finite.size == 1 or np.isclose(lo, hi, rtol=1e-12, atol=0.0):
+        center = float(finite[0])
+        pad = max(abs(center) * 1e-6, 1e-12)
+        return 1, (center - pad, center + pad)
+
+    unique = np.unique(finite)
+    max_bins = max(1, min(int(requested_bins), int(finite.size), int(unique.size)))
+    bins = max(int(min_bins), max_bins)
+    bins = min(bins, max_bins)
+    if bins <= 0:
+        bins = 1
+    if np.isclose(lo, hi, rtol=1e-12, atol=0.0):
+        pad = max(abs(lo) * 1e-6, 1e-12)
+        return bins, (lo - pad, hi + pad)
+    return bins, (lo, hi)
+
+
+def safe_hist(
+    ax: Any,
+    values: Any,
+    *,
+    requested_bins: int = 20,
+    min_bins: int = 3,
+    label: str | None = None,
+    color: str | None = None,
+    alpha: float = 0.8,
+    warnings_list: list[dict[str, Any]] | None = None,
+    context: str | None = None,
+) -> None:
+    finite = finite_numeric_array(values)
+    if finite.size == 0:
+        _placeholder_plot(ax, "no finite data", warnings_list=warnings_list, context=context)
+        return
+
+    bins, value_range = safe_histogram_bins(
+        finite,
+        requested_bins=requested_bins,
+        min_bins=min_bins,
+    )
+    if bins <= 0 or value_range is None:
+        _placeholder_plot(ax, "no finite data", warnings_list=warnings_list, context=context)
+        return
+
+    try:
+        if bins == 1:
+            center = float(finite[0])
+            ax.axvline(center, color=color or "#4C78A8", linewidth=2.0, label=label)
+            ax.set_xlim(value_range)
+            _append_plot_warning(
+                warnings_list,
+                "histogram data are constant or nearly constant; drew a marker instead of binned histogram",
+                context=context,
+            )
+        else:
+            # Avoid Matplotlib's auto edge path for degenerate precision cases:
+            # "Too many bins for data range. Cannot create 3 finite-sized bins."
+            ax.hist(
+                finite,
+                bins=bins,
+                range=value_range,
+                label=label,
+                color=color,
+                alpha=alpha,
+            )
+    except ValueError as exc:
+        _placeholder_plot(
+            ax,
+            f"histogram unavailable: {exc}",
+            warnings_list=warnings_list,
+            context=context,
+        )
+
+
 def scalar(data: dict[str, Any], dotted: str, default: Any = "") -> Any:
     cur: Any = data
     for part in dotted.split("."):
@@ -863,7 +985,16 @@ def image_comparisons(run_root: Path, outdir: Path, max_examples: int, mode: str
     return written
 
 
-def plot_outputs(outdir: Path, win: pd.DataFrame, param: pd.DataFrame, smear: pd.DataFrame, traj: pd.DataFrame, resid: pd.DataFrame, subblocks: pd.DataFrame) -> None:
+def plot_outputs(
+    outdir: Path,
+    win: pd.DataFrame,
+    param: pd.DataFrame,
+    smear: pd.DataFrame,
+    traj: pd.DataFrame,
+    resid: pd.DataFrame,
+    subblocks: pd.DataFrame,
+    warnings_list: list[dict[str, Any]] | None = None,
+) -> None:
     if plt is None:
         return
     plotdir = outdir / "plots"
@@ -935,15 +1066,30 @@ def forecast_tables(run_root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     return final, forecast, evolution
 
 
-def plot_forecast_outputs(outdir: Path, final_forecast: pd.DataFrame, evolution: pd.DataFrame) -> None:
+def plot_forecast_outputs(
+    outdir: Path,
+    final_forecast: pd.DataFrame,
+    evolution: pd.DataFrame,
+    warnings_list: list[dict[str, Any]] | None = None,
+) -> None:
     if plt is None:
         return
     plotdir = outdir / "plots"
+    plotdir.mkdir(parents=True, exist_ok=True)
     if not final_forecast.empty:
         if "projected_final_separation_error_microas" in final_forecast.columns:
             fig, ax = plt.subplots(figsize=(7, 4))
-            values = pd.to_numeric(final_forecast["projected_final_separation_error_microas"], errors="coerce").dropna()
-            ax.hist(values, bins=min(12, max(3, len(values))), color="#4C78A8", alpha=0.8)
+            values = pd.to_numeric(final_forecast["projected_final_separation_error_microas"], errors="coerce")
+            safe_hist(
+                ax,
+                values,
+                requested_bins=12,
+                min_bins=3,
+                color="#4C78A8",
+                alpha=0.8,
+                warnings_list=warnings_list,
+                context="projected_30min_separation_residual_distribution",
+            )
             ax.axvline(0.0, color="black", linewidth=0.8)
             ax.set_xlabel("Projected final separation error (microas)")
             ax.set_ylabel("Cases")
@@ -952,8 +1098,17 @@ def plot_forecast_outputs(outdir: Path, final_forecast: pd.DataFrame, evolution:
             plt.close(fig)
         if "projected_final_posterior_sigma_separation_microas" in final_forecast.columns:
             fig, ax = plt.subplots(figsize=(7, 4))
-            values = pd.to_numeric(final_forecast["projected_final_posterior_sigma_separation_microas"], errors="coerce").dropna()
-            ax.hist(values, bins=min(12, max(3, len(values))), color="#59A14F", alpha=0.8)
+            values = pd.to_numeric(final_forecast["projected_final_posterior_sigma_separation_microas"], errors="coerce")
+            safe_hist(
+                ax,
+                values,
+                requested_bins=12,
+                min_bins=3,
+                color="#59A14F",
+                alpha=0.8,
+                warnings_list=warnings_list,
+                context="projected_30min_posterior_sigma_distribution",
+            )
             ax.set_xlabel("Projected final posterior sigma (microas)")
             ax.set_ylabel("Cases")
             fig.tight_layout()
@@ -1047,6 +1202,9 @@ def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.
         "",
         "## Artifact index",
         "See [artifact_index.csv](artifact_index.csv).",
+        "",
+        "## Review warnings",
+        "Plotting and optional review warnings are recorded in [review_warnings.json](review_warnings.json). These warnings do not invalidate a campaign with complete required science artifacts.",
     ]
     (outdir / "review_summary.md").write_text("\n".join(lines) + "\n")
 
@@ -1055,6 +1213,14 @@ def write_index(outdir: Path) -> None:
     md = (outdir / "review_summary.md").read_text() if (outdir / "review_summary.md").exists() else ""
     body = md.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     (outdir / "index.html").write_text(f"<html><body><pre>{body}</pre></body></html>\n")
+
+
+def write_review_warnings(outdir: Path, warnings_list: list[dict[str, Any]]) -> None:
+    payload = {
+        "warning_count": len(warnings_list),
+        "warnings": warnings_list,
+    }
+    (outdir / "review_warnings.json").write_text(json.dumps(payload, indent=2))
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1123,17 +1289,58 @@ def run(args: argparse.Namespace) -> int:
         write_csv(df, outdir / name)
     (outdir / "campaign_dashboard.json").write_text(json.dumps(dashboard.to_dict(orient="records"), indent=2))
 
+    review_warnings: list[dict[str, Any]] = []
     if not args.no_plots:
-        plot_outputs(outdir, win, param, smear, traj, resid, subblock_metrics)
-        plot_forecast_outputs(outdir, final_forecast, forecast_evolution)
+        for context, func in (
+            (
+                "campaign_review_plots",
+                lambda: plot_outputs(
+                    outdir,
+                    win,
+                    param,
+                    smear,
+                    traj,
+                    resid,
+                    subblock_metrics,
+                    review_warnings,
+                ),
+            ),
+            (
+                "campaign_forecast_plots",
+                lambda: plot_forecast_outputs(
+                    outdir,
+                    final_forecast,
+                    forecast_evolution,
+                    review_warnings,
+                ),
+            ),
+        ):
+            try:
+                func()
+            except Exception as exc:
+                _append_plot_warning(
+                    review_warnings,
+                    f"optional plot generation failed: {exc}",
+                    context=context,
+                )
     image_plots = []
     if not args.no_plots:
-        image_plots = image_comparisons(run_root, outdir, args.max_image_examples, args.image_examples, args.include_subblock_images, args.include_frame_images)
+        try:
+            image_plots = image_comparisons(run_root, outdir, args.max_image_examples, args.image_examples, args.include_subblock_images, args.include_frame_images)
+        except Exception as exc:
+            _append_plot_warning(
+                review_warnings,
+                f"optional image comparison generation failed: {exc}",
+                context="representative_image_comparisons",
+            )
     write_report(outdir, run_root, artifacts["campaign_summary"], win, slow_final, local_policy, image_plots, final_forecast)
     write_index(outdir)
+    write_review_warnings(outdir, review_warnings)
     if args.open_report:
         webbrowser.open((outdir / "index.html").as_uri())
     print(f"Wrote full-fidelity review bundle to {outdir}")
+    if review_warnings:
+        print(f"Review completed with {len(review_warnings)} warning(s); see {outdir / 'review_warnings.json'}")
     return 0
 
 

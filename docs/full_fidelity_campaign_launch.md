@@ -95,6 +95,16 @@ configs.
    This reads expected shard roots and reports plan, summary, status, and
    completed subblock counts.
 
+8. Interpret review warnings separately from science completion.
+
+   The sbatch wrapper may run the full-fidelity review analyzer after the
+   campaign finishes. Required science artifacts still control strict analyzer
+   success, but optional review plots are best-effort. Degenerate plot inputs
+   such as empty, all-NaN, single-value, or constant forecast columns are
+   recorded in `analysis/full_fidelity_review/review_warnings.json` and should
+   not invalidate a shard whose campaign summary and subblock status show
+   complete science output.
+
 ## Expensive Steps
 
 Do not run generated `preflight_*_shards.sh` scripts on login or head nodes.
