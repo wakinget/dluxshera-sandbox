@@ -12,6 +12,7 @@ import re
 import sys
 import webbrowser
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,10 +100,13 @@ def rel(path: Any, root: Path) -> str:
 
 
 def read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
+    if not path.exists() or not path.is_file():
         return default
-    with path.open() as f:
-        return json.load(f)
+    try:
+        with path.open() as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default
 
 
 def _has_non_whitespace_content(path: Path) -> bool:
@@ -130,6 +134,166 @@ def read_csv(path: Path) -> pd.DataFrame:
 def write_csv(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def safe_float(value: Any, default: float = np.nan) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value: Any, default: float = np.nan) -> int | float:
+    if value in (None, ""):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists() or not path.is_file() or path.stat().st_size == 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    item = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                rows.append(item if isinstance(item, dict) else {"value": item})
+    except OSError:
+        return []
+    return rows
+
+
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return str(value).strip() == ""
+
+
+def first_nonblank(*values: Any, default: Any = "") -> Any:
+    for value in values:
+        if not _is_blank(value):
+            return value
+    return default
+
+
+def _as_bool(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if value in (None, "") or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return value
+
+
+def _nested_values(data: Any, keys: set[str]) -> list[Any]:
+    found: list[Any] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if str(key) in keys:
+                found.append(value)
+            found.extend(_nested_values(value, keys))
+    elif isinstance(data, list):
+        for item in data:
+            found.extend(_nested_values(item, keys))
+    return found
+
+
+def _first_nested_value(data: Any, keys: set[str]) -> Any:
+    for value in _nested_values(data, keys):
+        if not _is_blank(value):
+            return value
+    return ""
+
+
+def resolve_artifact_path(
+    value: Any,
+    run_root: Path,
+    context_dirs: list[Path] | tuple[Path, ...] = (),
+) -> Path | None:
+    if _is_blank(value):
+        return None
+    raw = str(value)
+    p = Path(raw).expanduser()
+    candidates = [p] if p.is_absolute() else [run_root / p, *[d / p for d in context_dirs]]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return p if p.is_absolute() else run_root / p
+
+
+def find_existing_candidate_path(candidates: list[Path | None]) -> Path | None:
+    for candidate in candidates:
+        if candidate is not None and candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def _artifact_text(path: Path | None, run_root: Path, fallback: Any = "") -> str:
+    if path is None:
+        return "" if _is_blank(fallback) else str(fallback)
+    return rel(path, run_root) if path.exists() else ("" if _is_blank(fallback) else str(fallback))
+
+
+def _path_parent_candidates(*paths: Path | None) -> list[Path]:
+    dirs: list[Path] = []
+    for path in paths:
+        if path is None:
+            continue
+        base = path if path.is_dir() else path.parent
+        for item in [base, base.parent, base.parent.parent]:
+            if item not in dirs:
+                dirs.append(item)
+    return dirs
+
+
+def _subblock_study_root(summary_path: Path | None, diag_path: Path | None) -> Path | None:
+    if summary_path is not None and summary_path.exists():
+        if summary_path.name in {"summary.json", "subblock_summary.json"}:
+            return summary_path.parent
+        if summary_path.parent.name == "schur_summary":
+            return summary_path.parent
+    if diag_path is not None:
+        candidate = diag_path.parent / "study" / "schur_summary"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if _is_blank(value):
+        return None
+    text = str(value).strip()
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _seconds_span(start: Any, finish: Any) -> float:
+    a = _parse_timestamp(start)
+    b = _parse_timestamp(finish)
+    if a is None or b is None:
+        return np.nan
+    return max(0.0, (b - a).total_seconds())
 
 
 def finite_numeric_array(values: Any) -> np.ndarray:
@@ -802,6 +966,527 @@ def command_arg(command: list[Any], flag: str, default: str = "") -> str:
     return vals[idx + 1]
 
 
+def classify_local_registration_policy(phi_ref: Any) -> str:
+    text = str(phi_ref or "").strip().lower()
+    if "truth_when_available" in text or "truth" in text:
+        return "truth_phi_or_solve_skipped"
+    if text in {"recovered", "starting_guess_csv"} or any(
+        token in text for token in ("recovered", "starting_guess", "fit", "solve")
+    ):
+        return "recovered_registration_solve"
+    return "unknown"
+
+
+def _summary_sidecar(summary_path: Path | None, summary: dict[str, Any], run_root: Path) -> dict[str, Any]:
+    explicit = scalar(summary, "schur_summary.artifacts.subblock_summary_json", "")
+    context_dirs = _path_parent_candidates(summary_path)
+    path = resolve_artifact_path(explicit, run_root, context_dirs) if explicit else None
+    if path is None or not path.exists():
+        study_root = _subblock_study_root(summary_path, None)
+        path = find_existing_candidate_path(
+            [
+                study_root / "subblock_summary.json" if study_root else None,
+                summary_path.parent / "subblock_summary.json" if summary_path else None,
+            ]
+        )
+    data = read_json(path, {}) if path is not None else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _candidate_artifacts(
+    summary_path: Path | None,
+    diag_path: Path | None,
+    summary: dict[str, Any],
+    diag: dict[str, Any],
+    run_root: Path,
+) -> dict[str, Path | None]:
+    context_dirs = _path_parent_candidates(summary_path, diag_path)
+    study_root = _subblock_study_root(summary_path, diag_path)
+
+    def explicit(*keys: str) -> Path | None:
+        for key in keys:
+            value = scalar(summary, key, "")
+            if _is_blank(value):
+                value = scalar(diag, key, "")
+            if not _is_blank(value):
+                return resolve_artifact_path(value, run_root, context_dirs)
+        return None
+
+    runtime_summary = explicit("runtime_profile.summary_json", "runtime_profile_summary_path")
+    runtime_timeline = explicit("runtime_profile.timeline_jsonl", "runtime_profile_timeline_path")
+    memory_timeline = explicit("memory_diagnostics.timeline_jsonl", "memory_diagnostics_path")
+    memory_audit = explicit("memory_diagnostics.audit_json", "memory_audit_path")
+
+    conventional = {
+        "runtime_profile_summary_path": [
+            runtime_summary,
+            study_root / "runtime_profile_summary.json" if study_root else None,
+        ],
+        "runtime_profile_timeline_path": [
+            runtime_timeline,
+            study_root / "runtime_profile_timeline.jsonl" if study_root else None,
+        ],
+        "memory_diagnostics_path": [
+            memory_timeline,
+            study_root / "schur_summary_memory_timeline.jsonl" if study_root else None,
+        ],
+        "memory_audit_path": [
+            memory_audit,
+            study_root / "schur_summary_memory_audit.json" if study_root else None,
+        ],
+    }
+    return {key: find_existing_candidate_path(paths) or paths[0] for key, paths in conventional.items()}
+
+
+def _peak_memory_from_sources(
+    status_row: pd.Series,
+    diag: dict[str, Any],
+    memory_audit: dict[str, Any],
+    memory_rows: list[dict[str, Any]],
+) -> tuple[float, str]:
+    candidates: list[tuple[float, str]] = []
+    key_sources = [
+        (status_row.get("resource_time_maximum_resident_set_mb", ""), "status.resource_time"),
+        (scalar(diag, "resource_time.maximum_resident_set_mb", ""), "diagnostics.resource_time"),
+        (scalar(diag, "memory_sampler.peak_total_rss_mb", ""), "diagnostics.memory_sampler"),
+        (scalar(diag, "memory_sampler.peak_descendant_tree_rss_mb", ""), "diagnostics.memory_sampler"),
+        (scalar(diag, "memory_sampler.peak_direct_child_rss_mb", ""), "diagnostics.memory_sampler"),
+        (memory_audit.get("peak_rss_mb_observed", ""), "memory_audit"),
+    ]
+    for value, source in key_sources:
+        f = safe_float(value)
+        if np.isfinite(f):
+            candidates.append((f, source))
+    for row in memory_rows:
+        for key in ("peak_rss_mb", "rss_mb", "last_memory_peak_rss_mb", "last_memory_rss_mb"):
+            f = safe_float(row.get(key, ""))
+            if np.isfinite(f):
+                candidates.append((f, "memory_timeline"))
+    if not candidates:
+        return np.nan, ""
+    return max(candidates, key=lambda item: item[0])
+
+
+def _resource_time_available(status_row: pd.Series, diag: dict[str, Any]) -> bool:
+    if np.isfinite(safe_float(status_row.get("resource_time_maximum_resident_set_mb", ""))):
+        return True
+    return bool(scalar(diag, "resource_time.available", False)) or np.isfinite(
+        safe_float(scalar(diag, "resource_time.maximum_resident_set_mb", ""))
+    )
+
+
+def build_subblock_runtime_ledger(run_root: Path) -> pd.DataFrame:
+    status = read_csv(run_root / "subblock_status_iterative.csv")
+    rows: list[dict[str, Any]] = []
+    for _, s in status.iterrows() if not status.empty else []:
+        raw_summary_path = s.get("summary_path", "")
+        raw_diag_path = s.get("subprocess_diagnostics_path", "")
+        summary_path = resolve_artifact_path(raw_summary_path, run_root)
+        context_dirs = _path_parent_candidates(summary_path)
+        diag_path = resolve_artifact_path(raw_diag_path, run_root, context_dirs)
+        summary = read_json(summary_path, {}) if summary_path is not None else {}
+        diag = read_json(diag_path, {}) if diag_path is not None else {}
+        summary = summary if isinstance(summary, dict) else {}
+        diag = diag if isinstance(diag, dict) else {}
+        sidecar = _summary_sidecar(summary_path, summary, run_root)
+        artifacts = _candidate_artifacts(summary_path, diag_path, summary, diag, run_root)
+        memory_rows = read_jsonl(artifacts.get("memory_diagnostics_path") or Path(""))
+        memory_audit_data = read_json(artifacts.get("memory_audit_path") or Path(""), {})
+        memory_audit = memory_audit_data if isinstance(memory_audit_data, dict) else {}
+        command = diag.get("command", [])
+        command = command if isinstance(command, list) else []
+        schur = summary.get("schur_summary", {}) if isinstance(summary.get("schur_summary"), dict) else {}
+        requested = summary.get("schur_summary_requested", {}) if isinstance(summary.get("schur_summary_requested"), dict) else {}
+        sidecar_diag = sidecar.get("diagnostics", {}) if isinstance(sidecar.get("diagnostics"), dict) else {}
+        sidecar_meta = sidecar.get("metadata", {}) if isinstance(sidecar.get("metadata"), dict) else {}
+        sidecar_curvature = sidecar_meta.get("curvature", {}) if isinstance(sidecar_meta.get("curvature"), dict) else {}
+        sidecar_frame_quality = sidecar_meta.get("frame_quality", {}) if isinstance(sidecar_meta.get("frame_quality"), dict) else {}
+
+        elapsed = safe_float(first_nonblank(s.get("elapsed_seconds", ""), diag.get("elapsed_seconds", "")))
+        phi_ref = first_nonblank(
+            command_arg(command, "--phi-ref"),
+            requested.get("phi_ref", ""),
+            schur.get("phi_ref_mode", ""),
+            sidecar_meta.get("phi_ref_mode", ""),
+        )
+        initial_loss = first_nonblank(
+            scalar(summary, "reference_optimizer.initial_loss", ""),
+            _first_nested_value(summary, {"initial_loss"}),
+        )
+        final_loss = first_nonblank(
+            scalar(summary, "reference_optimizer.final_loss", ""),
+            _first_nested_value(summary, {"final_loss"}),
+        )
+        loss_delta = np.nan
+        if np.isfinite(safe_float(initial_loss)) and np.isfinite(safe_float(final_loss)):
+            loss_delta = safe_float(final_loss) - safe_float(initial_loss)
+        peak_mb, peak_source = _peak_memory_from_sources(s, diag, memory_audit, memory_rows)
+        resource_rss = first_nonblank(
+            s.get("resource_time_maximum_resident_set_mb", ""),
+            scalar(diag, "resource_time.maximum_resident_set_mb", ""),
+        )
+        stdout_path = resolve_artifact_path(first_nonblank(s.get("stdout_log", ""), diag.get("stdout_log", "")), run_root, _path_parent_candidates(diag_path))
+        stderr_path = resolve_artifact_path(first_nonblank(s.get("stderr_log", ""), diag.get("stderr_log", "")), run_root, _path_parent_candidates(diag_path))
+        theta_dim = first_nonblank(
+            schur.get("n_theta", ""),
+            sidecar_diag.get("theta_dim", ""),
+            len(scalar(sidecar, "theta_labels", [])) if scalar(sidecar, "theta_labels", []) else "",
+            len(command_arg(command, "--theta-keys", "").split(",")) if command_arg(command, "--theta-keys", "") else "",
+        )
+        phi_dim = first_nonblank(schur.get("n_phi", ""), sidecar_diag.get("n_phi", ""), scalar(sidecar_meta, "curvature.n_phi", ""))
+        row = {
+            "case_name": s.get("case_name", ""),
+            "window_index": s.get("window_index", np.nan),
+            "window_subblock_index": s.get("window_subblock_index", np.nan),
+            "global_subblock_index": s.get("global_subblock_index", np.nan),
+            "status": s.get("status", ""),
+            "return_code": s.get("return_code", np.nan),
+            "summary_path": _artifact_text(summary_path, run_root, raw_summary_path),
+            "subprocess_diagnostics_path": _artifact_text(diag_path, run_root, raw_diag_path),
+            "stdout_log": _artifact_text(stdout_path, run_root, s.get("stdout_log", "")),
+            "stderr_log": _artifact_text(stderr_path, run_root, s.get("stderr_log", "")),
+            "runtime_profile_summary_path": _artifact_text(artifacts.get("runtime_profile_summary_path"), run_root),
+            "runtime_profile_timeline_path": _artifact_text(artifacts.get("runtime_profile_timeline_path"), run_root),
+            "memory_diagnostics_path": _artifact_text(artifacts.get("memory_diagnostics_path"), run_root),
+            "memory_audit_path": _artifact_text(artifacts.get("memory_audit_path"), run_root),
+            "elapsed_seconds": elapsed,
+            "elapsed_minutes": elapsed / 60.0 if np.isfinite(elapsed) else np.nan,
+            "elapsed_hours": elapsed / 3600.0 if np.isfinite(elapsed) else np.nan,
+            "started_at": diag.get("started_at", ""),
+            "finished_at": diag.get("finished_at", ""),
+            "subprocess_elapsed_seconds": diag.get("elapsed_seconds", ""),
+            "resource_time_elapsed_wall_clock": scalar(diag, "resource_time.elapsed_wall_clock", ""),
+            "resource_time_user_cpu_seconds": first_nonblank(scalar(diag, "resource_time.user_cpu_seconds", ""), scalar(diag, "resource_time.user_seconds", "")),
+            "resource_time_sys_cpu_seconds": first_nonblank(scalar(diag, "resource_time.system_cpu_seconds", ""), scalar(diag, "resource_time.sys_seconds", "")),
+            "resource_time_maximum_resident_set_mb": resource_rss,
+            "maximum_resident_set_mb": first_nonblank(s.get("maximum_resident_set_mb", ""), scalar(diag, "maximum_resident_set_mb", "")),
+            "max_rss_mb": first_nonblank(s.get("max_rss_mb", ""), scalar(diag, "max_rss_mb", "")),
+            "peak_rss_mb": peak_mb,
+            "last_memory_rss_mb": first_nonblank(s.get("last_memory_rss_mb", ""), memory_audit.get("last_memory_rss_mb", "")),
+            "last_memory_peak_rss_mb": first_nonblank(s.get("last_memory_peak_rss_mb", ""), memory_audit.get("last_memory_peak_rss_mb", "")),
+            "memory_peak_source": peak_source,
+            "n_frames": first_nonblank(schur.get("n_frames", ""), scalar(schur, "information_accounting.n_frames_total", ""), summary.get("n_frames_requested", ""), command_arg(command, "--n-frames")),
+            "exposure_time_s": first_nonblank(summary.get("exposure_time_s_requested", ""), command_arg(command, "--exposure-time-s")),
+            "phi_ref": phi_ref,
+            "schur_curvature_method_requested": first_nonblank(schur.get("schur_curvature_method_requested", ""), sidecar_diag.get("schur_curvature_method_requested", ""), sidecar_curvature.get("schur_curvature_method_requested", ""), requested.get("schur_curvature_method", ""), command_arg(command, "--schur-curvature-method")),
+            "schur_curvature_method_used": first_nonblank(schur.get("schur_curvature_method_used", ""), sidecar_diag.get("schur_curvature_method_used", ""), sidecar_curvature.get("schur_curvature_method_used", "")),
+            "summary_information_scale": first_nonblank(scalar(schur, "information_accounting.summary_information_scale", ""), scalar(sidecar_diag, "information_accounting.summary_information_scale", ""), requested.get("summary_information_scale", "")),
+            "theta_dim": theta_dim,
+            "phi_dim": phi_dim,
+            "combined_dim": first_nonblank(schur.get("combined_dim", ""), sidecar.get("combined_dim", ""), sidecar_curvature.get("combined_dim", "")),
+            "dense_global_hessian_materialized": _as_bool(first_nonblank(schur.get("dense_global_hessian_materialized", ""), sidecar_diag.get("dense_global_hessian_materialized", ""), sidecar_curvature.get("dense_global_hessian_materialized", ""))),
+            "structured_curvature_used": _as_bool(first_nonblank(schur.get("structured_curvature_used", ""), sidecar_diag.get("structured_curvature_used", ""), sidecar_curvature.get("structured_curvature_used", ""))),
+            "reference_optimizer_kind": first_nonblank(scalar(requested, "reference_inference_cli_overrides.reference_optimizer_kind", ""), scalar(summary, "schur_summary_plan.reference_inference_config_if_run.optimizer_kind", ""), command_arg(command, "--reference-optimizer-kind")),
+            "reference_optimizer_n_iter_requested": first_nonblank(scalar(requested, "reference_inference_cli_overrides.reference_n_iter", ""), scalar(summary, "schur_summary_plan.reference_inference_config_if_run.n_iter", ""), command_arg(command, "--reference-n-iter")),
+            "reference_optimizer_n_iter_actual": first_nonblank(scalar(summary, "reference_optimizer.n_iter", ""), _first_nested_value(summary, {"n_iter_actual", "iterations_completed"})),
+            "early_stopping_triggered": scalar(summary, "reference_optimizer.early_stopping_triggered", ""),
+            "reference_optimizer_converged": scalar(summary, "reference_optimizer.converged", ""),
+            "initial_loss": initial_loss,
+            "final_loss": final_loss,
+            "loss_delta": loss_delta,
+            "chi2": first_nonblank(scalar(summary, "fit_diagnostics.chi2", ""), _first_nested_value(summary, {"chi2"})),
+            "reduced_chi2": first_nonblank(scalar(summary, "fit_diagnostics.reduced_chi2", ""), _first_nested_value(summary, {"reduced_chi2"})),
+            "included_frame_count": first_nonblank(scalar(schur, "information_accounting.included_frame_count", ""), sidecar_frame_quality.get("included_frame_count", ""), sidecar_diag.get("frame_quality_good_frame_count", "")),
+            "bad_frame_count": first_nonblank(schur.get("frame_quality_bad_frame_count", ""), sidecar_frame_quality.get("bad_frame_count", ""), sidecar_diag.get("frame_quality_bad_frame_count", "")),
+            "frame_quality_policy": first_nonblank(schur.get("frame_quality_policy", ""), sidecar_frame_quality.get("policy", ""), sidecar_diag.get("frame_quality_policy", ""), requested.get("schur_frame_quality_policy", "")),
+            "local_registration_policy_class": classify_local_registration_policy(phi_ref),
+            "profile_available": bool((artifacts.get("runtime_profile_summary_path") and artifacts["runtime_profile_summary_path"].exists()) or (artifacts.get("runtime_profile_timeline_path") and artifacts["runtime_profile_timeline_path"].exists())),
+            "memory_diagnostics_available": bool((artifacts.get("memory_diagnostics_path") and artifacts["memory_diagnostics_path"].exists()) or (artifacts.get("memory_audit_path") and artifacts["memory_audit_path"].exists())),
+            "resource_time_available": _resource_time_available(s, diag),
+        }
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _join_modes(series: pd.Series) -> str:
+    vals = sorted({str(v) for v in series.dropna().tolist() if str(v).strip()})
+    return ";".join(vals)
+
+
+def build_window_runtime_summary(run_root: Path, ledger: pd.DataFrame, campaign_summary: dict[str, Any]) -> pd.DataFrame:
+    if ledger.empty:
+        return pd.DataFrame(columns=[
+            "case_name", "window_index", "n_subblocks_planned", "n_subblocks_with_status",
+            "n_subblocks_completed", "n_subblocks_failed", "n_subblocks_missing",
+            "subblock_elapsed_seconds_sum", "subblock_elapsed_seconds_min",
+            "subblock_elapsed_seconds_median", "subblock_elapsed_seconds_max",
+            "subblock_elapsed_seconds_mean", "approx_parallel_wall_seconds_lower_bound",
+            "approx_parallel_wall_seconds_observed_span", "resource_time_peak_rss_mb_max",
+            "memory_peak_rss_mb_max", "theta_dim_median", "phi_dim_median",
+            "n_frames_median", "phi_ref_modes", "schur_methods_used",
+            "reference_solve_classes", "posterior_table_exists",
+            "iterative_reference_update_exists", "window_diagnostics_exists",
+        ])
+    max_workers = _first_nested_value(campaign_summary, {"max_workers", "MAX_WORKERS"})
+    rows: list[dict[str, Any]] = []
+    planned_default = safe_int(campaign_summary.get("subblocks_per_window", ""))
+    for (case_name, window_index), group in ledger.groupby(["case_name", "window_index"], dropna=False):
+        elapsed = pd.to_numeric(group.get("elapsed_seconds", pd.Series(dtype=float)), errors="coerce")
+        starts = [t for t in group.get("started_at", pd.Series(dtype=str)).tolist() if _parse_timestamp(t)]
+        finishes = [t for t in group.get("finished_at", pd.Series(dtype=str)).tolist() if _parse_timestamp(t)]
+        observed_span = np.nan
+        if starts and finishes:
+            observed_span = _seconds_span(min(starts, key=lambda x: _parse_timestamp(x) or datetime.max), max(finishes, key=lambda x: _parse_timestamp(x) or datetime.min))
+        completed = int((group.get("status", pd.Series(dtype=str)).astype(str) == "ok").sum())
+        failed = int((group.get("status", pd.Series(dtype=str)).astype(str) == "failed").sum())
+        planned = planned_default if np.isfinite(safe_float(planned_default)) else len(group)
+        median_elapsed = float(elapsed.median()) if elapsed.notna().any() else np.nan
+        parallel_est = np.nan
+        mw = safe_int(max_workers)
+        if np.isfinite(safe_float(mw)) and int(mw) > 0 and np.isfinite(median_elapsed):
+            parallel_est = math.ceil(len(group) / int(mw)) * median_elapsed
+        window_root = run_root / "cases" / str(case_name) / "windows" / f"window_{int(window_index):03d}" if not pd.isna(window_index) else Path("")
+        if not window_root.exists() and not pd.isna(window_index):
+            window_root = run_root / "cases" / str(case_name) / "windows" / f"window_{int(window_index)}"
+        rows.append(
+            {
+                "case_name": case_name,
+                "window_index": window_index,
+                "n_subblocks_planned": planned,
+                "n_subblocks_with_status": int(len(group)),
+                "n_subblocks_completed": completed,
+                "n_subblocks_failed": failed,
+                "n_subblocks_missing": max(0, int(planned) - int(len(group))) if np.isfinite(safe_float(planned)) else np.nan,
+                "subblock_elapsed_seconds_sum": float(elapsed.sum(skipna=True)) if elapsed.notna().any() else np.nan,
+                "subblock_elapsed_seconds_min": float(elapsed.min()) if elapsed.notna().any() else np.nan,
+                "subblock_elapsed_seconds_median": median_elapsed,
+                "subblock_elapsed_seconds_max": float(elapsed.max()) if elapsed.notna().any() else np.nan,
+                "subblock_elapsed_seconds_mean": float(elapsed.mean()) if elapsed.notna().any() else np.nan,
+                "approx_parallel_wall_seconds_lower_bound": float(elapsed.max()) if elapsed.notna().any() else np.nan,
+                "approx_parallel_wall_seconds_observed_span": observed_span,
+                "approx_parallel_wall_seconds_estimated_from_max_workers": parallel_est,
+                "max_workers_for_estimate": max_workers,
+                "resource_time_peak_rss_mb_max": float(pd.to_numeric(group.get("resource_time_maximum_resident_set_mb", pd.Series(dtype=float)), errors="coerce").max()) if len(group) else np.nan,
+                "memory_peak_rss_mb_max": float(pd.to_numeric(group.get("peak_rss_mb", pd.Series(dtype=float)), errors="coerce").max()) if len(group) else np.nan,
+                "theta_dim_median": float(pd.to_numeric(group.get("theta_dim", pd.Series(dtype=float)), errors="coerce").median()) if len(group) else np.nan,
+                "phi_dim_median": float(pd.to_numeric(group.get("phi_dim", pd.Series(dtype=float)), errors="coerce").median()) if len(group) else np.nan,
+                "n_frames_median": float(pd.to_numeric(group.get("n_frames", pd.Series(dtype=float)), errors="coerce").median()) if len(group) else np.nan,
+                "phi_ref_modes": _join_modes(group.get("phi_ref", pd.Series(dtype=str))),
+                "schur_methods_used": _join_modes(group.get("schur_curvature_method_used", pd.Series(dtype=str))),
+                "reference_solve_classes": _join_modes(group.get("local_registration_policy_class", pd.Series(dtype=str))),
+                "posterior_table_exists": bool((window_root / "posterior_by_label.csv").exists()) if window_root else False,
+                "iterative_reference_update_exists": bool((window_root / "iterative_reference_update.json").exists()) if window_root else False,
+                "window_diagnostics_exists": bool((window_root / "iterative_window_diagnostics.csv").exists()) if window_root else False,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["case_name", "window_index"], na_position="last")
+
+
+def build_campaign_runtime_summary(
+    ledger: pd.DataFrame,
+    window_summary: pd.DataFrame,
+    campaign_summary: dict[str, Any],
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+
+    def add(metric: str, value: Any) -> None:
+        rows.append({"metric": metric, "value": compact(value, max_len=500)})
+
+    n = len(ledger)
+    elapsed = pd.to_numeric(ledger.get("elapsed_seconds", pd.Series(dtype=float)), errors="coerce") if not ledger.empty else pd.Series(dtype=float)
+    add("total_completed_subblocks", int((ledger.get("status", pd.Series(dtype=str)).astype(str) == "ok").sum()) if not ledger.empty else 0)
+    add("total_failed_subblocks", int((ledger.get("status", pd.Series(dtype=str)).astype(str) == "failed").sum()) if not ledger.empty else 0)
+    add("total_missing_subblocks", campaign_summary.get("missing_output_rows", ""))
+    add("total_windows", len(window_summary))
+    add("total_subblock_elapsed_seconds", float(elapsed.sum(skipna=True)) if elapsed.notna().any() else "")
+    add("total_subblock_elapsed_minutes", float(elapsed.sum(skipna=True) / 60.0) if elapsed.notna().any() else "")
+    add("total_subblock_elapsed_hours", float(elapsed.sum(skipna=True) / 3600.0) if elapsed.notna().any() else "")
+    for label, divisor in (("seconds", 1.0), ("minutes", 60.0), ("hours", 3600.0)):
+        add(f"median_subblock_elapsed_{label}", float(elapsed.median() / divisor) if elapsed.notna().any() else "")
+        add(f"max_subblock_elapsed_{label}", float(elapsed.max() / divisor) if elapsed.notna().any() else "")
+    peak = pd.to_numeric(ledger.get("peak_rss_mb", pd.Series(dtype=float)), errors="coerce") if not ledger.empty else pd.Series(dtype=float)
+    add("max_observed_memory_rss_mb", float(peak.max()) if peak.notna().any() else "")
+    for col, label in (
+        ("resource_time_available", "rows_with_resource_time_memory"),
+        ("profile_available", "rows_with_runtime_profiles"),
+        ("memory_diagnostics_available", "rows_with_memory_diagnostics"),
+    ):
+        count = int(ledger.get(col, pd.Series(dtype=bool)).astype(bool).sum()) if not ledger.empty else 0
+        add(label, count)
+        add(f"{label}_fraction", count / n if n else "")
+    add("breakdown_by_local_registration_policy_class", dict(Counter(ledger.get("local_registration_policy_class", []))) if not ledger.empty else {})
+    add("breakdown_by_schur_method", dict(Counter(ledger.get("schur_curvature_method_used", []))) if not ledger.empty else {})
+    status_rc = Counter(
+        f"{row.get('status', '')}:{row.get('return_code', '')}"
+        for _, row in ledger.iterrows()
+    ) if not ledger.empty else {}
+    add("breakdown_by_status_return_code", dict(status_rc))
+    add("windows_per_draw", first_nonblank(campaign_summary.get("windows_per_draw", ""), len(window_summary) if len(window_summary) else ""))
+    add("subblocks_per_window", first_nonblank(campaign_summary.get("subblocks_per_window", ""), float(pd.to_numeric(window_summary.get("n_subblocks_with_status", pd.Series(dtype=float)), errors="coerce").median()) if not window_summary.empty else ""))
+    add("n_frames_per_subblock", float(pd.to_numeric(ledger.get("n_frames", pd.Series(dtype=float)), errors="coerce").median()) if not ledger.empty else "")
+    add("theta_dim", float(pd.to_numeric(ledger.get("theta_dim", pd.Series(dtype=float)), errors="coerce").median()) if not ledger.empty else "")
+    add("phi_dim", float(pd.to_numeric(ledger.get("phi_dim", pd.Series(dtype=float)), errors="coerce").median()) if not ledger.empty else "")
+    serial_by_window = pd.to_numeric(window_summary.get("subblock_elapsed_seconds_sum", pd.Series(dtype=float)), errors="coerce") if not window_summary.empty else pd.Series(dtype=float)
+    add("estimated_serial_subblock_work_per_window_seconds", float(serial_by_window.median()) if serial_by_window.notna().any() else "")
+    add("estimated_serial_subblock_work_full_campaign_seconds", float(elapsed.sum(skipna=True)) if elapsed.notna().any() else "")
+    parallel = pd.to_numeric(window_summary.get("approx_parallel_wall_seconds_estimated_from_max_workers", pd.Series(dtype=float)), errors="coerce") if not window_summary.empty else pd.Series(dtype=float)
+    add("estimated_parallel_wall_per_window_seconds_from_max_workers", float(parallel.median()) if parallel.notna().any() else "")
+    caveats = []
+    if n and int(ledger.get("profile_available", pd.Series(dtype=bool)).astype(bool).sum()) < n:
+        caveats.append("Some subblocks lack runtime profile artifacts; stage-level timing is incomplete.")
+    if n and int(ledger.get("memory_diagnostics_available", pd.Series(dtype=bool)).astype(bool).sum()) < n:
+        caveats.append("Some subblocks lack memory diagnostics artifacts; peak memory uses available resource-time/status fields where possible.")
+    if n and int(ledger.get("resource_time_available", pd.Series(dtype=bool)).astype(bool).sum()) < n:
+        caveats.append("Some subblocks lack external resource-time memory fields.")
+    add("caveats", caveats)
+    return pd.DataFrame(rows)
+
+
+def _profile_records_from_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [x if isinstance(x, dict) else {"value": x} for x in payload]
+    if not isinstance(payload, dict):
+        return []
+    if isinstance(payload.get("events"), list):
+        return [x if isinstance(x, dict) else {"value": x} for x in payload["events"]]
+    if isinstance(payload.get("stages"), list):
+        return [x if isinstance(x, dict) else {"value": x} for x in payload["stages"]]
+    if isinstance(payload.get("stages"), dict):
+        return [{"stage": k, **(v if isinstance(v, dict) else {"elapsed_seconds": v})} for k, v in payload["stages"].items()]
+    if isinstance(payload.get("stage_totals"), dict):
+        return [{"stage": k, "elapsed_seconds": v} for k, v in payload["stage_totals"].items()]
+    if payload.get("stage") or payload.get("elapsed_seconds") or payload.get("duration_s"):
+        return [payload]
+    return []
+
+
+def _stage_row(base: dict[str, Any], record: dict[str, Any], source_path: Path, run_root: Path, min_start: float | None) -> dict[str, Any]:
+    started = safe_float(record.get("started_at_unix", ""))
+    finished = safe_float(record.get("finished_at_unix", ""))
+    raw = {k: v for k, v in record.items() if k not in {"stage", "duration_s", "elapsed_seconds", "started_at_unix", "finished_at_unix", "details", "category", "cacheability"}}
+    details = record.get("details", {}) if isinstance(record.get("details"), dict) else {}
+    return {
+        **base,
+        "stage": first_nonblank(record.get("stage", ""), record.get("name", ""), record.get("category", ""), "unknown"),
+        "elapsed_seconds": first_nonblank(record.get("elapsed_seconds", ""), record.get("duration_s", ""), record.get("duration_seconds", "")),
+        "start_offset_seconds": (started - min_start) if min_start is not None and np.isfinite(started) else "",
+        "end_offset_seconds": (finished - min_start) if min_start is not None and np.isfinite(finished) else "",
+        "detail_level": first_nonblank(record.get("detail_level", ""), details.get("detail_level", ""), details.get("profile_runtime_detail", "")),
+        "source_path": rel(source_path, run_root),
+        "raw_profile_compact": compact(raw, max_len=500),
+    }
+
+
+def build_stage_profile_summary(run_root: Path, ledger: pd.DataFrame) -> pd.DataFrame:
+    headers = ["case_name", "window_index", "window_subblock_index", "global_subblock_index", "stage", "elapsed_seconds", "start_offset_seconds", "end_offset_seconds", "detail_level", "source_path", "raw_profile_compact"]
+    rows: list[dict[str, Any]] = []
+    for _, item in ledger.iterrows() if not ledger.empty else []:
+        base = {k: item.get(k, "") for k in ["case_name", "window_index", "window_subblock_index", "global_subblock_index"]}
+        for path_text in [item.get("runtime_profile_summary_path", ""), item.get("runtime_profile_timeline_path", "")]:
+            path = resolve_artifact_path(path_text, run_root)
+            if path is None or not path.exists():
+                continue
+            payload: Any = read_jsonl(path) if path.suffix == ".jsonl" else read_json(path, {})
+            records = _profile_records_from_payload(payload)
+            starts = [safe_float(r.get("started_at_unix", "")) for r in records]
+            starts = [x for x in starts if np.isfinite(x)]
+            min_start = min(starts) if starts else None
+            if records:
+                rows.extend(_stage_row(base, record, path, run_root, min_start) for record in records)
+            else:
+                rows.append({**base, "stage": "unparsed_profile", "elapsed_seconds": "", "start_offset_seconds": "", "end_offset_seconds": "", "detail_level": "", "source_path": rel(path, run_root), "raw_profile_compact": compact(payload, max_len=500)})
+    return pd.DataFrame(rows, columns=headers)
+
+
+def _array_bytes_total(value: Any) -> float:
+    total = 0.0
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in {"bytes", "nbytes", "size_bytes", "array_bytes", "array_bytes_total"}:
+                f = safe_float(item)
+                if np.isfinite(f):
+                    total += f
+            else:
+                total += _array_bytes_total(item)
+    elif isinstance(value, list):
+        for item in value:
+            total += _array_bytes_total(item)
+    return total
+
+
+def build_memory_timeline_summary(run_root: Path, ledger: pd.DataFrame) -> pd.DataFrame:
+    headers = ["case_name", "window_index", "window_subblock_index", "global_subblock_index", "stage", "rss_mb", "peak_rss_mb", "tracemalloc_current_mb", "tracemalloc_peak_mb", "array_bytes_total", "array_mb_total", "source_path"]
+    rows: list[dict[str, Any]] = []
+    for _, item in ledger.iterrows() if not ledger.empty else []:
+        base = {k: item.get(k, "") for k in ["case_name", "window_index", "window_subblock_index", "global_subblock_index"]}
+        for path_text in [item.get("memory_diagnostics_path", ""), item.get("memory_audit_path", "")]:
+            path = resolve_artifact_path(path_text, run_root)
+            if path is None or not path.exists():
+                continue
+            records = read_jsonl(path) if path.suffix == ".jsonl" else [read_json(path, {})]
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                array_bytes = first_nonblank(record.get("array_bytes_total", ""), _array_bytes_total(record.get("arrays", {})))
+                f_array_bytes = safe_float(array_bytes)
+                rows.append(
+                    {
+                        **base,
+                        "stage": first_nonblank(record.get("stage", ""), record.get("last_stage", ""), "audit" if path.suffix == ".json" else ""),
+                        "rss_mb": first_nonblank(record.get("rss_mb", ""), record.get("last_memory_rss_mb", "")),
+                        "peak_rss_mb": first_nonblank(record.get("peak_rss_mb", ""), record.get("peak_rss_mb_observed", ""), record.get("last_memory_peak_rss_mb", "")),
+                        "tracemalloc_current_mb": record.get("tracemalloc_current_mb", ""),
+                        "tracemalloc_peak_mb": record.get("tracemalloc_peak_mb", ""),
+                        "array_bytes_total": array_bytes,
+                        "array_mb_total": f_array_bytes / (1024.0 * 1024.0) if np.isfinite(f_array_bytes) else "",
+                        "source_path": rel(path, run_root),
+                    }
+                )
+    return pd.DataFrame(rows, columns=headers)
+
+
+def write_runtime_accounting_outputs(
+    run_root: Path,
+    outdir: Path,
+    campaign_summary: dict[str, Any],
+) -> dict[str, Any]:
+    runtime_dir = outdir / "runtime_accounting"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    ledger = build_subblock_runtime_ledger(run_root)
+    window_summary = build_window_runtime_summary(run_root, ledger, campaign_summary)
+    campaign_runtime = build_campaign_runtime_summary(ledger, window_summary, campaign_summary)
+    stage_profile = build_stage_profile_summary(run_root, ledger)
+    memory_timeline = build_memory_timeline_summary(run_root, ledger)
+    outputs = {
+        "subblock_runtime_ledger.csv": ledger,
+        "window_runtime_summary.csv": window_summary,
+        "campaign_runtime_summary.csv": campaign_runtime,
+        "stage_profile_summary.csv": stage_profile,
+        "memory_timeline_summary.csv": memory_timeline,
+    }
+    for name, df in outputs.items():
+        write_csv(df, runtime_dir / name)
+    n = len(ledger)
+    summary_payload = {
+        "paths": {name: rel(runtime_dir / name, outdir) for name in outputs},
+        "overall_metrics": {
+            "subblock_rows": int(n),
+            "window_rows": int(len(window_summary)),
+            "stage_profile_rows": int(len(stage_profile)),
+            "memory_timeline_rows": int(len(memory_timeline)),
+            "total_subblock_elapsed_seconds": safe_float(pd.to_numeric(ledger.get("elapsed_seconds", pd.Series(dtype=float)), errors="coerce").sum()) if n else 0.0,
+        },
+        "missing_artifact_counts": {
+            "runtime_profile": int(n - ledger.get("profile_available", pd.Series(dtype=bool)).astype(bool).sum()) if n else 0,
+            "memory_diagnostics": int(n - ledger.get("memory_diagnostics_available", pd.Series(dtype=bool)).astype(bool).sum()) if n else 0,
+            "resource_time": int(n - ledger.get("resource_time_available", pd.Series(dtype=bool)).astype(bool).sum()) if n else 0,
+        },
+        "source_schema_notes": [
+            "Subprocess timing and resource-time fields are read from subprocess_diagnostics.json when present.",
+            "Stage profile parsing supports runtime profile summary JSON, timeline JSONL, events, stages, and stage_totals.",
+            "Memory parsing supports Schur summary memory timeline JSONL and audit JSON with nested array byte totals.",
+        ],
+        "caveats": [
+            "Existing campaigns may lack stage-level runtime and memory artifacts unless profiling, memory diagnostics, and/or resource-time were enabled.",
+            "Parallel wall estimates use observed timestamps when available and otherwise remain blank unless max_workers is discoverable.",
+        ],
+    }
+    summary_path = runtime_dir / "runtime_accounting_summary.json"
+    summary_payload["paths"]["runtime_accounting_summary.json"] = rel(summary_path, outdir)
+    summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    return summary_payload
+
+
 def trajectory_tables(run_root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     traj_rows = []
     for path in sorted(run_root.glob("trajectory/subblock_*/frame_truth.csv")):
@@ -1168,6 +1853,10 @@ def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.
         "## Execution health",
         "See [execution_status.csv](execution_status.csv), [subblock_status_summary.csv](subblock_status_summary.csv), and [subblock_metric_summary.csv](subblock_metric_summary.csv).",
         "",
+        "## Runtime and memory accounting",
+        "See [campaign_runtime_summary.csv](runtime_accounting/campaign_runtime_summary.csv), [window_runtime_summary.csv](runtime_accounting/window_runtime_summary.csv), [subblock_runtime_ledger.csv](runtime_accounting/subblock_runtime_ledger.csv), [stage_profile_summary.csv](runtime_accounting/stage_profile_summary.csv), and [memory_timeline_summary.csv](runtime_accounting/memory_timeline_summary.csv).",
+        "Existing campaigns may lack stage-level runtime and memory artifacts unless they were run with runtime profiling, memory diagnostics, and/or resource-time enabled.",
+        "",
         "## Iterative progress",
         "See [iterative_window_progress.csv](iterative_window_progress.csv) and plots [iterative_error_norm.png](plots/iterative_error_norm.png), [update_alignment_by_window.png](plots/update_alignment_by_window.png), and [separation_error_by_window.png](plots/separation_error_by_window.png).",
         "",
@@ -1221,6 +1910,17 @@ def write_review_warnings(outdir: Path, warnings_list: list[dict[str, Any]]) -> 
         "warnings": warnings_list,
     }
     (outdir / "review_warnings.json").write_text(json.dumps(payload, indent=2))
+
+
+def parse_bool_arg(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean value, got {value!r}.")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1288,6 +1988,11 @@ def run(args: argparse.Namespace) -> int:
     for name, df in outputs.items():
         write_csv(df, outdir / name)
     (outdir / "campaign_dashboard.json").write_text(json.dumps(dashboard.to_dict(orient="records"), indent=2))
+    write_runtime_accounting_outputs(
+        run_root,
+        outdir,
+        artifacts["campaign_summary"],
+    )
 
     review_warnings: list[dict[str, Any]] = []
     if not args.no_plots:
@@ -1348,7 +2053,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-root", required=True)
     p.add_argument("--outdir")
-    p.add_argument("--strict", action="store_true")
+    p.add_argument("--strict", nargs="?", const=True, default=False, type=parse_bool_arg)
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--image-examples", default="first,median,last")
     p.add_argument("--include-subblock-images", action="store_true")
