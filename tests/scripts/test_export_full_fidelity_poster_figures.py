@@ -5,6 +5,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "examples" / "scripts" / "export_full_fidelity_poster_figures.py"
@@ -39,6 +40,41 @@ def test_formats_normalize_common_aliases_and_keep_overrides():
 
     assert module._formats("tif,png,jpg") == ["png", "tiff", "jpeg"]
     assert module._formats("png,tiff,pdf") == ["png", "tiff", "pdf"]
+
+
+def test_formats_reject_empty_or_unsupported_values():
+    module = _load_script_module()
+
+    with pytest.raises(module.argparse.ArgumentTypeError):
+        module._formats("")
+    with pytest.raises(module.argparse.ArgumentTypeError):
+        module._formats("png,svg")
+
+
+def test_export_sections_inventory_includes_notebook_plot_categories():
+    module = _load_script_module()
+
+    assert set(module.EXPORT_SECTIONS) >= {
+        "spectral",
+        "sed",
+        "dp_opd",
+        "high_order_wfe",
+        "trajectory",
+        "detector_calibration",
+    }
+
+
+def test_record_exports_groups_flat_and_category_manifest_entries():
+    module = _load_script_module()
+    manifest = {
+        "figure_exports": {},
+        "figure_exports_by_category": {section: {} for section in module.EXPORT_SECTIONS},
+    }
+
+    module._record_exports(manifest, "trajectory", "trajectory_x", ["trajectory_x.png"])
+
+    assert manifest["figure_exports"]["trajectory_x"] == ["trajectory_x.png"]
+    assert manifest["figure_exports_by_category"]["trajectory"]["trajectory_x"] == ["trajectory_x.png"]
 
 
 def test_poster_light_theme_sets_dark_text_on_white_background():
@@ -100,3 +136,19 @@ def test_resolved_pupil_extent_prefers_physical_m1_diameter_without_warning():
     assert label == "M1 pupil coordinate (m)"
     assert warnings == []
     assert metadata["units"] == "m"
+
+
+def test_collect_source_artifacts_keeps_fits_separate_from_figure_exports(tmp_path):
+    module = _load_script_module()
+    maps = tmp_path / "_model_split_for_poster" / "model_split" / "high_order_wfe" / "maps"
+    maps.mkdir(parents=True)
+    fits_path = maps / "primary_high_order_truth_opd_nm.fits"
+    manifest_path = maps / "high_order_wfe_deck_manifest.json"
+    fits_path.write_bytes(b"source fits")
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    artifacts = module._collect_source_artifacts(tmp_path)
+
+    assert artifacts["high_order_wfe_fits"] == [str(fits_path)]
+    assert artifacts["high_order_wfe_manifests"] == [str(manifest_path)]
+    assert str(fits_path) in artifacts["all"]

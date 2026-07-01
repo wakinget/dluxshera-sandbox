@@ -24,7 +24,12 @@ import numpy as np
 
 from dluxshera.config.io import load_config_file
 from dluxshera.params.store import ParameterStore
-from dluxshera.plot.plotting import apply_plot_defaults, get_default_cmaps
+from dluxshera.plot.plotting import (
+    apply_plot_defaults,
+    get_default_cmaps,
+    plot_pixel_offset_maps,
+    plot_pixel_response_maps,
+)
 from dluxshera.systems import SheraBinder
 from dluxshera.systems.base import compose_forward_spec
 from dluxshera.utils import full_fidelity_review as review
@@ -42,6 +47,15 @@ DEFAULT_SED_FILES = {
     "Alpha Cen A": Path("src/dluxshera/data/target_seds/alfCenA_SED.dat"),
     "Alpha Cen B": Path("src/dluxshera/data/target_seds/alfCenB_SED.dat"),
 }
+SUPPORTED_FIGURE_FORMATS = {"png", "tiff", "pdf", "jpeg"}
+EXPORT_SECTIONS = (
+    "spectral",
+    "sed",
+    "dp_opd",
+    "high_order_wfe",
+    "trajectory",
+    "detector_calibration",
+)
 
 
 @contextmanager
@@ -102,6 +116,14 @@ def _formats(value: str) -> list[str]:
     aliases = {"tif": "tiff", "jpg": "jpeg"}
     formats = [item.strip().lower().lstrip(".") for item in value.split(",")]
     formats = [aliases.get(item, item) for item in formats if item]
+    if not formats:
+        raise argparse.ArgumentTypeError("--formats must include at least one format.")
+    unsupported = sorted(set(formats) - SUPPORTED_FIGURE_FORMATS)
+    if unsupported:
+        allowed = ", ".join(sorted(SUPPORTED_FIGURE_FORMATS | set(aliases)))
+        raise argparse.ArgumentTypeError(
+            f"Unsupported figure format(s): {', '.join(unsupported)}. Allowed formats: {allowed}."
+        )
     unique = list(dict.fromkeys(formats))
     if "png" in unique:
         unique.remove("png")
@@ -123,8 +145,11 @@ def _figsize(value: str) -> tuple[float, float]:
 
 def _save_figure(fig: plt.Figure, outdir: Path, stem: str, formats: list[str], *, dpi: int) -> list[str]:
     paths: list[str] = []
+    outdir.mkdir(parents=True, exist_ok=True)
+    _style_figure(fig)
     for fmt in formats:
         path = outdir / f"{stem}.{fmt}"
+        path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(
             path,
             dpi=dpi,
@@ -136,6 +161,43 @@ def _save_figure(fig: plt.Figure, outdir: Path, stem: str, formats: list[str], *
         paths.append(str(path))
     plt.close(fig)
     return paths
+
+
+def _safe_stem(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(value)).strip("_").lower()
+
+
+def _style_figure(fig: plt.Figure) -> None:
+    fig.patch.set_facecolor("white")
+    for ax in fig.axes:
+        ax.set_facecolor("white")
+        ax.tick_params(colors="black", which="both")
+        for spine in ax.spines.values():
+            spine.set_color("black")
+        ax.title.set_color("black")
+        ax.xaxis.label.set_color("black")
+        ax.yaxis.label.set_color("black")
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.get_frame().set_facecolor("white")
+            legend.get_frame().set_edgecolor("0.75")
+            for text in legend.get_texts():
+                text.set_color("black")
+
+
+def _record_exports(manifest: dict[str, Any], category: str, name: str, files: list[str]) -> None:
+    manifest["figure_exports"][name] = files
+    manifest["figure_exports_by_category"].setdefault(category, {})[name] = files
+
+
+def _mark_completed(manifest: dict[str, Any], category: str) -> None:
+    if category not in manifest["export_sections_completed"]:
+        manifest["export_sections_completed"].append(category)
+
+
+def _mark_skipped(manifest: dict[str, Any], category: str, reason: str) -> None:
+    manifest["export_sections_skipped"][category] = reason
+    manifest["warnings"].append(f"Skipped {category}: {reason}")
 
 
 def _save_map_figure(
@@ -271,6 +333,210 @@ def _plot_raw_seds(
     _style_axis(ax)
     fig.tight_layout()
     return _save_figure(fig, outdir, "alpha_cen_raw_sed", formats, dpi=dpi), source_paths
+
+
+def _plot_spectral_review_figures(
+    *,
+    resolved_ctx: dict[str, Any],
+    outdir: Path,
+    formats: list[str],
+    dpi: int,
+) -> tuple[dict[str, list[str]], dict[str, Any], list[str]]:
+    split_ctx = resolved_ctx["split_ctx"]
+    translated = split_ctx["translated_config"]
+    base_system = split_ctx["base_system_cfg"]
+    truth_system = split_ctx["truth_system_cfg"]
+    inference_system = split_ctx["inference_system_cfg"]
+    tables = review.spectral_review_tables(base_system, truth_system, inference_system)
+    responses = review.response_curve_review(translated["experiment"].get("spectral_model"))
+    truth_rows = list(tables.get("truth", []))
+    inference_rows = list(tables.get("inference", []))
+    exports: dict[str, list[str]] = {}
+    warnings: list[str] = []
+
+    def rows_for_component(rows: list[dict[str, Any]], component: str) -> list[dict[str, Any]]:
+        return sorted((row for row in rows if row.get("component") == component), key=lambda row: row["wavelength_nm"])
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    for ax, (label, response) in zip(axes[0], responses.items()):
+        if response["available"]:
+            ax.plot(response["wavelengths_nm"], response["response"], color="#2a6f97", linewidth=2.0)
+        else:
+            warnings.append(f"{label} response unavailable: {response.get('error')}")
+        ax.set_title(f"{label}: {'active' if response['enabled'] else 'available but not active'}")
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Response")
+        _style_axis(ax)
+
+    for role, rows, ax in [("truth", truth_rows, axes[1, 0]), ("inference", inference_rows, axes[1, 1])]:
+        components = sorted({str(row["component"]) for row in rows})
+        for component in components:
+            group = rows_for_component(rows, component)
+            ax.plot(
+                [row["wavelength_nm"] for row in group],
+                [row["weight"] for row in group],
+                marker="o",
+                linewidth=1.8,
+                label=component,
+            )
+        ax.set_title(f"Effective {role} component weights")
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Normalized sample weight")
+        _style_axis(ax)
+        if components:
+            ax.legend()
+    fig.tight_layout()
+    exports["spectral_response_and_weights"] = _save_figure(
+        fig, outdir, "spectral_response_and_weights", formats, dpi=dpi
+    )
+
+    components = sorted({str(row["component"]) for row in truth_rows + inference_rows})
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    for component in components:
+        truth = rows_for_component(truth_rows, component)
+        inference = rows_for_component(inference_rows, component)
+        if truth:
+            axes[0].plot(
+                [row["wavelength_nm"] for row in truth],
+                [row["weight"] for row in truth],
+                marker="o",
+                linewidth=1.8,
+                label=f"truth {component}",
+            )
+        if inference:
+            axes[0].plot(
+                [row["wavelength_nm"] for row in inference],
+                [row["weight"] for row in inference],
+                marker="s",
+                linestyle="--",
+                linewidth=1.8,
+                label=f"inference {component}",
+            )
+    if {"primary", "secondary"} <= set(components):
+        for role, rows, marker in [("truth", truth_rows, "o"), ("inference", inference_rows, "s")]:
+            primary = rows_for_component(rows, "primary")
+            secondary = rows_for_component(rows, "secondary")
+            if len(primary) == len(secondary) and primary:
+                axes[1].plot(
+                    [row["wavelength_nm"] for row in primary],
+                    [p["weight"] - s["weight"] for p, s in zip(primary, secondary)],
+                    marker=marker,
+                    linewidth=1.8,
+                    label=f"{role} primary-secondary",
+                )
+    axes[0].set_title("Truth vs inference effective spectral response")
+    axes[0].set_xlabel("Wavelength (nm)")
+    axes[0].set_ylabel("Weight")
+    axes[1].set_title("Component weight difference")
+    axes[1].set_xlabel("Wavelength (nm)")
+    axes[1].set_ylabel("Primary - secondary")
+    for ax in axes:
+        _style_axis(ax)
+        ax.legend()
+    fig.tight_layout()
+    exports["spectral_truth_vs_inference_weights"] = _save_figure(
+        fig, outdir, "spectral_truth_vs_inference_weights", formats, dpi=dpi
+    )
+
+    metadata = {
+        "tables": {
+            "truth_rows": len(truth_rows),
+            "inference_rows": len(inference_rows),
+        },
+        "response_paths": {label: response.get("path") for label, response in responses.items()},
+    }
+    return exports, metadata, warnings
+
+
+def _plot_detector_calibration_figures(
+    *,
+    resolved_ctx: dict[str, Any],
+    outdir: Path,
+    formats: list[str],
+    dpi: int,
+) -> tuple[dict[str, list[str]], dict[str, Any], list[str]]:
+    truth_system = resolved_ctx["split_ctx"]["truth_system_cfg"]
+    inference_system = resolved_ctx["split_ctx"]["inference_system_cfg"]
+    truth_maps = review.load_detector_calibration_maps(truth_system)
+    inference_maps = review.load_detector_calibration_maps(inference_system)
+    exports: dict[str, list[str]] = {}
+    warnings: list[str] = []
+    metadata: dict[str, Any] = {
+        "truth_maps": {name: list(np.asarray(arr).shape) for name, arr in truth_maps.items()},
+        "inference_maps": {name: list(np.asarray(arr).shape) for name, arr in inference_maps.items()},
+    }
+    if not truth_maps:
+        return exports, metadata, ["No detector calibration maps were loaded from the truth system."]
+
+    n = len(truth_maps)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
+    for ax, (name, arr) in zip(axes.flat, truth_maps.items()):
+        im = ax.imshow(np.asarray(arr, dtype=float), origin="lower", cmap=review.cmap_with_bad("viridis", bad="0.65"))
+        ax.set_title(name)
+        ax.set_xlabel("X (px)")
+        ax.set_ylabel("Y (px)")
+        _style_axis(ax, grid=False)
+        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        cbar.ax.tick_params(colors="black")
+        cbar.outline.set_edgecolor("black")
+    fig.tight_layout()
+    exports["detector_calibration_maps"] = _save_figure(
+        fig, outdir, "detector_calibration_maps", formats, dpi=dpi
+    )
+
+    def first_map(suffix: str, maps: dict[str, np.ndarray]) -> np.ndarray | None:
+        for name, arr in maps.items():
+            if name.endswith(suffix):
+                return np.asarray(arr, dtype=float)
+        return None
+
+    truth_dx = first_map(".dx_path", truth_maps)
+    truth_dy = first_map(".dy_path", truth_maps)
+    infer_dx = first_map(".dx_path", inference_maps)
+    infer_dy = first_map(".dy_path", inference_maps)
+    if all(arr is not None for arr in (truth_dx, truth_dy, infer_dx, infer_dy)):
+        try:
+            fig, _ = plot_pixel_offset_maps(
+                truth_dx,
+                truth_dy,
+                infer_dx,
+                infer_dy,
+                cmap="viridis_nan",
+                show=False,
+                close=False,
+            )
+            exports["detector_pixel_offsets"] = _save_figure(
+                fig, outdir, "detector_pixel_offsets", formats, dpi=dpi
+            )
+        except Exception as exc:
+            warnings.append(f"Detector pixel offset comparison skipped: {exc}")
+    else:
+        warnings.append("Detector pixel offset comparison skipped: dx/dy maps not available for both truth and inference.")
+
+    truth_prf = first_map(".prf_path", truth_maps)
+    if truth_prf is None:
+        truth_prf = first_map(".flat_path", truth_maps)
+    infer_prf = first_map(".prf_path", inference_maps)
+    if infer_prf is None:
+        infer_prf = first_map(".flat_path", inference_maps)
+    if truth_prf is not None and infer_prf is not None:
+        try:
+            fig, _ = plot_pixel_response_maps(
+                truth_prf,
+                infer_prf,
+                cmap="viridis_nan",
+                show=False,
+                close=False,
+            )
+            exports["detector_pixel_response"] = _save_figure(
+                fig, outdir, "detector_pixel_response", formats, dpi=dpi
+            )
+        except Exception as exc:
+            warnings.append(f"Detector pixel response comparison skipped: {exc}")
+    else:
+        warnings.append("Detector pixel response comparison skipped: prf/flat maps not available for both truth and inference.")
+
+    return exports, metadata, warnings
 
 
 def _extract_layer_array(layer: Any, attr: str) -> np.ndarray | None:
@@ -470,13 +736,26 @@ def _plot_diffractive_pupil_opd(
 
 
 WFE_MAP_PANELS = [
-    ("raw_ptt_removed_truth_opd_nm", "full_truth_opd_nm", "Raw PTT-removed truth OPD"),
-    ("low_order_truth_reconstruction_nm", "low_order_truth_reconstruction_nm", "Low-order Zernike reconstruction"),
-    ("truth_high_order_residual_opd_nm", "high_order_truth_opd_nm", "Truth high-order residual OPD"),
-    ("knowledge_error_high_order_residual_opd_nm", "high_order_error_opd_nm", "High-order knowledge-error residual OPD"),
-    ("inference_high_order_opd_nm", "inference_high_order_opd_nm", "Inference high-order OPD"),
-    ("inference_sum_residual_nm", "inference_sum_residual_nm", "Inference - truth residual - error"),
+    ("raw_ptt_removed_truth_opd_nm", "full_truth_opd_nm", "Raw PTT-removed truth OPD", "full_truth"),
+    ("low_order_truth_reconstruction_nm", "low_order_truth_reconstruction_nm", "Low-order Zernike reconstruction", None),
+    ("truth_high_order_residual_opd_nm", "high_order_truth_opd_nm", "Truth high-order residual OPD", "high_order_truth"),
+    (
+        "knowledge_error_high_order_residual_opd_nm",
+        "high_order_error_opd_nm",
+        "High-order knowledge-error residual OPD",
+        "high_order_error",
+    ),
+    ("inference_high_order_opd_nm", "inference_high_order_opd_nm", "Inference high-order OPD", "high_order_knowledge"),
+    ("inference_sum_residual_nm", "inference_sum_residual_nm", "Inference - truth residual - error", None),
 ]
+
+
+def _split_artifact_path(split: Any, filename: str) -> str | None:
+    for path in getattr(split, "artifact_paths", {}).values():
+        candidate = Path(str(path))
+        if candidate.name == filename:
+            return str(candidate)
+    return None
 
 
 def _plot_wfe_review_maps(
@@ -507,9 +786,10 @@ def _plot_wfe_review_maps(
         mirror_meta: dict[str, Any] = {
             "extent": extent_metadata,
             "mask_source": "review.summarize_wfe_artifacts(...)[mirror]['mask']",
+            "mask_fits_source": _split_artifact_path(split, f"{mirror}_mask.fits"),
             "panels": {},
         }
-        for key, suffix, title in WFE_MAP_PANELS:
+        for key, suffix, title, source_name in WFE_MAP_PANELS:
             if key not in item:
                 warnings.append(f"{mirror}: WFE panel {key} is unavailable; skipped.")
                 continue
@@ -535,8 +815,126 @@ def _plot_wfe_review_maps(
                 "title": title,
                 "shape": list(arr.shape),
                 "display_unit": "nm",
+                "source_fits": (
+                    _split_artifact_path(split, f"{mirror}_{source_name}_opd_nm.fits")
+                    if source_name is not None
+                    else None
+                ),
+                "source_kind": "model_split_fits" if source_name is not None else "derived_from_review_summary",
             }
         metadata["mirrors"][mirror] = mirror_meta
+    return exports, metadata, warnings
+
+
+def _trajectory_ylabel(key: str) -> str:
+    if key.endswith("_as"):
+        return f"{key} (arcsec)"
+    if key.endswith("_deg"):
+        return f"{key} (deg)"
+    return str(key)
+
+
+def _plot_trajectory_figures(
+    *,
+    translated_config: dict[str, Any],
+    outdir: Path,
+    formats: list[str],
+    dpi: int,
+) -> tuple[dict[str, list[str]], dict[str, Any], list[str]]:
+    trajectory_review = review.load_trajectory_for_review(translated_config)
+    hp_review = review.make_high_pass_trajectory_diagnostic(trajectory_review, timescale_s=15.0)
+    exports: dict[str, list[str]] = {}
+    warnings = list(trajectory_review.get("warnings", []))
+    metadata: dict[str, Any] = {
+        "available": bool(trajectory_review.get("available", False)),
+        "summary": trajectory_review.get("summary", trajectory_review),
+        "high_pass_diagnostic": {
+            key: value for key, value in hp_review.items() if key != "series"
+        },
+    }
+    if not trajectory_review.get("available"):
+        reason = str(trajectory_review.get("reason", "trajectory unavailable"))
+        return exports, metadata, [reason]
+
+    component_figures = review.plot_trajectory_review_components(trajectory_review)
+    traj = trajectory_review["trajectory"]
+    keys = list(traj.values)
+    for idx, fig in enumerate(component_figures, start=1):
+        key = keys[idx - 1] if idx - 1 < len(keys) else f"component_{idx:02d}"
+        stem = f"trajectory_{_safe_stem(key)}_components"
+        exports[stem] = _save_figure(fig, outdir, stem, formats, dpi=dpi)
+
+    filter_rows = review.trajectory_filter_provenance_table(trajectory_review)
+    if filter_rows:
+        labels = [str(row["key"]) for row in filter_rows]
+        x = np.arange(len(labels))
+        fig, ax = plt.subplots(figsize=(10, 4))
+        width = 0.25
+        ax.bar(x - width, [row["raw_rms"] for row in filter_rows], width=width, label="raw")
+        ax.bar(x, [row["filtered_rms"] for row in filter_rows], width=width, label="filtered")
+        ax.bar(x + width, [row["removed_rms"] for row in filter_rows], width=width, label="removed")
+        ax.set_title("Trajectory RMS by raw, filtered, and removed components")
+        ax.set_ylabel("RMS")
+        ax.set_xticks(x, labels, rotation=20, ha="right")
+        ax.legend()
+        _style_axis(ax)
+        fig.tight_layout()
+        exports["trajectory_rms_summary"] = _save_figure(
+            fig, outdir, "trajectory_rms_summary", formats, dpi=dpi
+        )
+
+    filter_prov = trajectory_review.get("summary", {}).get("filter", {})
+    if filter_prov.get("frequency_response"):
+        response = filter_prov["frequency_response"]
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(response.get("frequency_hz", []), response.get("gain", []), color="#2a6f97", linewidth=2.0)
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("Gain")
+        ax.set_title("Configured Bessel filter response")
+        _style_axis(ax)
+        fig.tight_layout()
+        exports["trajectory_filter_response"] = _save_figure(
+            fig, outdir, "trajectory_filter_response", formats, dpi=dpi
+        )
+
+    time_s = np.asarray(traj.time_s, dtype=float)
+    if time_s.size > 1:
+        dt = float(np.median(np.diff(time_s)))
+        raw_values = traj.unfiltered_values or traj.values
+        fig, axes = plt.subplots(len(traj.values), 1, figsize=(11, 3 * len(traj.values)), squeeze=False)
+        for ax, key in zip(axes[:, 0], traj.values):
+            raw = np.asarray(raw_values[key], dtype=float)
+            filt = np.asarray(traj.values[key], dtype=float)
+            freq = np.fft.rfftfreq(raw.size, d=dt)
+            ax.semilogy(freq[1:], np.abs(np.fft.rfft(raw - raw.mean()))[1:] ** 2, label="raw")
+            ax.semilogy(freq[1:], np.abs(np.fft.rfft(filt - filt.mean()))[1:] ** 2, label="filtered")
+            ax.set_title(f"FFT power {key}")
+            ax.set_xlabel("Frequency (Hz)")
+            ax.set_ylabel("Power")
+            ax.legend()
+            _style_axis(ax)
+        fig.tight_layout()
+        exports["trajectory_fft_power"] = _save_figure(
+            fig, outdir, "trajectory_fft_power", formats, dpi=dpi
+        )
+
+    if hp_review.get("available") and hp_review.get("series"):
+        fig, axes = plt.subplots(len(hp_review["series"]), 1, figsize=(12, 3 * len(hp_review["series"])), squeeze=False)
+        for ax, key in zip(axes[:, 0], hp_review["series"]):
+            series = hp_review["series"][key]
+            ax.plot(time_s, series["raw"], label="raw", alpha=0.55)
+            ax.plot(time_s, series["low_pass"], label="15 s moving average")
+            ax.plot(time_s, series["high_pass"], label="diagnostic residual")
+            ax.set_title(f"Moving-average diagnostic {key}; residual RMS={series['rms_high_pass']:.4g}")
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel(_trajectory_ylabel(key))
+            ax.legend()
+            _style_axis(ax)
+        fig.tight_layout()
+        exports["trajectory_moving_average_diagnostic"] = _save_figure(
+            fig, outdir, "trajectory_moving_average_diagnostic", formats, dpi=dpi
+        )
+
     return exports, metadata, warnings
 
 
@@ -550,6 +948,9 @@ def _collect_source_artifacts(outdir: Path) -> dict[str, list[str]]:
     artifacts: dict[str, list[str]] = {}
     for label, pattern in patterns.items():
         artifacts[label] = [str(path) for path in sorted(root.glob(pattern)) if path.is_file()]
+    artifacts["all"] = sorted(
+        path for group, paths in artifacts.items() if group != "all" for path in paths
+    )
     return artifacts
 
 
@@ -598,6 +999,10 @@ def export_figures(args: argparse.Namespace) -> dict[str, Any]:
             ],
         },
         "figure_exports": {},
+        "figure_exports_by_category": {section: {} for section in EXPORT_SECTIONS},
+        "export_sections_requested": list(EXPORT_SECTIONS),
+        "export_sections_completed": [],
+        "export_sections_skipped": {},
         "source_data_paths": {},
         "source_artifacts": {},
         "git_commit": _git_commit(),
@@ -618,7 +1023,7 @@ def export_figures(args: argparse.Namespace) -> dict[str, Any]:
             formats=formats,
             dpi=int(args.dpi),
         )
-        manifest["figure_exports"]["m2_filter_response"] = files
+        _record_exports(manifest, "spectral", "m2_filter_response", files)
         manifest["source_data_paths"]["m2_filter_response"] = str(source)
 
         qe_spec = _component_spec(config, "detector_qe")
@@ -633,8 +1038,9 @@ def export_figures(args: argparse.Namespace) -> dict[str, Any]:
             formats=formats,
             dpi=int(args.dpi),
         )
-        manifest["figure_exports"]["detector_qe"] = files
+        _record_exports(manifest, "spectral", "detector_qe", files)
         manifest["source_data_paths"]["detector_qe"] = str(source)
+        _mark_completed(manifest, "spectral")
 
         files, sed_paths = _plot_raw_seds(
             outdir=figure_dir,
@@ -643,26 +1049,51 @@ def export_figures(args: argparse.Namespace) -> dict[str, Any]:
             formats=formats,
             dpi=int(args.dpi),
         )
-        manifest["figure_exports"]["alpha_cen_raw_sed"] = files
+        _record_exports(manifest, "sed", "alpha_cen_raw_sed", files)
         manifest["source_data_paths"]["raw_target_seds"] = sed_paths
+        _mark_completed(manifest, "sed")
 
         try:
             resolved_ctx = _build_resolved_context(config, outdir)
-            files, metadata, warnings = _plot_diffractive_pupil_opd(
-                resolved_ctx=resolved_ctx,
-                outdir=figure_dir,
-                cmap_name=str(args.dp_opd_cmap),
-                figsize=opd_figsize,
-                formats=formats,
-                dpi=int(args.dpi),
-            )
-            manifest["figure_exports"]["diffractive_pupil_opd"] = files
-            manifest["source_data_paths"]["diffractive_pupil_opd"] = metadata
-            manifest["warnings"].extend(warnings)
         except Exception as exc:
-            manifest["warnings"].append(f"Skipped diffractive_pupil_opd: {exc}")
+            _mark_skipped(manifest, "dp_opd", f"resolved-system context unavailable: {exc}")
+            _mark_skipped(manifest, "high_order_wfe", f"resolved-system context unavailable: {exc}")
+            _mark_skipped(manifest, "trajectory", f"translated review config unavailable: {exc}")
+            _mark_skipped(manifest, "detector_calibration", f"resolved-system context unavailable: {exc}")
 
         if resolved_ctx is not None:
+            try:
+                files_by_panel, metadata, warnings = _plot_spectral_review_figures(
+                    resolved_ctx=resolved_ctx,
+                    outdir=figure_dir,
+                    formats=formats,
+                    dpi=int(args.dpi),
+                )
+                for name, files in files_by_panel.items():
+                    _record_exports(manifest, "spectral", name, files)
+                manifest["source_data_paths"]["spectral_review"] = metadata
+                manifest["warnings"].extend(warnings)
+                if files_by_panel:
+                    _mark_completed(manifest, "spectral")
+            except Exception as exc:
+                manifest["warnings"].append(f"Skipped spectral review figure exports: {exc}")
+
+            try:
+                files, metadata, warnings = _plot_diffractive_pupil_opd(
+                    resolved_ctx=resolved_ctx,
+                    outdir=figure_dir,
+                    cmap_name=str(args.dp_opd_cmap),
+                    figsize=opd_figsize,
+                    formats=formats,
+                    dpi=int(args.dpi),
+                )
+                _record_exports(manifest, "dp_opd", "diffractive_pupil_opd", files)
+                manifest["source_data_paths"]["diffractive_pupil_opd"] = metadata
+                manifest["warnings"].extend(warnings)
+                _mark_completed(manifest, "dp_opd")
+            except Exception as exc:
+                _mark_skipped(manifest, "dp_opd", str(exc))
+
             try:
                 files_by_panel, metadata, warnings = _plot_wfe_review_maps(
                     resolved_ctx=resolved_ctx,
@@ -671,11 +1102,53 @@ def export_figures(args: argparse.Namespace) -> dict[str, Any]:
                     dpi=int(args.dpi),
                     figsize=opd_figsize,
                 )
-                manifest["figure_exports"].update(files_by_panel)
+                for name, files in files_by_panel.items():
+                    _record_exports(manifest, "high_order_wfe", name, files)
                 manifest["source_data_paths"]["high_order_wfe_review_maps"] = metadata
                 manifest["warnings"].extend(warnings)
+                if files_by_panel:
+                    _mark_completed(manifest, "high_order_wfe")
+                else:
+                    _mark_skipped(manifest, "high_order_wfe", "no high-order WFE review maps were available")
             except Exception as exc:
-                manifest["warnings"].append(f"Skipped high-order WFE review map exports: {exc}")
+                _mark_skipped(manifest, "high_order_wfe", str(exc))
+
+            try:
+                files_by_panel, metadata, warnings = _plot_trajectory_figures(
+                    translated_config=resolved_ctx["split_ctx"]["translated_config"],
+                    outdir=figure_dir,
+                    formats=formats,
+                    dpi=int(args.dpi),
+                )
+                for name, files in files_by_panel.items():
+                    _record_exports(manifest, "trajectory", name, files)
+                manifest["source_data_paths"]["trajectory_review"] = metadata
+                manifest["warnings"].extend(warnings)
+                if files_by_panel:
+                    _mark_completed(manifest, "trajectory")
+                else:
+                    _mark_skipped(manifest, "trajectory", "; ".join(warnings) or "no trajectory figures were available")
+            except Exception as exc:
+                _mark_skipped(manifest, "trajectory", str(exc))
+
+            try:
+                files_by_panel, metadata, warnings = _plot_detector_calibration_figures(
+                    resolved_ctx=resolved_ctx,
+                    outdir=figure_dir,
+                    formats=formats,
+                    dpi=int(args.dpi),
+                )
+                for name, files in files_by_panel.items():
+                    _record_exports(manifest, "detector_calibration", name, files)
+                manifest["source_data_paths"]["detector_calibration"] = metadata
+                manifest["warnings"].extend(warnings)
+                if files_by_panel:
+                    _mark_completed(manifest, "detector_calibration")
+                else:
+                    _mark_skipped(manifest, "detector_calibration", "; ".join(warnings) or "no detector calibration figures were available")
+            except Exception as exc:
+                _mark_skipped(manifest, "detector_calibration", str(exc))
+
             manifest["source_artifacts"] = _collect_source_artifacts(outdir)
 
     manifest_path = outdir / "poster_figure_manifest.json"
