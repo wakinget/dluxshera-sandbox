@@ -17,6 +17,9 @@ MAX_WORKERS="${MAX_WORKERS:-5}"
 FAIL_FAST="${FAIL_FAST:-1}"
 ANALYZE_AFTER_RUN="${ANALYZE_AFTER_RUN:-1}"
 USE_RESOURCE_TIME="${USE_RESOURCE_TIME:-1}"
+PROFILE_RUNTIME="${PROFILE_RUNTIME:-0}"
+PROFILE_RUNTIME_DETAIL="${PROFILE_RUNTIME_DETAIL:-basic}"
+MEMORY_DIAGNOSTICS="${MEMORY_DIAGNOSTICS:-0}"
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -48,6 +51,12 @@ if [[ "$USE_RESOURCE_TIME" == "1" ]]; then
   RUN_ARGS+=(--resource-time auto)
 else
   RUN_ARGS+=(--no-resource-time)
+fi
+if [[ "$PROFILE_RUNTIME" == "1" ]]; then
+  RUN_ARGS+=(--profile-runtime --profile-runtime-detail "$PROFILE_RUNTIME_DETAIL")
+fi
+if [[ "$MEMORY_DIAGNOSTICS" == "1" ]]; then
+  RUN_ARGS+=(--memory-diagnostics)
 fi
 
 PYTHONPATH=src python examples/scripts/run_full_fidelity_binary_iterative_campaign.py "${RUN_ARGS[@]}"

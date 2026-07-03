@@ -1126,10 +1126,15 @@ def _apply_cli_overrides(experiment_cfg: dict[str, Any], args: argparse.Namespac
         ("max_dense_dim", "max_dense_dim"),
         ("schur_curvature_method", "schur_curvature_method"),
         ("summary_information_scale", "summary_information_scale"),
+        ("profile_runtime_detail", "profile_runtime_detail"),
     ):
         value = getattr(args, arg_name, None)
         if value is not None:
             subblocks[key] = value
+    if bool(getattr(args, "profile_runtime", False)):
+        subblocks["profile_runtime"] = True
+    if bool(getattr(args, "memory_diagnostics", False)):
+        subblocks["memory_diagnostics"] = True
     trace_source = dict(subblocks.get("trace_source", {}) or {})
     if getattr(args, "trace_source_mode", None) is not None:
         trace_source["mode"] = args.trace_source_mode
@@ -1869,6 +1874,17 @@ def resolve_subblock_command_options(
         )
     if options.get("reference_early_stopping_enabled") is True:
         forwarded_flags.append("--reference-early-stopping")
+    if bool(subblock_cfg.get("profile_runtime", False)):
+        options["profile_runtime"] = True
+        forwarded_flags.append("--profile-runtime")
+        detail = str(subblock_cfg.get("profile_runtime_detail", "basic"))
+        if detail not in {"basic", "full"}:
+            raise ValueError("experiment.subblocks.profile_runtime_detail must be 'basic' or 'full'.")
+        options["profile_runtime_detail"] = detail
+        forwarded_flags.extend(["--profile-runtime-detail", detail])
+    if bool(subblock_cfg.get("memory_diagnostics", False)):
+        options["memory_diagnostics"] = True
+        forwarded_flags.append("--memory-diagnostics")
     options["forwarded_flags"] = forwarded_flags
     return options
 
@@ -1953,6 +1969,16 @@ def build_subblock_command(
         command.append("--use-render-variance")
     append_reference_optimizer_flags(command, command_options)
     append_schur_frame_quality_flags(command, command_options)
+    if command_options.get("profile_runtime") is True:
+        command.append("--profile-runtime")
+        command.extend(
+            [
+                "--profile-runtime-detail",
+                str(command_options.get("profile_runtime_detail", "basic")),
+            ]
+        )
+    if command_options.get("memory_diagnostics") is True:
+        command.append("--memory-diagnostics")
     if trace_subblock is not None:
         command.extend(trace_subblock_command_flags(trace_subblock))
     return command
@@ -2698,6 +2724,46 @@ def execute_subblocks(
                 if fail_fast:
                     raise RuntimeError(str(exc)) from exc
                 print(str(exc), file=sys.stderr, flush=True)
+
+
+def _execution_context_payload(
+    *,
+    run_root: Path,
+    max_workers: int,
+    resource_time: bool | str | None,
+) -> dict[str, Any]:
+    env = os.environ
+    return {
+        "schema_version": "observation_bias_execution_context.v1",
+        "created_at": now_iso_local_ms(),
+        "run_root": str(run_root),
+        "max_workers": int(max_workers),
+        "resource_time": resource_time,
+        "slurm": {
+            "job_id": env.get("SLURM_JOB_ID"),
+            "job_name": env.get("SLURM_JOB_NAME"),
+            "cpus_per_task": env.get("SLURM_CPUS_PER_TASK"),
+            "mem_per_node": env.get("SLURM_MEM_PER_NODE"),
+            "mem_per_cpu": env.get("SLURM_MEM_PER_CPU"),
+            "job_nodelist": env.get("SLURM_JOB_NODELIST"),
+        },
+        "threading": {
+            "OMP_NUM_THREADS": env.get("OMP_NUM_THREADS"),
+            "MKL_NUM_THREADS": env.get("MKL_NUM_THREADS"),
+            "OPENBLAS_NUM_THREADS": env.get("OPENBLAS_NUM_THREADS"),
+            "NUMEXPR_NUM_THREADS": env.get("NUMEXPR_NUM_THREADS"),
+        },
+        "jax": {
+            "XLA_FLAGS": env.get("XLA_FLAGS"),
+            "JAX_COMPILATION_CACHE_DIR": env.get("JAX_COMPILATION_CACHE_DIR"),
+            "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": env.get(
+                "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
+            ),
+            "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES": env.get(
+                "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES"
+            ),
+        },
+    }
 
 
 def _flatten_subblock_plan_rows(plan: CampaignPlan) -> list[dict[str, Any]]:
@@ -6042,6 +6108,14 @@ def run_observation_bias_campaign(
         _write_csv_rows(plan.run_root / "expected_outputs.csv", plan.expected_output_rows)
         _write_csv_rows(plan.run_root / "bias_cases.csv", _bias_case_rows(plan))
         _write_csv_rows(plan.run_root / "prior_draws.csv", _flatten_prior_draw_rows(plan))
+        _write_json(
+            plan.run_root / "execution_context.json",
+            _execution_context_payload(
+                run_root=plan.run_root,
+                max_workers=max(1, int(max_workers)),
+                resource_time=resource_time,
+            ),
+        )
     if dry_run:
         payload = _plan_payload(plan)
         if not quiet:
@@ -6122,6 +6196,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument("--no-resource-time", dest="resource_time", action="store_const", const="disabled")
+    parser.add_argument("--profile-runtime", action="store_true", default=False)
+    parser.add_argument("--profile-runtime-detail", choices=("basic", "full"), default=None)
+    parser.add_argument("--memory-diagnostics", action="store_true", default=False)
     parser.add_argument("--system-preset", default=None)
     parser.add_argument(
         "--prior-source",
