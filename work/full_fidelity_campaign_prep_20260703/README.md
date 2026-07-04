@@ -100,6 +100,27 @@ python3 work/full_fidelity_campaign_prep_20260703/audit_detector_pixelpos_ke_con
   examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_pixelposke_*pix_n10_w10x30_projected_30min_v1.yaml
 ```
 
+## Science KE block audit
+
+Verify the five HO-KE and pixel-position KE sweep families have the required
+knowledge-error blocks under `experiment`, with the expected cadence and
+low-order prior condition:
+
+```bash
+python3 work/full_fidelity_campaign_prep_20260703/audit_next_science_ke_configs.py \
+  examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_hoke_0p1nm_loz0p01nm_n10_w10x30_projected_30min_v1.yaml \
+  examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_hoke_1p0nm_loz0p01nm_n10_w10x30_projected_30min_v1.yaml \
+  examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_pixelposke_1em4pix_n10_w10x30_projected_30min_v1.yaml \
+  examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_pixelposke_5em4pix_n10_w10x30_projected_30min_v1.yaml \
+  examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_pixelposke_1em3pix_n10_w10x30_projected_30min_v1.yaml
+```
+
+The audit prints `run_name`, cadence, `high_order_wfe`,
+`detector_calibration_knowledge_error`, and primary/secondary low-order sigma.
+It exits nonzero if an HO-KE config lacks an enabled `high_order_wfe` knowledge
+error block, or if a pixel-position KE config lacks an enabled detector
+calibration knowledge-error block.
+
 ## Long-pilot walltime estimate
 
 Using the recent 66-85 min/subblock range and assuming 30 subblocks/window with `MAX_WORKERS=15`, each window takes roughly two waves:
