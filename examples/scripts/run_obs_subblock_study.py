@@ -84,6 +84,11 @@ from dluxshera.utils.obs_subblock_keys import (
     validate_supported_obs_subblock_key_addresses,
 )
 from dluxshera.utils.obs_subblock_trace import load_obs_subblock_trace_csv
+from dluxshera.utils.runtime_profile import (
+    RuntimeProfiler,
+    write_profile_summary_json,
+    write_profile_timeline_jsonl,
+)
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
