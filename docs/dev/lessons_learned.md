@@ -1,5 +1,43 @@
 # Lessons Learned
 
+- 2026-07-06 - HPC Git hygiene and full-fidelity benchmark launch debugging:
+  - **Symptom:** Full-fidelity runtime benchmark launch debugging mixed heavy
+    campaign/model plan construction, head-node import smoke tests, Slurm shell
+    initialization failures, and broad `work/` cleanup/staging commands. Even a
+    dry run could build enough artifacts to stress the head node, importing
+    full-fidelity/JAX scripts triggered CPU backend thread creation and aborted
+    with `pthread_create` failures, and broad recursive Git operations over old
+    campaign trees were slow on the shared filesystem.
+  - **Resolution:** Treat full-fidelity dry runs and plan-generation paths as
+    compute-node work when they build campaign or model artifacts. On the head
+    node, prefer syntax-only checks such as
+    `python -m py_compile examples/scripts/run_obs_subblock_study.py`; run
+    import and runtime checks for JAX/full-fidelity scripts on an interactive or
+    batch compute node. In Slurm scripts, initialize shells and Conda before
+    enabling strict unset-variable handling: start with `set -eo pipefail`,
+    temporarily `set +u` around `source ~/.bashrc`,
+    `eval "$(conda shell.bash hook)"`, and `conda activate ...`, then re-enable
+    `set -u`.
+  - **Git hygiene:** Commit narrow source fixes immediately during debugging
+    loops, such as the runtime-profiler import fix in
+    `examples/scripts/run_obs_subblock_study.py`, before continuing launch
+    iteration. Keep active benchmark configs and launchers in explicit,
+    reviewable locations under `work/`, and keep one-off sbatch launchers out
+    of the repo root by placing them under `work/slurm/...` or a
+    campaign-specific directory. Do not commit generated results, exports,
+    tarballs, backups, logs, or broad historical scratch directories.
+  - **Shared-filesystem caution:** Avoid broad recursive commands such as
+    `git add work/...` or `find work ...` over historical campaign output
+    trees; Git may need to walk or hash large artifact sets. Stage explicit
+    files or small directories only after confirming they are small text
+    artifacts. Prefer repo-root `.gitignore` for project-wide generated and
+    scratch patterns. Use `.git/info/exclude` only for personal or local clutter
+    that should not affect collaborators.
+  - **Recommended pattern:** Patch one issue, run only head-node-safe checks,
+    commit the narrow fix, relaunch with a new run suffix, archive bulky
+    generated scratch artifacts outside the repo or ignore them, and avoid
+    recursive Git operations over old campaign trees.
+
 - 2026-05-22 - Keep packaging metadata in one canonical place:
   - **Symptom:** `pyproject.toml`, `requirements.txt`, and setup docs diverged,
     which made environment setup inconsistent across local and agent workflows.
