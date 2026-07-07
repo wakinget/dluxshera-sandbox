@@ -206,6 +206,12 @@ where Edge submission is required, inspect or edit the command to include:
 sbatch -M edge ...
 ```
 
+On Gattaca2 Edge, also make environment and shared data paths side-explicit.
+Do not use `/scratch` when the job needs a JPL-side environment; Edge resolves
+`/scratch` to `/scratch-edge`, while the default/JPL side resolves it to
+`/scratch-jpl`. See `docs/full_fidelity_campaign_launch.md` for the current
+Edge launch checklist.
+
 A future helper option such as `--slurm-cluster edge` would make this less
 manual. For now, treat cluster selection as an explicit launch review step.
 

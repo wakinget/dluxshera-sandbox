@@ -1,5 +1,30 @@
 # Lessons Learned
 
+- 2026-07-07 - Gattaca2 Edge launches: avoid `/scratch` aliases for cross-side environments:
+  - **Symptom:** Edge-side full-fidelity campaign shards failed immediately
+    with `EnvironmentNameNotFound: Could not find conda environment:
+    dluxshera-py311`. The jobs completed in only a few seconds and showed
+    negligible MaxRSS, around 5 MB.
+  - **Root cause:** `/scratch` is side-dependent on Gattaca2. On the
+    default/JPL side it resolves to `/scratch-jpl`; on Edge it resolves to
+    `/scratch-edge`. The two scratch filesystems are independent and are not
+    mirrored, so a Conda environment created on JPL scratch is not found when an
+    Edge job interprets the same `/scratch/...` path as Edge scratch.
+  - **Fix:** Source shared Miniforge and activate the environment by explicit,
+    side-correct prefix:
+
+    ```bash
+    source /cm/shared/apps/miniforge/etc/profile.d/conda.sh
+    conda activate /scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311
+    ```
+
+    Print `CONDA_PREFIX`, `which python`, `sys.executable`, and import checks
+    for `jax` and `dluxshera` at the start of Edge sbatch jobs.
+  - **Follow-up:** Run one-job smoke tests before full Edge launches. Keep
+    generated submit scripts and common sbatch templates side-explicit.
+    Consider creating a separate `/scratch-edge/...` environment only if we
+    want Edge-local environments long term.
+
 - 2026-07-06 - HPC Git hygiene and full-fidelity benchmark launch debugging:
   - **Symptom:** Full-fidelity runtime benchmark launch debugging mixed heavy
     campaign/model plan construction, head-node import smoke tests, Slurm shell

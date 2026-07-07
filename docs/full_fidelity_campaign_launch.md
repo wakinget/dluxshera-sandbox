@@ -105,6 +105,58 @@ configs.
    not invalidate a shard whose campaign summary and subblock status show
    complete science output.
 
+## Edge Launch Checklist
+
+Use this checklist before launching full-fidelity shards on Gattaca2 Edge:
+
+- Submit Edge-side jobs with `sbatch -M edge`.
+- Do not rely on `/scratch` for paths that must refer to one specific side's
+  filesystem. On Gattaca2, `/scratch` resolves to `/scratch-jpl` on JPL/default
+  nodes and to `/scratch-edge` on Edge nodes. `/scratch-jpl` and
+  `/scratch-edge` are independent filesystems and are not mirrored.
+- If a Conda environment was created on the JPL/default side under `/scratch`,
+  Edge jobs must reference it through `/scratch-jpl`, not `/scratch`.
+- For the current dLuxShera environment, Edge jobs should use
+  `/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311`, not
+  `/scratch/shera_hpc/dmckeith/conda/envs/dluxshera-py311`, and not only
+  `conda activate dluxshera-py311`.
+- Use the shared Miniforge initialization and activate by explicit prefix:
+
+  ```bash
+  source /cm/shared/apps/miniforge/etc/profile.d/conda.sh
+  conda activate /scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311
+  export PYTHONPATH="${PYTHONPATH:-src}"
+  ```
+
+- Print environment diagnostics at the start of Edge sbatch jobs.
+
+Use this block exactly so the here-doc delimiter stays at column zero:
+
+```bash
+echo "Conda env: ${CONDA_DEFAULT_ENV:-unset}"
+echo "CONDA_PREFIX: ${CONDA_PREFIX:-unset}"
+echo "Python executable: $(which python)"
+python - <<'PYENV'
+import sys
+print("sys.executable:", sys.executable)
+import jax
+print("jax:", jax.__version__)
+import dluxshera
+print("dluxshera import ok")
+PYENV
+```
+
+The here-doc delimiter must be exact: the closing `PYENV` has no quotes, no
+indentation, and no duplicated Python code after it.
+
+- Run one Edge smoke job or one test draw before submitting a full wave of
+  10-30 jobs.
+- Jobs that fail in 1-4 seconds with about 5 MB MaxRSS are usually
+  launch/environment/shell failures, not science/model failures.
+- Healthy Edge launch states include `RUNNING`, `PENDING` with
+  `QOSMaxMemoryPerUser`, or jobs that at least print the Python/import
+  diagnostics before later model execution.
+
 ## Expensive Steps
 
 Do not run generated `preflight_*_shards.sh` scripts on login or head nodes.

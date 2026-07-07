@@ -33,8 +33,27 @@ export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=-1
 mkdir -p "$RUN_RESULTS_ROOT" "$JAX_COMPILATION_CACHE_DIR" "$RESULTS_ROOT/slurm_logs" logs
 cd "$REPO"
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate dluxshera-py311
+# Use the shared cluster Miniforge install explicitly, but activate by prefix.
+# Important: /scratch is side-dependent on Gattaca2. On Edge, /scratch points
+# to /scratch-edge, so use /scratch-jpl explicitly for the JPL-side env.
+source /cm/shared/apps/miniforge/etc/profile.d/conda.sh
+
+DLUXSHERA_CONDA_ENV_PREFIX="${DLUXSHERA_CONDA_ENV_PREFIX:-/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311}"
+conda activate "$DLUXSHERA_CONDA_ENV_PREFIX"
+
+export PYTHONPATH="${PYTHONPATH:-src}"
+
+echo "Conda env: ${CONDA_DEFAULT_ENV:-unset}"
+echo "CONDA_PREFIX: ${CONDA_PREFIX:-unset}"
+echo "Python executable: $(which python)"
+python - <<'PYENV'
+import sys
+print("sys.executable:", sys.executable)
+import jax
+print("jax:", jax.__version__)
+import dluxshera
+print("dluxshera import ok")
+PYENV
 
 RUN_ARGS=(
   --config "$CONFIG"
@@ -59,11 +78,11 @@ if [[ "$MEMORY_DIAGNOSTICS" == "1" ]]; then
   RUN_ARGS+=(--memory-diagnostics)
 fi
 
-PYTHONPATH=src python examples/scripts/run_full_fidelity_binary_iterative_campaign.py "${RUN_ARGS[@]}"
+python examples/scripts/run_full_fidelity_binary_iterative_campaign.py "${RUN_ARGS[@]}"
 
 if [[ "$ANALYZE_AFTER_RUN" == "1" ]]; then
   RUN_ROOT="$RUN_RESULTS_ROOT/$RUN_NAME"
-  PYTHONPATH=src python examples/scripts/analyze_full_fidelity_binary_iterative_campaign.py \
+  python examples/scripts/analyze_full_fidelity_binary_iterative_campaign.py \
     --run-root "$RUN_ROOT" \
     --outdir "$RUN_ROOT/analysis/full_fidelity_review" \
     --strict \
