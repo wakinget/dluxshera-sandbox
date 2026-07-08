@@ -88,6 +88,17 @@ class ScalarParameter:
     noll_index: int | None = None
 
 
+@dataclass(frozen=True)
+class ResumeState:
+    start_sample_index: int
+    retained_rows: tuple[dict[str, Any], ...]
+    valid_prefix_count: int
+    cleanup_group_key: str | None
+    cleanup_group_start_index: int
+    cleanup_sample_count: int
+    reason: str
+
+
 DEFAULT_SWEEP_CONFIG = SweepConfig()
 
 
@@ -317,6 +328,27 @@ def _normalize_sweep_configs(
     }
 
 
+def _dedupe_preserve_order(keys: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw_key in keys:
+        key = str(raw_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _nuisance_uniform_sampling_keys(datasets_cfg: Mapping[str, Any]) -> list[str]:
+    nuisance_cfg = datasets_cfg.get("nuisance_replicates", {}) or {}
+    sampling_cfg = nuisance_cfg.get("sampling", {}) or {}
+    mode = str(sampling_cfg.get("mode", "uniform_from_sweeps"))
+    if mode != "uniform_from_sweeps":
+        return []
+    return _dedupe_preserve_order(nuisance_cfg.get("keys", REGISTRATION_NUISANCE_KEYS))
+
+
 def _resolve_sweep_for_label(
     label: str,
     *,
@@ -355,12 +387,6 @@ def _validate_experiment_config(experiment_cfg: Mapping[str, Any]) -> dict[str, 
         if not isinstance(value, Mapping):
             raise ValueError(f"experiment.sweeps.{raw_key} must be a mapping/dict.")
         sweep_overrides[str(raw_key)] = dict(value)
-    extras = sorted(set(sweep_overrides) - set(sweep_keys))
-    if extras:
-        raise ValueError(
-            "experiment.sweeps contains keys that are not present in experiment.sweep_keys: "
-            + ", ".join(extras)
-        )
     noise_cfg = copy.deepcopy(experiment_cfg.get("noise", {}) or {})
     if not isinstance(noise_cfg, dict):
         raise ValueError("experiment.noise must be a mapping/dict when provided.")
@@ -405,11 +431,21 @@ def _validate_experiment_config(experiment_cfg: Mapping[str, Any]) -> dict[str, 
     datasets_cfg["nuisance_replicates"] = nuisance_cfg
     datasets_cfg["sparse_mixture"] = sparse_cfg
 
+    nuisance_sweep_keys = _nuisance_uniform_sampling_keys(datasets_cfg)
+    allowed_sweep_keys = set(sweep_keys) | set(nuisance_sweep_keys)
+    extras = sorted(set(sweep_overrides) - allowed_sweep_keys)
+    if extras:
+        raise ValueError(
+            "experiment.sweeps contains keys that are not used by experiment.sweep_keys or "
+            "datasets.nuisance_replicates sampling: " + ", ".join(extras)
+        )
+
     return {
         "kind": kind,
         "seed": int(experiment_cfg.get("seed", 0)),
         "notes": str(experiment_cfg.get("notes", "") or ""),
         "sweep_keys": sweep_keys,
+        "nuisance_sweep_keys": nuisance_sweep_keys,
         "outputs": copy.deepcopy(experiment_cfg.get("outputs", {}) or {}),
         "noise": noise_cfg,
         "add_noise": bool(noise_cfg.get("add_noise", False)),
@@ -457,13 +493,16 @@ def _build_nominal_store(
     from dluxshera.systems.base import compose_forward_spec
 
     forward_spec = compose_forward_spec(system_cfg)
-    sweep_keys = list(experiment_cfg["sweep_keys"])
-    missing_keys = [key for key in sweep_keys if key not in forward_spec]
+    required_keys = _dedupe_preserve_order(
+        list(experiment_cfg["sweep_keys"]) + list(experiment_cfg.get("nuisance_sweep_keys", []))
+    )
+    missing_keys = [key for key in required_keys if key not in forward_spec]
     if missing_keys:
         raise ValueError(
-            "The resolved system does not expose all requested sweep keys. Missing from forward spec: "
+            "The resolved system does not expose all requested sweep-backed keys. Missing from forward spec: "
             + ", ".join(missing_keys)
         )
+    sweep_keys = list(experiment_cfg["sweep_keys"])
     nominal_values = dict(experiment_cfg["nominal_values"])
     invalid_nominal = [key for key in nominal_values if key not in forward_spec]
     if invalid_nominal:
@@ -706,6 +745,7 @@ def _build_nuisance_draws(
             }
         )
     rng = np.random.default_rng(_make_subseed(seed, "nuisance_replicates"))
+    next_nuisance_id = 1 if draws else 1
     for random_idx in range(int(nuisance_cfg.get("n_random", 0))):
         values: dict[str, float] = {}
         sigma_values: dict[str, float] = {}
@@ -716,7 +756,8 @@ def _build_nuisance_draws(
             sigma_offset = _draw_uniform_sigma(rng, param.sweep_config, signed=True)
             sigma_values[key] = sigma_offset
             values[key] = sigma_offset * param.parameter_sigma
-        nuisance_id = len(draws)
+        nuisance_id = next_nuisance_id
+        next_nuisance_id += 1
         draws.append(
             {
                 "nuisance_id": nuisance_id,
@@ -749,6 +790,7 @@ def _nuisance_for_controlled_axes(
 def _build_pair_grid_plan(
     *,
     parameters: Sequence[ScalarParameter],
+    nuisance_parameters_by_label: Mapping[str, ScalarParameter],
     pair_cfg: Mapping[str, Any],
     nuisance_cfg: Mapping[str, Any],
     seed: int,
@@ -757,9 +799,8 @@ def _build_pair_grid_plan(
     if not bool(pair_cfg.get("enabled", True)):
         return []
     include_self = bool(pair_cfg.get("include_self_pairs", False))
-    parameters_by_label = {param.label: param for param in parameters}
     nuisance_draws = _build_nuisance_draws(
-        parameters_by_label=parameters_by_label,
+        parameters_by_label=nuisance_parameters_by_label,
         nuisance_cfg=nuisance_cfg,
         seed=seed,
     )
@@ -827,6 +868,7 @@ def _normalize_active_count_probs(raw_probs: Mapping[Any, Any]) -> tuple[np.ndar
 def _build_sparse_mixture_plan(
     *,
     parameters: Sequence[ScalarParameter],
+    nuisance_parameters_by_label: Mapping[str, ScalarParameter],
     sparse_cfg: Mapping[str, Any],
     nuisance_cfg: Mapping[str, Any],
     seed: int,
@@ -837,13 +879,12 @@ def _build_sparse_mixture_plan(
         return []
     rng = np.random.default_rng(_make_subseed(seed, "sparse_mixture"))
     labels = [param.label for param in parameters]
-    parameters_by_label = {param.label: param for param in parameters}
     counts, probs = _normalize_active_count_probs(sparse_cfg.get("active_count_probs", {1: 1.0}))
     n_samples = int(sparse_cfg.get("n_samples", 0))
     signed = bool((sparse_cfg.get("amplitude_sampling", {}) or {}).get("signed", True))
     sparse_nuisance_enabled = bool((sparse_cfg.get("nuisance", {}) or {}).get("enabled", True))
     nuisance_draws = _build_nuisance_draws(
-        parameters_by_label=parameters_by_label,
+        parameters_by_label=nuisance_parameters_by_label,
         nuisance_cfg={**dict(nuisance_cfg), "n_random": max(1, int(nuisance_cfg.get("n_random", 1))), "include_nominal": False},
         seed=_make_subseed(seed, "sparse_nuisance"),
     )
@@ -1005,6 +1046,13 @@ def _append_sample_jsonl(path: Path, row: Mapping[str, Any]) -> None:
         handle.write(json.dumps(_serialize_value(dict(row)), sort_keys=True) + "\n")
 
 
+def _write_samples_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(_serialize_value(dict(row)), sort_keys=True) + "\n")
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_serialize_value(payload), indent=2, sort_keys=True), encoding="utf-8")
@@ -1024,6 +1072,165 @@ def _dataset_family_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         key = str(row.get("dataset_family", "unknown"))
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _read_json_if_exists(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_samples_jsonl(path: Path) -> tuple[list[dict[str, Any]], str | None]:
+    if not path.exists():
+        return [], None
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                return rows, f"samples.jsonl line {line_number} is not valid JSON: {exc}"
+            if not isinstance(payload, Mapping):
+                return rows, f"samples.jsonl line {line_number} is not a JSON object."
+            rows.append(dict(payload))
+    return rows, None
+
+
+def _resume_group_key(sample: Mapping[str, Any]) -> str:
+    family = str(sample.get("dataset_family", "unknown"))
+    if family == "pair_grid" and sample.get("pair_id") is not None:
+        return f"pair_grid:{sample.get('pair_id')}"
+    return f"{family}:{sample.get('sample_id')}"
+
+
+def _resume_group_start_index(plan: Sequence[Mapping[str, Any]], sample_index: int) -> int:
+    if sample_index <= 0:
+        return 0
+    if sample_index >= len(plan):
+        return len(plan)
+    group_key = _resume_group_key(plan[sample_index])
+    cursor = sample_index
+    while cursor > 0 and _resume_group_key(plan[cursor - 1]) == group_key:
+        cursor -= 1
+    return cursor
+
+
+def _sample_artifact_paths(run_dir: Path, row: Mapping[str, Any]) -> list[Path]:
+    out: list[Path] = []
+    for key in ("fits_path", "metadata_path"):
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        out.append(run_dir / str(value))
+    return out
+
+
+def _delete_paths(paths: Iterable[Path]) -> int:
+    removed = 0
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            path.unlink()
+            removed += 1
+    return removed
+
+
+def _validate_resume_compatibility(
+    *,
+    run_dir: Path,
+    runtime_resolved_cfg: Mapping[str, Any],
+    parameter_space_records: Sequence[Mapping[str, Any]],
+) -> None:
+    if not run_dir.exists():
+        raise ValueError(f"--resume requires an existing run directory: {run_dir}")
+    current_resolved = _serialize_value(runtime_resolved_cfg)
+    existing_resolved = _read_json_if_exists(run_dir / "prescription_resolved.json")
+    if existing_resolved is not None and existing_resolved != current_resolved:
+        raise ValueError(
+            "--resume refused because the existing run directory was generated from a different resolved prescription."
+        )
+    current_parameter_space = _serialize_value({"parameters": parameter_space_records})
+    existing_parameter_space = _read_json_if_exists(run_dir / "parameter_space.json")
+    if existing_parameter_space is not None and existing_parameter_space != current_parameter_space:
+        raise ValueError(
+            "--resume refused because the existing run directory has a different parameter space."
+        )
+
+
+def _prepare_resume_state(
+    *,
+    run_dir: Path,
+    planned_samples: Sequence[Mapping[str, Any]],
+    runtime_resolved_cfg: Mapping[str, Any],
+    parameter_space_records: Sequence[Mapping[str, Any]],
+) -> ResumeState:
+    _validate_resume_compatibility(
+        run_dir=run_dir,
+        runtime_resolved_cfg=runtime_resolved_cfg,
+        parameter_space_records=parameter_space_records,
+    )
+    samples_path = run_dir / "samples.jsonl"
+    rows, read_issue = _read_samples_jsonl(samples_path)
+    if len(rows) > len(planned_samples):
+        raise ValueError(
+            "--resume refused because the existing samples.jsonl contains more rows than the current requested sample set."
+        )
+
+    valid_prefix_count = 0
+    reason = read_issue or "existing samples.jsonl ended before the requested sample set was complete."
+    for idx, row in enumerate(rows):
+        expected = planned_samples[idx]
+        if str(row.get("sample_id", "")) != str(expected["sample_id"]):
+            reason = (
+                f"samples.jsonl row {idx + 1} has sample_id={row.get('sample_id')!r}, "
+                f"expected {expected['sample_id']!r}."
+            )
+            break
+        expected_paths = _sample_artifact_paths(run_dir, expected)
+        if not all(path.exists() for path in expected_paths):
+            reason = f"sample_id={expected['sample_id']} is missing one or more artifacts on disk."
+            break
+        valid_prefix_count += 1
+    else:
+        if read_issue is None:
+            if valid_prefix_count == len(planned_samples):
+                return ResumeState(
+                    start_sample_index=len(planned_samples),
+                    retained_rows=tuple(rows),
+                    valid_prefix_count=valid_prefix_count,
+                    cleanup_group_key=None,
+                    cleanup_group_start_index=len(planned_samples),
+                    cleanup_sample_count=0,
+                    reason="requested sample set is already complete.",
+                )
+            reason = "existing samples form a valid prefix but stop before the requested sample set is complete."
+
+    cleanup_start_index = _resume_group_start_index(planned_samples, valid_prefix_count)
+    cleanup_group_key = (
+        None if cleanup_start_index >= len(planned_samples) else _resume_group_key(planned_samples[cleanup_start_index])
+    )
+    retained_rows = rows[:cleanup_start_index]
+    cleanup_paths: list[Path] = []
+    for sample in planned_samples[cleanup_start_index:]:
+        cleanup_paths.extend(_sample_artifact_paths(run_dir, sample))
+    for row in rows[cleanup_start_index:]:
+        cleanup_paths.extend(_sample_artifact_paths(run_dir, row))
+    _delete_paths(cleanup_paths)
+    return ResumeState(
+        start_sample_index=cleanup_start_index,
+        retained_rows=tuple(retained_rows),
+        valid_prefix_count=valid_prefix_count,
+        cleanup_group_key=cleanup_group_key,
+        cleanup_group_start_index=cleanup_start_index,
+        cleanup_sample_count=len(planned_samples) - cleanup_start_index,
+        reason=reason,
+    )
 
 
 def _system_summary(system_cfg: Mapping[str, Any], image_shape: Sequence[int]) -> dict[str, Any]:
@@ -1048,6 +1255,7 @@ def main() -> None:
     parser.add_argument("--outdir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
+    parser.add_argument("--resume", action="store_true", default=False)
     parser.add_argument("--max-samples", type=int, default=None)
     args = parser.parse_args()
 
@@ -1084,19 +1292,21 @@ def main() -> None:
 
     forward_spec, base_store, binder = _build_nominal_store(system_cfg=system_cfg, experiment_cfg=experiment_cfg)
     sweep_keys = list(experiment_cfg["sweep_keys"])
+    nuisance_sweep_keys = list(experiment_cfg.get("nuisance_sweep_keys", []))
+    analysis_keys = _dedupe_preserve_order(sweep_keys + nuisance_sweep_keys)
     _log("Calculating Fisher information matrix for V3 scalarized parameter scales.")
     fisher_sigmas, image_shape = _compute_fisher_sigmas(
         binder=binder,
         system_cfg=system_cfg,
         forward_spec=forward_spec,
         base_store=base_store,
-        sweep_keys=sweep_keys,
+        sweep_keys=analysis_keys,
         seed=int(experiment_cfg["seed"]),
         add_noise=bool(experiment_cfg["add_noise"]),
     )
 
     per_parameter_cfg = _normalize_sweep_configs(
-        sweep_keys=sweep_keys,
+        sweep_keys=analysis_keys,
         default_cfg=experiment_cfg["default_sweep"],
         overrides=experiment_cfg["sweep_overrides"],
     )
@@ -1109,6 +1319,16 @@ def main() -> None:
         fisher_sigmas=fisher_sigmas,
     )
     parameters_by_label = {param.label: param for param in parameters}
+    nuisance_only_keys = [key for key in nuisance_sweep_keys if key not in set(sweep_keys)]
+    nuisance_parameters = _scalarize_parameter_space(
+        sweep_keys=nuisance_only_keys,
+        base_store=base_store,
+        system_cfg=system_cfg,
+        per_parameter_cfg=per_parameter_cfg,
+        default_cfg=experiment_cfg["default_sweep"],
+        fisher_sigmas=fisher_sigmas,
+    )
+    nuisance_parameters_by_label = {param.label: param for param in parameters + nuisance_parameters}
 
     datasets_cfg = experiment_cfg["datasets"]
     pair_cfg = datasets_cfg["pair_grid"]
@@ -1116,12 +1336,14 @@ def main() -> None:
     sparse_cfg = datasets_cfg["sparse_mixture"]
     pair_plan = _build_pair_grid_plan(
         parameters=parameters,
+        nuisance_parameters_by_label=nuisance_parameters_by_label,
         pair_cfg=pair_cfg,
         nuisance_cfg=nuisance_cfg,
         seed=int(experiment_cfg["seed"]),
     )
     sparse_plan = _build_sparse_mixture_plan(
         parameters=parameters,
+        nuisance_parameters_by_label=nuisance_parameters_by_label,
         sparse_cfg=sparse_cfg,
         nuisance_cfg=nuisance_cfg,
         seed=int(experiment_cfg["seed"]),
@@ -1132,7 +1354,7 @@ def main() -> None:
     n_params = len(parameters)
     unordered_pairs = n_params * (n_params - 1) // 2
     nuisance_draws = _build_nuisance_draws(
-        parameters_by_label=parameters_by_label,
+        parameters_by_label=nuisance_parameters_by_label,
         nuisance_cfg=nuisance_cfg,
         seed=int(experiment_cfg["seed"]),
     )
@@ -1163,6 +1385,8 @@ def main() -> None:
         },
     }
     parameter_space_records = _parameter_space_records(parameters)
+    max_samples = len(full_plan) if args.max_samples is None else min(int(args.max_samples), len(full_plan))
+    planned_samples = full_plan[:max_samples]
     plan_summary = {
         "scalarized_parameter_count": n_params,
         "unordered_pair_count": unordered_pairs,
@@ -1173,10 +1397,34 @@ def main() -> None:
         "pair_grid_sample_count": len(pair_plan),
         "sparse_mixture_sample_count": len(sparse_plan),
         "total_planned_sample_count": len(full_plan),
+        "requested_render_sample_count": max_samples,
         "estimated_image_shape": list(image_shape),
     }
+    resume_state = ResumeState(
+        start_sample_index=0,
+        retained_rows=(),
+        valid_prefix_count=0,
+        cleanup_group_key=None,
+        cleanup_group_start_index=0,
+        cleanup_sample_count=0,
+        reason="fresh render requested.",
+    )
+    if args.resume:
+        resume_state = _prepare_resume_state(
+            run_dir=run_dir,
+            planned_samples=planned_samples,
+            runtime_resolved_cfg=runtime_resolved_cfg,
+            parameter_space_records=parameter_space_records,
+        )
+        _log_section("Resume analysis")
+        _log(f"resume_reason={resume_state.reason}")
+        _log(f"resume_valid_prefix_count={resume_state.valid_prefix_count}")
+        _log(f"resume_restart_sample_index={resume_state.start_sample_index}")
+        if resume_state.cleanup_group_key is not None:
+            _log(f"resume_cleanup_group={resume_state.cleanup_group_key}")
+
     manifest = {
-        "schema_version": "ml_training_dataset_v3_manifest/1",
+        "schema_version": "ml_training_dataset_v3_manifest/2",
         "generator": "work/experiments/generate_training_dataset_v3.py",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "script_version": SCRIPT_VERSION,
@@ -1214,10 +1462,29 @@ def main() -> None:
         },
         "git_info": _git_info(),
         "plan_summary": plan_summary,
+        "resume_mode": bool(args.resume),
+        "resume_state": {
+            "reason": resume_state.reason,
+            "valid_prefix_count": resume_state.valid_prefix_count,
+            "restart_sample_index": resume_state.start_sample_index,
+            "cleanup_group_key": resume_state.cleanup_group_key,
+            "cleanup_group_start_index": resume_state.cleanup_group_start_index,
+            "cleanup_sample_count": resume_state.cleanup_sample_count,
+        },
+        "render_target_sample_count": max_samples,
+        "rendered_sample_count": len(resume_state.retained_rows),
+        "next_sample_index": resume_state.start_sample_index,
+        "render_complete": False,
+        "last_rendered_sample_id": (
+            None if not resume_state.retained_rows else resume_state.retained_rows[-1].get("sample_id")
+        ),
+        "last_rendered_pair_id": (
+            None if not resume_state.retained_rows else resume_state.retained_rows[-1].get("pair_id")
+        ),
         "dry_run": bool(args.dry_run),
     }
 
-    run_dir.mkdir(parents=True, exist_ok=args.dry_run)
+    run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "quicklook").mkdir(parents=True, exist_ok=True)
     _write_json(run_dir / "prescription_input.json", user_cfg)
     _write_json(run_dir / "prescription_resolved.json", runtime_resolved_cfg)
@@ -1233,13 +1500,18 @@ def main() -> None:
         return
 
     samples_path = run_dir / "samples.jsonl"
-    samples_path.write_text("", encoding="utf-8")
-    max_samples = len(full_plan) if args.max_samples is None else min(int(args.max_samples), len(full_plan))
+    if args.resume:
+        _write_samples_jsonl(samples_path, resume_state.retained_rows)
+    else:
+        _write_samples_jsonl(samples_path, [])
     _log_section("Dataset rendering")
     _log(f"Rendering {max_samples} of {len(full_plan)} planned samples.")
+    if args.resume:
+        _log(f"Resuming from sample index {resume_state.start_sample_index}.")
     t0 = time.perf_counter()
-    rendered = 0
-    for sample in full_plan[:max_samples]:
+    rendered = len(resume_state.retained_rows)
+    rendered_this_run = 0
+    for sample in planned_samples[resume_state.start_sample_index:]:
         applied_store = _apply_sample_to_store(
             base_store=base_store,
             sample=sample,
@@ -1256,11 +1528,21 @@ def main() -> None:
         )
         _append_sample_jsonl(samples_path, row)
         rendered += 1
-        if rendered % 10 == 0:
+        rendered_this_run += 1
+        manifest = dict(manifest)
+        manifest["rendered_sample_count"] = rendered
+        manifest["next_sample_index"] = rendered
+        manifest["render_complete"] = rendered >= max_samples
+        manifest["last_rendered_sample_id"] = row.get("sample_id")
+        manifest["last_rendered_pair_id"] = row.get("pair_id")
+        _write_manifest(run_dir=run_dir, manifest=manifest)
+        if rendered_this_run % 10 == 0:
             elapsed = time.perf_counter() - t0
-            _log(f"Progress: rendered={rendered} rate={rendered / elapsed:.2f} samples/s")
+            _log(f"Progress: rendered={rendered} resumed={rendered_this_run} rate={rendered_this_run / elapsed:.2f} samples/s")
     manifest = dict(manifest)
     manifest["rendered_sample_count"] = rendered
+    manifest["next_sample_index"] = rendered
+    manifest["render_complete"] = rendered >= max_samples
     manifest["dry_run"] = False
     _write_manifest(run_dir=run_dir, manifest=manifest)
     _log(f"Rendered samples: {rendered}")

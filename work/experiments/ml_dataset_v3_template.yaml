@@ -4,20 +4,10 @@ system:
     kind: alpha_cen
     target: ALPHA_CEN
     exposure_time_s: 0.05
-    x_position_as: 0.0
-    y_position_as: 0.0
-    separation_as: 10.0
-    position_angle_deg: 90.0
-    contrast: 3.0
   optics:
     psf_npix: 160
     primary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
     secondary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
-  detector:
-    layers:
-      - name: downsample
-        kind: Downsample
-        kernel_size: 3
 
 experiment:
   kind: ml_training_dataset_v3
@@ -26,9 +16,6 @@ experiment:
 
   sweep_keys:
     - source.separation_as
-    - source.position_angle_deg
-    - source.x_position_as
-    - source.y_position_as
     - source.log_flux_total
     - source.contrast
     - optics.plate_scale_as_per_pix
@@ -55,8 +42,8 @@ experiment:
 
     nuisance_replicates:
       enabled: true
-      include_nominal: true
-      n_random: 3
+      include_nominal: false
+      n_random: 10
       keys:
         - source.x_position_as
         - source.y_position_as
@@ -66,7 +53,7 @@ experiment:
       collision_policy: skip_if_key_is_controlled_axis
 
     sparse_mixture:
-      enabled: true
+      enabled: false
       split: test
       n_samples: 1000
       active_count_probs:
@@ -89,47 +76,47 @@ experiment:
       spacing: log
 
     source.separation_as:
-      min_sigma: 1e0
-      max_sigma: 2e4
+      min_sigma: 1e-2
+      max_sigma: 1e3
       n_magnitudes: 11
       spacing: log
     source.position_angle_deg:
       min_sigma: 1e0
-      max_sigma: 1e4
+      max_sigma: 2e2
       n_magnitudes: 11
       spacing: log
     source.x_position_as:
       min_sigma: 1e0
-      max_sigma: 1e5
+      max_sigma: 1.5e3
       n_magnitudes: 11
       spacing: log
     source.y_position_as:
       min_sigma: 1e0
-      max_sigma: 1e5
+      max_sigma: 1.5e3
       n_magnitudes: 11
       spacing: log
     source.log_flux_total:
-      min_sigma: 1e1
-      max_sigma: 1e5
+      min_sigma: 1e0
+      max_sigma: 1e3
       n_magnitudes: 11
       spacing: log
     source.contrast:
       min_sigma: 1e0
-      max_sigma: 1e4
+      max_sigma: 2e2
       n_magnitudes: 11
       spacing: log
     optics.plate_scale_as_per_pix:
       min_sigma: 1e1
-      max_sigma: 1e5
+      max_sigma: 2e4
       n_magnitudes: 11
       spacing: log
     optics.primary.zernike_coeffs_nm:
-      min_sigma: 1e1
-      max_sigma: 4e5
+      min_sigma: 1e0
+      max_sigma: 1e3
       n_magnitudes: 11
       spacing: log
     optics.secondary.zernike_coeffs_nm:
-      min_sigma: 1e1
-      max_sigma: 1e5
+      min_sigma: 1e0
+      max_sigma: 5e2
       n_magnitudes: 11
       spacing: log

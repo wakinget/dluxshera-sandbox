@@ -23,16 +23,16 @@ expands the dataset plan beyond one-parameter-at-a-time samples.
 From the repository root:
 
 ```bash
-PYTHONPATH=src python work/experiments/generate_training_dataset_v3.py \
-  --prescription work/experiments/generate_training_dataset_v3_template.yaml \
+python work/experiments/generate_training_dataset_v3.py \
+  --prescription work/experiments/ml_dataset_v3_template.yaml \
   --dry-run
 ```
 
 Render only the first two planned samples for a smoke test:
 
 ```bash
-PYTHONPATH=src python work/experiments/generate_training_dataset_v3.py \
-  --prescription work/experiments/generate_training_dataset_v3_template.yaml \
+python work/experiments/generate_training_dataset_v3.py \
+  --prescription work/experiments/ml_dataset_v3_template.yaml \
   --run-name ml_training_v3_smoke \
   --max-samples 2
 ```
