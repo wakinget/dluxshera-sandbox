@@ -6,32 +6,44 @@ system:
     exposure_time_s: 0.05
   optics:
     psf_npix: 160
-    primary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
-    secondary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
-
+    primary_noll_indices:
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    secondary_noll_indices:
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
 experiment:
   kind: ml_training_dataset_v3
-  notes: "Fisher-scaled pair-grid ML training dataset template."
-  seed: 0
-
+  notes: Sparse 100k noiseless ML test dataset with X/Y/PA registration nuisance;
+    pair grid disabled; SHERA_FLIGHT_3P_SIMPLE 50 ms system.
+  seed: 7007
   sweep_keys:
-    - source.separation_as
-    - source.log_flux_total
-    - source.contrast
-    - optics.plate_scale_as_per_pix
-    - optics.primary.zernike_coeffs_nm
-    - optics.secondary.zernike_coeffs_nm
-
+  - source.separation_as
+  - source.log_flux_total
+  - source.contrast
+  - optics.plate_scale_as_per_pix
+  - optics.primary.zernike_coeffs_nm
+  - optics.secondary.zernike_coeffs_nm
   noise:
     enabled: false
-
   outputs:
-    outdir: ../../Results/ML Training Datasets
-    run_name: ml_training_v3_50ms_pairgrid_sparse
-
+    outdir: /projects/shera_hpc/data/ml_training
+    run_name: shera_training_dataset_sparse100k_nuisance_50ms_noiseless_20260707_v1
   datasets:
     pair_grid:
-      enabled: true
+      enabled: false
       include_all_pairs: true
       level_mode: symmetric_grid_from_sweeps
       grid_size: 11
@@ -39,26 +51,24 @@ experiment:
       pair_order: upper_triangle
       amplitude_scale: fisher_sigma
       include_self_pairs: false
-
     nuisance_replicates:
       enabled: true
       include_nominal: false
       n_random: 10
       keys:
-        - source.x_position_as
-        - source.y_position_as
-        - source.position_angle_deg
+      - source.x_position_as
+      - source.y_position_as
+      - source.position_angle_deg
       sampling:
         mode: uniform_from_sweeps
       collision_policy: skip_if_key_is_controlled_axis
-
     sparse_mixture:
-      enabled: false
+      enabled: true
       split: test
-      n_samples: 1000
+      n_samples: 100000
       active_count_probs:
         1: 0.25
-        2: 0.50
+        2: 0.5
         3: 0.25
       amplitude_sampling:
         mode: uniform_from_sweeps
@@ -67,14 +77,12 @@ experiment:
         enabled: true
       noise:
         enabled: false
-
   sweeps:
     default:
       min_sigma: 1e0
       max_sigma: 1e3
       n_magnitudes: 10
       spacing: log
-
     source.separation_as:
       min_sigma: 1e-2
       max_sigma: 1e3
