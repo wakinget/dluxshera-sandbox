@@ -105,6 +105,20 @@ configs.
    not invalidate a shard whose campaign summary and subblock status show
    complete science output.
 
+9. Use the standard family-analysis contract for post-run summaries.
+
+   See
+   `docs/dev/notes/full_fidelity_campaign_family_analysis_standard.md`. Family
+   summaries should use actual realized final separation error as the headline
+   result; projected 30-minute endpoints are diagnostics unless the campaign is
+   explicitly testing projections. Report signed bias metrics
+   (`mean_final_sep_err_uas`, `std_final_sep_err_uas`,
+   `sem_final_sep_err_uas`, `mad_final_sep_err_uas`) separately from achieved
+   absolute-error magnitude (`mean_abs_final_sep_err_uas`,
+   `median_abs_final_sep_err_uas`). Preserve axes such as target, low-order WFE
+   condition, KE amplitude, and detector calibration term unless a row is
+   explicitly labeled as pooled.
+
 ## Edge Launch Checklist
 
 Use this checklist before launching full-fidelity shards on Gattaca2 Edge:

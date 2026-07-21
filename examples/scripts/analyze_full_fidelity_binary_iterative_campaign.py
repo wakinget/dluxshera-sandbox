@@ -465,6 +465,10 @@ def label_group(label: str) -> str:
 def label_units(label: str) -> str:
     if label == "source.separation_as":
         return "as"
+    if label in {"source.x_as", "source.y_as"}:
+        return "as"
+    if label == "source.position_angle_deg":
+        return "deg"
     if label == "source.log_flux_total":
         return "dex"
     if label == "source.contrast":
@@ -479,9 +483,41 @@ def label_units(label: str) -> str:
 def display_offset(label: str, value: float) -> str:
     if pd.isna(value):
         return ""
-    if label == "source.separation_as":
+    if label in {"source.separation_as", "source.x_as", "source.y_as"}:
         return f"{value * 1e6:.3g} microas"
     return f"{value:.3g} {label_units(label)}".strip()
+
+
+def standard_parameter_group(label: str) -> str:
+    if label.startswith("source."):
+        return "source"
+    if label == "optics.plate_scale_as_per_pix":
+        return "plate_scale"
+    if "primary.zernike_coeffs_nm" in label:
+        return "m1_zernike"
+    if "secondary.zernike_coeffs_nm" in label:
+        return "m2_zernike"
+    return "other"
+
+
+def standard_parameter_scale(label: str, truth_value: float) -> tuple[str, float, float]:
+    """Return display unit, offset scale, and value offset for note-ready summaries."""
+
+    if label in {"source.separation_as", "source.x_as", "source.y_as"}:
+        return "uas", 1e6, 0.0
+    if label == "source.position_angle_deg":
+        return "deg", 1.0, 0.0
+    if label == "source.log_flux_total":
+        return "dex", 1.0, 0.0
+    if label == "source.contrast":
+        return "dimensionless", 1.0, 0.0
+    if label == "optics.plate_scale_as_per_pix":
+        if np.isfinite(truth_value) and truth_value != 0:
+            return "ppm", 1e6 / truth_value, truth_value
+        return "as_per_pix", 1.0, 0.0
+    if "zernike_coeffs_nm" in label:
+        return "nm", 1.0, 0.0
+    return label_units(label), 1.0, 0.0
 
 
 def validate_required(run_root: Path, strict: bool) -> list[str]:
@@ -741,6 +777,120 @@ def slow_state_tables(param_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
             }
         )
     return evo, pd.DataFrame(final_rows)
+
+
+def separation_error_summary(win: pd.DataFrame) -> pd.DataFrame:
+    headers = [
+        "case_name",
+        "initial_sep_err_uas",
+        "final_sep_err_uas",
+        "initial_abs_sep_err_uas",
+        "final_abs_sep_err_uas",
+        "final_posterior_sigma_sep_uas",
+        "signed_improvement_uas",
+        "abs_improvement_uas",
+        "final_sep_err_over_sigma",
+        "final_abs_sep_err_over_sigma",
+    ]
+    if win.empty:
+        return pd.DataFrame(columns=headers)
+    rows: list[dict[str, Any]] = []
+    ordered = win.sort_values(["case_name", "window_index"], na_position="last")
+    for case_name, group in ordered.groupby("case_name", dropna=False):
+        group = group.sort_values("window_index")
+        first = group.iloc[0]
+        last = group.iloc[-1]
+        initial = safe_float(first.get("separation_reference_error_before_microas", np.nan))
+        final = safe_float(last.get("separation_next_reference_error_microas", np.nan))
+        sigma = safe_float(last.get("posterior_sigma_separation_microas", np.nan))
+        initial_abs = abs(initial) if np.isfinite(initial) else np.nan
+        final_abs = abs(final) if np.isfinite(final) else np.nan
+        rows.append(
+            {
+                "case_name": case_name,
+                "initial_sep_err_uas": initial,
+                "final_sep_err_uas": final,
+                "initial_abs_sep_err_uas": initial_abs,
+                "final_abs_sep_err_uas": final_abs,
+                "final_posterior_sigma_sep_uas": sigma,
+                "signed_improvement_uas": initial - final if np.isfinite(initial) and np.isfinite(final) else np.nan,
+                "abs_improvement_uas": initial_abs - final_abs if np.isfinite(initial_abs) and np.isfinite(final_abs) else np.nan,
+                "final_sep_err_over_sigma": final / sigma if np.isfinite(final) and np.isfinite(sigma) and sigma != 0 else np.nan,
+                "final_abs_sep_err_over_sigma": final_abs / sigma if np.isfinite(final_abs) and np.isfinite(sigma) and sigma != 0 else np.nan,
+            }
+        )
+    return pd.DataFrame(rows, columns=headers)
+
+
+def slow_parameter_error_summary(param_df: pd.DataFrame) -> pd.DataFrame:
+    headers = [
+        "case_name",
+        "parameter_label",
+        "parameter_group",
+        "unit",
+        "initial_value",
+        "truth_value",
+        "final_value",
+        "initial_err",
+        "final_err",
+        "initial_abs_err",
+        "final_abs_err",
+        "abs_improvement",
+        "fractional_abs_improvement",
+        "final_posterior_sigma",
+        "final_err_over_sigma",
+        "final_abs_err_over_sigma",
+    ]
+    if param_df.empty:
+        return pd.DataFrame(columns=headers)
+    rows: list[dict[str, Any]] = []
+    ordered = param_df.sort_values(["case_name", "label", "window_index"], na_position="last")
+    for (case_name, label), group in ordered.groupby(["case_name", "label"], dropna=False):
+        group = group.sort_values("window_index")
+        first = group.iloc[0]
+        last = group.iloc[-1]
+        truth = safe_float(last.get("truth_value", first.get("truth_value", np.nan)))
+        unit, scale, value_offset = standard_parameter_scale(str(label), truth)
+
+        def convert_value(value: Any) -> float:
+            f = safe_float(value)
+            if not np.isfinite(f):
+                return np.nan
+            return (f - value_offset) * scale
+
+        def convert_offset(value: Any) -> float:
+            f = safe_float(value)
+            return f * scale if np.isfinite(f) else np.nan
+
+        initial_value = convert_value(first.get("current_value", np.nan))
+        truth_value = convert_value(truth)
+        final_value = convert_value(last.get("next_value", np.nan))
+        initial_err = convert_offset(first.get("current_offset", np.nan))
+        final_err = convert_offset(last.get("next_offset", np.nan))
+        sigma = convert_offset(last.get("posterior_sigma", np.nan))
+        initial_abs = abs(initial_err) if np.isfinite(initial_err) else np.nan
+        final_abs = abs(final_err) if np.isfinite(final_err) else np.nan
+        rows.append(
+            {
+                "case_name": case_name,
+                "parameter_label": label,
+                "parameter_group": standard_parameter_group(str(label)),
+                "unit": unit,
+                "initial_value": initial_value,
+                "truth_value": truth_value,
+                "final_value": final_value,
+                "initial_err": initial_err,
+                "final_err": final_err,
+                "initial_abs_err": initial_abs,
+                "final_abs_err": final_abs,
+                "abs_improvement": initial_abs - final_abs if np.isfinite(initial_abs) and np.isfinite(final_abs) else np.nan,
+                "fractional_abs_improvement": (initial_abs - final_abs) / initial_abs if np.isfinite(initial_abs) and initial_abs > 0 and np.isfinite(final_abs) else np.nan,
+                "final_posterior_sigma": sigma,
+                "final_err_over_sigma": final_err / sigma if np.isfinite(final_err) and np.isfinite(sigma) and sigma != 0 else np.nan,
+                "final_abs_err_over_sigma": final_abs / sigma if np.isfinite(final_abs) and np.isfinite(sigma) and sigma != 0 else np.nan,
+            }
+        )
+    return pd.DataFrame(rows, columns=headers)
 
 
 def state_row(state: str, r: pd.Series, truth: float, value: float, offset: float) -> dict[str, Any]:
@@ -1688,12 +1838,14 @@ def plot_outputs(
         line_plot(win, "window_index", ["reference_error_norm_before", "posterior_error_norm_after", "next_reference_error_norm"], plotdir / "iterative_error_norm.png", "Window", "error norm")
         line_plot(win, "window_index", ["update_cosine_with_ideal", "applied_vector_gain"], plotdir / "update_alignment_by_window.png", "Window", "alignment/gain")
         line_plot(win, "window_index", ["separation_reference_error_before_microas", "separation_posterior_error_after_microas", "separation_next_reference_error_microas"], plotdir / "separation_error_by_window.png", "Window", "separation error (microas)")
+        plot_separation_evolution_standard(win, plotdir, warnings_list)
     if not param.empty:
         pivot_plot(param, "parameter_offsets_by_window.png", plotdir, value="next_offset", ylabel="next offset")
         pivot_plot(param, "posterior_sigma_by_parameter.png", plotdir, value="posterior_sigma", ylabel="posterior sigma", bar=True)
         z = param[param["label"].str.contains("zernike", na=False)]
         if not z.empty:
             pivot_plot(z, "zernike_m1_m2_offsets.png", plotdir, value="next_offset", ylabel="Zernike next offset (nm)")
+        plot_slow_parameter_standard(param, plotdir, warnings_list)
     if not traj.empty:
         numeric_cols = [c for c in traj.columns if c.endswith("_mean")][:6]
         if numeric_cols:
@@ -1706,6 +1858,230 @@ def plot_outputs(
         line_plot(smear, "subblock_index", ["smear_length_pix"], plotdir / "smear_length_by_subblock.png", "Subblock", "smear length (pix)")
     if not subblocks.empty and "elapsed_seconds" in subblocks.columns:
         line_plot(subblocks, "global_subblock_index", ["elapsed_seconds"], plotdir / "subblock_convergence_summary.png", "Subblock", "elapsed seconds")
+
+
+def separation_evolution_points(win: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if win.empty:
+        return pd.DataFrame(columns=["case_name", "step", "sep_err_uas"])
+    for case_name, group in win.sort_values(["case_name", "window_index"], na_position="last").groupby("case_name", dropna=False):
+        group = group.sort_values("window_index")
+        if group.empty:
+            continue
+        initial = safe_float(group.iloc[0].get("separation_reference_error_before_microas", np.nan))
+        rows.append({"case_name": case_name, "step": 0.0, "sep_err_uas": initial})
+        for _, r in group.iterrows():
+            window = safe_float(r.get("window_index", np.nan))
+            err = first_nonblank(
+                r.get("separation_next_reference_error_microas", np.nan),
+                r.get("separation_posterior_error_after_microas", np.nan),
+            )
+            step = window + 1.0 if np.isfinite(window) else np.nan
+            rows.append({"case_name": case_name, "step": step, "sep_err_uas": safe_float(err)})
+    return pd.DataFrame(rows)
+
+
+def plot_separation_evolution_standard(
+    win: pd.DataFrame,
+    plotdir: Path,
+    warnings_list: list[dict[str, Any]] | None = None,
+) -> None:
+    points = separation_evolution_points(win)
+    if points.empty:
+        return
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    any_values = False
+    for case_name, group in points.groupby("case_name", dropna=False):
+        ordered = group.sort_values("step")
+        y = np.abs(pd.to_numeric(ordered["sep_err_uas"], errors="coerce"))
+        y = y.where(y > 0)
+        if y.notna().any():
+            any_values = True
+        ax.plot(pd.to_numeric(ordered["step"], errors="coerce"), y, marker="o", linewidth=1.2, label=str(case_name))
+    if not any_values:
+        _placeholder_plot(ax, "no positive finite separation errors", warnings_list=warnings_list, context="separation_error_evolution_abs_log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Window step")
+    ax.set_ylabel("Absolute separation error (uas)")
+    ax.grid(True, alpha=0.25, which="both")
+    if points["case_name"].nunique(dropna=False) <= 12:
+        ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(plotdir / "separation_error_evolution_abs_log.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for case_name, group in points.groupby("case_name", dropna=False):
+        ordered = group.sort_values("step")
+        ax.plot(
+            pd.to_numeric(ordered["step"], errors="coerce"),
+            pd.to_numeric(ordered["sep_err_uas"], errors="coerce"),
+            marker="o",
+            linewidth=1.2,
+            label=str(case_name),
+        )
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_yscale("symlog", linthresh=1.0)
+    ax.set_xlabel("Window step")
+    ax.set_ylabel("Signed separation error (uas)")
+    ax.grid(True, alpha=0.25, which="both")
+    if points["case_name"].nunique(dropna=False) <= 12:
+        ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(plotdir / "separation_error_evolution_signed_symlog.png", dpi=150)
+    plt.close(fig)
+
+
+def _symlog_linthresh(unit: str) -> float:
+    if unit == "uas":
+        return 1.0
+    if unit == "nm":
+        return 0.01
+    if unit == "ppm":
+        return 0.1
+    return 1e-3
+
+
+def standard_parameter_progress(param: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if param.empty:
+        return pd.DataFrame()
+    for _, r in param.iterrows():
+        label = str(r.get("label", ""))
+        truth = safe_float(r.get("truth_value", np.nan))
+        unit, scale, _ = standard_parameter_scale(label, truth)
+        next_offset = safe_float(r.get("next_offset", np.nan))
+        sigma = safe_float(r.get("posterior_sigma", np.nan))
+        rows.append(
+            {
+                "case_name": r.get("case_name", ""),
+                "window_index": r.get("window_index", np.nan),
+                "parameter_label": label,
+                "parameter_group": standard_parameter_group(label),
+                "unit": unit,
+                "final_err": next_offset * scale if np.isfinite(next_offset) else np.nan,
+                "final_posterior_sigma": sigma * scale if np.isfinite(sigma) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_slow_parameter_standard(
+    param: pd.DataFrame,
+    plotdir: Path,
+    warnings_list: list[dict[str, Any]] | None = None,
+) -> None:
+    summary = slow_parameter_error_summary(param)
+    progress = standard_parameter_progress(param)
+    if summary.empty:
+        return
+    latest = summary.sort_values(["parameter_group", "parameter_label"])
+    width = min(16, max(8, 0.35 * len(latest)))
+    fig, ax = plt.subplots(figsize=(width, 5))
+    labels = latest["parameter_label"].astype(str).tolist()
+    ax.bar(labels, pd.to_numeric(latest["final_err"], errors="coerce"))
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_ylabel("Final signed error (natural unit)")
+    ax.tick_params(axis="x", rotation=70, labelsize=7)
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(plotdir / "slow_parameter_final_error_bar.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(width, 5))
+    ax.bar(labels, pd.to_numeric(latest["final_err_over_sigma"], errors="coerce"))
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_ylabel("Final signed error / posterior sigma")
+    ax.tick_params(axis="x", rotation=70, labelsize=7)
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(plotdir / "slow_parameter_final_error_over_sigma_bar.png", dpi=150)
+    plt.close(fig)
+
+    if not progress.empty:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for label, ldf in progress.groupby("parameter_label", dropna=False):
+            ax.plot(
+                pd.to_numeric(ldf["window_index"], errors="coerce"),
+                pd.to_numeric(ldf["final_err"], errors="coerce"),
+                marker="o",
+                linewidth=1.0,
+                label=str(label),
+            )
+        ax.axhline(0.0, color="black", linewidth=0.8)
+        ax.set_yscale("symlog", linthresh=1e-3)
+        ax.set_xlabel("Window")
+        ax.set_ylabel("Signed error (natural unit)")
+        ax.grid(True, alpha=0.25, which="both")
+        if progress["parameter_label"].nunique(dropna=False) <= 14:
+            ax.legend(fontsize=6, ncol=2)
+        fig.tight_layout()
+        fig.savefig(plotdir / "slow_parameter_evolution_signed_symlog.png", dpi=150)
+        plt.close(fig)
+
+        for group_name, group_df in progress.groupby("parameter_group", dropna=False):
+            fig, ax = plt.subplots(figsize=(9, 4.8))
+            units = [u for u in group_df.get("unit", pd.Series(dtype=str)).dropna().astype(str).unique() if u]
+            linthresh = _symlog_linthresh(units[0] if len(units) == 1 else "")
+            for label, ldf in group_df.groupby("parameter_label", dropna=False):
+                ax.plot(
+                    pd.to_numeric(ldf["window_index"], errors="coerce"),
+                    pd.to_numeric(ldf["final_err"], errors="coerce"),
+                    marker="o",
+                    linewidth=1.1,
+                    label=str(label),
+                )
+            ax.axhline(0.0, color="black", linewidth=0.8)
+            ax.set_yscale("symlog", linthresh=linthresh)
+            ax.set_xlabel("Window")
+            ylabel_unit = units[0] if len(units) == 1 else "natural unit"
+            ax.set_ylabel(f"Signed error ({ylabel_unit})")
+            ax.grid(True, alpha=0.25, which="both")
+            if group_df["parameter_label"].nunique(dropna=False) <= 12:
+                ax.legend(fontsize=7, ncol=2)
+            fig.tight_layout()
+            safe_group = str(group_name).replace(".", "_").replace("/", "_")
+            fig.savefig(plotdir / f"slow_parameter_evolution_{safe_group}_signed_symlog.png", dpi=150)
+            plt.close(fig)
+
+    z = summary[summary["parameter_group"].isin(["m1_zernike", "m2_zernike"])]
+    if not z.empty:
+        fig, ax = plt.subplots(figsize=(max(8, 0.35 * len(z)), 4.8))
+        z = z.sort_values(["parameter_group", "parameter_label"])
+        z_labels = [
+            str(row.parameter_label).replace("optics.primary.", "m1.").replace("optics.secondary.", "m2.")
+            for row in z.itertuples()
+        ]
+        ax.bar(z_labels, pd.to_numeric(z["final_err"], errors="coerce"))
+        ax.axhline(0.0, color="black", linewidth=0.8)
+        ax.set_ylabel("Final signed Zernike error (nm)")
+        ax.tick_params(axis="x", rotation=70, labelsize=7)
+        ax.grid(True, axis="y", alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(plotdir / "zernike_final_error_by_mirror.png", dpi=150)
+        plt.close(fig)
+    if not progress.empty:
+        zp = progress[progress["parameter_group"].isin(["m1_zernike", "m2_zernike"])]
+        if not zp.empty:
+            fig, ax = plt.subplots(figsize=(9, 4.8))
+            for label, ldf in zp.groupby("parameter_label", dropna=False):
+                ax.plot(
+                    pd.to_numeric(ldf["window_index"], errors="coerce"),
+                    pd.to_numeric(ldf["final_err"], errors="coerce"),
+                    marker="o",
+                    linewidth=1.0,
+                    label=str(label).replace("optics.primary.", "m1.").replace("optics.secondary.", "m2."),
+                )
+            ax.axhline(0.0, color="black", linewidth=0.8)
+            ax.set_yscale("symlog", linthresh=0.01)
+            ax.set_xlabel("Window")
+            ax.set_ylabel("Signed Zernike error (nm)")
+            ax.grid(True, alpha=0.25, which="both")
+            if zp["parameter_label"].nunique(dropna=False) <= 16:
+                ax.legend(fontsize=6, ncol=2)
+            fig.tight_layout()
+            fig.savefig(plotdir / "zernike_error_evolution_signed_symlog.png", dpi=150)
+            plt.close(fig)
 
 
 def line_plot(df: pd.DataFrame, x: str, cols: list[str], path: Path, xlabel: str, ylabel: str) -> None:
@@ -1778,6 +2154,7 @@ def plot_forecast_outputs(
             ax.axvline(0.0, color="black", linewidth=0.8)
             ax.set_xlabel("Projected final separation error (microas)")
             ax.set_ylabel("Cases")
+            ax.grid(True, alpha=0.25)
             fig.tight_layout()
             fig.savefig(plotdir / "projected_30min_separation_residual_distribution.png", dpi=150)
             plt.close(fig)
@@ -1796,6 +2173,7 @@ def plot_forecast_outputs(
             )
             ax.set_xlabel("Projected final posterior sigma (microas)")
             ax.set_ylabel("Cases")
+            ax.grid(True, alpha=0.25)
             fig.tight_layout()
             fig.savefig(plotdir / "projected_30min_posterior_sigma_distribution.png", dpi=150)
             plt.close(fig)
@@ -1858,13 +2236,13 @@ def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.
         "Existing campaigns may lack stage-level runtime and memory artifacts unless they were run with runtime profiling, memory diagnostics, and/or resource-time enabled.",
         "",
         "## Iterative progress",
-        "See [iterative_window_progress.csv](iterative_window_progress.csv) and plots [iterative_error_norm.png](plots/iterative_error_norm.png), [update_alignment_by_window.png](plots/update_alignment_by_window.png), and [separation_error_by_window.png](plots/separation_error_by_window.png).",
+        "See [iterative_window_progress.csv](iterative_window_progress.csv), [separation_error_summary.csv](separation_error_summary.csv), and plots [separation_error_evolution_abs_log.png](plots/separation_error_evolution_abs_log.png), [separation_error_evolution_signed_symlog.png](plots/separation_error_evolution_signed_symlog.png), [iterative_error_norm.png](plots/iterative_error_norm.png), [update_alignment_by_window.png](plots/update_alignment_by_window.png), and [separation_error_by_window.png](plots/separation_error_by_window.png).",
         "",
         "## Projected 30-minute observation forecast",
         "See [final_observation_summary.csv](final_observation_summary.csv), [projected_observation_forecast.csv](projected_observation_forecast.csv), and [window_evolution_actual_and_projected.csv](window_evolution_actual_and_projected.csv). These results are projected from the realized actual windows, not from a fully rendered 60-window observation.",
         "",
         "## Slow-state evolution",
-        "See [slow_state_evolution.csv](slow_state_evolution.csv) and [slow_state_final_summary.csv](slow_state_final_summary.csv).",
+        "See [slow_parameter_error_summary.csv](slow_parameter_error_summary.csv), [slow_state_evolution.csv](slow_state_evolution.csv), and [slow_state_final_summary.csv](slow_state_final_summary.csv). Standard slow-parameter plots include [slow_parameter_final_error_bar.png](plots/slow_parameter_final_error_bar.png), [slow_parameter_final_error_over_sigma_bar.png](plots/slow_parameter_final_error_over_sigma_bar.png), and [slow_parameter_evolution_signed_symlog.png](plots/slow_parameter_evolution_signed_symlog.png).",
         "",
         "## Parameter constraints and degeneracies",
         "See [iterative_parameter_progress.csv](iterative_parameter_progress.csv), [parameter_sloppiness_summary.csv](parameter_sloppiness_summary.csv), [correlation_top_pairs.csv](correlation_top_pairs.csv), and [eigenmode_summary.csv](eigenmode_summary.csv). Zernike behavior is plotted in [zernike_m1_m2_offsets.png](plots/zernike_m1_m2_offsets.png).",
@@ -1950,6 +2328,8 @@ def run(args: argparse.Namespace) -> int:
     subblock_metrics, local_policy = subblock_metric_summary(run_root)
     traj, resid, smear = trajectory_tables(run_root)
     slow_evo, slow_final = slow_state_tables(param)
+    sep_summary = separation_error_summary(win)
+    slow_param_summary = slow_parameter_error_summary(param)
     sloppy, corr, eig = sloppiness_tables(run_root, param)
     final_forecast, projected_forecast, forecast_evolution = forecast_tables(run_root)
     dashboard = campaign_dashboard(run_root, artifacts)
@@ -1963,6 +2343,7 @@ def run(args: argparse.Namespace) -> int:
         "campaign_dashboard.csv": dashboard,
         "execution_status.csv": exec_status,
         "iterative_window_progress.csv": win,
+        "separation_error_summary.csv": sep_summary,
         "eigen_update_modes.csv": eigen_update_modes,
         "eigen_update_window_summary.csv": eigen_update_summary,
         "eigen_update_mode_contributions.csv": eigen_update_contributions,
@@ -1977,6 +2358,7 @@ def run(args: argparse.Namespace) -> int:
         "smear_summary_review.csv": smear,
         "slow_state_evolution.csv": slow_evo,
         "slow_state_final_summary.csv": slow_final,
+        "slow_parameter_error_summary.csv": slow_param_summary,
         "final_observation_summary.csv": final_forecast,
         "projected_observation_forecast.csv": projected_forecast,
         "window_evolution_actual_and_projected.csv": forecast_evolution,
