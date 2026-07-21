@@ -349,7 +349,7 @@ def _mirror_offset(mirror: str) -> int:
     return {"primary": 1, "secondary": 2}.get(str(mirror), 9)
 
 
-def build_mirror_wfe_deck(mirror: str, *, shape: tuple[int, int] = (128, 128), seed: int = 42, mask: np.ndarray | None = None, mask_policy: str = "circular_fallback", truth_rms_opd_nm: float = 20.0, truth_power_law_alpha: float = 2.5, low_order_noll_indices: tuple[int, ...] = DEFAULT_LOW_ORDER_NOLL_INDICES, low_order_sigma_nm_per_coeff: float = 2.0, high_order_error_rms_nm: float = 0.3, high_order_error_power_law_alpha: float | None = None, high_order_error_remove_noll_indices: tuple[int, ...] | None = None) -> MirrorWfeDeck:
+def build_mirror_wfe_deck(mirror: str, *, shape: tuple[int, int] = (128, 128), seed: int = 42, mask: np.ndarray | None = None, mask_policy: str = "circular_fallback", truth_rms_opd_nm: float = 20.0, truth_power_law_alpha: float = 2.5, low_order_noll_indices: tuple[int, ...] = DEFAULT_LOW_ORDER_NOLL_INDICES, low_order_sigma_nm_per_coeff: float = 2.0, high_order_error_rms_nm: float = 0.3, high_order_error_power_law_alpha: float | None = None, high_order_error_remove_noll_indices: tuple[int, ...] | None = None, high_order_error_seed: int | None = None) -> MirrorWfeDeck:
     """Build one deterministic mirror WFE truth/knowledge decomposition."""
 
     shape = _as_shape(shape)
@@ -358,7 +358,11 @@ def build_mirror_wfe_deck(mirror: str, *, shape: tuple[int, int] = (128, 128), s
     mo = _mirror_offset(mirror)
     truth_seed = _seed(seed, mo, 11)
     low_order_seed = _seed(seed, mo, 23)
-    error_seed = _seed(seed, mo, 37)
+    error_seed = (
+        _seed(seed, mo, 37)
+        if high_order_error_seed is None
+        else int(high_order_error_seed)
+    )
     alpha_err = truth_power_law_alpha if high_order_error_power_law_alpha is None else float(high_order_error_power_law_alpha)
 
     raw = generate_power_law_opd_map(shape, alpha=truth_power_law_alpha, seed=truth_seed, rms_opd_nm=1.0, mask=valid)
@@ -455,6 +459,7 @@ def build_high_order_wfe_deck(*, shape: tuple[int, int] = (128, 128), seed: int 
             "high_order_error_rms_nm": float(_cfg_get(cfg, ("knowledge", "high_order_error_rms_nm"), 0.3)),
             "high_order_error_power_law_alpha": _cfg_get(cfg, ("knowledge", "high_order_error_power_law_alpha"), None),
             "high_order_error_remove_noll_indices": tuple(int(i) for i in _cfg_get(cfg, ("knowledge", "high_order_error_remove_noll_indices"), _cfg_get(cfg, ("truth", "fit_low_order_zernikes"), DEFAULT_LOW_ORDER_NOLL_INDICES))),
+            "high_order_error_seed": _cfg_get(cfg, ("knowledge", "high_order_error_seed"), None),
         }
 
     primary = build_mirror_wfe_deck("primary", shape=shape, seed=seed, mask=mask, mask_policy=mask_policy, **kwargs(primary_config))

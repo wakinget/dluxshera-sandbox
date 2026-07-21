@@ -278,6 +278,7 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         or trajectory_processing_cfg.get("high_pass_filter")
         or {}
     )
+    offsets_cfg = dict(trajectory_processing_cfg.get("offsets", {}) or {})
     filter_spec = parse_trajectory_filter_config(filter_cfg)
     smear_cfg = parse_smear_config(
         trajectory_processing_cfg,
@@ -299,6 +300,7 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
         time_mode="inferred_uniform",
         time_start_s=0.0,
         filter_config=filter_cfg,
+        offsets_config=offsets_cfg,
     )
     unfiltered_blocks = None
     if filter_spec.write_unfiltered_comparison and trajectory.unfiltered_values is not None:
@@ -320,7 +322,8 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
 
     run_root.mkdir(parents=True, exist_ok=True)
     filter_artifacts: dict[str, Any] = {}
-    if filter_spec.enabled and filter_spec.kind != "none":
+    offsets_enabled = bool(trajectory.offset_provenance and trajectory.offset_provenance.get("enabled"))
+    if (filter_spec.enabled and filter_spec.kind != "none") or offsets_enabled:
         filter_artifacts = write_trajectory_filter_artifacts(
             outdir=run_root,
             trajectory=trajectory,
@@ -394,6 +397,17 @@ def run_trajectory_subblock_campaign(args: argparse.Namespace) -> dict[str, Any]
             "zero_phase": filter_spec.zero_phase,
             "apply_stage": filter_spec.apply_stage,
             "provenance_json": str(filter_artifacts.get("trajectory_filter_provenance_json", "")),
+        },
+        "offsets": {
+            "enabled": bool(offsets_enabled),
+            "requested_offsets": dict(offsets_cfg),
+            "stage": (
+                None
+                if trajectory.offset_provenance is None
+                else trajectory.offset_provenance.get("stage")
+            ),
+            "provenance_json": str(filter_artifacts.get("trajectory_offset_provenance_json", "")),
+            "summary_csv": str(filter_artifacts.get("trajectory_offset_summary_csv", "")),
         },
     }
     write_json(run_root / "trajectory_ingest_summary.json", ingest_summary)

@@ -96,6 +96,61 @@ def test_trajectory_trace_source_binary_writes_xy_pa_artifacts(tmp_path):
     assert "source.position_angle_deg" in truth.read_text(encoding="utf-8")
 
 
+def test_trajectory_trace_source_offsets_write_shifted_artifacts_and_provenance(tmp_path):
+    plan = prepare_campaign_trace_source(
+        trace_source_cfg={
+            "mode": "trajectory",
+            "source": {"kind": "airbus_csv", "path": str(_write_airbus_fixture(tmp_path / "airbus.csv"))},
+            "processing": {
+                "offsets": {
+                    "source.x_position_as": 1.0,
+                    "source.y_position_as": -1.0,
+                    "source.position_angle_deg": 0.5,
+                }
+            },
+            "window": {"start_s": 0.0, "n_subblocks": 1},
+            "sampling": {
+                "frame_dt_s": 0.05,
+                "subblock_duration_s": 0.1,
+                "n_frames_per_subblock": 2,
+            },
+            "output_keys": [
+                "source.x_position_as",
+                "source.y_position_as",
+                "source.position_angle_deg",
+            ],
+        },
+        run_root=tmp_path,
+        source_kind="binary",
+        active_frame_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ),
+        n_subblocks=1,
+        n_frames_per_subblock=2,
+        frame_dt_s=0.05,
+        subblock_duration_s=0.1,
+        default_output_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ),
+    )
+
+    row = plan.rows[0]
+    assert row["trajectory_offsets_enabled"] is True
+    assert Path(row["trajectory_offset_provenance_json"]).exists()
+    truth_rows = list(csv.DictReader(Path(row["frame_truth_path"]).open("r", encoding="utf-8")))
+    guess_rows = list(csv.DictReader(Path(row["starting_guess_prediction_path"]).open("r", encoding="utf-8")))
+    assert float(truth_rows[0]["source.x_position_as"]) == pytest.approx(2.0)
+    assert float(guess_rows[0]["source.x_position_as_linear_fit"]) == pytest.approx(2.0)
+    provenance = json.loads(Path(row["trajectory_offset_provenance_json"]).read_text(encoding="utf-8"))
+    stats = provenance["statistics"]["source.x_position_as"]
+    assert stats["mean_delta"] == pytest.approx(1.0)
+    assert stats["residual_std_unchanged"] is True
+
+
 def test_trajectory_trace_source_single_star_xy_only_does_not_require_pa(tmp_path):
     plan = prepare_campaign_trace_source(
         trace_source_cfg={

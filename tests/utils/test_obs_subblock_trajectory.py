@@ -8,10 +8,13 @@ import pytest
 from dluxshera.utils.obs_subblock_trajectory import (
     CanonicalTrajectory,
     RawTrajectory,
+    apply_filter_to_trajectory,
+    apply_offsets_to_trajectory,
     build_frame_times,
     interpolate_trajectory,
     load_airbus_csv,
     map_trajectory,
+    parse_trajectory_offsets_config,
     prepare_airbus_subblocks,
     split_subblocks,
     write_subblock_artifacts,
@@ -132,6 +135,128 @@ def test_csv_artifacts_and_xy_only_output_omit_position_angle(tmp_path):
     assert "source.y_position_as" in guess_text
     assert "source.position_angle_deg" not in truth_text
     assert "source.position_angle_deg" not in guess_text
+
+
+def test_zero_trajectory_offsets_preserve_values() -> None:
+    trajectory = _linear_xy_trajectory()
+    shifted = apply_offsets_to_trajectory(
+        trajectory,
+        offsets={
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
+            "source.position_angle_deg": 0.0,
+        },
+        stage="unit",
+    )
+
+    for key in trajectory.values:
+        assert np.allclose(shifted.values[key], trajectory.values[key])
+    assert shifted.offset_provenance["enabled"] is True
+
+
+def test_trajectory_offsets_are_additive_and_preserve_residual_motion() -> None:
+    trajectory = _linear_xy_trajectory()
+    shifted = apply_offsets_to_trajectory(
+        trajectory,
+        offsets={
+            "source.x_position_as": 1.0,
+            "source.y_position_as": -2.0,
+            "source.position_angle_deg": 0.25,
+        },
+        stage="after_filter_before_window_interpolation",
+    )
+
+    assert np.allclose(
+        shifted.values["source.x_position_as"],
+        trajectory.values["source.x_position_as"] + 1.0,
+    )
+    assert np.allclose(
+        shifted.values["source.y_position_as"],
+        trajectory.values["source.y_position_as"] - 2.0,
+    )
+    assert np.allclose(
+        shifted.values["source.position_angle_deg"],
+        trajectory.values["source.position_angle_deg"] + 0.25,
+    )
+    stats = shifted.offset_provenance["statistics"]["source.x_position_as"]
+    assert stats["mean_delta"] == pytest.approx(1.0)
+    assert stats["std_delta"] == pytest.approx(0.0)
+    assert stats["peak_to_peak_delta"] == pytest.approx(0.0)
+    assert stats["residual_std_unchanged"] is True
+
+
+def test_trajectory_offsets_apply_after_filtering() -> None:
+    raw = RawTrajectory(
+        time_s=np.arange(80, dtype=float) * 0.1,
+        columns={
+            "x_as": np.linspace(0.0, 1.0, 80) + 0.01 * np.sin(np.arange(80)),
+            "y_as": np.linspace(1.0, 2.0, 80),
+            "z_as": np.zeros(80, dtype=float),
+        },
+        source_path=Path("filter.csv"),
+        source_kind="airbus_csv",
+    )
+    trajectory = map_trajectory(raw)
+    filtered = apply_filter_to_trajectory(
+        trajectory,
+        config={
+            "enabled": True,
+            "kind": "high_pass",
+            "method": "bessel",
+            "order": 2,
+            "cutoff_period_s": 2.0,
+            "zero_phase": True,
+            "columns": ["source.x_position_as"],
+        },
+    )
+    shifted = apply_offsets_to_trajectory(
+        filtered,
+        offsets={"source.x_position_as": 1.0},
+        stage="after_filter_before_window_interpolation",
+    )
+
+    assert np.allclose(
+        shifted.values["source.x_position_as"],
+        filtered.values["source.x_position_as"] + 1.0,
+    )
+
+
+def test_integrated_offsets_shift_frame_truth_and_starting_guess(tmp_path: Path) -> None:
+    _, _, blocks = prepare_airbus_subblocks(
+        path=_write_airbus_fixture(tmp_path / "airbus.csv"),
+        start_s=0.0,
+        duration_s=0.1,
+        sample_dt_s=0.1,
+        frame_dt_s=0.05,
+        subblock_duration_s=0.1,
+        n_frames_per_subblock=2,
+        output_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+            "source.position_angle_deg",
+        ),
+        offsets_config={
+            "source.x_position_as": 1.0,
+            "source.y_position_as": -1.0,
+            "source.position_angle_deg": 0.5,
+        },
+    )
+
+    block = blocks[0]
+    assert np.allclose(block.truth["source.x_position_as"], [2.0, 2.05])
+    assert np.allclose(block.truth["source.y_position_as"], [1.0, 1.1])
+    assert np.allclose(block.truth["source.position_angle_deg"], [1.5, 2.0])
+    assert np.allclose(
+        block.prediction["source.x_position_as"],
+        block.truth["source.x_position_as"],
+    )
+
+
+def test_trajectory_offsets_reject_invalid_keys_and_nonfinite_values() -> None:
+    with pytest.raises(ValueError, match="unsupported keys"):
+        parse_trajectory_offsets_config({"source.bad": 1.0})
+    with pytest.raises(ValueError, match="must be finite"):
+        parse_trajectory_offsets_config({"source.x_position_as": float("nan")})
 
 
 def _linear_xy_trajectory() -> CanonicalTrajectory:

@@ -198,3 +198,67 @@ Do not use this with the shard helper:
 
 The helper and sbatch wrapper add `observation_bias_campaign` themselves.
 Passing the nested path produces doubled run roots.
+
+## HO-WFE Field-Dither Family
+
+The 2026-07 per-mirror high-order WFE knowledge-error and field-dither family is
+prepared by:
+
+```bash
+PYTHONPATH=src:. python examples/scripts/prepare_howfe_field_dither_campaign_family.py --overwrite
+```
+
+This writes source configs, draw-level shard configs, manifests, status helpers,
+and Gattaca Edge submit scripts under:
+
+```text
+examples/recipes/full_fidelity_howfe_field_dither_20260720/
+```
+
+The helper delegates sharding to `prepare_full_fidelity_campaign_shards.py` and
+does not execute validation, preflight, or production jobs. The generated
+scientific YAMLs keep scheduler details outside the config; Edge-specific launch
+details live in `submit_draw_shards_edge.sh`.
+
+Cheap login-node audits:
+
+```bash
+PYTHONPATH=src python examples/scripts/audit_campaign_config_schema.py \
+  --config examples/recipes/full_fidelity_howfe_field_dither_20260720/configs/production/ff_howfe_field_m1_hoke_0p1nm_xp0p0_yp0p0_w10x30_v1.yaml
+
+PYTHONPATH=src python examples/scripts/audit_campaign_config_schema.py \
+  --config examples/recipes/full_fidelity_howfe_field_dither_20260720/configs/production/ff_howfe_field_m2_hoke_0p1nm_xp0p0_yp0p0_w10x30_v1.yaml
+
+PYTHONPATH=src python examples/scripts/audit_campaign_config_schema.py \
+  --config examples/recipes/full_fidelity_howfe_field_dither_20260720/configs/controls/ff_howfe_field_noke_xp0p0_yp0p0_w10x30_v1.yaml
+
+PYTHONPATH=src python examples/scripts/audit_campaign_config_schema.py \
+  --config examples/recipes/full_fidelity_howfe_field_dither_20260720/configs/production/ff_howfe_field_m2_hoke_0p1nm_xp1p0_yp0p0_w10x30_v1.yaml
+
+PYTHONPATH=src python examples/scripts/audit_campaign_config_schema.py \
+  --config examples/recipes/full_fidelity_howfe_field_dither_20260720/configs/production/ff_howfe_field_m1_hoke_0p1nm_xp0p0_yp0p0_w10x30_v1.yaml \
+  --check-shard-manifest examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/production_center/shard_manifest.csv
+```
+
+Validation launch, not run during preparation:
+
+```bash
+./examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/validation/submit_draw_shards_edge.sh
+```
+
+Production priority order, not run during preparation:
+
+```bash
+./examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/production_center/submit_draw_shards_edge.sh
+./examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/production_m2_offaxis/submit_draw_shards_edge.sh
+./examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/production_m1_offaxis/submit_draw_shards_edge.sh
+./examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/controls/submit_draw_shards_edge.sh
+```
+
+The generated preflight scripts are still expensive because they call the
+full-fidelity wrapper `--dry-run`; reserve them for compute nodes.
+
+For TACC, reuse the same scientific YAMLs and provide a site wrapper with module
+or Conda activation, repository/data paths, results root, Slurm
+account/partition, CPU and memory requests, JAX cache path, and submission
+syntax appropriate to that system.

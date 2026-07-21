@@ -19,13 +19,14 @@ The current preparation workflow:
 1. loads the raw Airbus trajectory
 2. normalizes it to canonical dLuxShera frame keys
 3. optionally filters the full mapped trajectory when configured
-4. selects a requested time window
-5. linearly interpolates the trajectory to the frame cadence, normally 50 ms
-6. splits the selected frames into non-overlapping subblocks
-7. writes each subblock's `frame_truth.csv`
-8. fits a per-subblock line for each active registration key and writes
+4. adds configured constant X/Y/PA offsets
+5. selects a requested time window
+6. linearly interpolates the trajectory to the frame cadence, normally 50 ms
+7. splits the selected frames into non-overlapping subblocks
+8. writes each subblock's `frame_truth.csv`
+9. fits a per-subblock line for each active registration key and writes
    `starting_guess_prediction.csv`
-9. writes case-local trace/render/inference config records and `command.sh`
+10. writes case-local trace/render/inference config records and `command.sh`
 
 For a 20-frame, 50 ms subblock, frame times are
 `t_block_start + i * 0.05` for `i = 0 ... 19`, so one block covers 0.00 through
@@ -73,6 +74,27 @@ Cutoff periods are frequency conveniences, not time constants: `cutoff_hz = 1 / 
 The default `apply_stage` is `before_window`: load the full raw trajectory, map it to canonical columns, filter the full mapped sequence, then select frame windows and split subblocks. This is preferred for high-pass/low-pass conditioning because zero-phase filters need padding and short selected windows can create edge artifacts. `after_window` is supported for diagnostics and records an edge-artifact warning.
 
 When filtering is enabled the trajectory root records `trajectory_raw.csv`, `trajectory_filtered.csv`, `trajectory_filter_provenance.json`, `trajectory_filter_summary.csv`, and `trajectory_filter_diagnostic.png`. The provenance records cutoff fields, sample cadence, Nyquist frequency, columns filtered, input/output/removed RMS by column, method/order, zero-phase setting, and warnings. Per-subblock `frame_truth.csv` is the filtered truth used by rendering. A standalone trajectory campaign can also write `frame_truth_unfiltered.csv` when `write_unfiltered_comparison: true`.
+
+Constant field dithers are configured under the same processing block:
+
+```yaml
+processing:
+  offsets:
+    source.x_position_as: 1.0
+    source.y_position_as: 0.0
+    source.position_angle_deg: 0.0
+```
+
+Offsets are applied after filtering and before interpolation for the canonical
+`apply_stage: before_window` path. For the diagnostic `after_window` filter
+path, offsets are applied after that frame-sampled filter and before subblock
+splitting. This shifts the mean field location while preserving the filtered
+residual standard deviation and peak-to-peak motion. The final `frame_truth.csv`
+and `starting_guess_prediction.csv` both receive the same shifted trajectory.
+When offsets are present, the trajectory root records
+`trajectory_offset_provenance.json` and `trajectory_offset_summary.csv` with
+requested offsets, application stage, and pre/post mean, standard deviation,
+min, max, and peak-to-peak statistics.
 
 Single-star calibration-style preparation can omit PA by passing explicit
 output keys, for example:

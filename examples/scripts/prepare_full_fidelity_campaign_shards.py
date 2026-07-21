@@ -47,6 +47,19 @@ MANIFEST_FIELDS = (
     "recommended_mem",
     "recommended_max_workers",
     "sbatch_command",
+    "ho_ke_active_mirror",
+    "ho_ke_primary_enabled",
+    "ho_ke_secondary_enabled",
+    "ho_ke_primary_amplitude_nm_rms",
+    "ho_ke_secondary_amplitude_nm_rms",
+    "field_offset_x_as",
+    "field_offset_y_as",
+    "field_offset_pa_deg",
+    "truth_seed",
+    "knowledge_error_seed",
+    "primary_ke_map_hash",
+    "secondary_ke_map_hash",
+    "map_group",
 )
 
 
@@ -73,6 +86,7 @@ class Shard:
     expected_subblocks_per_window: int
     m1_sigma_nm: float | None
     m2_sigma_nm: float | None
+    metadata: dict[str, Any]
 
 
 def _mapping(value: Any, *, name: str) -> dict[str, Any]:
@@ -96,6 +110,23 @@ def _sigma_nm(condition: Mapping[str, Any], key: str) -> float | None:
     if not isinstance(entry, Mapping) or entry.get("sigma") is None:
         return None
     return float(entry["sigma"])
+
+
+def _campaign_condition_metadata(
+    config: Mapping[str, Any],
+    condition: Mapping[str, Any],
+) -> dict[str, Any]:
+    experiment = config.get("experiment")
+    out: dict[str, Any] = {}
+    if isinstance(experiment, Mapping):
+        for key in ("campaign_family", "campaign_family_condition", "sweep_condition"):
+            value = experiment.get(key)
+            if isinstance(value, Mapping):
+                out.update(dict(value))
+    value = condition.get("metadata")
+    if isinstance(value, Mapping):
+        out.update(dict(value))
+    return out
 
 
 def _expected_n_theta(config: Mapping[str, Any]) -> int:
@@ -241,6 +272,7 @@ def build_shards(
                     expected_subblocks_per_window=subblocks_per_window,
                     m1_sigma_nm=_sigma_nm(condition, PRIMARY_SIGMA_KEY),
                     m2_sigma_nm=_sigma_nm(condition, SECONDARY_SIGMA_KEY),
+                    metadata=_campaign_condition_metadata(source, condition),
                 )
             )
     return shards
@@ -510,6 +542,19 @@ def prepare_shards(
                 "recommended_mem": resources.mem,
                 "recommended_max_workers": resources.max_workers,
                 "sbatch_command": command,
+                "ho_ke_active_mirror": shard.metadata.get("ho_ke_active_mirror", ""),
+                "ho_ke_primary_enabled": shard.metadata.get("ho_ke_primary_enabled", ""),
+                "ho_ke_secondary_enabled": shard.metadata.get("ho_ke_secondary_enabled", ""),
+                "ho_ke_primary_amplitude_nm_rms": shard.metadata.get("ho_ke_primary_amplitude_nm_rms", ""),
+                "ho_ke_secondary_amplitude_nm_rms": shard.metadata.get("ho_ke_secondary_amplitude_nm_rms", ""),
+                "field_offset_x_as": shard.metadata.get("field_offset_x_as", ""),
+                "field_offset_y_as": shard.metadata.get("field_offset_y_as", ""),
+                "field_offset_pa_deg": shard.metadata.get("field_offset_pa_deg", ""),
+                "truth_seed": shard.metadata.get("truth_seed", ""),
+                "knowledge_error_seed": shard.metadata.get("knowledge_error_seed", ""),
+                "primary_ke_map_hash": shard.metadata.get("primary_ke_map_hash", ""),
+                "secondary_ke_map_hash": shard.metadata.get("secondary_ke_map_hash", ""),
+                "map_group": shard.metadata.get("map_group", ""),
             }
         )
 
@@ -580,11 +625,170 @@ def prepare_shards(
     return rows
 
 
+def prepare_shards_for_configs(
+    *,
+    config_paths: Sequence[Path],
+    outdir: Path,
+    run_name_prefix: str,
+    mode: str,
+    results_root: Path | None,
+    resources: Resources,
+    dry_run: bool,
+    overwrite: bool,
+) -> list[dict[str, Any]]:
+    """Prepare one combined shard directory from multiple source configs."""
+
+    configs_dir = outdir / "configs"
+    manifest_path = outdir / "shard_manifest.csv"
+    rows: list[dict[str, Any]] = []
+    shards_by_source: list[tuple[Path, int, list[Shard]]] = []
+    seen_names: set[str] = set()
+    for config_path in config_paths:
+        config = load_campaign_config(config_path)
+        expected_n_theta = _expected_n_theta(config)
+        shards = build_shards(
+            config,
+            run_name_prefix=run_name_prefix,
+            mode=mode,
+        )
+        for shard in shards:
+            if shard.name in seen_names:
+                raise ValueError(f"Generated duplicate shard name: {shard.name}.")
+            seen_names.add(shard.name)
+        shards_by_source.append((config_path, expected_n_theta, shards))
+
+    for config_path, expected_n_theta, shards in shards_by_source:
+        for shard in shards:
+            config_out = configs_dir / f"{shard.name}.yaml"
+            command = _sbatch_command(
+                shard=shard,
+                config_path=config_out,
+                results_root=results_root,
+                resources=resources,
+            )
+            rows.append(
+                {
+                    "shard_name": shard.name,
+                    "shard_mode": shard.mode,
+                    "source_config_path": _repo_relative(config_path),
+                    "config_path": _repo_relative(config_out),
+                    "expected_run_root": _expected_run_root(
+                        results_root,
+                        shard.name,
+                    ),
+                    "condition_label": shard.condition_label,
+                    "m1_sigma_nm": (
+                        "" if shard.m1_sigma_nm is None else shard.m1_sigma_nm
+                    ),
+                    "m2_sigma_nm": (
+                        "" if shard.m2_sigma_nm is None else shard.m2_sigma_nm
+                    ),
+                    "draw_start": shard.draw_start,
+                    "draw_stop": shard.draw_stop,
+                    "draw_index": (
+                        "" if shard.draw_index is None else shard.draw_index
+                    ),
+                    "expected_subblocks": shard.expected_subblocks,
+                    "expected_windows": shard.expected_windows,
+                    "expected_subblocks_per_window": (
+                        shard.expected_subblocks_per_window
+                    ),
+                    "expected_n_theta": expected_n_theta,
+                    "recommended_time": resources.time,
+                    "recommended_cpus_per_task": resources.cpus_per_task,
+                    "recommended_mem": resources.mem,
+                    "recommended_max_workers": resources.max_workers,
+                    "sbatch_command": command,
+                    "ho_ke_active_mirror": shard.metadata.get("ho_ke_active_mirror", ""),
+                    "ho_ke_primary_enabled": shard.metadata.get("ho_ke_primary_enabled", ""),
+                    "ho_ke_secondary_enabled": shard.metadata.get("ho_ke_secondary_enabled", ""),
+                    "ho_ke_primary_amplitude_nm_rms": shard.metadata.get("ho_ke_primary_amplitude_nm_rms", ""),
+                    "ho_ke_secondary_amplitude_nm_rms": shard.metadata.get("ho_ke_secondary_amplitude_nm_rms", ""),
+                    "field_offset_x_as": shard.metadata.get("field_offset_x_as", ""),
+                    "field_offset_y_as": shard.metadata.get("field_offset_y_as", ""),
+                    "field_offset_pa_deg": shard.metadata.get("field_offset_pa_deg", ""),
+                    "truth_seed": shard.metadata.get("truth_seed", ""),
+                    "knowledge_error_seed": shard.metadata.get("knowledge_error_seed", ""),
+                    "primary_ke_map_hash": shard.metadata.get("primary_ke_map_hash", ""),
+                    "secondary_ke_map_hash": shard.metadata.get("secondary_ke_map_hash", ""),
+                    "map_group": shard.metadata.get("map_group", ""),
+                }
+            )
+
+    if dry_run:
+        for row in rows:
+            print(
+                f"{row['shard_name']}: {row['expected_subblocks']} subblocks, "
+                f"{row['expected_windows']} windows -> {row['config_path']}"
+            )
+        return rows
+
+    targets = [
+        manifest_path,
+        outdir / f"submit_{mode}_shards.sh",
+        outdir / f"preflight_{mode}_shards.sh",
+        outdir / "summarize_shard_status.sh",
+        outdir / "README.md",
+        *(configs_dir / f"{row['shard_name']}.yaml" for row in rows),
+    ]
+    existing = [path for path in targets if path.exists()]
+    if existing and not overwrite:
+        raise FileExistsError(
+            "Refusing to overwrite generated files: "
+            + ", ".join(str(path) for path in existing[:5])
+        )
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    for _, _, shards in shards_by_source:
+        for shard in shards:
+            path = configs_dir / f"{shard.name}.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    shard.config,
+                    sort_keys=False,
+                    default_flow_style=False,
+                ),
+                encoding="utf-8",
+            )
+    with manifest_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    scripts = {
+        outdir / f"submit_{mode}_shards.sh": _submit_script(
+            rows=rows,
+            results_root=results_root,
+        ),
+        outdir / f"preflight_{mode}_shards.sh": _preflight_script(
+            manifest_path=manifest_path,
+            mode=mode,
+        ),
+        outdir / "summarize_shard_status.sh": _status_script(
+            manifest_path=manifest_path,
+            results_root=results_root,
+        ),
+    }
+    for path, text in scripts.items():
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+    (outdir / "README.md").write_text(
+        _readme(
+            source_config=config_paths[0],
+            mode=mode,
+            resources=resources,
+            shard_count=len(rows),
+        )
+        + f"\nCombined source configs: {len(config_paths)}\n",
+        encoding="utf-8",
+    )
+    print(f"Wrote {len(rows)} {mode} shards to {outdir}")
+    return rows
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate full-fidelity iterative campaign shard configs."
     )
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path, nargs="+", required=True)
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--run-name-prefix", required=True)
     parser.add_argument("--mode", choices=("condition", "draw"), default="condition")
@@ -603,21 +807,34 @@ def main(argv: list[str] | None = None) -> None:
     if args.cpus_per_task <= 0 or args.max_workers <= 0:
         raise SystemExit("--cpus-per-task and --max-workers must be positive.")
     default_time = "36:00:00" if args.mode == "condition" else "12:00:00"
-    prepare_shards(
-        config_path=args.config,
-        outdir=args.outdir,
-        run_name_prefix=args.run_name_prefix,
-        mode=args.mode,
-        results_root=args.results_root,
-        resources=Resources(
-            time=args.time or default_time,
-            cpus_per_task=args.cpus_per_task,
-            mem=args.mem,
-            max_workers=args.max_workers,
-        ),
-        dry_run=bool(args.dry_run),
-        overwrite=bool(args.overwrite),
+    resources = Resources(
+        time=args.time or default_time,
+        cpus_per_task=args.cpus_per_task,
+        mem=args.mem,
+        max_workers=args.max_workers,
     )
+    if len(args.config) == 1:
+        prepare_shards(
+            config_path=args.config[0],
+            outdir=args.outdir,
+            run_name_prefix=args.run_name_prefix,
+            mode=args.mode,
+            results_root=args.results_root,
+            resources=resources,
+            dry_run=bool(args.dry_run),
+            overwrite=bool(args.overwrite),
+        )
+    else:
+        prepare_shards_for_configs(
+            config_paths=args.config,
+            outdir=args.outdir,
+            run_name_prefix=args.run_name_prefix,
+            mode=args.mode,
+            results_root=args.results_root,
+            resources=resources,
+            dry_run=bool(args.dry_run),
+            overwrite=bool(args.overwrite),
+        )
 
 
 if __name__ == "__main__":

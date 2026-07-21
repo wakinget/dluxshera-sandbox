@@ -68,6 +68,7 @@ class CanonicalTrajectory:
     raw: RawTrajectory
     mapping: Mapping[str, Mapping[str, Any]]
     filter_provenance: Mapping[str, Any] | None = None
+    offset_provenance: Mapping[str, Any] | None = None
     unfiltered_values: Mapping[str, np.ndarray] | None = None
 
 
@@ -264,8 +265,108 @@ def apply_filter_to_trajectory(
         raw=trajectory.raw,
         mapping=trajectory.mapping,
         filter_provenance=provenance,
+        offset_provenance=trajectory.offset_provenance,
         unfiltered_values=trajectory.values,
     )
+
+
+def _series_stats(values: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(values, dtype=float)
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "peak_to_peak": float(np.max(arr) - np.min(arr)),
+    }
+
+
+def parse_trajectory_offsets_config(
+    config: Mapping[str, Any] | None,
+    *,
+    available_keys: Sequence[str] | None = None,
+) -> dict[str, float]:
+    """Parse constant trajectory offsets keyed by canonical frame parameter."""
+
+    cfg = dict(config or {})
+    if not cfg:
+        return {}
+    keys = set(DEFAULT_OUTPUT_KEYS if available_keys is None else available_keys)
+    bad = sorted(set(str(key) for key in cfg) - keys)
+    if bad:
+        raise ValueError(
+            "trajectory offsets contain unsupported keys: " + ", ".join(bad)
+        )
+    out: dict[str, float] = {}
+    for key, value in cfg.items():
+        out[str(key)] = _finite_float(value, name=f"trajectory offsets {key}")
+    return out
+
+
+def apply_offsets_to_trajectory(
+    trajectory: CanonicalTrajectory,
+    *,
+    offsets: Mapping[str, Any] | None,
+    stage: str,
+) -> CanonicalTrajectory:
+    """Return a trajectory with constant offsets added to mapped parameters."""
+
+    parsed = parse_trajectory_offsets_config(offsets, available_keys=trajectory.values)
+    values = {
+        key: np.asarray(series, dtype=float).copy()
+        for key, series in trajectory.values.items()
+    }
+    shifted, provenance = apply_offsets_to_values(values, offsets=parsed, stage=stage)
+    return CanonicalTrajectory(
+        time_s=trajectory.time_s,
+        values=shifted,
+        raw=trajectory.raw,
+        mapping=trajectory.mapping,
+        filter_provenance=trajectory.filter_provenance,
+        offset_provenance=provenance,
+        unfiltered_values=trajectory.unfiltered_values,
+    )
+
+
+def apply_offsets_to_values(
+    values: Mapping[str, Sequence[float]],
+    *,
+    offsets: Mapping[str, Any] | None,
+    stage: str,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Return value columns shifted by constant canonical-parameter offsets."""
+
+    parsed = parse_trajectory_offsets_config(offsets, available_keys=values)
+    shifted = {
+        key: np.asarray(series, dtype=float).copy()
+        for key, series in values.items()
+    }
+    provenance: dict[str, Any] = {
+        "schema_version": "trajectory_offsets_provenance.v1",
+        "enabled": bool(parsed),
+        "stage": str(stage),
+        "requested_offsets": dict(parsed),
+        "columns": list(parsed),
+        "statistics": {},
+        "std_unchanged_tolerance": 1.0e-12,
+    }
+    for key, offset in parsed.items():
+        before = _series_stats(shifted[key])
+        series = shifted[key] + float(offset)
+        after = _series_stats(series)
+        shifted[key] = series
+        provenance["statistics"][key] = {
+            "requested_offset": float(offset),
+            "pre_offset": before,
+            "post_offset": after,
+            "mean_delta": float(after["mean"] - before["mean"]),
+            "std_delta": float(after["std"] - before["std"]),
+            "peak_to_peak_delta": float(after["peak_to_peak"] - before["peak_to_peak"]),
+            "residual_std_unchanged": bool(
+                np.isclose(after["std"], before["std"], atol=1.0e-12, rtol=1.0e-12)
+            ),
+        }
+    return shifted, provenance
 
 
 def derive_window_duration(
@@ -485,6 +586,8 @@ def write_trajectory_filter_artifacts(
     provenance_path = outdir / "trajectory_filter_provenance.json"
     summary_path = outdir / "trajectory_filter_summary.csv"
     diagnostic_path = outdir / "trajectory_filter_diagnostic.png"
+    offset_provenance_path = outdir / "trajectory_offset_provenance.json"
+    offset_summary_path = outdir / "trajectory_offset_summary.csv"
     write_rows_csv(raw_path, trajectory_rows(trajectory, values=raw_values), fieldnames)
     write_rows_csv(filtered_path, trajectory_rows(trajectory), fieldnames)
     provenance = dict(trajectory.filter_provenance or {})
@@ -526,13 +629,67 @@ def write_trajectory_filter_artifacts(
     except Exception as exc:
         with diagnostic_path.with_suffix(".txt").open("w", encoding="utf-8") as handle:
             handle.write(f"trajectory filter diagnostic plot unavailable: {exc}\n")
-    return {
+    written = {
         "trajectory_raw_csv": raw_path.resolve(),
         "trajectory_filtered_csv": filtered_path.resolve(),
         "trajectory_filter_provenance_json": provenance_path.resolve(),
         "trajectory_filter_summary_csv": summary_path.resolve(),
         "trajectory_filter_diagnostic_png": diagnostic_path.resolve(),
     }
+    offset_provenance = dict(trajectory.offset_provenance or {})
+    if offset_provenance:
+        with offset_provenance_path.open("w", encoding="utf-8") as handle:
+            json.dump(offset_provenance, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        offset_rows = []
+        for key, item in dict(offset_provenance.get("statistics", {}) or {}).items():
+            pre = dict(item.get("pre_offset", {}) or {})
+            post = dict(item.get("post_offset", {}) or {})
+            offset_rows.append(
+                {
+                    "column": key,
+                    "requested_offset": item.get("requested_offset", ""),
+                    "pre_mean": pre.get("mean", ""),
+                    "post_mean": post.get("mean", ""),
+                    "mean_delta": item.get("mean_delta", ""),
+                    "pre_std": pre.get("std", ""),
+                    "post_std": post.get("std", ""),
+                    "std_delta": item.get("std_delta", ""),
+                    "pre_min": pre.get("min", ""),
+                    "post_min": post.get("min", ""),
+                    "pre_max": pre.get("max", ""),
+                    "post_max": post.get("max", ""),
+                    "pre_peak_to_peak": pre.get("peak_to_peak", ""),
+                    "post_peak_to_peak": post.get("peak_to_peak", ""),
+                    "peak_to_peak_delta": item.get("peak_to_peak_delta", ""),
+                    "residual_std_unchanged": item.get("residual_std_unchanged", ""),
+                }
+            )
+        write_rows_csv(
+            offset_summary_path,
+            offset_rows,
+            (
+                "column",
+                "requested_offset",
+                "pre_mean",
+                "post_mean",
+                "mean_delta",
+                "pre_std",
+                "post_std",
+                "std_delta",
+                "pre_min",
+                "post_min",
+                "pre_max",
+                "post_max",
+                "pre_peak_to_peak",
+                "post_peak_to_peak",
+                "peak_to_peak_delta",
+                "residual_std_unchanged",
+            ),
+        )
+        written["trajectory_offset_provenance_json"] = offset_provenance_path.resolve()
+        written["trajectory_offset_summary_csv"] = offset_summary_path.resolve()
+    return written
 
 
 def write_subblock_artifacts(
@@ -585,6 +742,7 @@ def prepare_airbus_subblocks(
     time_start_s: float = 0.0,
     interpolation: str = "linear",
     filter_config: Mapping[str, Any] | None = None,
+    offsets_config: Mapping[str, Any] | None = None,
 ) -> tuple[CanonicalTrajectory, np.ndarray, list[SubblockTrajectory]]:
     """Load Airbus trajectory and return prepared subblocks."""
 
@@ -598,6 +756,11 @@ def prepare_airbus_subblocks(
     filter_spec = parse_trajectory_filter_config(filter_config)
     if filter_spec.apply_stage == "before_window":
         trajectory = apply_filter_to_trajectory(trajectory, config=filter_config)
+        trajectory = apply_offsets_to_trajectory(
+            trajectory,
+            offsets=offsets_config,
+            stage="after_filter_before_window_interpolation",
+        )
     resolved_duration = derive_window_duration(
         duration_s=duration_s,
         n_subblocks=n_subblocks,
@@ -642,8 +805,23 @@ def prepare_airbus_subblocks(
                 raw=trajectory.raw,
                 mapping=trajectory.mapping,
                 filter_provenance=provenance,
+                offset_provenance=trajectory.offset_provenance,
                 unfiltered_values=trajectory.values,
             )
+        truth, offset_provenance = apply_offsets_to_values(
+            truth,
+            offsets=offsets_config,
+            stage="after_window_filter_before_subblock_split",
+        )
+        trajectory = CanonicalTrajectory(
+            time_s=trajectory.time_s,
+            values=trajectory.values,
+            raw=trajectory.raw,
+            mapping=trajectory.mapping,
+            filter_provenance=trajectory.filter_provenance,
+            offset_provenance=offset_provenance,
+            unfiltered_values=trajectory.unfiltered_values,
+        )
     blocks = split_subblocks(
         frame_times_s=frame_times,
         truth_values=truth,
@@ -664,9 +842,12 @@ __all__ = [
     "derive_window_duration",
     "frame_truth_rows",
     "interpolate_trajectory",
+    "apply_offsets_to_trajectory",
+    "apply_offsets_to_values",
     "apply_filter_to_trajectory",
     "load_airbus_csv",
     "map_trajectory",
+    "parse_trajectory_offsets_config",
     "prepare_airbus_subblocks",
     "split_subblocks",
     "starting_guess_rows",

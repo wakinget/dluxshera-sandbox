@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from .obs_subblock_trajectory import (
     DEFAULT_OUTPUT_KEYS,
     TRAJECTORY_NOTES,
+    parse_trajectory_offsets_config,
     prepare_airbus_subblocks,
     write_subblock_artifacts,
     write_trajectory_filter_artifacts,
@@ -194,6 +195,13 @@ def _trajectory_plan(
         or legacy_processing_cfg.get("high_pass_filter")
         or {}
     )
+    offsets_cfg = dict(
+        processing_cfg.get("offsets")
+        if isinstance(processing_cfg.get("offsets"), Mapping)
+        else legacy_processing_cfg.get("offsets")
+        if isinstance(legacy_processing_cfg.get("offsets"), Mapping)
+        else {}
+    )
     filter_spec = parse_trajectory_filter_config(filter_cfg)
     start_s = float(window_cfg.get("start_s", 0.0))
     requested_n_subblocks = int(window_cfg.get("n_subblocks", n_subblocks))
@@ -206,6 +214,10 @@ def _trajectory_plan(
         trace_source_cfg.get("output_keys"),
         default=default_output_keys,
         field_name="subblocks.trace_source.output_keys",
+    )
+    parsed_offsets = parse_trajectory_offsets_config(
+        offsets_cfg,
+        available_keys=output_keys,
     )
     starting_guess_cfg = dict(trace_source_cfg.get("starting_guess", {}) or {})
     fit_keys = _as_key_tuple(
@@ -252,6 +264,14 @@ def _trajectory_plan(
                 path = trajectory_root / filename
                 if not path.exists():
                     missing.append(path)
+        if parsed_offsets:
+            for filename in (
+                "trajectory_offset_provenance.json",
+                "trajectory_offset_summary.csv",
+            ):
+                path = trajectory_root / filename
+                if not path.exists():
+                    missing.append(path)
         for index in range(int(n_subblocks)):
             for filename in ("frame_truth.csv", "starting_guess_prediction.csv"):
                 path = trajectory_root / f"subblock_{index:06d}" / filename
@@ -285,9 +305,11 @@ def _trajectory_plan(
         fit_keys=fit_keys,
         interpolation=str(sampling_cfg.get("interpolation", "linear")),
         filter_config=filter_cfg,
+        offsets_config=parsed_offsets,
     )
     filter_artifacts: dict[str, Any] = {}
-    if filter_spec.enabled and filter_spec.kind != "none":
+    offsets_enabled = bool(trajectory.offset_provenance and trajectory.offset_provenance.get("enabled"))
+    if (filter_spec.enabled and filter_spec.kind != "none") or offsets_enabled:
         if not reuse_existing:
             filter_artifacts = write_trajectory_filter_artifacts(
                 outdir=trajectory_root,
@@ -307,6 +329,17 @@ def _trajectory_plan(
                     trajectory_root / "trajectory_filter_diagnostic.png"
                 ).resolve(),
             }
+            if offsets_enabled:
+                filter_artifacts.update(
+                    {
+                        "trajectory_offset_provenance_json": (
+                            trajectory_root / "trajectory_offset_provenance.json"
+                        ).resolve(),
+                        "trajectory_offset_summary_csv": (
+                            trajectory_root / "trajectory_offset_summary.csv"
+                        ).resolve(),
+                    }
+                )
 
     rows: list[dict[str, Any]] = []
     subblocks: list[PreparedTraceSubblock] = []
@@ -376,6 +409,14 @@ def _trajectory_plan(
                 filter_artifacts.get("trajectory_filter_provenance_json", "")
             ),
             "trajectory_filtered_csv": str(filter_artifacts.get("trajectory_filtered_csv", "")),
+            "trajectory_offsets_json": json.dumps(parsed_offsets, sort_keys=True),
+            "trajectory_offsets_enabled": bool(offsets_enabled),
+            "trajectory_offset_provenance_json": str(
+                filter_artifacts.get("trajectory_offset_provenance_json", "")
+            ),
+            "trajectory_offset_summary_csv": str(
+                filter_artifacts.get("trajectory_offset_summary_csv", "")
+            ),
         }
         for key, diag in block.diagnostics.items():
             diagnostics[key] = dict(diag)
@@ -437,6 +478,17 @@ def _trajectory_plan(
                 "apply_stage": filter_spec.apply_stage,
                 "provenance_json": str(filter_artifacts.get("trajectory_filter_provenance_json", "")),
                 "summary_csv": str(filter_artifacts.get("trajectory_filter_summary_csv", "")),
+            },
+            "offsets": {
+                "enabled": bool(offsets_enabled),
+                "requested_offsets": dict(parsed_offsets),
+                "stage": (
+                    None
+                    if trajectory.offset_provenance is None
+                    else trajectory.offset_provenance.get("stage")
+                ),
+                "provenance_json": str(filter_artifacts.get("trajectory_offset_provenance_json", "")),
+                "summary_csv": str(filter_artifacts.get("trajectory_offset_summary_csv", "")),
             },
             "notes": list(TRAJECTORY_NOTES),
         },

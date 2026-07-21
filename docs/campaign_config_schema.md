@@ -109,6 +109,103 @@ For iterative-disabled observation-bias configs, `subblocks.n_subblocks` remains
 the canonical total count. That is a different execution mode from the
 full-fidelity binary iterative source schema described here.
 
+Trajectory trace sources may add constant registration offsets after trajectory
+filtering:
+
+```yaml
+experiment:
+  subblocks:
+    trace_source:
+      mode: trajectory
+      processing:
+        filter:
+          enabled: true
+          kind: high_pass
+          apply_stage: before_window
+        offsets:
+          source.x_position_as: 1.0
+          source.y_position_as: 0.0
+          source.position_angle_deg: 0.0
+```
+
+Supported offset keys are `source.x_position_as`, `source.y_position_as`, and
+`source.position_angle_deg`. The processing order is raw trajectory load,
+canonical X/Y/PA mapping, configured filtering, constant offsets, frame
+interpolation, subblock split, then frame-truth and starting-guess artifact
+writing. For the diagnostic `filter.apply_stage: after_window` mode, offsets
+are applied after that frame-sampled filter and before subblock splitting, so a
+high-pass filter cannot remove the requested DC field displacement. Zero
+offsets preserve previous trajectory values to numerical precision.
+
+When offsets are active, trajectory preparation writes
+`trajectory_offset_provenance.json` and `trajectory_offset_summary.csv` beside
+the existing trajectory filter artifacts. These files record requested offsets,
+application stage, and pre/post mean, standard deviation, min, max, and
+peak-to-peak statistics.
+
+## High-Order WFE
+
+`experiment.high_order_wfe` remains backward-compatible with the original scalar
+knowledge-error block:
+
+```yaml
+high_order_wfe:
+  enabled: true
+  inference:
+    knowledge_error:
+      enabled: true
+      amplitude_nm_rms: 0.1
+```
+
+When no mirror-specific block is present, the scalar knowledge-error amplitude
+is applied to every active truth mirror. Per-mirror overrides can enable or
+disable the additive high-order knowledge-error residual independently:
+
+```yaml
+high_order_wfe:
+  enabled: true
+  truth:
+    enabled: true
+    mirrors: [primary, secondary]
+    mode: synthetic
+    npix: 256
+    amplitude_nm_rms: 20.0
+    power_law_alpha: 2.5
+    seed: 20260610
+    pairing: independent
+    remove_low_order_zernikes: true
+    remove_zernike_modes: [4, 5, 6, 7, 8, 9, 10, 11]
+  inference:
+    enabled: true
+    mode: knowledge_error
+    use_truth_common_map: true
+    knowledge_error:
+      enabled: true
+      seed: 20260720
+      pairing: independent
+      power_law_alpha: same_as_truth
+      remove_low_order_zernikes: true
+      mirrors:
+        primary:
+          enabled: true
+          amplitude_nm_rms: 0.1
+        secondary:
+          enabled: false
+          amplitude_nm_rms: 0.0
+```
+
+Mirror-specific `enabled: false` means the reference/inference map for that
+mirror is truth-matched; it does not remove that mirror's truth high-order WFE.
+Truth maps remain present for all mirrors listed under `truth.mirrors`.
+
+`truth.seed` controls truth-map realization. `inference.knowledge_error.seed`
+controls knowledge-error morphology independently. With an explicit KE seed, the
+same seed and mirror produce the same normalized residual morphology regardless
+of run name, prior draw, field offset, shard name, or requested RMS. Changing
+`amplitude_nm_rms` rescales that same morphology. Provenance records per-mirror
+truth seeds, KE seeds, enabled state, requested and measured KE RMS, truth vs
+reference difference RMS, truth-match state, and raw/normalized map hashes.
+
 ## Results Root Semantics
 
 The safest convention for full-fidelity shard launches is:
@@ -189,6 +286,19 @@ recommended_cpus_per_task
 recommended_mem
 recommended_max_workers
 sbatch_command
+ho_ke_active_mirror
+ho_ke_primary_enabled
+ho_ke_secondary_enabled
+ho_ke_primary_amplitude_nm_rms
+ho_ke_secondary_amplitude_nm_rms
+field_offset_x_as
+field_offset_y_as
+field_offset_pa_deg
+truth_seed
+knowledge_error_seed
+primary_ke_map_hash
+secondary_ke_map_hash
+map_group
 ```
 
 The most important count fields should resolve from the source cadence:

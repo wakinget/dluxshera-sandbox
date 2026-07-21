@@ -55,6 +55,106 @@ def _stable_seed(seed_context: Mapping[str, Any], explicit_seed: Any = None) -> 
     return int(digest[:8], 16)
 
 
+def _array_hash(array: np.ndarray, *, mask: np.ndarray | None = None) -> str:
+    arr = np.asarray(array, dtype=np.float64)
+    valid = np.ones(arr.shape, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    if valid.shape != arr.shape:
+        raise ValueError(f"Map/hash mask shape mismatch: {valid.shape} vs {arr.shape}.")
+    digest = hashlib.sha256()
+    digest.update(str(arr.shape).encode("utf-8"))
+    digest.update(np.ascontiguousarray(arr[valid]).tobytes())
+    return digest.hexdigest()
+
+
+def _normalised_map_hash(array: np.ndarray, *, mask: np.ndarray) -> str | None:
+    arr = np.asarray(array, dtype=float)
+    valid = np.asarray(mask, dtype=bool)
+    rms = float(np.sqrt(np.mean(np.square(arr[valid])))) if np.any(valid) else 0.0
+    if rms == 0.0:
+        return None
+    return _array_hash(np.round(arr / rms, decimals=10), mask=valid)
+
+
+def _mirror_seed(seed: int, mirror: str) -> int:
+    return _stable_seed({"configured_seed": int(seed), "mirror": mirror, "role": "high_order_error"})
+
+
+def _validate_nonnegative(value: float, *, name: str) -> None:
+    if value < 0.0:
+        raise ValueError(f"{name} must be >= 0.")
+
+
+def _mirror_knowledge_configs(
+    *,
+    mirrors: tuple[str, ...],
+    knowledge_cfg: Mapping[str, Any],
+    inference_enabled: bool,
+    truth_alpha: float,
+    low_order_noll: list[int],
+    truth_remove_low_order: bool,
+    seed_context: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    raw_mirrors = knowledge_cfg.get("mirrors")
+    mirror_overrides = _cfg(raw_mirrors if isinstance(raw_mirrors, Mapping) else None)
+    if raw_mirrors is not None and not isinstance(raw_mirrors, Mapping):
+        raise ValueError("high_order_wfe.inference.knowledge_error.mirrors must be a mapping.")
+    bad = sorted(set(str(key).strip().lower() for key in mirror_overrides) - set(DEFAULT_MIRRORS))
+    if bad:
+        raise ValueError(
+            "Unsupported high_order_wfe.inference.knowledge_error.mirrors entries: "
+            + ", ".join(bad)
+        )
+    shared_enabled = bool(inference_enabled) and bool(knowledge_cfg.get("enabled", True))
+    shared_amp = float(knowledge_cfg.get("amplitude_nm_rms", knowledge_cfg.get("rms_nm", 0.3)))
+    _validate_nonnegative(
+        shared_amp,
+        name="high_order_wfe.inference.knowledge_error.amplitude_nm_rms",
+    )
+    raw_seed = knowledge_cfg.get("seed")
+    fixed_seed = (
+        _stable_seed(
+            {**dict(seed_context), "role": "high_order_knowledge_error"},
+            raw_seed,
+        )
+        if raw_seed is not None
+        else None
+    )
+    raw_alpha = knowledge_cfg.get("power_law_alpha", knowledge_cfg.get("alpha", truth_alpha))
+    error_alpha = truth_alpha if str(raw_alpha).strip().lower() == "same_as_truth" else float(raw_alpha)
+    remove_error_low_order = bool(
+        knowledge_cfg.get("remove_low_order_zernikes", truth_remove_low_order)
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for mirror in DEFAULT_MIRRORS:
+        override = _cfg(mirror_overrides.get(mirror))
+        enabled = bool(inference_enabled) and bool(override.get("enabled", shared_enabled))
+        amp = float(
+            override.get(
+                "amplitude_nm_rms",
+                override.get("rms_nm", shared_amp),
+            )
+        )
+        _validate_nonnegative(
+            amp,
+            name=f"high_order_wfe.inference.knowledge_error.mirrors.{mirror}.amplitude_nm_rms",
+        )
+        mirror_seed = override.get("seed")
+        if mirror_seed is None and fixed_seed is not None:
+            mirror_seed = _mirror_seed(fixed_seed, mirror)
+        if mirror not in mirrors:
+            enabled = False
+            amp = 0.0
+        out[mirror] = {
+            "enabled": bool(enabled),
+            "requested_amplitude_nm_rms": amp if enabled else 0.0,
+            "seed": None if mirror_seed is None else int(mirror_seed),
+            "power_law_alpha": error_alpha,
+            "remove_low_order_zernikes": remove_error_low_order,
+            "remove_noll_indices": low_order_noll if remove_error_low_order else [],
+        }
+    return out
+
+
 def _array_ref(array: np.ndarray, *, path: Path | None, write_array: bool = True) -> dict[str, Any]:
     if path is None:
         return {"array_nm": np.asarray(array, dtype=float).tolist()}
@@ -112,7 +212,7 @@ def _deck_cfg_to_optics_block(
     *,
     mirrors: tuple[str, ...],
     truth: bool,
-    knowledge_enabled: bool,
+    knowledge_enabled_by_mirror: Mapping[str, bool],
     config_map_root: Path | None = None,
     write_config_maps: bool = True,
 ) -> dict[str, Any]:
@@ -121,7 +221,7 @@ def _deck_cfg_to_optics_block(
         block["primary"] = _map_cfg_from_mirror(
             deck.primary,
             truth=truth,
-            knowledge_enabled=knowledge_enabled,
+            knowledge_enabled=bool(knowledge_enabled_by_mirror.get("primary", False)),
             config_map_root=config_map_root,
             write_config_maps=write_config_maps,
         )
@@ -129,22 +229,43 @@ def _deck_cfg_to_optics_block(
         block["secondary"] = _map_cfg_from_mirror(
             deck.secondary,
             truth=truth,
-            knowledge_enabled=knowledge_enabled,
+            knowledge_enabled=bool(knowledge_enabled_by_mirror.get("secondary", False)),
             config_map_root=config_map_root,
             write_config_maps=write_config_maps,
         )
     return block
 
 
-def _mirror_summary(mirror: MirrorWfeDeck, *, active: bool) -> dict[str, Any]:
+def _mirror_summary(
+    mirror: MirrorWfeDeck,
+    *,
+    active: bool,
+    knowledge_enabled: bool,
+    requested_error_rms_nm: float,
+) -> dict[str, Any]:
     return {
         "active": bool(active),
+        "truth_matched": not bool(knowledge_enabled),
+        "knowledge_error_enabled": bool(knowledge_enabled),
+        "requested_knowledge_error_rms_nm": float(requested_error_rms_nm),
         "truth_seed": mirror.provenance.get("truth_seed"),
         "knowledge_seed": mirror.provenance.get("high_order_error_seed"),
         "truth_full_rms_nm": mirror.full_truth.rms_nm,
         "truth_high_order_rms_nm": mirror.high_order_truth.rms_nm,
         "knowledge_error_rms_nm": mirror.high_order_knowledge_error.rms_nm,
-        "truth_inference_difference_rms_nm": mirror.high_order_knowledge_error.rms_nm,
+        "measured_knowledge_error_rms_nm": mirror.high_order_knowledge_error.rms_nm,
+        "truth_inference_difference_rms_nm": (
+            mirror.high_order_knowledge_error.rms_nm if knowledge_enabled else 0.0
+        ),
+        "truth_map_hash": _array_hash(mirror.high_order_truth.opd_nm, mask=mirror.high_order_truth.mask),
+        "knowledge_error_map_hash": _array_hash(
+            mirror.high_order_knowledge_error.opd_nm,
+            mask=mirror.high_order_knowledge_error.mask,
+        ),
+        "normalised_knowledge_error_map_hash": _normalised_map_hash(
+            mirror.high_order_knowledge_error.opd_nm,
+            mask=mirror.high_order_knowledge_error.mask,
+        ),
         "low_order_removed": list(mirror.diagnostics.get("low_order_mapping", {})),
         "low_order_truth_coefficients_nm": dict(mirror.low_order_truth_coeffs_nm),
         "low_order_inference_coefficients_nm": dict(mirror.low_order_knowledge_coeffs_nm),
@@ -208,51 +329,64 @@ def apply_high_order_wfe_campaign_config(
     if truth_cfg.get("seed") is None:
         truth_seed = base_seed
     knowledge_cfg = _cfg(inference_cfg.get("knowledge_error"))
-    knowledge_enabled = bool(inference_cfg.get("enabled", True)) and bool(knowledge_cfg.get("enabled", True))
+    knowledge_pairing = str(knowledge_cfg.get("pairing", "independent"))
+    if knowledge_pairing != "independent":
+        raise ValueError(
+            "Only high_order_wfe.inference.knowledge_error.pairing='independent' "
+            "is supported in v1 campaign wiring."
+        )
 
     shape_npix = int(truth_cfg.get("npix", cfg.get("npix", 64)))
     mask_policy = str(truth_cfg.get("mask_mode", truth_cfg.get("mask_policy", "circular_fallback")))
     amp = float(truth_cfg.get("amplitude_nm_rms", truth_cfg.get("rms_opd_nm", 1.0)))
-    error_amp = float(knowledge_cfg.get("amplitude_nm_rms", knowledge_cfg.get("rms_nm", 0.3))) if knowledge_enabled else 0.0
+    _validate_nonnegative(amp, name="high_order_wfe.truth.amplitude_nm_rms")
     alpha = float(truth_cfg.get("power_law_alpha", truth_cfg.get("alpha", 2.5)))
-    raw_error_alpha = knowledge_cfg.get("power_law_alpha", knowledge_cfg.get("alpha", alpha))
-    error_alpha = alpha if str(raw_error_alpha).strip().lower() == "same_as_truth" else float(raw_error_alpha)
-    remove_error_low_order = bool(
-        knowledge_cfg.get(
-            "remove_low_order_zernikes",
-            truth_cfg.get("remove_low_order_zernikes", True),
-        )
-    )
+    truth_remove_low_order = bool(truth_cfg.get("remove_low_order_zernikes", True))
     low_order_noll = [
         int(i)
         for i in truth_cfg.get(
             "remove_zernike_modes",
             [4, 5, 6, 7, 8, 9, 10, 11]
-            if truth_cfg.get("remove_low_order_zernikes", True)
+            if truth_remove_low_order
             else [],
         )
     ]
-
-    mirror_wfe_cfg = {
-        "truth": {
-            "rms_opd_nm": amp,
-            "power_law_alpha": alpha,
-            "fit_low_order_zernikes": low_order_noll,
-        },
-        "knowledge": {
-            "low_order_sigma_nm_per_coeff": 0.0,
-            "high_order_error_rms_nm": error_amp,
-            "high_order_error_power_law_alpha": error_alpha,
-            "high_order_error_remove_noll_indices": low_order_noll
-            if remove_error_low_order
-            else [],
-        },
+    mirror_knowledge = _mirror_knowledge_configs(
+        mirrors=mirrors,
+        knowledge_cfg=knowledge_cfg,
+        inference_enabled=bool(inference_cfg.get("enabled", True)),
+        truth_alpha=alpha,
+        low_order_noll=low_order_noll,
+        truth_remove_low_order=truth_remove_low_order,
+        seed_context=seed_context,
+    )
+    knowledge_enabled_by_mirror = {
+        mirror: bool(spec["enabled"]) and float(spec["requested_amplitude_nm_rms"]) >= 0.0
+        for mirror, spec in mirror_knowledge.items()
     }
+
+    def mirror_wfe_cfg(mirror: str) -> dict[str, Any]:
+        spec = mirror_knowledge[mirror]
+        return {
+            "truth": {
+                "rms_opd_nm": amp,
+                "power_law_alpha": alpha,
+                "fit_low_order_zernikes": low_order_noll,
+            },
+            "knowledge": {
+                "low_order_sigma_nm_per_coeff": 0.0,
+                "high_order_error_rms_nm": spec["requested_amplitude_nm_rms"],
+                "high_order_error_power_law_alpha": spec["power_law_alpha"],
+                "high_order_error_remove_noll_indices": spec["remove_noll_indices"],
+                "high_order_error_seed": spec["seed"],
+            },
+        }
+
     deck = build_high_order_wfe_deck(
         shape=(shape_npix, shape_npix),
         seed=truth_seed,
-        primary_config=mirror_wfe_cfg,
-        secondary_config=mirror_wfe_cfg,
+        primary_config=mirror_wfe_cfg("primary"),
+        secondary_config=mirror_wfe_cfg("secondary"),
         mask_policy=mask_policy,
     )
 
@@ -265,7 +399,7 @@ def apply_high_order_wfe_campaign_config(
         deck,
         mirrors=mirrors,
         truth=True,
-        knowledge_enabled=False,
+        knowledge_enabled_by_mirror={},
         config_map_root=config_map_root,
         write_config_maps=write_artifacts,
     )
@@ -273,7 +407,7 @@ def apply_high_order_wfe_campaign_config(
         deck,
         mirrors=mirrors,
         truth=False,
-        knowledge_enabled=knowledge_enabled,
+        knowledge_enabled_by_mirror=knowledge_enabled_by_mirror,
         config_map_root=config_map_root,
         write_config_maps=write_artifacts,
     )
@@ -283,25 +417,46 @@ def apply_high_order_wfe_campaign_config(
     if config_map_root is not None:
         for path in sorted(config_map_root.glob("*.npy")):
             artifact_paths[f"config_map_{path.stem}"] = str(path)
+    knowledge_enabled = any(bool(spec["enabled"]) for spec in mirror_knowledge.values())
+    nonzero_knowledge_enabled = any(
+        bool(spec["enabled"]) and float(spec["requested_amplitude_nm_rms"]) > 0.0
+        for spec in mirror_knowledge.values()
+    )
+    shared_error_amp = knowledge_cfg.get("amplitude_nm_rms", knowledge_cfg.get("rms_nm", None))
     summary_payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "enabled": True,
         "mirrors": list(mirrors),
         "pairing": pairing,
+        "knowledge_error_pairing": knowledge_pairing,
         "seed_context": json_ready(seed_context),
         "base_seed": int(base_seed),
         "truth_seed": int(truth_seed),
         "knowledge_enabled": knowledge_enabled,
+        "knowledge_error_seed": knowledge_cfg.get("seed"),
         "truth_amplitude_nm_rms": amp,
-        "knowledge_error_amplitude_nm_rms": error_amp,
-        "knowledge_error_power_law_alpha": error_alpha,
-        "knowledge_error_remove_low_order_zernikes": remove_error_low_order,
+        "knowledge_error_amplitude_nm_rms": shared_error_amp,
+        "knowledge_error_by_mirror": copy.deepcopy(mirror_knowledge),
         "mask_policy": mask_policy,
         "npix": shape_npix,
-        "remove_low_order_zernikes": bool(truth_cfg.get("remove_low_order_zernikes", True)),
+        "remove_low_order_zernikes": truth_remove_low_order,
         "remove_zernike_modes": low_order_noll,
-        "primary": _mirror_summary(deck.primary, active="primary" in mirrors),
-        "secondary": _mirror_summary(deck.secondary, active="secondary" in mirrors),
+        "primary": _mirror_summary(
+            deck.primary,
+            active="primary" in mirrors,
+            knowledge_enabled=bool(mirror_knowledge["primary"]["enabled"]),
+            requested_error_rms_nm=float(
+                mirror_knowledge["primary"]["requested_amplitude_nm_rms"]
+            ),
+        ),
+        "secondary": _mirror_summary(
+            deck.secondary,
+            active="secondary" in mirrors,
+            knowledge_enabled=bool(mirror_knowledge["secondary"]["enabled"]),
+            requested_error_rms_nm=float(
+                mirror_knowledge["secondary"]["requested_amplitude_nm_rms"]
+            ),
+        ),
         "deck_comparison": deck.comparison,
     }
     if artifact_root is not None:
@@ -316,7 +471,11 @@ def apply_high_order_wfe_campaign_config(
     summary_payload["artifact_paths"] = dict(artifact_paths)
 
     warnings: list[str] = []
-    if bool(validation_cfg.get("require_nonzero_difference_when_enabled", False)) and knowledge_enabled and error_amp <= 0.0:
+    if (
+        bool(validation_cfg.get("require_nonzero_difference_when_enabled", False))
+        and knowledge_enabled
+        and not nonzero_knowledge_enabled
+    ):
         raise ValueError("High-order WFE validation requires nonzero truth/inference difference, but knowledge error amplitude is zero.")
     if not knowledge_enabled:
         warnings.append("High-order WFE inference knowledge error is disabled; truth/reference maps match.")

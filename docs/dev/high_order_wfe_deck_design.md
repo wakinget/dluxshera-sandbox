@@ -75,6 +75,19 @@ high_order_knowledge_nm = high_order_truth_nm + high_order_error_nm
 The default high-order error map RMS is 0.3 nm OPD over the same mask. Its power
 law defaults to the truth alpha, and can be configured independently.
 
+Campaign wiring now supports per-mirror high-order knowledge-error residuals.
+`primary`-only and `secondary`-only conditions still build nonzero high-order
+truth maps for both mirrors. The selected mirror receives an additive
+knowledge-error residual in the inference/reference config, while the disabled
+mirror's inference/reference high-order map is truth-matched.
+
+`truth.seed` and `inference.knowledge_error.seed` are separate campaign controls.
+When a KE seed is explicit, the campaign helper derives deterministic
+mirror-specific error seeds from that configured seed. The normalized KE
+morphology hash is stable across prior draws, run names, field offsets, shards,
+and requested RMS amplitudes; changing `amplitude_nm_rms` only rescales the same
+residual morphology.
+
 ## Artifact Contract
 
 `write_high_order_wfe_deck_artifacts(...)` writes an `optics/`-style directory
@@ -159,6 +172,13 @@ experiment:
         seed: null
         seed_policy: derive_from_campaign_case
         realization_policy: fixed_per_case
+        mirrors:
+          primary:
+            enabled: true
+            amplitude_nm_rms: 0.3
+          secondary:
+            enabled: true
+            amplitude_nm_rms: 0.3
     artifacts:
       write_maps: true
       write_png_quicklooks: false
@@ -168,8 +188,12 @@ experiment:
       max_abs_low_order_projection_nm: null
 ```
 
-The v1 campaign helper supports independent M1/M2 maps. Matched and
-differential pairing are reserved for a later case-generation task.
+When the `mirrors` block under `knowledge_error` is absent, the legacy scalar
+amplitude applies to every active truth mirror. When the block is present, each
+mirror override controls that mirror's KE enabled state and requested RMS.
+Unsupported mirror names and negative amplitudes fail during campaign config
+application. The v1 campaign helper supports independent M1/M2 maps. Matched
+and differential pairing are reserved for a later case-generation task.
 
 Tiny dry-runs:
 
