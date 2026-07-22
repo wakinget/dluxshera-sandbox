@@ -63,6 +63,7 @@
     "production_m2_offaxis": "examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/production_m2_offaxis/submit_draw_shards_edge.sh",
     "validation": "examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/validation/submit_draw_shards_edge.sh"
   },
+  "low_order_prior_sigma_nm": 1.0,
   "production_conditions": 50,
   "production_ho_ke_draw_shards": 500,
   "schema_version": "howfe_field_dither_campaign_family.v1",

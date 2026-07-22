@@ -297,11 +297,11 @@ experiment:
       sigmas:
         optics.primary.zernike_coeffs_nm[*]:
           kind: absolute
-          sigma: 0.01
+          sigma: 1.0
           unit: nm
         optics.secondary.zernike_coeffs_nm[*]:
           kind: absolute
-          sigma: 0.01
+          sigma: 1.0
           unit: nm
       metadata:
         campaign_family: full_fidelity_howfe_field_dither_20260720
@@ -316,7 +316,7 @@ experiment:
         truth_seed: 20260610
         knowledge_error_seed: 20260720
         primary_ke_map_hash: 136ffb953c6b61223cde44f31b1f27f64527b18d960e3028051b6457c7366d84
-        secondary_ke_map_hash: cbb35695e63caf8ed5acfdedb0f6a7ae2e5bb727482db071d46202ad9df3087b
+        secondary_ke_map_hash: 48e71e820ba20e36b33114f3ce299d8460c18b417bc62aaeb8b3748cc355ae01
         map_group: truth20260610_ke20260720_independent
     condition_index_start: 0
     draw_index_start: 0
@@ -349,5 +349,5 @@ experiment:
     truth_seed: 20260610
     knowledge_error_seed: 20260720
     primary_ke_map_hash: 136ffb953c6b61223cde44f31b1f27f64527b18d960e3028051b6457c7366d84
-    secondary_ke_map_hash: cbb35695e63caf8ed5acfdedb0f6a7ae2e5bb727482db071d46202ad9df3087b
+    secondary_ke_map_hash: 48e71e820ba20e36b33114f3ce299d8460c18b417bc62aaeb8b3748cc355ae01
     map_group: truth20260610_ke20260720_independent

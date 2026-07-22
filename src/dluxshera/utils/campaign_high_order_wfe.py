@@ -20,6 +20,7 @@ from .high_order_wfe import (
 
 SCHEMA_VERSION = "campaign_high_order_wfe.v1"
 DEFAULT_MIRRORS = ("primary", "secondary")
+NORMALISED_MAP_HASH_DECIMALS = 9
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,15 @@ def _normalised_map_hash(array: np.ndarray, *, mask: np.ndarray) -> str | None:
     rms = float(np.sqrt(np.mean(np.square(arr[valid])))) if np.any(valid) else 0.0
     if rms == 0.0:
         return None
-    return _array_hash(np.round(arr / rms, decimals=10), mask=valid)
+    # Quantize the unit-RMS morphology before hashing. Nine decimal places
+    # suppresses insignificant floating-point differences introduced by
+    # amplitude scaling and low-order projection while retaining a stringent
+    # provenance fingerprint.
+    normalised = np.round(
+        arr / rms,
+        decimals=NORMALISED_MAP_HASH_DECIMALS,
+    )
+    return _array_hash(normalised, mask=valid)
 
 
 def _mirror_seed(seed: int, mirror: str) -> int:

@@ -38,7 +38,8 @@ FIELD_OFFSETS = (
     ("xp0p0_ym1p0", 0.0, -1.0),
 )
 MIRRORS = ("primary", "secondary")
-RESULTS_ROOT = Path("/scratch-jpl/shera_hpc/dmckeith/dLuxShera-Results")
+RESULTS_ROOT = Path("/projects/shera_hpc/dmckeith/dLuxShera-Results")
+LOW_ORDER_PRIOR_SIGMA_NM = 1.0
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -110,6 +111,36 @@ def _set_cadence(config: dict[str, Any], *, windows: int, subblocks_per_window: 
     prior = experiment["prior_draws"]
     prior["n_cases"] = int(draws)
     prior["draws_per_condition"] = int(draws)
+
+
+def _set_low_order_prior(config: dict[str, Any], *, sigma_nm: float) -> None:
+    """Set the shared M1/M2 low-order prior regime for the family."""
+
+    prior = config["experiment"]["prior_draws"]
+    conditions = list(prior.get("conditions", []) or [])
+    if len(conditions) != 1:
+        raise ValueError(
+            "HO-WFE field-dither base config must contain exactly one "
+            "prior_draws condition."
+        )
+
+    condition = copy.deepcopy(dict(conditions[0]))
+    token = _amp_token(float(sigma_nm))
+    condition["condition_name"] = f"m1_{token}_m2_{token}"
+
+    sigmas = dict(condition.get("sigmas", {}) or {})
+    for key in (
+        "optics.primary.zernike_coeffs_nm[*]",
+        "optics.secondary.zernike_coeffs_nm[*]",
+    ):
+        sigmas[key] = {
+            "kind": "absolute",
+            "sigma": float(sigma_nm),
+            "unit": "nm",
+        }
+
+    condition["sigmas"] = sigmas
+    prior["conditions"] = [condition]
 
 
 def _set_single_condition(config: dict[str, Any], *, name: str, metadata: Mapping[str, Any]) -> None:
@@ -190,6 +221,7 @@ def _condition_config(
     draws: int,
 ) -> dict[str, Any]:
     config = copy.deepcopy(dict(base))
+    _set_low_order_prior(config, sigma_nm=LOW_ORDER_PRIOR_SIGMA_NM)
     name = _condition_name(
         mirror=mirror,
         amplitude_nm=amplitude_nm,
@@ -251,6 +283,7 @@ Base config: `{BASE_CONFIG.relative_to(ROOT).as_posix()}`
 Fixed seeds:
 - truth maps: `{TRUTH_SEED}`
 - knowledge-error maps: `{KNOWLEDGE_ERROR_SEED}`
+- M1/M2 low-order prior sigma: `{LOW_ORDER_PRIOR_SIGMA_NM}` nm
 
 Production HO-WFE KE matrix:
 - 2 mirrors x 5 amplitudes x 5 fields x 10 draws = 500 draw shards
@@ -380,6 +413,7 @@ def prepare_family(*, outdir: Path, overwrite: bool) -> dict[str, Any]:
         "base_config": BASE_CONFIG.relative_to(ROOT).as_posix(),
         "truth_seed": TRUTH_SEED,
         "knowledge_error_seed": KNOWLEDGE_ERROR_SEED,
+        "low_order_prior_sigma_nm": LOW_ORDER_PRIOR_SIGMA_NM,
         "amplitudes_nm_rms": list(AMPLITUDES_NM),
         "field_offsets": [
             {"token": token, "x_as": x, "y_as": y, "pa_deg": 0.0}

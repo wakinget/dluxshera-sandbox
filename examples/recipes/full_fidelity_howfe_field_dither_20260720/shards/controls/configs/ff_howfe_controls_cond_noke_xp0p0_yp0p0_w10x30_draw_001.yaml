@@ -297,11 +297,11 @@ experiment:
       sigmas:
         optics.primary.zernike_coeffs_nm[*]:
           kind: absolute
-          sigma: 0.01
+          sigma: 1.0
           unit: nm
         optics.secondary.zernike_coeffs_nm[*]:
           kind: absolute
-          sigma: 0.01
+          sigma: 1.0
           unit: nm
       metadata:
         campaign_family: full_fidelity_howfe_field_dither_20260720

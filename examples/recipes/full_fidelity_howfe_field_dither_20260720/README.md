@@ -7,6 +7,7 @@ Base config: `examples/recipes/full_fidelity_next_campaigns_20260703/full_fideli
 Fixed seeds:
 - truth maps: `20260610`
 - knowledge-error maps: `20260720`
+- M1/M2 low-order prior sigma: `1.0` nm
 
 Production HO-WFE KE matrix:
 - 2 mirrors x 5 amplitudes x 5 fields x 10 draws = 500 draw shards
