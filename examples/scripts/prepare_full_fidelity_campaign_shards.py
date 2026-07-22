@@ -592,7 +592,11 @@ def prepare_shards(
             encoding="utf-8",
         )
     with manifest_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS)
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=MANIFEST_FIELDS,
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
     scripts = {
@@ -750,7 +754,11 @@ def prepare_shards_for_configs(
                 encoding="utf-8",
             )
     with manifest_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS)
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=MANIFEST_FIELDS,
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
     scripts = {
