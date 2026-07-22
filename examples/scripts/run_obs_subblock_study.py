@@ -17,6 +17,7 @@ mode under ``<case_root>/study/<mode>/``:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import csv
 import importlib.util
@@ -96,6 +97,48 @@ import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results"
+
+
+@contextlib.contextmanager
+def _runtime_profile_stage(
+    runtime_profiler: RuntimeProfiler | None,
+    stage: str,
+    *,
+    cacheability: str = "unknown",
+    category: str = "unknown",
+    details: Mapping[str, Any] | None = None,
+):
+    if runtime_profiler is None:
+        yield
+        return
+    with runtime_profiler.profile_stage(
+        stage,
+        cacheability=cacheability,
+        category=category,
+        details=details,
+    ):
+        yield
+
+
+def _write_runtime_profile_artifacts(
+    *,
+    runtime_profiler: RuntimeProfiler | None,
+    summary_path: Path | None,
+    timeline_path: Path | None,
+    outputs: Mapping[str, Any] | None = None,
+) -> None:
+    if runtime_profiler is None or summary_path is None or timeline_path is None:
+        return
+    profile_outputs = {
+        "summary_json": str(summary_path.resolve()),
+        "timeline_jsonl": str(timeline_path.resolve()),
+        **dict(outputs or {}),
+    }
+    write_profile_summary_json(
+        summary_path,
+        runtime_profiler.summary_payload(outputs=profile_outputs),
+    )
+    write_profile_timeline_jsonl(timeline_path, runtime_profiler.events)
 
 # ---------------------------------------------------------------------------
 # General study workflow defaults
@@ -6432,6 +6475,7 @@ def _evaluate_schur_summary(
     theta_reference_overrides: Mapping[str, Any] | None = None,
     allow_dense_image_hessian: bool = False,
     memory_recorder: MemoryDiagnosticsRecorder | None = None,
+    runtime_profiler: RuntimeProfiler | None = None,
 ) -> dict[str, Any]:
     """Export one image-backed Schur-reduced summary from a prepared subblock.
 
@@ -6454,37 +6498,43 @@ def _evaluate_schur_summary(
     theta_reference_override_payload = dict(
         theta_reference_overrides or _disabled_theta_reference_overrides_payload()
     )
-    context = _prepare_inference_context(config_path=config_path)
-    summary_inference_cfg, information_accounting_base = build_summary_inference_config(
-        context["inference_cfg"],
-        summary_information_scale=summary_information_scale,
-    )
-    # Reference solves consume the config on disk before this point. Curvature
-    # export below reads this copy so optimizer loss normalization does not
-    # silently become observation-level information normalization.
-    context["inference_cfg"] = summary_inference_cfg
-    theta_layout = _build_observation_theta_layout(
-        theta_keys=theta_keys,
-        enable_zernikes=enable_zernikes,
-        zernike_indices=zernike_indices,
-        reference_store=context["base_store"],
-    )
-    observation_theta_ref_values = _observation_theta_ref_from_store(
-        theta_layout=theta_layout,
-        base_store=context["base_store"],
-    )
-    prior_theta_ref_by_label = {
-        label: float(observation_theta_ref_values[index])
-        for index, label in enumerate(theta_layout.labels)
-    }
-    theta_reference_consistency = validate_theta_reference_override_consistency(
-        theta_reference_overrides=theta_reference_override_payload,
-        theta_labels=theta_layout.labels,
-        theta_ref=observation_theta_ref_values,
-        resolved_config=context["system_cfg"],
-        store=context["base_store"],
-        prior_context={"theta_ref_by_label": prior_theta_ref_by_label},
-    )
+    with _runtime_profile_stage(
+        runtime_profiler,
+        "theta_phi_layout",
+        cacheability="cacheable_with_same_inputs",
+        category="layout",
+    ):
+        context = _prepare_inference_context(config_path=config_path)
+        summary_inference_cfg, information_accounting_base = build_summary_inference_config(
+            context["inference_cfg"],
+            summary_information_scale=summary_information_scale,
+        )
+        # Reference solves consume the config on disk before this point. Curvature
+        # export below reads this copy so optimizer loss normalization does not
+        # silently become observation-level information normalization.
+        context["inference_cfg"] = summary_inference_cfg
+        theta_layout = _build_observation_theta_layout(
+            theta_keys=theta_keys,
+            enable_zernikes=enable_zernikes,
+            zernike_indices=zernike_indices,
+            reference_store=context["base_store"],
+        )
+        observation_theta_ref_values = _observation_theta_ref_from_store(
+            theta_layout=theta_layout,
+            base_store=context["base_store"],
+        )
+        prior_theta_ref_by_label = {
+            label: float(observation_theta_ref_values[index])
+            for index, label in enumerate(theta_layout.labels)
+        }
+        theta_reference_consistency = validate_theta_reference_override_consistency(
+            theta_reference_overrides=theta_reference_override_payload,
+            theta_labels=theta_layout.labels,
+            theta_ref=observation_theta_ref_values,
+            resolved_config=context["system_cfg"],
+            store=context["base_store"],
+            prior_context={"theta_ref_by_label": prior_theta_ref_by_label},
+        )
     if recovered_theta is None and normalize_schur_phi_ref_mode(phi_ref) == "recovered":
         recovered_trace_value = (recovered_reference_metadata or {}).get(
             "recovered_trace_csv"
@@ -6495,11 +6545,17 @@ def _evaluate_schur_summary(
                 recovered_trace_csv=Path(recovered_trace_value),
             )
     record("phi_ref.resolve.start", phi_ref_mode=phi_ref)
-    fast_phi_ref_values, phi_ref_source = _resolve_phi_reference_for_summary(
-        context=context,
-        phi_ref_mode=phi_ref,
-        recovered_theta=recovered_theta,
-    )
+    with _runtime_profile_stage(
+        runtime_profiler,
+        "phi_ref.resolve",
+        cacheability="cacheable_with_same_inputs",
+        category="reference",
+    ):
+        fast_phi_ref_values, phi_ref_source = _resolve_phi_reference_for_summary(
+            context=context,
+            phi_ref_mode=phi_ref,
+            recovered_theta=recovered_theta,
+        )
     record(
         "phi_ref.resolve.done",
         phi_ref_mode=phi_ref,
@@ -6640,11 +6696,17 @@ def _evaluate_schur_summary(
     )
 
     record("objective_context.start", summary_objective=summary_objective)
-    combined_loss_fn, objective_metadata = _build_combined_local_objective(
-        context=context,
-        theta_layout=theta_layout,
-        objective_kind=summary_objective,
-    )
+    with _runtime_profile_stage(
+        runtime_profiler,
+        "objective_context",
+        cacheability="cacheable_with_same_inputs",
+        category="objective",
+    ):
+        combined_loss_fn, objective_metadata = _build_combined_local_objective(
+            context=context,
+            theta_layout=theta_layout,
+            objective_kind=summary_objective,
+        )
     record(
         "objective_context.done",
         objective_kind_used=objective_metadata["objective_kind_used"],
@@ -6753,15 +6815,21 @@ def _evaluate_schur_summary(
             ),
             arrays=named_array_memory_metadata(frame_phi_ref=frame_phi_ref),
         )
-        structured_blocks = build_independent_frame_theta_phi_quadratic_blocks(
-            frame_loss_fn=frame_loss_fn,
-            theta_ref=observation_theta_ref_values,
-            frame_phi_ref=frame_phi_ref,
-            subblock_reduce=str(
-                context["inference_cfg"]["objective"]["subblock_reduce"]
-            ),
-            kind=SCHUR_CURVATURE_METHOD_STRUCTURED,
-        )
+        with _runtime_profile_stage(
+            runtime_profiler,
+            "structured_curvature.blocks",
+            cacheability="amortizable_jax_compile",
+            category="curvature",
+        ):
+            structured_blocks = build_independent_frame_theta_phi_quadratic_blocks(
+                frame_loss_fn=frame_loss_fn,
+                theta_ref=observation_theta_ref_values,
+                frame_phi_ref=frame_phi_ref,
+                subblock_reduce=str(
+                    context["inference_cfg"]["objective"]["subblock_reduce"]
+                ),
+                kind=SCHUR_CURVATURE_METHOD_STRUCTURED,
+            )
         record(
             "structured_curvature.blocks.done",
             n_frames=int(context["layout"].n_frame),
@@ -6786,18 +6854,30 @@ def _evaluate_schur_summary(
             reduce_weight=float(structured_blocks.reduce_weight),
         )
         if curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED:
-            structured_reduction = schur_reduce_independent_frame_blocks(
-                structured_blocks,
-                damping=float(schur_damping),
-                frame_indices=frame_quality_state["included_frame_indices"],
-                frame_scale=float(frame_quality_state["frame_scale"]),
-            )
+            with _runtime_profile_stage(
+                runtime_profiler,
+                "structured_schur_reduce",
+                cacheability="cacheable_with_same_inputs",
+                category="schur_reduce",
+            ):
+                structured_reduction = schur_reduce_independent_frame_blocks(
+                    structured_blocks,
+                    damping=float(schur_damping),
+                    frame_indices=frame_quality_state["included_frame_indices"],
+                    frame_scale=float(frame_quality_state["frame_scale"]),
+                )
             record("materialize_sidecar_blocks.start")
-            structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
-                structured_blocks,
-                frame_indices=frame_quality_state["included_frame_indices"],
-                frame_scale=float(frame_quality_state["frame_scale"]),
-            )
+            with _runtime_profile_stage(
+                runtime_profiler,
+                "materialize_sidecar_blocks",
+                cacheability="cacheable_with_same_inputs",
+                category="artifact",
+            ):
+                structured_sidecar_blocks = materialize_structured_schur_sidecar_blocks(
+                    structured_blocks,
+                    frame_indices=frame_quality_state["included_frame_indices"],
+                    frame_scale=float(frame_quality_state["frame_scale"]),
+                )
         elif curvature_method_used == SCHUR_CURVATURE_METHOD_STRUCTURED_LINEAR_DRIFT:
             if context["layout"].frame_times_s is None:
                 raise RuntimeError(
@@ -6807,11 +6887,17 @@ def _evaluate_schur_summary(
                 frame_times_s=context["layout"].frame_times_s,
                 frame_keys=context["layout"].frame_keys,
             )
-            sidecar_expanded = materialize_structured_schur_sidecar_blocks(
-                structured_blocks,
-                frame_indices=frame_quality_state["included_frame_indices"],
-                frame_scale=float(frame_quality_state["frame_scale"]),
-            )
+            with _runtime_profile_stage(
+                runtime_profiler,
+                "materialize_sidecar_blocks",
+                cacheability="cacheable_with_same_inputs",
+                category="artifact",
+            ):
+                sidecar_expanded = materialize_structured_schur_sidecar_blocks(
+                    structured_blocks,
+                    frame_indices=frame_quality_state["included_frame_indices"],
+                    frame_scale=float(frame_quality_state["frame_scale"]),
+                )
             h_tt = np.asarray(sidecar_expanded["h_tt"], dtype=float)
             h_tphi = np.asarray(sidecar_expanded["h_tp"], dtype=float)
             h_phiphi = np.asarray(sidecar_expanded["h_pp"], dtype=float)
@@ -6824,20 +6910,26 @@ def _evaluate_schur_summary(
                 _theta_labels_for_observation_layout(theta_layout),
                 phi_labels,
             )
-            projected_blocks = LocalQuadraticBlocks(
-                layout=compact_layout,
-                combined_gradient=np.concatenate((g_theta, g_q), axis=0),
-                combined_curvature=np.block([[h_tt, h_tq], [h_tq.T, h_qq]]),
-                g_theta=g_theta,
-                g_phi=g_q,
-                h_tt=h_tt,
-                h_tp=h_tq,
-                h_pp=h_qq,
-            )
-            structured_reduction = schur_reduce_local_quadratic(
-                blocks=projected_blocks,
-                damping=float(schur_damping),
-            )
+            with _runtime_profile_stage(
+                runtime_profiler,
+                "structured_schur_reduce",
+                cacheability="cacheable_with_same_inputs",
+                category="schur_reduce",
+            ):
+                projected_blocks = LocalQuadraticBlocks(
+                    layout=compact_layout,
+                    combined_gradient=np.concatenate((g_theta, g_q), axis=0),
+                    combined_curvature=np.block([[h_tt, h_tq], [h_tq.T, h_qq]]),
+                    g_theta=g_theta,
+                    g_phi=g_q,
+                    h_tt=h_tt,
+                    h_tp=h_tq,
+                    h_pp=h_qq,
+                )
+                structured_reduction = schur_reduce_local_quadratic(
+                    blocks=projected_blocks,
+                    damping=float(schur_damping),
+                )
             structured_sidecar_blocks = {
                 "h_tt": h_tt,
                 "h_tp": h_tq,
@@ -6865,11 +6957,17 @@ def _evaluate_schur_summary(
                 inference_cfg=context["inference_cfg"],
                 frame_keys=context["layout"].frame_keys,
             )
-            sidecar_data = materialize_structured_schur_sidecar_blocks(
-                structured_blocks,
-                frame_indices=frame_quality_state["included_frame_indices"],
-                frame_scale=float(frame_quality_state["frame_scale"]),
-            )
+            with _runtime_profile_stage(
+                runtime_profiler,
+                "materialize_sidecar_blocks",
+                cacheability="cacheable_with_same_inputs",
+                category="artifact",
+            ):
+                sidecar_data = materialize_structured_schur_sidecar_blocks(
+                    structured_blocks,
+                    frame_indices=frame_quality_state["included_frame_indices"],
+                    frame_scale=float(frame_quality_state["frame_scale"]),
+                )
             h_tt = np.asarray(sidecar_data["h_tt"], dtype=float)
             h_tphi = np.asarray(sidecar_data["h_tp"], dtype=float)
             h_phiphi_data = np.asarray(sidecar_data["h_pp"], dtype=float)
@@ -6889,25 +6987,31 @@ def _evaluate_schur_summary(
             g_phi_prior = h_phiphi_prior @ phi_ref_vec
             h_phiphi_total = 0.5 * (h_phiphi_data + h_phiphi_data.T) + h_phiphi_prior
             g_phi_total = g_phi_data + g_phi_prior
-            projected_blocks = LocalQuadraticBlocks(
-                layout=combined_layout,
-                combined_gradient=np.concatenate((g_theta, g_phi_total), axis=0),
-                combined_curvature=np.block(
-                    [
-                        [h_tt, h_tphi],
-                        [h_tphi.T, h_phiphi_total],
-                    ]
-                ),
-                g_theta=g_theta,
-                g_phi=g_phi_total,
-                h_tt=h_tt,
-                h_tp=h_tphi,
-                h_pp=h_phiphi_total,
-            )
-            structured_reduction = schur_reduce_local_quadratic(
-                blocks=projected_blocks,
-                damping=float(schur_damping),
-            )
+            with _runtime_profile_stage(
+                runtime_profiler,
+                "structured_schur_reduce",
+                cacheability="cacheable_with_same_inputs",
+                category="schur_reduce",
+            ):
+                projected_blocks = LocalQuadraticBlocks(
+                    layout=combined_layout,
+                    combined_gradient=np.concatenate((g_theta, g_phi_total), axis=0),
+                    combined_curvature=np.block(
+                        [
+                            [h_tt, h_tphi],
+                            [h_tphi.T, h_phiphi_total],
+                        ]
+                    ),
+                    g_theta=g_theta,
+                    g_phi=g_phi_total,
+                    h_tt=h_tt,
+                    h_tp=h_tphi,
+                    h_pp=h_phiphi_total,
+                )
+                structured_reduction = schur_reduce_local_quadratic(
+                    blocks=projected_blocks,
+                    damping=float(schur_damping),
+                )
             structured_sidecar_blocks = {
                 "h_tt": h_tt,
                 "h_tp": h_tphi,
@@ -7005,59 +7109,65 @@ def _evaluate_schur_summary(
             reduced_score=reduced_score,
         ),
     )
-    reduced_summary = SubblockSummary.from_reduced_form(
-        subblock_id=f"{case_root.name}_subblock_summary",
-        theta_labels=theta_layout.labels,
-        theta_ref=observation_theta_ref_values,
-        reduced_information=reduced_information,
-        reduced_score=reduced_score,
-        summary_kind="image_backed_schur",
-        damping_used=float(schur_damping),
-        diagnostics={
-            "phi_ref_source": phi_ref_source,
-            "objective_kind": objective_metadata["objective_kind_used"],
-            "n_phi": int(combined_layout.n_phi),
-            "local_fit_reference_kind": phi_ref,
-            "schur_curvature_method_requested": curvature_method_requested,
-            "schur_curvature_method_used": curvature_method_used,
-            "dense_global_hessian_materialized": bool(
-                dense_global_hessian_materialized
-            ),
-            "structured_curvature_used": bool(structured_curvature_used),
-            "structured_supported_layout": bool(structured_support["supported"]),
-            "structured_reduce_weight": None
-            if structured_blocks is None
-            else float(structured_blocks.reduce_weight),
-            "n_frames": int(context["layout"].n_frame),
-            "theta_dim": int(theta_layout.size),
-            "frame_phi_dim": int(context["layout"].frame_width),
-            "shared_phi_dim": int(context["layout"].shared_width),
-            "dense_vs_structured_comparison": dense_vs_structured_comparison,
-            "analytic_temporal_prior_added": bool(
-                objective_metadata.get("structured_residual_prior", {}).get(
-                    "analytic_temporal_prior_added",
-                    False,
-                )
-            ),
-            "frame_quality_policy": str(schur_frame_quality_policy),
-            "frame_quality_total_frame_count": int(
-                frame_quality_report.total_frame_count
-            ),
-            "frame_quality_good_frame_count": int(frame_quality_report.good_frame_count),
-            "frame_quality_bad_frame_count": int(frame_quality_report.bad_frame_count),
-            "frame_quality_bad_frame_indices": list(
-                frame_quality_report.bad_frame_indices
-            ),
-            "frame_quality_chi2_threshold": float(schur_frame_chi2_threshold),
-            "frame_quality_effective_frame_fraction": float(
-                frame_quality_metadata["effective_frame_fraction"]
-            ),
-            "theta_reference_overrides": theta_reference_override_payload,
-            "theta_reference_consistency": theta_reference_consistency,
-            "information_accounting": information_accounting,
-            **dense_comparison_state,
-        },
-    )
+    with _runtime_profile_stage(
+        runtime_profiler,
+        "subblock_summary.build",
+        cacheability="cacheable_with_same_inputs",
+        category="summary",
+    ):
+        reduced_summary = SubblockSummary.from_reduced_form(
+            subblock_id=f"{case_root.name}_subblock_summary",
+            theta_labels=theta_layout.labels,
+            theta_ref=observation_theta_ref_values,
+            reduced_information=reduced_information,
+            reduced_score=reduced_score,
+            summary_kind="image_backed_schur",
+            damping_used=float(schur_damping),
+            diagnostics={
+                "phi_ref_source": phi_ref_source,
+                "objective_kind": objective_metadata["objective_kind_used"],
+                "n_phi": int(combined_layout.n_phi),
+                "local_fit_reference_kind": phi_ref,
+                "schur_curvature_method_requested": curvature_method_requested,
+                "schur_curvature_method_used": curvature_method_used,
+                "dense_global_hessian_materialized": bool(
+                    dense_global_hessian_materialized
+                ),
+                "structured_curvature_used": bool(structured_curvature_used),
+                "structured_supported_layout": bool(structured_support["supported"]),
+                "structured_reduce_weight": None
+                if structured_blocks is None
+                else float(structured_blocks.reduce_weight),
+                "n_frames": int(context["layout"].n_frame),
+                "theta_dim": int(theta_layout.size),
+                "frame_phi_dim": int(context["layout"].frame_width),
+                "shared_phi_dim": int(context["layout"].shared_width),
+                "dense_vs_structured_comparison": dense_vs_structured_comparison,
+                "analytic_temporal_prior_added": bool(
+                    objective_metadata.get("structured_residual_prior", {}).get(
+                        "analytic_temporal_prior_added",
+                        False,
+                    )
+                ),
+                "frame_quality_policy": str(schur_frame_quality_policy),
+                "frame_quality_total_frame_count": int(
+                    frame_quality_report.total_frame_count
+                ),
+                "frame_quality_good_frame_count": int(frame_quality_report.good_frame_count),
+                "frame_quality_bad_frame_count": int(frame_quality_report.bad_frame_count),
+                "frame_quality_bad_frame_indices": list(
+                    frame_quality_report.bad_frame_indices
+                ),
+                "frame_quality_chi2_threshold": float(schur_frame_chi2_threshold),
+                "frame_quality_effective_frame_fraction": float(
+                    frame_quality_metadata["effective_frame_fraction"]
+                ),
+                "theta_reference_overrides": theta_reference_override_payload,
+                "theta_reference_consistency": theta_reference_consistency,
+                "information_accounting": information_accounting,
+                **dense_comparison_state,
+            },
+        )
     record(
         "subblock_summary.build.done",
         n_frames=int(context["layout"].n_frame),
@@ -7184,10 +7294,16 @@ def _evaluate_schur_summary(
             matrix_npz_path=summary_npz_path,
             dense_global_hessian_materialized=True,
         )
-        artifact.write(
-            summary_json_path=summary_json_path,
-            matrix_npz_path=summary_npz_path,
-        )
+        with _runtime_profile_stage(
+            runtime_profiler,
+            "subblock_summary.write",
+            cacheability="artifact_reusable",
+            category="artifact",
+        ):
+            artifact.write(
+                summary_json_path=summary_json_path,
+                matrix_npz_path=summary_npz_path,
+            )
         record(
             "subblock_summary.write.done",
             summary_json_path=summary_json_path,
@@ -7206,17 +7322,23 @@ def _evaluate_schur_summary(
             matrix_npz_path=summary_npz_path,
             dense_global_hessian_materialized=False,
         )
-        _write_structured_schur_summary_artifact(
-            summary=reduced_summary,
-            combined_layout=combined_layout,
-            theta_ref=observation_theta_ref_values,
-            phi_ref=fast_phi_ref_values,
-            sidecar_blocks=structured_sidecar_blocks,
-            structured_reduction=structured_reduction,
-            summary_json_path=summary_json_path,
-            matrix_npz_path=summary_npz_path,
-            metadata=artifact_metadata,
-        )
+        with _runtime_profile_stage(
+            runtime_profiler,
+            "subblock_summary.write",
+            cacheability="artifact_reusable",
+            category="artifact",
+        ):
+            _write_structured_schur_summary_artifact(
+                summary=reduced_summary,
+                combined_layout=combined_layout,
+                theta_ref=observation_theta_ref_values,
+                phi_ref=fast_phi_ref_values,
+                sidecar_blocks=structured_sidecar_blocks,
+                structured_reduction=structured_reduction,
+                summary_json_path=summary_json_path,
+                matrix_npz_path=summary_npz_path,
+                metadata=artifact_metadata,
+            )
         record(
             "subblock_summary.write.done",
             summary_json_path=summary_json_path,
@@ -7311,7 +7433,13 @@ def _evaluate_schur_summary(
     else:
         _write_rows_csv(surrogate_csv_path, validation_rows)
 
-    loaded_summary = load_subblock_summary(summary_json_path)
+    with _runtime_profile_stage(
+        runtime_profiler,
+        "subblock_summary.validate",
+        cacheability="diagnostic_overhead",
+        category="validation",
+    ):
+        loaded_summary = load_subblock_summary(summary_json_path)
     record(
         "subblock_summary.validate.done",
         loaded_theta_labels=list(loaded_summary.theta_labels),
@@ -7799,9 +7927,27 @@ def run_obs_subblock_study(
     memory_recorder: MemoryDiagnosticsRecorder | None = None
     memory_audit_path: Path | None = None
     if profile_runtime and study_mode == MODE_SCHUR_SUMMARY:
-        runtime_profile_summary_path = (profile_runtime_file.resolve() if profile_runtime_file is not None else study_root / "runtime_profile_summary.json")
-        runtime_profile_timeline_path = (profile_runtime_timeline.resolve() if profile_runtime_timeline is not None else study_root / "runtime_profile_timeline.jsonl")
-        runtime_profiler = RuntimeProfiler(run_context={"script":"run_obs_subblock_study.py","mode":study_mode,"case_root":str(case_root),"n_frames":n_frames,"phi_ref":normalized_phi_ref,"schur_curvature_method":normalized_schur_curvature_method,"profile_runtime_detail":profile_runtime_detail})
+        runtime_profile_summary_path = (
+            profile_runtime_file.resolve()
+            if profile_runtime_file is not None
+            else study_root / "runtime_profile_summary.json"
+        )
+        runtime_profile_timeline_path = (
+            profile_runtime_timeline.resolve()
+            if profile_runtime_timeline is not None
+            else study_root / "runtime_profile_timeline.jsonl"
+        )
+        runtime_profiler = RuntimeProfiler(
+            run_context={
+                "script": "run_obs_subblock_study.py",
+                "mode": study_mode,
+                "case_root": str(case_root),
+                "n_frames": n_frames,
+                "phi_ref": normalized_phi_ref,
+                "schur_curvature_method": normalized_schur_curvature_method,
+                "profile_runtime_detail": profile_runtime_detail,
+            }
+        )
     if memory_diagnostics and study_mode == MODE_SCHUR_SUMMARY:
         memory_timeline_path = (
             memory_diagnostics_file.resolve()
@@ -7967,7 +8113,17 @@ def run_obs_subblock_study(
         "cli_overrides_applied": template_info["applied_overrides"],
     }
     if runtime_profiler is not None:
-        summary["runtime_profile"] = {"enabled": True, "summary_json": str(runtime_profile_summary_path), "timeline_jsonl": str(runtime_profile_timeline_path)}
+        summary["runtime_profile"] = {
+            "enabled": True,
+            "summary_json": str(runtime_profile_summary_path.resolve()),
+            "timeline_jsonl": str(runtime_profile_timeline_path.resolve()),
+        }
+        summary["runtime_profile_summary_path"] = str(
+            runtime_profile_summary_path.resolve()
+        )
+        summary["runtime_profile_timeline_path"] = str(
+            runtime_profile_timeline_path.resolve()
+        )
     if memory_recorder is not None:
         summary["memory_diagnostics"] = {
             "enabled": True,
@@ -8002,35 +8158,25 @@ def run_obs_subblock_study(
             noise_mode=noise_mode,
             dry_run=dry_run,
         )
-    if runtime_profiler is not None:
-        with runtime_profiler.profile_stage("case_prepare.run", cacheability="not_cacheable", category="case_prepare"):
-            prep = _prepare_case_render_artifacts(
-        case_root=case_root,
-        template_paths=template_paths,
-        candidate_key=candidate,
-        truth_value=truth_value,
-        n_frames=n_frames,
-        dt_s=dt_s,
-        exposure_time_s=exposure_time_s,
-        noise_mode=noise_mode,
-        render_seed=render_seed,
-        external_frame_truth_csv=external_frame_truth_csv,
-        dry_run=dry_run,
-    )
-    if runtime_profiler is None:
+    with _runtime_profile_stage(
+        runtime_profiler,
+        "case_prepare.run",
+        cacheability="not_cacheable",
+        category="case_prepare",
+    ):
         prep = _prepare_case_render_artifacts(
-        case_root=case_root,
-        template_paths=template_paths,
-        candidate_key=candidate,
-        truth_value=truth_value,
-        n_frames=n_frames,
-        dt_s=dt_s,
-        exposure_time_s=exposure_time_s,
-        noise_mode=noise_mode,
-        render_seed=render_seed,
-        external_frame_truth_csv=external_frame_truth_csv,
-        dry_run=dry_run,
-    )
+            case_root=case_root,
+            template_paths=template_paths,
+            candidate_key=candidate,
+            truth_value=truth_value,
+            n_frames=n_frames,
+            dt_s=dt_s,
+            exposure_time_s=exposure_time_s,
+            noise_mode=noise_mode,
+            render_seed=render_seed,
+            external_frame_truth_csv=external_frame_truth_csv,
+            dry_run=dry_run,
+        )
 
     if memory_recorder is not None:
         memory_recorder.record(
@@ -8304,6 +8450,12 @@ def run_obs_subblock_study(
                             matrix_npz_written=False,
                         ),
                     )
+            _write_runtime_profile_artifacts(
+                runtime_profiler=runtime_profiler,
+                summary_path=runtime_profile_summary_path,
+                timeline_path=runtime_profile_timeline_path,
+                outputs={"study_summary_json": str(summary_path.resolve())},
+            )
             _write_json(summary_path, summary)
             return summary
 
@@ -8325,11 +8477,17 @@ def run_obs_subblock_study(
                     config_path=schur_config_path,
                 )
             if reuse_reference_inference is None:
-                recovered_result = _default_inference_runner(
-                    schur_config_path,
-                    recovered_run_root,
-                    False,
-                )
+                with _runtime_profile_stage(
+                    runtime_profiler,
+                    "reference_inference",
+                    cacheability="not_cacheable",
+                    category="reference_inference",
+                ):
+                    recovered_result = _default_inference_runner(
+                        schur_config_path,
+                        recovered_run_root,
+                        False,
+                    )
                 recovered_theta = np.asarray(recovered_result["theta_final"], dtype=float)
                 if memory_recorder is not None:
                     memory_recorder.record(
@@ -8380,6 +8538,7 @@ def run_obs_subblock_study(
             theta_reference_overrides=theta_reference_override_metadata,
             allow_dense_image_hessian=bool(allow_dense_image_hessian),
             memory_recorder=memory_recorder,
+            runtime_profiler=runtime_profiler,
         )
         summary["schur_summary"] = schur_summary
         frame_truth_preview = _write_frame_truth_preview(
@@ -8430,6 +8589,20 @@ def run_obs_subblock_study(
                 summary["memory_diagnostics"]["audit_json"] = str(
                     memory_audit_path.resolve()
                 )
+        _write_runtime_profile_artifacts(
+            runtime_profiler=runtime_profiler,
+            summary_path=runtime_profile_summary_path,
+            timeline_path=runtime_profile_timeline_path,
+            outputs={
+                "study_summary_json": str(summary_path.resolve()),
+                "subblock_summary_json": schur_summary["artifacts"].get(
+                    "subblock_summary_json"
+                ),
+                "subblock_summary_matrices_npz": schur_summary["artifacts"].get(
+                    "subblock_summary_matrices_npz"
+                ),
+            },
+        )
         _write_json(summary_path, summary)
         return summary
 

@@ -1748,6 +1748,97 @@ def test_schur_summary_recovered_plan_reports_preconditioning_enabled_cli_source
     assert preconditioning["reference"] == "initial"
 
 
+def test_schur_summary_runtime_profile_writes_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_schur_runtime_profile"
+    _write_case_render_artifacts(case_root, truth_value=0.011)
+
+    def fake_evaluate_schur_summary(**kwargs: object) -> dict:
+        output_dir = Path(kwargs["output_dir"])
+        summary_json = output_dir / "subblock_summary.json"
+        matrix_npz = output_dir / "subblock_summary_matrices.npz"
+        diagnostics_json = output_dir / "schur_diagnostics.json"
+        curvature_json = output_dir / "combined_curvature_diagnostics.json"
+        validation_csv = output_dir / "local_surrogate_validation.csv"
+        summary_json.write_text("{}", encoding="utf-8")
+        matrix_npz.write_bytes(b"npz")
+        diagnostics_json.write_text("{}", encoding="utf-8")
+        curvature_json.write_text("{}", encoding="utf-8")
+        validation_csv.write_text(
+            "label,predicted_delta,actual_delta_fixed_phi\n",
+            encoding="utf-8",
+        )
+        runtime_profiler = kwargs.get("runtime_profiler")
+        with module._runtime_profile_stage(
+            runtime_profiler,
+            "subblock_summary.build",
+            cacheability="cacheable_with_same_inputs",
+            category="summary",
+        ):
+            pass
+        return {
+            "mode": module.MODE_SCHUR_SUMMARY,
+            "schema_version": "image_backed_subblock_summary.v1",
+            "n_frames": 2,
+            "n_theta": 2,
+            "n_phi": 3,
+            "schur_curvature_method_requested": "auto",
+            "schur_curvature_method_used": "structured",
+            "information_accounting": {},
+            "artifacts": {
+                "subblock_summary_json": str(summary_json.resolve()),
+                "subblock_summary_matrices_npz": str(matrix_npz.resolve()),
+                "schur_diagnostics_json": str(diagnostics_json.resolve()),
+                "combined_curvature_diagnostics_json": str(curvature_json.resolve()),
+                "local_surrogate_validation_csv": str(validation_csv.resolve()),
+            },
+        }
+
+    monkeypatch.setattr(module, "_evaluate_schur_summary", fake_evaluate_schur_summary)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        theta_keys=("source.separation_as", "optics.plate_scale_as_per_pix"),
+        phi_ref="truth_when_available",
+        dry_run=False,
+        profile_runtime=True,
+        profile_runtime_detail="basic",
+    )
+
+    summary_path = Path(summary["runtime_profile_summary_path"])
+    timeline_path = Path(summary["runtime_profile_timeline_path"])
+    assert summary_path == (
+        case_root / "study" / "schur_summary" / "runtime_profile_summary.json"
+    ).resolve()
+    assert timeline_path == (
+        case_root / "study" / "schur_summary" / "runtime_profile_timeline.jsonl"
+    ).resolve()
+    assert summary_path.exists()
+    assert timeline_path.exists()
+
+    profile_summary = _read_json(summary_path)
+    assert profile_summary["totals"]["completed_stage_count"] >= 1
+    assert profile_summary["events"]
+    timeline_rows = [
+        json.loads(line)
+        for line in timeline_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert timeline_rows
+    assert {row["stage"] for row in timeline_rows} >= {
+        "case_prepare.run",
+        "subblock_summary.build",
+    }
+
+
 def test_schur_summary_dry_run_accepts_reference_early_stopping_kwargs(
     tmp_path: Path,
 ):
