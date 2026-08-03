@@ -8,6 +8,7 @@ import pytest
 
 from dluxshera.inference.observation_belief import (
     ObservationBeliefState,
+    ObservationLikelihoodState,
     SubblockSummary,
     update_observation_belief,
 )
@@ -252,6 +253,16 @@ def test_observation_belief_accumulator_consumes_loaded_real_summary(tmp_path: P
         sigma=np.array([10.0]),
     )
     result = update_observation_belief(prior, [loaded])
+    likelihood = ObservationLikelihoodState.from_summaries(
+        theta_labels=prior.theta_labels,
+        summaries=[loaded],
+    )
+    cumulative = likelihood.combine_with_prior(prior)
 
     assert result.posterior.mean[0] > 0.0
     assert result.posterior.precision[0, 0] > prior.precision[0, 0]
+    np.testing.assert_allclose(cumulative.posterior.mean, result.posterior.mean)
+    np.testing.assert_allclose(
+        cumulative.posterior.precision,
+        result.posterior.precision,
+    )

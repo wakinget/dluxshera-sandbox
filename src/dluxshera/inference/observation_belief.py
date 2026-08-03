@@ -7,11 +7,13 @@ import numpy as np
 
 __all__ = [
     "accumulate_summary_information",
+    "accumulate_observation_likelihood_prefixes",
     "build_system_observation_theta_layout",
     "build_prior_whitened_information_gain_matrix",
     "MatrixDiagnostics",
     "ObservationBeliefState",
     "ObservationEigenBasis",
+    "ObservationLikelihoodState",
     "ObservationPolicyUpdateResult",
     "ObservationThetaLayout",
     "ObservationUpdatePolicy",
@@ -26,6 +28,9 @@ __all__ = [
     "update_observation_belief",
     "update_observation_belief_with_policy",
 ]
+
+
+OBSERVATION_LIKELIHOOD_STATE_SCHEMA_VERSION = "observation_likelihood_state.v1"
 
 
 def _as_label_tuple(labels: Sequence[str], *, name: str) -> tuple[str, ...]:
@@ -114,6 +119,18 @@ def _store_get_optional(store: Any, key: str) -> Any:
         return store.get(key)
     except (AttributeError, KeyError):
         return None
+
+
+def _summary_information_scale(summary: SubblockSummary) -> str | None:
+    accounting = summary.diagnostics.get("information_accounting")
+    if isinstance(accounting, Mapping):
+        scale = accounting.get("summary_information_scale")
+        if scale is not None:
+            return str(scale)
+    scale = summary.diagnostics.get("summary_information_scale")
+    if scale is None:
+        return None
+    return str(scale)
 
 
 def infer_indexed_parameter_indices(store: Any, key: str) -> tuple[int, ...]:
@@ -922,6 +939,334 @@ class ObservationBeliefState:
 
 
 @dataclass(frozen=True)
+class ObservationLikelihoodState:
+    """Accumulate observation-level likelihood information only.
+
+    This object stores the Schur-reduced likelihood contribution from accepted
+    :class:`SubblockSummary` objects in one canonical physical parameter basis.
+    It deliberately does not contain an observation prior and is not itself a
+    posterior belief. Combine it with exactly one :class:`ObservationBeliefState`
+    prior to form a cumulative science posterior.
+
+    Each ``SubblockSummary`` represents a local objective quadratic
+
+    ``L(theta) ~= const + g.T @ (theta - theta_ref) + 0.5 * dtheta.T @ S @ dtheta``
+
+    where ``reduced_score`` stores ``g`` and ``reduced_information`` stores
+    ``S``. In absolute information coordinates, one summary contributes
+    ``Lambda = S`` and ``eta = S @ theta_ref - g``. This rebasing lets summaries
+    evaluated around different physical reference vectors accumulate in the
+    same state.
+
+    The cumulative posterior mean is a science estimate formed by
+    :meth:`combine_with_prior`. It is distinct from any next iterative reference
+    state used for later linearization; reference damping, gating, clipping, or
+    truncation should be represented outside this likelihood-only object.
+
+    Instances are immutable. Methods that add summaries return new states.
+    Summary labels may be a compatible permutation or strict subset of this
+    state's labels; duplicate labels and unknown labels are rejected. Summary
+    identifiers are recorded in insertion order for provenance. Duplicate IDs
+    are allowed by default because the repository does not yet guarantee that
+    every ``subblock_id`` is globally stable; callers can enable conservative
+    duplicate rejection when their IDs are known unique.
+
+    When summaries expose ``summary_information_scale`` provenance in their
+    diagnostics, all accumulated summaries must use the same scale. Older
+    summaries without this provenance are accepted unchanged.
+
+    Matrix damping is not accumulated into this likelihood state. Optional
+    damping in :meth:`combine_with_prior` is applied only to the posterior solve
+    convention inherited from :func:`update_observation_belief`.
+    """
+
+    theta_labels: tuple[str, ...]
+    information: np.ndarray
+    information_vector: np.ndarray
+    summary_count: int = 0
+    summary_ids: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+    schema_version: str = OBSERVATION_LIKELIHOOD_STATE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        labels = _as_label_tuple(self.theta_labels, name="theta_labels")
+        information = _as_square_matrix(self.information, name="information")
+        information_vector = _as_vector(
+            self.information_vector,
+            name="information_vector",
+        )
+        expected_shape = (len(labels), len(labels))
+        if information.shape != expected_shape:
+            raise ValueError(
+                f"information must have shape {expected_shape}; "
+                f"received {information.shape}."
+            )
+        if information_vector.shape != (len(labels),):
+            raise ValueError(
+                "information_vector shape must match theta_labels; "
+                f"received {information_vector.shape} for {len(labels)} labels."
+            )
+        if int(self.summary_count) < 0:
+            raise ValueError("summary_count must be non-negative.")
+        summary_ids = tuple(str(identifier) for identifier in self.summary_ids)
+        if len(summary_ids) > int(self.summary_count):
+            raise ValueError("summary_ids cannot be longer than summary_count.")
+        if self.schema_version != OBSERVATION_LIKELIHOOD_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                "schema_version must be "
+                f"{OBSERVATION_LIKELIHOOD_STATE_SCHEMA_VERSION!r}."
+            )
+
+        object.__setattr__(self, "theta_labels", labels)
+        object.__setattr__(self, "information", information)
+        object.__setattr__(self, "information_vector", information_vector)
+        object.__setattr__(self, "summary_count", int(self.summary_count))
+        object.__setattr__(self, "summary_ids", summary_ids)
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @classmethod
+    def empty(
+        cls,
+        theta_labels: Sequence[str],
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ObservationLikelihoodState:
+        """Return an empty likelihood state for one canonical label layout."""
+
+        labels = _as_label_tuple(theta_labels, name="theta_labels")
+        size = len(labels)
+        return cls(
+            theta_labels=labels,
+            information=np.zeros((size, size), dtype=float),
+            information_vector=np.zeros((size,), dtype=float),
+            summary_count=0,
+            summary_ids=(),
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def from_summaries(
+        cls,
+        *,
+        theta_labels: Sequence[str],
+        summaries: Sequence[SubblockSummary],
+        metadata: Mapping[str, Any] | None = None,
+        reject_duplicate_ids: bool = False,
+    ) -> ObservationLikelihoodState:
+        """Accumulate a batch of summaries into a likelihood-only state.
+
+        This is numerically equivalent to starting from :meth:`empty` and
+        calling :meth:`add_summaries` once with the same summaries.
+        """
+
+        return cls.empty(theta_labels, metadata=metadata).add_summaries(
+            summaries,
+            reject_duplicate_ids=reject_duplicate_ids,
+        )
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> ObservationLikelihoodState:
+        """Restore a likelihood state from a JSON-friendly payload."""
+
+        schema_version = payload.get("schema_version")
+        if schema_version != OBSERVATION_LIKELIHOOD_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported ObservationLikelihoodState schema_version: "
+                f"{schema_version!r}."
+            )
+        return cls(
+            theta_labels=tuple(str(label) for label in payload.get("theta_labels", ())),
+            information=np.asarray(payload.get("information"), dtype=float),
+            information_vector=np.asarray(
+                payload.get("information_vector"),
+                dtype=float,
+            ),
+            summary_count=int(payload.get("summary_count", 0)),
+            summary_ids=tuple(str(item) for item in payload.get("summary_ids", ())),
+            metadata=dict(payload.get("metadata", {})),
+            schema_version=str(schema_version),
+        )
+
+    def add_summary(
+        self,
+        summary: SubblockSummary,
+        *,
+        reject_duplicate_ids: bool = False,
+    ) -> ObservationLikelihoodState:
+        """Return a new state with one additional summary accumulated."""
+
+        if reject_duplicate_ids and summary.subblock_id in set(self.summary_ids):
+            raise ValueError(
+                f"Summary id {summary.subblock_id!r} is already present in "
+                "this likelihood state."
+            )
+        summary_precision, summary_score, summary_theta_ref = _summary_to_global_arrays(
+            summary,
+            global_labels=self.theta_labels,
+        )
+        contribution_vector = summary_precision @ summary_theta_ref - summary_score
+        if not np.all(np.isfinite(contribution_vector)):
+            raise ValueError(
+                f"Summary {summary.subblock_id!r} produces a non-finite "
+                "canonical information vector."
+            )
+        information = self.information + summary_precision
+        information_vector = self.information_vector + contribution_vector
+        metadata = dict(self.metadata)
+        metadata.setdefault(
+            "score_convention",
+            "eta = reduced_information @ theta_ref - reduced_score",
+        )
+        summary_scale = _summary_information_scale(summary)
+        if summary_scale is not None:
+            state_scale = metadata.get("summary_information_scale")
+            if state_scale is None:
+                metadata["summary_information_scale"] = summary_scale
+            elif str(state_scale) != summary_scale:
+                raise ValueError(
+                    "Summary information-scale provenance is incompatible: "
+                    f"state has {state_scale!r}, summary "
+                    f"{summary.subblock_id!r} has {summary_scale!r}."
+                )
+        return ObservationLikelihoodState(
+            theta_labels=self.theta_labels,
+            information=information,
+            information_vector=information_vector,
+            summary_count=self.summary_count + 1,
+            summary_ids=self.summary_ids + (summary.subblock_id,),
+            metadata=metadata,
+        )
+
+    def add_summaries(
+        self,
+        summaries: Sequence[SubblockSummary],
+        *,
+        reject_duplicate_ids: bool = False,
+    ) -> ObservationLikelihoodState:
+        """Return a new state with all supplied summaries accumulated."""
+
+        state = self
+        for summary in summaries:
+            state = state.add_summary(
+                summary,
+                reject_duplicate_ids=reject_duplicate_ids,
+            )
+        return state
+
+    def iter_add_summaries(
+        self,
+        summaries: Sequence[SubblockSummary],
+        *,
+        reject_duplicate_ids: bool = False,
+    ):
+        """Yield cumulative states after each supplied summary.
+
+        The first yielded state contains the initial state plus ``summaries[0]``;
+        the last yielded state contains every supplied summary.
+        """
+
+        state = self
+        for summary in summaries:
+            state = state.add_summary(
+                summary,
+                reject_duplicate_ids=reject_duplicate_ids,
+            )
+            yield state
+
+    def combine_with_prior(
+        self,
+        prior: ObservationBeliefState,
+        *,
+        damping: float = 0.0,
+    ) -> ObservationUpdateResult:
+        """Form a cumulative posterior by adding one prior exactly once.
+
+        The returned :class:`ObservationUpdateResult` has an empty summary tuple
+        and no cumulative step trace because this state stores already
+        accumulated likelihood information rather than the original
+        ``SubblockSummary`` objects. Use :func:`update_observation_belief` when a
+        per-summary cumulative trace is required.
+        """
+
+        if prior.theta_labels != self.theta_labels:
+            raise ValueError("prior theta_labels must match likelihood theta_labels.")
+        if damping < 0.0:
+            raise ValueError("damping must be non-negative.")
+
+        raw_precision = prior.precision + self.information
+        raw_information = prior.information_vector + self.information_vector
+        posterior_precision = raw_precision.copy()
+        if damping > 0.0:
+            posterior_precision += float(damping) * np.eye(prior.theta_size, dtype=float)
+
+        posterior_mean, posterior_covariance, solve_method = _solve_symmetric_system(
+            posterior_precision,
+            raw_information,
+        )
+        posterior = ObservationBeliefState(
+            theta_labels=self.theta_labels,
+            mean=posterior_mean,
+            precision=posterior_precision,
+            covariance=posterior_covariance,
+            metadata={
+                "damping": float(damping),
+                "n_summaries": int(self.summary_count),
+                "posterior_precision_diagnostics": _compute_matrix_diagnostics(
+                    posterior_precision
+                ).to_dict(),
+                "solve_method": solve_method,
+            },
+        )
+        return ObservationUpdateResult(
+            prior=prior,
+            posterior=posterior,
+            summaries=(),
+            information_vector=raw_information,
+            cumulative_steps=(),
+            metadata={
+                "damping": float(damping),
+                "n_summaries": int(self.summary_count),
+                "summary_ids": list(self.summary_ids),
+                "solve_method": solve_method,
+                "raw_precision_diagnostics": _compute_matrix_diagnostics(
+                    raw_precision
+                ).to_dict(),
+                "likelihood_diagnostics": self.to_diagnostics_dict(),
+            },
+        )
+
+    def matrix_diagnostics(self, *, rcond: float | None = None) -> MatrixDiagnostics:
+        """Return standard diagnostics for the likelihood information matrix."""
+
+        return _compute_matrix_diagnostics(self.information, rcond=rcond)
+
+    def to_diagnostics_dict(self, *, rcond: float | None = None) -> dict[str, Any]:
+        """Return JSON-friendly diagnostics for the accumulated likelihood."""
+
+        return {
+            "summary_count": int(self.summary_count),
+            "finite_information": bool(np.all(np.isfinite(self.information))),
+            "finite_information_vector": bool(
+                np.all(np.isfinite(self.information_vector))
+            ),
+            "information": self.matrix_diagnostics(rcond=rcond).to_dict(),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly payload for artifact writers and restarts."""
+
+        return {
+            "schema_version": OBSERVATION_LIKELIHOOD_STATE_SCHEMA_VERSION,
+            "theta_labels": list(self.theta_labels),
+            "information": self.information.tolist(),
+            "information_vector": self.information_vector.tolist(),
+            "summary_count": int(self.summary_count),
+            "summary_ids": list(self.summary_ids),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
 class ObservationUpdateStep:
     """Capture the posterior state after one cumulative summary update."""
 
@@ -1178,6 +1523,36 @@ class ObservationPolicyUpdateResult:
         object.__setattr__(self, "diagnostics", dict(self.diagnostics))
 
 
+def accumulate_observation_likelihood_prefixes(
+    theta_labels: Sequence[str],
+    summaries: Sequence[SubblockSummary],
+    *,
+    initial_state: ObservationLikelihoodState | None = None,
+    reject_duplicate_ids: bool = False,
+) -> tuple[ObservationLikelihoodState, ...]:
+    """Return cumulative likelihood states after each supplied summary.
+
+    Prefixes are generated incrementally: prefix ``k`` reuses the accumulated
+    state from prefix ``k - 1`` and adds only summary ``k``. The returned states
+    contain likelihood information only; combine each state with one prior to
+    obtain prefix posteriors.
+    """
+
+    state = (
+        ObservationLikelihoodState.empty(theta_labels)
+        if initial_state is None
+        else initial_state
+    )
+    if state.theta_labels != _as_label_tuple(theta_labels, name="theta_labels"):
+        raise ValueError("initial_state theta_labels must match theta_labels.")
+    return tuple(
+        state.iter_add_summaries(
+            summaries,
+            reject_duplicate_ids=reject_duplicate_ids,
+        )
+    )
+
+
 def accumulate_summary_information(
     theta_labels: Sequence[str],
     summaries: Sequence[SubblockSummary],
@@ -1188,15 +1563,10 @@ def accumulate_summary_information(
     contributed by sub-block summaries, excluding the prior precision.
     """
 
-    global_labels = _as_label_tuple(theta_labels, name="theta_labels")
-    accumulated = np.zeros((len(global_labels), len(global_labels)), dtype=float)
-    for summary in summaries:
-        summary_precision, _, _ = _summary_to_global_arrays(
-            summary,
-            global_labels=global_labels,
-        )
-        accumulated += summary_precision
-    return 0.5 * (accumulated + accumulated.T)
+    return ObservationLikelihoodState.from_summaries(
+        theta_labels=theta_labels,
+        summaries=summaries,
+    ).information
 
 
 def build_prior_whitened_information_gain_matrix(
@@ -1225,8 +1595,9 @@ def _summary_to_global_arrays(
     *,
     global_labels: Sequence[str],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    label_to_index = {label: index for index, label in enumerate(global_labels)}
-    global_dim = len(global_labels)
+    labels = _as_label_tuple(global_labels, name="global_labels")
+    label_to_index = {label: index for index, label in enumerate(labels)}
+    global_dim = len(labels)
     info = np.zeros((global_dim, global_dim), dtype=float)
     score = np.zeros((global_dim,), dtype=float)
     theta_ref = np.zeros((global_dim,), dtype=float)
@@ -1308,18 +1679,15 @@ def update_observation_belief(
         raise ValueError("damping must be non-negative.")
 
     theta_labels = prior.theta_labels
-    raw_precision = prior.precision.copy()
-    raw_information = prior.information_vector.copy()
+    summary_tuple = tuple(summaries)
+    likelihood = ObservationLikelihoodState.empty(theta_labels)
     cumulative_steps: list[ObservationUpdateStep] = []
     solve_method = "solve"
 
-    for step_index, summary in enumerate(summaries, start=1):
-        summary_precision, summary_score, summary_theta_ref = _summary_to_global_arrays(
-            summary,
-            global_labels=theta_labels,
-        )
-        raw_precision += summary_precision
-        raw_information += summary_precision @ summary_theta_ref - summary_score
+    for step_index, summary in enumerate(summary_tuple, start=1):
+        likelihood = likelihood.add_summary(summary)
+        raw_precision = prior.precision + likelihood.information
+        raw_information = prior.information_vector + likelihood.information_vector
 
         solve_precision = raw_precision.copy()
         if damping > 0.0:
@@ -1342,13 +1710,13 @@ def update_observation_belief(
             )
         )
 
-    posterior_precision = raw_precision.copy()
-    if damping > 0.0:
-        posterior_precision += float(damping) * np.eye(prior.theta_size, dtype=float)
-    posterior_mean, posterior_covariance, solve_method = _solve_symmetric_system(
-        posterior_precision,
-        raw_information,
-    )
+    final_result = likelihood.combine_with_prior(prior, damping=damping)
+    posterior_precision = final_result.posterior.precision
+    posterior_mean = final_result.posterior.mean
+    posterior_covariance = final_result.posterior.covariance
+    raw_information = final_result.information_vector
+    raw_precision = prior.precision + likelihood.information
+    solve_method = str(final_result.metadata["solve_method"])
     posterior = ObservationBeliefState(
         theta_labels=theta_labels,
         mean=posterior_mean,
@@ -1356,7 +1724,7 @@ def update_observation_belief(
         covariance=posterior_covariance,
         metadata={
             "damping": float(damping),
-            "n_summaries": int(len(summaries)),
+            "n_summaries": int(len(summary_tuple)),
             "posterior_precision_diagnostics": _compute_matrix_diagnostics(
                 posterior_precision
             ).to_dict(),
@@ -1366,16 +1734,17 @@ def update_observation_belief(
     return ObservationUpdateResult(
         prior=prior,
         posterior=posterior,
-        summaries=tuple(summaries),
+        summaries=summary_tuple,
         information_vector=raw_information,
         cumulative_steps=tuple(cumulative_steps),
         metadata={
             "damping": float(damping),
-            "n_summaries": int(len(summaries)),
+            "n_summaries": int(len(summary_tuple)),
             "solve_method": solve_method,
             "raw_precision_diagnostics": _compute_matrix_diagnostics(
                 raw_precision
             ).to_dict(),
+            "likelihood_diagnostics": likelihood.to_diagnostics_dict(),
         },
     )
 

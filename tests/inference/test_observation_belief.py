@@ -4,10 +4,12 @@ import numpy as np
 import pytest
 
 from dluxshera.inference.observation_belief import (
+    ObservationLikelihoodState,
     ObservationBeliefState,
     ObservationThetaLayout,
     ObservationUpdatePolicy,
     SubblockSummary,
+    accumulate_observation_likelihood_prefixes,
     build_observation_eigenbasis,
     build_prior_whitened_information_gain_matrix,
     build_system_observation_theta_layout,
@@ -16,6 +18,23 @@ from dluxshera.inference.observation_belief import (
     update_observation_belief,
     update_observation_belief_with_policy,
 )
+
+
+def _summary_about_target(
+    *,
+    subblock_id: str,
+    labels: tuple[str, ...],
+    information: np.ndarray,
+    theta_target: np.ndarray,
+    theta_ref: np.ndarray,
+) -> SubblockSummary:
+    return SubblockSummary.from_reduced_form(
+        subblock_id=subblock_id,
+        theta_labels=labels,
+        theta_ref=theta_ref,
+        reduced_information=information,
+        reduced_score=information @ (theta_ref - theta_target),
+    )
 
 
 @pytest.mark.parametrize(
@@ -290,6 +309,451 @@ def test_posterior_covariance_shrinks_with_multiple_information_summaries():
 
     assert np.all(np.diag(result_1.posterior.covariance) < np.diag(prior.covariance))
     assert np.all(np.diag(result_2.posterior.covariance) < np.diag(result_1.posterior.covariance))
+
+
+def test_observation_likelihood_state_empty_payload_is_valid():
+    labels = ("source.separation_as", "source.log_flux_total")
+
+    state = ObservationLikelihoodState.empty(labels, metadata={"case": "synthetic"})
+    payload = state.to_dict()
+    restored = ObservationLikelihoodState.from_dict(payload)
+
+    assert state.theta_labels == labels
+    assert state.summary_count == 0
+    assert state.summary_ids == ()
+    np.testing.assert_allclose(state.information, np.zeros((2, 2)))
+    np.testing.assert_allclose(state.information_vector, np.zeros(2))
+    assert payload["schema_version"] == "observation_likelihood_state.v1"
+    assert payload["information"] == [[0.0, 0.0], [0.0, 0.0]]
+    assert payload["information_vector"] == [0.0, 0.0]
+    assert restored.metadata == {"case": "synthetic"}
+    np.testing.assert_allclose(restored.information, state.information)
+    np.testing.assert_allclose(restored.information_vector, state.information_vector)
+
+
+def test_observation_likelihood_state_recovers_1d_analytic_posterior():
+    labels = ("source.separation_as",)
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.0]),
+        sigma=np.array([2.0]),
+    )
+    summary = SubblockSummary.from_reduced_form(
+        subblock_id="subblock_000000",
+        theta_labels=labels,
+        theta_ref=np.array([1.0]),
+        reduced_information=np.array([[4.0]]),
+        reduced_score=np.array([-8.0]),
+    )
+
+    state = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=[summary],
+    )
+    result = state.combine_with_prior(prior)
+
+    expected_precision = 4.0 + 0.25
+    expected_information_vector = np.array([12.0])
+    np.testing.assert_allclose(state.information, np.array([[4.0]]))
+    np.testing.assert_allclose(state.information_vector, expected_information_vector)
+    np.testing.assert_allclose(result.posterior.precision, np.array([[expected_precision]]))
+    np.testing.assert_allclose(result.posterior.mean, expected_information_vector / expected_precision)
+    np.testing.assert_allclose(result.posterior.covariance, np.array([[1.0 / expected_precision]]))
+
+
+def test_observation_likelihood_state_rebases_different_local_references():
+    labels = ("source.separation_as",)
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.0]),
+        sigma=np.array([10.0]),
+    )
+    information = np.array([[2.0]])
+    theta_target = np.array([1.5])
+    summary_ref_0 = _summary_about_target(
+        subblock_id="subblock_000000",
+        labels=labels,
+        information=information,
+        theta_target=theta_target,
+        theta_ref=np.array([0.0]),
+    )
+    summary_ref_1 = _summary_about_target(
+        subblock_id="subblock_000001",
+        labels=labels,
+        information=information,
+        theta_target=theta_target,
+        theta_ref=np.array([1.0]),
+    )
+    summary_ref_0_equivalent = _summary_about_target(
+        subblock_id="subblock_000002",
+        labels=labels,
+        information=information,
+        theta_target=theta_target,
+        theta_ref=np.array([0.0]),
+    )
+
+    mixed_refs = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=[summary_ref_0, summary_ref_1],
+    )
+    common_refs = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=[summary_ref_0, summary_ref_0_equivalent],
+    )
+
+    np.testing.assert_allclose(mixed_refs.information, common_refs.information)
+    np.testing.assert_allclose(
+        mixed_refs.information_vector,
+        common_refs.information_vector,
+    )
+    np.testing.assert_allclose(
+        mixed_refs.combine_with_prior(prior).posterior.mean,
+        common_refs.combine_with_prior(prior).posterior.mean,
+    )
+
+
+def test_observation_likelihood_state_accumulates_coupled_information():
+    labels = ("theta.a", "theta.b", "theta.c")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.2, -0.1, 0.3]),
+        sigma=np.array([2.0, 3.0, 4.0]),
+    )
+    information_1 = np.array(
+        [
+            [5.0, 1.0, -0.5],
+            [1.0, 3.0, 0.2],
+            [-0.5, 0.2, 2.5],
+        ]
+    )
+    information_2 = np.array(
+        [
+            [2.0, -0.3, 0.4],
+            [-0.3, 4.0, 0.7],
+            [0.4, 0.7, 3.0],
+        ]
+    )
+    target_1 = np.array([0.5, -0.25, 0.8])
+    target_2 = np.array([-0.2, 0.4, 0.1])
+    summaries = [
+        _summary_about_target(
+            subblock_id="subblock_000000",
+            labels=labels,
+            information=information_1,
+            theta_target=target_1,
+            theta_ref=np.array([0.0, 0.1, -0.2]),
+        ),
+        _summary_about_target(
+            subblock_id="subblock_000001",
+            labels=labels,
+            information=information_2,
+            theta_target=target_2,
+            theta_ref=np.array([0.3, -0.2, 0.5]),
+        ),
+    ]
+
+    state = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=summaries,
+    )
+    result = state.combine_with_prior(prior)
+    expected_information = information_1 + information_2
+    expected_like_vector = information_1 @ target_1 + information_2 @ target_2
+    expected_precision = prior.precision + expected_information
+    expected_vector = prior.information_vector + expected_like_vector
+    expected_mean = np.linalg.solve(expected_precision, expected_vector)
+    expected_covariance = np.linalg.inv(expected_precision)
+
+    np.testing.assert_allclose(state.information, expected_information)
+    np.testing.assert_allclose(state.information_vector, expected_like_vector)
+    np.testing.assert_allclose(result.posterior.mean, expected_mean)
+    np.testing.assert_allclose(result.posterior.covariance, expected_covariance)
+    np.testing.assert_allclose(result.posterior.sigma(), np.sqrt(np.diag(expected_covariance)))
+
+
+def test_observation_likelihood_incremental_batch_and_legacy_paths_match():
+    labels = ("theta.a", "theta.b")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.1, -0.2]),
+        sigma=np.array([5.0, 4.0]),
+    )
+    summary_a = _summary_about_target(
+        subblock_id="subblock_000000",
+        labels=labels,
+        information=np.array([[3.0, 0.5], [0.5, 2.0]]),
+        theta_target=np.array([0.3, -0.7]),
+        theta_ref=np.array([0.0, 0.0]),
+    )
+    summary_b = _summary_about_target(
+        subblock_id="subblock_000001",
+        labels=("theta.b", "theta.a"),
+        information=np.array([[4.0, -0.2], [-0.2, 1.5]]),
+        theta_target=np.array([-0.1, 0.6]),
+        theta_ref=np.array([0.2, -0.4]),
+    )
+    summaries = [summary_a, summary_b]
+
+    incremental = ObservationLikelihoodState.empty(labels).add_summaries(summaries)
+    batch = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=summaries,
+    )
+    legacy = update_observation_belief(prior, summaries)
+
+    np.testing.assert_allclose(incremental.information, batch.information)
+    np.testing.assert_allclose(incremental.information_vector, batch.information_vector)
+    np.testing.assert_allclose(
+        batch.combine_with_prior(prior).posterior.mean,
+        legacy.posterior.mean,
+    )
+    np.testing.assert_allclose(
+        batch.combine_with_prior(prior).posterior.precision,
+        legacy.posterior.precision,
+    )
+
+
+def test_observation_likelihood_prefixes_match_independent_batch_updates():
+    labels = ("theta.a", "theta.b")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.array([2.0, 2.5]),
+    )
+    summaries = [
+        _summary_about_target(
+            subblock_id=f"subblock_{index:06d}",
+            labels=labels,
+            information=np.diag([1.0 + index, 2.0 + 0.5 * index]),
+            theta_target=np.array([0.2 * index, -0.1 * index]),
+            theta_ref=np.array([0.3, -0.4]),
+        )
+        for index in range(1, 4)
+    ]
+
+    prefixes = accumulate_observation_likelihood_prefixes(labels, summaries)
+
+    assert len(prefixes) == len(summaries)
+    for prefix_index, prefix_state in enumerate(prefixes, start=1):
+        batch_state = ObservationLikelihoodState.from_summaries(
+            theta_labels=labels,
+            summaries=summaries[:prefix_index],
+        )
+        batch_update = update_observation_belief(prior, summaries[:prefix_index])
+        np.testing.assert_allclose(prefix_state.information, batch_state.information)
+        np.testing.assert_allclose(
+            prefix_state.information_vector,
+            batch_state.information_vector,
+        )
+        np.testing.assert_allclose(
+            prefix_state.combine_with_prior(prior).posterior.mean,
+            batch_update.posterior.mean,
+        )
+
+
+def test_observation_likelihood_order_invariance_for_numeric_state():
+    labels = ("theta.a", "theta.b")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([0.0, 0.0]),
+        sigma=np.array([10.0, 10.0]),
+    )
+    summaries = [
+        _summary_about_target(
+            subblock_id="subblock_000000",
+            labels=labels,
+            information=np.array([[2.0, 0.1], [0.1, 1.0]]),
+            theta_target=np.array([1.0, -0.5]),
+            theta_ref=np.zeros(2),
+        ),
+        _summary_about_target(
+            subblock_id="subblock_000001",
+            labels=labels,
+            information=np.array([[1.5, -0.2], [-0.2, 2.5]]),
+            theta_target=np.array([-0.2, 0.4]),
+            theta_ref=np.ones(2),
+        ),
+    ]
+
+    forward = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=summaries,
+    )
+    reverse = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=list(reversed(summaries)),
+    )
+
+    np.testing.assert_allclose(forward.information, reverse.information)
+    np.testing.assert_allclose(forward.information_vector, reverse.information_vector)
+    np.testing.assert_allclose(
+        forward.combine_with_prior(prior).posterior.mean,
+        reverse.combine_with_prior(prior).posterior.mean,
+    )
+    assert forward.summary_ids != reverse.summary_ids
+
+
+def test_observation_likelihood_combine_counts_prior_once_per_prefix():
+    labels = ("theta.a",)
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.array([10.0]),
+        sigma=np.array([1.0]),
+    )
+    summaries = [
+        SubblockSummary.from_reduced_form(
+            subblock_id=f"subblock_{index:06d}",
+            theta_labels=labels,
+            theta_ref=np.array([0.0]),
+            reduced_information=np.array([[1.0]]),
+            reduced_score=np.array([0.0]),
+        )
+        for index in range(3)
+    ]
+
+    prefixes = accumulate_observation_likelihood_prefixes(labels, summaries)
+
+    for prefix_index, prefix_state in enumerate(prefixes, start=1):
+        result = prefix_state.combine_with_prior(prior)
+        expected_precision = 1.0 + prefix_index
+        expected_mean = 10.0 / expected_precision
+        np.testing.assert_allclose(result.posterior.precision, [[expected_precision]])
+        np.testing.assert_allclose(result.posterior.mean, [expected_mean])
+        np.testing.assert_allclose(prefix_state.information, [[float(prefix_index)]])
+
+
+def test_observation_likelihood_positive_information_contracts_covariance():
+    labels = ("theta.a", "theta.b")
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=np.zeros(2),
+        sigma=np.array([3.0, 4.0]),
+    )
+    summaries = [
+        _summary_about_target(
+            subblock_id="subblock_000000",
+            labels=labels,
+            information=np.diag([1.0, 0.5]),
+            theta_target=np.zeros(2),
+            theta_ref=np.zeros(2),
+        ),
+        _summary_about_target(
+            subblock_id="subblock_000001",
+            labels=labels,
+            information=np.diag([2.0, 1.5]),
+            theta_target=np.zeros(2),
+            theta_ref=np.zeros(2),
+        ),
+    ]
+
+    state_1, state_2 = accumulate_observation_likelihood_prefixes(labels, summaries)
+    cov_0 = prior.covariance
+    cov_1 = state_1.combine_with_prior(prior).posterior.covariance
+    cov_2 = state_2.combine_with_prior(prior).posterior.covariance
+
+    assert np.all(np.diag(cov_1) < np.diag(cov_0))
+    assert np.all(np.diag(cov_2) < np.diag(cov_1))
+
+
+def test_observation_likelihood_serialization_round_trip_preserves_state():
+    labels = ("theta.a", "theta.b")
+    summaries = [
+        _summary_about_target(
+            subblock_id="subblock_000000",
+            labels=labels,
+            information=np.array([[2.0, 0.5], [0.5, 3.0]]),
+            theta_target=np.array([0.4, -0.3]),
+            theta_ref=np.array([0.1, 0.2]),
+        )
+    ]
+    state = ObservationLikelihoodState.from_summaries(
+        theta_labels=labels,
+        summaries=summaries,
+        metadata={"campaign": "unit-test"},
+    )
+
+    restored = ObservationLikelihoodState.from_dict(state.to_dict())
+
+    assert restored.theta_labels == state.theta_labels
+    assert restored.summary_count == state.summary_count
+    assert restored.summary_ids == state.summary_ids
+    assert restored.metadata == state.metadata
+    np.testing.assert_allclose(restored.information, state.information)
+    np.testing.assert_allclose(restored.information_vector, state.information_vector)
+
+
+def test_observation_likelihood_state_failure_cases_are_clear():
+    labels = ("theta.a",)
+    summary = SubblockSummary.from_reduced_form(
+        subblock_id="subblock_000000",
+        theta_labels=labels,
+        theta_ref=np.array([0.0]),
+        reduced_information=np.array([[1.0]]),
+        reduced_score=np.array([0.0]),
+    )
+
+    with pytest.raises(ValueError, match="outside the prior belief state"):
+        ObservationLikelihoodState.empty(("theta.b",)).add_summary(summary)
+
+    with pytest.raises(ValueError, match="information must have shape"):
+        ObservationLikelihoodState(
+            theta_labels=labels,
+            information=np.eye(2),
+            information_vector=np.zeros(1),
+        )
+
+    with pytest.raises(ValueError, match="non-finite"):
+        ObservationLikelihoodState(
+            theta_labels=labels,
+            information=np.array([[np.nan]]),
+            information_vector=np.zeros(1),
+        )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        ObservationLikelihoodState.empty(("theta.a", "theta.a"))
+
+    with pytest.raises(ValueError, match="schema_version"):
+        ObservationLikelihoodState.from_dict(
+            {
+                "schema_version": "observation_likelihood_state.v0",
+                "theta_labels": ["theta.a"],
+                "information": [[0.0]],
+                "information_vector": [0.0],
+            }
+        )
+
+    prior_wrong_order = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=("theta.b",),
+        mean=np.array([0.0]),
+        sigma=np.array([1.0]),
+    )
+    with pytest.raises(ValueError, match="prior theta_labels"):
+        ObservationLikelihoodState.empty(labels).combine_with_prior(prior_wrong_order)
+
+    with pytest.raises(ValueError, match="already present"):
+        ObservationLikelihoodState.empty(labels).add_summaries(
+            [summary, summary],
+            reject_duplicate_ids=True,
+        )
+
+    optimizer_summary = SubblockSummary.from_reduced_form(
+        subblock_id="subblock_000001",
+        theta_labels=labels,
+        theta_ref=np.array([0.0]),
+        reduced_information=np.array([[1.0]]),
+        reduced_score=np.array([0.0]),
+        diagnostics={
+            "information_accounting": {
+                "summary_information_scale": "optimizer",
+            }
+        },
+    )
+    summed_state = ObservationLikelihoodState.empty(
+        labels,
+        metadata={"summary_information_scale": "summed_likelihood"},
+    )
+    with pytest.raises(ValueError, match="information-scale"):
+        summed_state.add_summary(optimizer_summary)
 
 
 def test_build_observation_eigenbasis_identifies_weak_zernike_mode():
