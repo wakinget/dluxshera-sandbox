@@ -14,10 +14,20 @@ import webbrowser
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+
+from dluxshera.inference.observation_belief import (
+    ObservationBeliefState,
+    ObservationLikelihoodState,
+)
+from dluxshera.inference.observation_summary import (
+    get_summary_information_scale,
+    load_subblock_summary,
+    load_subblock_summary_artifact_payload,
+)
 
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.environ.get("TMPDIR", "/tmp"), "matplotlib"))
 
@@ -87,6 +97,13 @@ MISMATCH_COMPONENTS = [
     "slow_state_prior_draw",
     "local_registration_policy",
 ]
+
+CUMULATIVE_SCHEMA_VERSION = "full_fidelity_cumulative_information_review.v1"
+CUMULATIVE_VARIANTS = (
+    ("all_windows", 0),
+    ("exclude_first_window", 1),
+    ("exclude_first_two_windows", 2),
+)
 
 
 def rel(path: Any, root: Path) -> str:
@@ -518,6 +535,1023 @@ def standard_parameter_scale(label: str, truth_value: float) -> tuple[str, float
     if "zernike_coeffs_nm" in label:
         return "nm", 1.0, 0.0
     return label_units(label), 1.0, 0.0
+
+
+def _json_scalar(value: Any) -> Any:
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        f = float(value)
+        return f if np.isfinite(f) else None
+    if isinstance(value, np.ndarray):
+        return [_json_scalar(item) for item in value.tolist()]
+    if isinstance(value, dict):
+        return {str(k): _json_scalar(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_scalar(item) for item in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def _matrix_diagnostics_row(matrix: np.ndarray, prefix: str = "") -> dict[str, Any]:
+    matrix = np.asarray(matrix, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1] or matrix.size == 0:
+        return {
+            f"{prefix}rank": 0,
+            f"{prefix}min_eigenvalue": np.nan,
+            f"{prefix}max_eigenvalue": np.nan,
+            f"{prefix}trace": np.nan,
+            f"{prefix}frobenius_norm": np.nan,
+            f"{prefix}condition_number": np.nan,
+            f"{prefix}finite": False,
+        }
+    finite = bool(np.all(np.isfinite(matrix)))
+    if not finite:
+        return {
+            f"{prefix}rank": 0,
+            f"{prefix}min_eigenvalue": np.nan,
+            f"{prefix}max_eigenvalue": np.nan,
+            f"{prefix}trace": np.nan,
+            f"{prefix}frobenius_norm": np.nan,
+            f"{prefix}condition_number": np.nan,
+            f"{prefix}finite": False,
+        }
+    sym = 0.5 * (matrix + matrix.T)
+    eig = np.linalg.eigvalsh(sym)
+    tol = np.finfo(float).eps * max(sym.shape) * max(float(np.max(np.abs(eig))), 1.0)
+    active = eig > tol
+    pos = eig[active]
+    condition = float(np.max(pos) / np.min(pos)) if pos.size else float("inf")
+    return {
+        f"{prefix}rank": int(np.count_nonzero(active)),
+        f"{prefix}min_eigenvalue": float(np.min(eig)),
+        f"{prefix}max_eigenvalue": float(np.max(eig)),
+        f"{prefix}trace": float(np.trace(sym)),
+        f"{prefix}frobenius_norm": float(np.linalg.norm(sym)),
+        f"{prefix}condition_number": condition,
+        f"{prefix}finite": True,
+    }
+
+
+def _path_after_run_name(path: Path, run_root: Path) -> Path | None:
+    parts = path.parts
+    run_name = run_root.name
+    if run_name not in parts:
+        return None
+    index = len(parts) - 1 - list(reversed(parts)).index(run_name)
+    suffix = Path(*parts[index + 1 :])
+    return run_root / suffix
+
+
+def resolve_portable_artifact_path(
+    value: Any,
+    run_root: Path,
+    *,
+    context_dirs: Sequence[Path] = (),
+    plan_run_root: Any = "",
+) -> tuple[Path | None, str]:
+    if _is_blank(value):
+        return None, "blank"
+    raw = str(value)
+    path = Path(raw).expanduser()
+    candidates: list[tuple[Path, str]] = []
+    if path.is_absolute():
+        candidates.append((path, "recorded_absolute"))
+        plan_root = Path(str(plan_run_root)).expanduser() if not _is_blank(plan_run_root) else None
+        if plan_root and str(path).startswith(str(plan_root)):
+            try:
+                candidates.append((run_root / path.relative_to(plan_root), "plan_run_root_relative"))
+            except ValueError:
+                pass
+        run_name_candidate = _path_after_run_name(path, run_root)
+        if run_name_candidate is not None:
+            candidates.append((run_name_candidate, "run_name_suffix"))
+    else:
+        candidates.append((run_root / path, "run_root_relative"))
+        for directory in context_dirs:
+            candidates.append((directory / path, "context_relative"))
+
+    seen: set[str] = set()
+    for candidate, method in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate.resolve(), method
+    fallback = candidates[0][0] if candidates else path
+    return fallback, "unresolved"
+
+
+def _extract_window_subblock_from_path(value: Any) -> tuple[int | None, int | None]:
+    text = str(value or "")
+    window_match = re.search(r"window[_/](\d+)|window_(\d+)", text)
+    subblock_match = re.search(r"subblock[_/](\d+)|subblock_(\d+)", text)
+
+    def match_int(match: re.Match[str] | None) -> int | None:
+        if match is None:
+            return None
+        for item in match.groups():
+            if item is not None:
+                return int(item)
+        return None
+
+    return match_int(window_match), match_int(subblock_match)
+
+
+def _realized_case_name(base_case: Any, window_index: Any) -> str:
+    if _is_blank(base_case) or pd.isna(window_index):
+        return ""
+    return f"{base_case}/windows/window_{int(window_index):03d}"
+
+
+def _stable_summary_id(case_name: Any, window_index: Any, subblock_index: Any, path: Any = "") -> str:
+    c = str(case_name)
+    w = int(window_index) if not pd.isna(window_index) else -1
+    s = int(subblock_index) if not pd.isna(subblock_index) else -1
+    if w >= 0 and s >= 0:
+        return f"{c}/window_{w:03d}/subblock_{s:03d}"
+    return f"{c}/{path}"
+
+
+def discover_cumulative_summary_inventory(run_root: Path, plan: dict[str, Any]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    plan_run_root = plan.get("run_root", "")
+    status = read_csv(run_root / "subblock_status_iterative.csv")
+    if not status.empty and {"case_name", "summary_path", "status"}.issubset(status.columns):
+        for _, row in status.iterrows():
+            window_index = safe_int(row.get("window_index", np.nan))
+            subblock_index = safe_int(row.get("window_subblock_index", row.get("subblock_index", np.nan)))
+            if pd.isna(window_index) or pd.isna(subblock_index):
+                inferred_w, inferred_s = _extract_window_subblock_from_path(row.get("summary_path", ""))
+                window_index = inferred_w if inferred_w is not None else window_index
+                subblock_index = inferred_s if inferred_s is not None else subblock_index
+            case_name = str(row.get("case_name", ""))
+            realized = first_nonblank(row.get("window_case_name", ""), _realized_case_name(case_name, window_index))
+            path, method = resolve_portable_artifact_path(
+                row.get("summary_path", ""),
+                run_root,
+                plan_run_root=plan_run_root,
+            )
+            accepted = str(row.get("status", "")).strip().lower() == "ok" and path is not None and path.exists()
+            exclusion = "" if accepted else ("missing_summary_artifact" if str(row.get("status", "")).strip().lower() == "ok" else "status_not_ok")
+            rows.append(
+                {
+                    "case_name": case_name,
+                    "realized_case_name": realized,
+                    "window_index": window_index,
+                    "subblock_index": subblock_index,
+                    "stable_summary_id": _stable_summary_id(case_name, window_index, subblock_index, row.get("summary_path", "")),
+                    "recorded_summary_path": str(row.get("summary_path", "")),
+                    "resolved_summary_path": "" if path is None else str(path),
+                    "path_resolution_method": method,
+                    "status_source": "subblock_status_iterative.csv",
+                    "status_value": row.get("status", ""),
+                    "summary_id": "",
+                    "summary_kind": "",
+                    "theta_size": np.nan,
+                    "summary_information_scale": "",
+                    "accepted_for_cumulative": bool(accepted),
+                    "exclusion_reason": exclusion,
+                    "load_status": "not_loaded",
+                }
+            )
+        return pd.DataFrame(rows).sort_values(["case_name", "window_index", "subblock_index"], na_position="last")
+
+    for item in plan.get("expected_outputs", []) or []:
+        if not isinstance(item, dict):
+            continue
+        case_name = str(item.get("case_name", ""))
+        window_index = safe_int(item.get("window_index", np.nan))
+        subblock_index = safe_int(item.get("subblock_index", np.nan))
+        path, method = resolve_portable_artifact_path(item.get("summary_path", ""), run_root, plan_run_root=plan_run_root)
+        rows.append(
+            {
+                "case_name": case_name,
+                "realized_case_name": first_nonblank(item.get("window_case_name", ""), _realized_case_name(case_name, window_index)),
+                "window_index": window_index,
+                "subblock_index": subblock_index,
+                "stable_summary_id": _stable_summary_id(case_name, window_index, subblock_index, item.get("summary_path", "")),
+                "recorded_summary_path": str(item.get("summary_path", "")),
+                "resolved_summary_path": "" if path is None else str(path),
+                "path_resolution_method": method,
+                "status_source": "campaign_plan.expected_outputs",
+                "status_value": "expected",
+                "summary_id": "",
+                "summary_kind": "",
+                "theta_size": np.nan,
+                "summary_information_scale": "",
+                "accepted_for_cumulative": bool(path is not None and path.exists()),
+                "exclusion_reason": "" if path is not None and path.exists() else "missing_summary_artifact",
+                "load_status": "not_loaded",
+            }
+        )
+    if rows:
+        return pd.DataFrame(rows).sort_values(["case_name", "window_index", "subblock_index"], na_position="last")
+
+    for path in sorted(run_root.glob("cases/*/windows/window_*/summary_paths.csv")):
+        window_case, window_index = parse_window_path(path)
+        table = read_csv(path)
+        for idx, row in table.iterrows():
+            recorded = row.get("summary_path", "")
+            inferred_w, inferred_s = _extract_window_subblock_from_path(recorded)
+            subblock_index = inferred_s if inferred_s is not None else idx
+            base_case = window_case
+            if not _is_blank(row.get("case_name", "")):
+                base_case = str(row.get("case_name", "")).split("/windows/")[0]
+            resolved, method = resolve_portable_artifact_path(
+                recorded,
+                run_root,
+                context_dirs=(path.parent,),
+                plan_run_root=plan_run_root,
+            )
+            rows.append(
+                {
+                    "case_name": base_case,
+                    "realized_case_name": first_nonblank(row.get("case_name", ""), _realized_case_name(base_case, window_index)),
+                    "window_index": window_index if inferred_w is None else inferred_w,
+                    "subblock_index": subblock_index,
+                    "stable_summary_id": _stable_summary_id(base_case, window_index, subblock_index, recorded),
+                    "recorded_summary_path": str(recorded),
+                    "resolved_summary_path": "" if resolved is None else str(resolved),
+                    "path_resolution_method": method,
+                    "status_source": "summary_paths.csv",
+                    "status_value": "listed",
+                    "summary_id": "",
+                    "summary_kind": "",
+                    "theta_size": np.nan,
+                    "summary_information_scale": "",
+                    "accepted_for_cumulative": bool(resolved is not None and resolved.exists()),
+                    "exclusion_reason": "" if resolved is not None and resolved.exists() else "missing_summary_artifact",
+                    "load_status": "not_loaded",
+                }
+            )
+    if rows:
+        return pd.DataFrame(rows).sort_values(["case_name", "window_index", "subblock_index"], na_position="last")
+
+    return pd.DataFrame(columns=[
+        "case_name", "realized_case_name", "window_index", "subblock_index",
+        "stable_summary_id", "recorded_summary_path", "resolved_summary_path",
+        "path_resolution_method", "status_source", "status_value", "summary_id",
+        "summary_kind", "theta_size", "summary_information_scale",
+        "accepted_for_cumulative", "exclusion_reason", "load_status",
+    ])
+
+
+def reconstruct_initial_observation_prior(
+    run_root: Path,
+    plan: dict[str, Any],
+    case_name: str,
+    labels: Sequence[str],
+) -> tuple[ObservationBeliefState | None, dict[str, Any], list[dict[str, Any]]]:
+    warnings: list[dict[str, Any]] = []
+    labels = tuple(str(label) for label in labels)
+    top_prior = read_csv(run_root / "prior_draws.csv")
+    source = "prior_draws.csv"
+    if top_prior.empty:
+        source = "campaign_plan.prior_draw_rows_by_case"
+        rows = plan.get("prior_draw_rows_by_case", {}).get(case_name, [])
+        top_prior = pd.DataFrame(rows)
+    if not top_prior.empty and "case_name" in top_prior.columns:
+        filtered = top_prior[top_prior["case_name"].astype(str) == str(case_name)]
+        if not filtered.empty:
+            top_prior = filtered
+    if top_prior.empty or not {"theta_label", "prior_mean", "prior_sigma"}.issubset(top_prior.columns):
+        return None, {
+            "status": "missing_prior",
+            "source": source,
+            "reconstructed": False,
+            "reason": "No complete initial prior table with theta_label/prior_mean/prior_sigma was found.",
+        }, [{"status": "missing_prior", "case": case_name, "message": "Cumulative analysis requires initial prior_draws.csv or equivalent campaign-plan prior rows."}]
+
+    by_label = {str(row["theta_label"]): row for _, row in top_prior.iterrows()}
+    missing = [label for label in labels if label not in by_label]
+    if missing:
+        return None, {
+            "status": "missing_prior",
+            "source": source,
+            "reconstructed": False,
+            "missing_labels": missing,
+        }, [{"status": "missing_prior", "case": case_name, "message": "Initial prior table is missing labels: " + ", ".join(missing)}]
+    table_mean = np.asarray([safe_float(by_label[label].get("prior_mean")) for label in labels], dtype=float)
+    sigma = np.asarray([safe_float(by_label[label].get("prior_sigma")) for label in labels], dtype=float)
+    if not np.all(np.isfinite(table_mean)) or not np.all(np.isfinite(sigma)) or np.any(sigma <= 0):
+        return None, {
+            "status": "missing_prior",
+            "source": source,
+            "reconstructed": False,
+            "reason": "Initial prior mean/sigma contains non-finite or non-positive values.",
+        }, [{"status": "missing_prior", "case": case_name, "message": "Initial prior mean/sigma contains invalid values."}]
+
+    mean = table_mean.copy()
+    mean_source = source
+    first_update_paths = sorted((run_root / "cases" / case_name / "windows").glob("window_*/iterative_reference_update.json"))
+    if first_update_paths:
+        first_update = read_json(first_update_paths[0], {})
+        truth = first_update.get("truth_by_label", {}) if isinstance(first_update.get("truth_by_label"), dict) else {}
+        current_offsets = first_update.get("current_offsets", {}) if isinstance(first_update.get("current_offsets"), dict) else {}
+        candidate = np.asarray(
+            [
+                safe_float(truth.get(label, np.nan)) + safe_float(current_offsets.get(label, np.nan))
+                for label in labels
+            ],
+            dtype=float,
+        )
+        if np.all(np.isfinite(candidate)):
+            mean_source = rel(first_update_paths[0], run_root) + ":truth_by_label+current_offsets"
+            if not np.allclose(candidate, table_mean, rtol=1e-10, atol=1e-12):
+                warnings.append(
+                    {
+                        "status": "initial_prior_mean_context_differs",
+                        "case": case_name,
+                        "message": "Top-level prior_draws.csv mean differs from the realized window-0 observation-context reference; cumulative analysis uses the realized initial reference as the prior mean and prior_draws.csv for sigma.",
+                        "table_prior_mean_source": source,
+                        "realized_initial_reference_source": mean_source,
+                        "max_abs_difference": float(np.max(np.abs(candidate - table_mean))),
+                    }
+                )
+            mean = candidate
+
+    window_prior_paths = sorted((run_root / "cases" / case_name / "windows").glob("window_*/prior_draws.csv"))
+    differing_windows: list[str] = []
+    for path in window_prior_paths:
+        frame = read_csv(path)
+        if frame.empty or "reference_value" not in frame.columns:
+            continue
+        ref_by_label = {str(row["theta_label"]): safe_float(row.get("reference_value")) for _, row in frame.iterrows()}
+        ref = np.asarray([ref_by_label.get(label, np.nan) for label in labels], dtype=float)
+        if np.all(np.isfinite(ref)) and not np.allclose(ref, mean, rtol=1e-10, atol=1e-12):
+            differing_windows.append(rel(path, run_root))
+    if differing_windows:
+        warnings.append(
+            {
+                "status": "historical_window_prior_differs",
+                "case": case_name,
+                "message": "Per-window reference/prior tables follow the historical moving reference and differ from the initial prior; cumulative analysis uses the initial prior once.",
+                "paths": differing_windows[:5],
+                "additional_count": max(0, len(differing_windows) - 5),
+            }
+        )
+
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=mean,
+        sigma=sigma,
+        metadata={
+            "prior_source": source,
+            "prior_mean_source": mean_source,
+            "prior_counted_once": True,
+            "case_name": case_name,
+            "reconstructed": True,
+        },
+    )
+    provenance = {
+        "status": "ok",
+        "source": source,
+        "prior_mean_source": mean_source,
+        "prior_sigma_source": source,
+        "reconstructed": True,
+        "prior_counted_once": True,
+        "labels": list(labels),
+        "mean": mean.tolist(),
+        "table_prior_mean": table_mean.tolist(),
+        "sigma": sigma.tolist(),
+        "window_local_prior_differs": bool(differing_windows),
+        "window_local_prior_difference_count": len(differing_windows),
+    }
+    return prior, provenance, warnings
+
+
+def recover_truth_by_label(
+    run_root: Path,
+    plan: dict[str, Any],
+    case_name: str,
+    labels: Sequence[str],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    labels = tuple(str(label) for label in labels)
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    top_truth = read_csv(run_root / "truth_realization_by_label.csv")
+    if not top_truth.empty and {"theta_label", "truth_value"}.issubset(top_truth.columns):
+        frame = top_truth
+        if "case_name" in frame.columns:
+            filtered = frame[frame["case_name"].astype(str) == str(case_name)]
+            if not filtered.empty:
+                frame = filtered
+        candidates.append(("truth_realization_by_label.csv", dict(zip(frame["theta_label"].astype(str), frame["truth_value"]))))
+    if isinstance(plan.get("prior_truth_by_label"), dict):
+        candidates.append(("campaign_plan.prior_truth_by_label", plan["prior_truth_by_label"]))
+    for path in sorted((run_root / "cases" / case_name / "windows").glob("window_*/iterative_reference_update.json")):
+        payload = read_json(path, {})
+        if isinstance(payload.get("truth_by_label"), dict):
+            candidates.append((rel(path, run_root) + ":truth_by_label", payload["truth_by_label"]))
+            break
+    for path in sorted((run_root / "cases" / case_name / "windows").glob("window_*/posterior_by_label.csv")):
+        frame = read_csv(path)
+        if not frame.empty and {"theta_label", "truth_value"}.issubset(frame.columns):
+            candidates.append((rel(path, run_root), dict(zip(frame["theta_label"].astype(str), frame["truth_value"]))))
+            break
+    for source, values in candidates:
+        truth = {label: safe_float(values.get(label, np.nan)) for label in labels}
+        if all(np.isfinite(truth[label]) for label in labels):
+            return truth, {"source": source, "status": "ok"}
+    return {label: np.nan for label in labels}, {"source": "", "status": "missing_truth"}
+
+
+def _load_cumulative_summaries(
+    inventory: pd.DataFrame,
+    labels: Sequence[str],
+) -> tuple[list[Any], pd.DataFrame, list[dict[str, Any]]]:
+    rows = inventory.to_dict(orient="records")
+    loaded: list[Any] = []
+    warnings: list[dict[str, Any]] = []
+    seen_stable: set[str] = set()
+    expected_labels = tuple(str(label) for label in labels)
+    for row in rows:
+        stable = str(row.get("stable_summary_id", ""))
+        if stable in seen_stable:
+            row["accepted_for_cumulative"] = False
+            row["exclusion_reason"] = "duplicate_stable_summary_id"
+            row["load_status"] = "not_loaded"
+            warnings.append({"status": "duplicate_stable_summary_id", "summary_identity": stable, "message": "Duplicate cumulative summary identity."})
+            continue
+        seen_stable.add(stable)
+        if not bool(row.get("accepted_for_cumulative")):
+            row["load_status"] = "not_loaded"
+            continue
+        path = Path(str(row.get("resolved_summary_path", "")))
+        try:
+            payload = load_subblock_summary_artifact_payload(path)
+            summary = load_subblock_summary(path)
+            row["summary_id"] = summary.subblock_id
+            row["summary_kind"] = summary.summary_kind
+            row["theta_size"] = summary.theta_size
+            row["summary_information_scale"] = get_summary_information_scale(payload) or ""
+            if tuple(summary.theta_labels) != expected_labels:
+                row["accepted_for_cumulative"] = False
+                row["exclusion_reason"] = "label_mismatch"
+                row["load_status"] = "label_mismatch"
+                warnings.append({"status": "label_mismatch", "summary_identity": stable, "path": str(path), "message": "Summary theta labels do not match campaign layout."})
+                continue
+            if not np.all(np.isfinite(summary.theta_ref)) or not np.all(np.isfinite(summary.reduced_score)) or not np.all(np.isfinite(summary.reduced_information)):
+                row["accepted_for_cumulative"] = False
+                row["exclusion_reason"] = "invalid_matrix"
+                row["load_status"] = "invalid_matrix"
+                warnings.append({"status": "invalid_matrix", "summary_identity": stable, "path": str(path), "message": "Summary contains non-finite arrays."})
+                continue
+            row["load_status"] = "loaded"
+            loaded.append(summary)
+        except Exception as exc:
+            row["accepted_for_cumulative"] = False
+            row["exclusion_reason"] = "summary_load_error"
+            row["load_status"] = f"error: {exc}"
+            warnings.append({"status": "summary_load_error", "summary_identity": stable, "path": str(path), "message": str(exc)})
+    scales = sorted({str(row.get("summary_information_scale", "")) for row in rows if row.get("accepted_for_cumulative") and str(row.get("summary_information_scale", "")).strip()})
+    if len(scales) > 1:
+        for row in rows:
+            if row.get("accepted_for_cumulative"):
+                row["accepted_for_cumulative"] = False
+                row["exclusion_reason"] = "information_scale_mismatch"
+        warnings.append({"status": "information_scale_mismatch", "message": "Accepted summaries have mixed information-scale provenance.", "scales": scales})
+        loaded = []
+    return loaded, pd.DataFrame(rows), warnings
+
+
+def _vector_from_label_values(labels: Sequence[str], values: Mapping[str, Any]) -> np.ndarray:
+    return np.asarray([safe_float(values.get(label, np.nan)) for label in labels], dtype=float)
+
+
+def _historical_vectors(run_root: Path, case_name: str, labels: Sequence[str]) -> dict[int, dict[str, np.ndarray]]:
+    result: dict[int, dict[str, np.ndarray]] = {}
+    labels = tuple(str(label) for label in labels)
+    for path in sorted((run_root / "cases" / case_name / "windows").glob("window_*/iterative_reference_update.json")):
+        data = read_json(path, {})
+        window_index = safe_int(data.get("window_index", parse_window_path(path)[1]))
+        truth = data.get("truth_by_label", {}) if isinstance(data.get("truth_by_label"), dict) else {}
+        current_offsets = data.get("current_offsets", {}) if isinstance(data.get("current_offsets"), dict) else {}
+        posterior_offsets = data.get("posterior_offsets", {}) if isinstance(data.get("posterior_offsets"), dict) else {}
+        next_offsets = data.get("next_offsets", {}) if isinstance(data.get("next_offsets"), dict) else {}
+        truth_vec = _vector_from_label_values(labels, truth)
+        result[int(window_index)] = {
+            "truth": truth_vec,
+            "historical_reference_before": truth_vec + _vector_from_label_values(labels, current_offsets),
+            "window_local_posterior_mean": truth_vec + _vector_from_label_values(labels, posterior_offsets),
+            "historical_next_reference": truth_vec + _vector_from_label_values(labels, next_offsets),
+        }
+    return result
+
+
+def _posterior_table_maps(run_root: Path, case_name: str) -> dict[int, dict[str, dict[str, Any]]]:
+    out: dict[int, dict[str, dict[str, Any]]] = {}
+    for path in sorted((run_root / "cases" / case_name / "windows").glob("window_*/posterior_by_label.csv")):
+        window_index = parse_window_path(path)[1]
+        frame = read_csv(path)
+        if frame.empty or "theta_label" not in frame.columns:
+            continue
+        out[window_index] = {str(row["theta_label"]): row.to_dict() for _, row in frame.iterrows()}
+    return out
+
+
+def _separation_index(labels: Sequence[str]) -> int | None:
+    try:
+        return tuple(labels).index("source.separation_as")
+    except ValueError:
+        return None
+
+
+def _window_duration_s(inventory: pd.DataFrame, plan: dict[str, Any]) -> float:
+    subblock_duration = safe_float(scalar(plan, "trace_source.subblock_duration_s", np.nan))
+    if np.isfinite(subblock_duration):
+        return subblock_duration
+    exposure = safe_float(scalar(plan, "subblock_command_options.exposure_time_s", np.nan))
+    frames = safe_float(scalar(plan, "trace_source.n_frames_per_subblock", np.nan))
+    n_per_window = float(pd.to_numeric(inventory.get("subblock_index", pd.Series(dtype=float)), errors="coerce").groupby(inventory.get("window_index", pd.Series(dtype=float))).count().median()) if not inventory.empty else np.nan
+    if np.isfinite(exposure) and np.isfinite(frames) and np.isfinite(n_per_window):
+        return exposure * frames
+    return np.nan
+
+
+def build_cumulative_case_products(
+    run_root: Path,
+    plan: dict[str, Any],
+    case_name: str,
+    case_inventory: pd.DataFrame,
+    prior: ObservationBeliefState,
+    truth_by_label: dict[str, float],
+) -> dict[str, Any]:
+    labels = tuple(prior.theta_labels)
+    loaded_summaries, loaded_inventory, load_warnings = _load_cumulative_summaries(case_inventory, labels)
+    exclusion_reasons = set(loaded_inventory.get("exclusion_reason", pd.Series(dtype=str)).astype(str))
+    if "information_scale_mismatch" in exclusion_reasons:
+        raise ValueError("information_scale_mismatch: accepted summaries have mixed information-scale provenance.")
+    if "label_mismatch" in exclusion_reasons:
+        raise ValueError("label_mismatch: one or more summaries have incompatible theta labels.")
+    accepted_inventory = loaded_inventory[loaded_inventory["accepted_for_cumulative"].astype(bool)].copy()
+    if len(loaded_summaries) != len(accepted_inventory):
+        raise RuntimeError("Internal cumulative inventory/load count mismatch.")
+    if accepted_inventory.empty:
+        raise ValueError("No accepted summaries are available for cumulative analysis.")
+    windows = sorted(int(w) for w in accepted_inventory["window_index"].dropna().unique())
+    grouped_indices: dict[int, list[int]] = {}
+    for pos, (_, row) in enumerate(accepted_inventory.sort_values(["window_index", "subblock_index"]).iterrows()):
+        grouped_indices.setdefault(int(row["window_index"]), []).append(pos)
+    ordered_summaries = [loaded_summaries[pos] for window in windows for pos in grouped_indices[window]]
+    ordered_inventory = accepted_inventory.sort_values(["window_index", "subblock_index"]).reset_index(drop=True)
+
+    historical = _historical_vectors(run_root, case_name, labels)
+    posterior_maps = _posterior_table_maps(run_root, case_name)
+    truth_vec = np.asarray([truth_by_label[label] for label in labels], dtype=float)
+    sep_idx = _separation_index(labels)
+    state = ObservationLikelihoodState.empty(labels, metadata={"case_name": case_name, "variant": "all_windows"})
+    window_rows: list[dict[str, Any]] = []
+    posterior_rows: list[dict[str, Any]] = []
+    diagnostics_rows: list[dict[str, Any]] = []
+    reference_rows: list[dict[str, Any]] = []
+    first_sigma = np.nan
+    running_count = 0
+    duration_per_subblock = _window_duration_s(accepted_inventory, plan)
+    for window in windows:
+        summaries = [ordered_summaries[int(i)] for i in grouped_indices[window]]
+        state = state.add_summaries(summaries, reject_duplicate_ids=False)
+        running_count += len(summaries)
+        update = state.combine_with_prior(prior)
+        posterior = update.posterior
+        sigma = posterior.sigma()
+        cumulative_mean = posterior.mean
+        cumulative_error = cumulative_mean - truth_vec
+        h = historical.get(window, {})
+        local_map = posterior_maps.get(window, {})
+        hist_ref = h.get("historical_reference_before", np.full(len(labels), np.nan))
+        hist_post = h.get("window_local_posterior_mean", np.full(len(labels), np.nan))
+        hist_next = h.get("historical_next_reference", np.full(len(labels), np.nan))
+        if sep_idx is not None:
+            cumulative_sigma_sep_uas = sigma[sep_idx] * 1e6
+            if not np.isfinite(first_sigma):
+                first_sigma = cumulative_sigma_sep_uas
+            expected = first_sigma / math.sqrt(len([w for w in windows if w <= window])) if np.isfinite(first_sigma) else np.nan
+            local_row = local_map.get(labels[sep_idx], {})
+            local_mean_sep = safe_float(local_row.get("posterior_mean", hist_post[sep_idx] if hist_post.size else np.nan))
+            local_sigma_sep_uas = safe_float(local_row.get("posterior_sigma", np.nan)) * 1e6
+            cumulative_sep_err_uas = cumulative_error[sep_idx] * 1e6
+            row = {
+                "case_name": case_name,
+                "window_index": window,
+                "n_windows_cumulative": len([w for w in windows if w <= window]),
+                "n_subblocks_window": len(summaries),
+                "n_subblocks_cumulative": running_count,
+                "cumulative_duration_s": running_count * duration_per_subblock if np.isfinite(duration_per_subblock) else np.nan,
+                "window_local_separation_mean_as": local_mean_sep,
+                "window_local_separation_error_uas": (local_mean_sep - truth_vec[sep_idx]) * 1e6 if np.isfinite(local_mean_sep) else np.nan,
+                "window_local_separation_sigma_uas": local_sigma_sep_uas,
+                "cumulative_separation_mean_as": cumulative_mean[sep_idx],
+                "cumulative_separation_error_uas": cumulative_sep_err_uas,
+                "cumulative_separation_sigma_uas": cumulative_sigma_sep_uas,
+                "cumulative_error_over_sigma": cumulative_sep_err_uas / cumulative_sigma_sep_uas if cumulative_sigma_sep_uas else np.nan,
+                "historical_reference_before_as": hist_ref[sep_idx] if hist_ref.size else np.nan,
+                "historical_reference_before_error_uas": (hist_ref[sep_idx] - truth_vec[sep_idx]) * 1e6 if hist_ref.size and np.isfinite(hist_ref[sep_idx]) else np.nan,
+                "historical_next_reference_as": hist_next[sep_idx] if hist_next.size else np.nan,
+                "historical_next_reference_error_uas": (hist_next[sep_idx] - truth_vec[sep_idx]) * 1e6 if hist_next.size and np.isfinite(hist_next[sep_idx]) else np.nan,
+                "cumulative_minus_window_local_uas": (cumulative_mean[sep_idx] - local_mean_sep) * 1e6 if np.isfinite(local_mean_sep) else np.nan,
+                "cumulative_minus_next_reference_uas": (cumulative_mean[sep_idx] - hist_next[sep_idx]) * 1e6 if hist_next.size and np.isfinite(hist_next[sep_idx]) else np.nan,
+                "expected_sqrt_n_sigma_uas": expected,
+                "sigma_ratio_to_first_window": cumulative_sigma_sep_uas / first_sigma if first_sigma else np.nan,
+                "sigma_ratio_to_sqrt_n_expectation": cumulative_sigma_sep_uas / expected if expected else np.nan,
+                "solve_method": update.metadata.get("solve_method", ""),
+                "cumulative_status": "ok",
+            }
+            info_diag = _matrix_diagnostics_row(state.information)
+            post_diag = _matrix_diagnostics_row(posterior.precision)
+            row.update(
+                {
+                    "information_rank": info_diag["rank"],
+                    "information_min_eigenvalue": info_diag["min_eigenvalue"],
+                    "information_max_eigenvalue": info_diag["max_eigenvalue"],
+                    "information_condition_number": info_diag["condition_number"],
+                    "posterior_rank": post_diag["rank"],
+                    "posterior_condition_number": post_diag["condition_number"],
+                }
+            )
+            window_rows.append(row)
+        diagnostics_row = {
+            "case_name": case_name,
+            "window_index": window,
+            "n_windows_cumulative": len([w for w in windows if w <= window]),
+            "n_subblocks_cumulative": running_count,
+            "solve_method": update.metadata.get("solve_method", ""),
+            "damping": safe_float(update.metadata.get("damping", 0.0)),
+        }
+        diagnostics_row.update(_matrix_diagnostics_row(state.information, "information_"))
+        diagnostics_row.update(_matrix_diagnostics_row(posterior.precision, "posterior_precision_"))
+        diagnostics_rows.append(diagnostics_row)
+        for index, label in enumerate(labels):
+            local_row = local_map.get(label, {})
+            local_mean = safe_float(local_row.get("posterior_mean", hist_post[index] if hist_post.size else np.nan))
+            local_sigma = safe_float(local_row.get("posterior_sigma", np.nan))
+            posterior_rows.append(
+                {
+                    "case_name": case_name,
+                    "window_index": window,
+                    "n_windows_cumulative": len([w for w in windows if w <= window]),
+                    "n_subblocks_cumulative": running_count,
+                    "theta_label": label,
+                    "truth_value": truth_vec[index],
+                    "initial_prior_mean": prior.mean[index],
+                    "initial_prior_sigma": prior.sigma()[index],
+                    "cumulative_posterior_mean": cumulative_mean[index],
+                    "cumulative_posterior_sigma": sigma[index],
+                    "cumulative_posterior_error": cumulative_error[index],
+                    "cumulative_error_over_sigma": cumulative_error[index] / sigma[index] if sigma[index] else np.nan,
+                    "window_local_posterior_mean": local_mean,
+                    "window_local_posterior_sigma": local_sigma,
+                    "historical_reference_before": hist_ref[index] if hist_ref.size else np.nan,
+                    "historical_next_reference": hist_next[index] if hist_next.size else np.nan,
+                    "parameter_unit": local_row.get("unit", label_units(label)),
+                    "parameter_group": local_row.get("label_group", label_group(label)),
+                }
+            )
+        reference_rows.append(
+            {
+                "case_name": case_name,
+                "window_index": window,
+                "n_subblocks_cumulative": running_count,
+                "reference_to_cumulative_norm": float(np.linalg.norm(hist_ref - cumulative_mean)) if hist_ref.size and np.all(np.isfinite(hist_ref)) else np.nan,
+                "window_posterior_to_cumulative_norm": float(np.linalg.norm(hist_post - cumulative_mean)) if hist_post.size and np.all(np.isfinite(hist_post)) else np.nan,
+                "next_reference_to_cumulative_norm": float(np.linalg.norm(hist_next - cumulative_mean)) if hist_next.size and np.all(np.isfinite(hist_next)) else np.nan,
+                "historical_reference_before_minus_cumulative_sep_uas": (hist_ref[sep_idx] - cumulative_mean[sep_idx]) * 1e6 if sep_idx is not None and hist_ref.size and np.isfinite(hist_ref[sep_idx]) else np.nan,
+                "window_local_posterior_minus_cumulative_sep_uas": (hist_post[sep_idx] - cumulative_mean[sep_idx]) * 1e6 if sep_idx is not None and hist_post.size and np.isfinite(hist_post[sep_idx]) else np.nan,
+                "historical_next_reference_minus_cumulative_sep_uas": (hist_next[sep_idx] - cumulative_mean[sep_idx]) * 1e6 if sep_idx is not None and hist_next.size and np.isfinite(hist_next[sep_idx]) else np.nan,
+            }
+        )
+
+    final_rows: list[dict[str, Any]] = []
+    variant_rows: list[dict[str, Any]] = []
+    for variant, start_window in CUMULATIVE_VARIANTS:
+        variant_windows = [w for w in windows if w >= start_window]
+        if not variant_windows:
+            continue
+        variant_summaries = [ordered_summaries[int(i)] for w in variant_windows for i in grouped_indices[w]]
+        variant_state = ObservationLikelihoodState.from_summaries(
+            theta_labels=labels,
+            summaries=variant_summaries,
+            metadata={"case_name": case_name, "variant": variant},
+            reject_duplicate_ids=False,
+        )
+        variant_update = variant_state.combine_with_prior(prior)
+        variant_post = variant_update.posterior
+        variant_sigma = variant_post.sigma()
+        last_window = variant_windows[-1]
+        hlast = historical.get(last_window, {})
+        local_map = posterior_maps.get(last_window, {})
+        if sep_idx is not None:
+            local_sep_row = local_map.get(labels[sep_idx], {})
+            local_mean = safe_float(local_sep_row.get("posterior_mean", np.nan))
+            local_sigma = safe_float(local_sep_row.get("posterior_sigma", np.nan)) * 1e6
+            hist_next = hlast.get("historical_next_reference", np.full(len(labels), np.nan))
+            err_uas = (variant_post.mean[sep_idx] - truth_vec[sep_idx]) * 1e6
+            sigma_uas = variant_sigma[sep_idx] * 1e6
+            out = {
+                "case_name": case_name,
+                "cumulative_variant": variant,
+                "cumulative_final_sep_err_uas": err_uas,
+                "cumulative_final_abs_sep_err_uas": abs(err_uas),
+                "cumulative_final_posterior_sigma_sep_uas": sigma_uas,
+                "cumulative_final_sep_err_over_sigma": err_uas / sigma_uas if sigma_uas else np.nan,
+                "window_local_final_sep_err_uas": (local_mean - truth_vec[sep_idx]) * 1e6 if np.isfinite(local_mean) else np.nan,
+                "window_local_final_posterior_sigma_sep_uas": local_sigma,
+                "historical_next_reference_final_sep_err_uas": (hist_next[sep_idx] - truth_vec[sep_idx]) * 1e6 if hist_next.size and np.isfinite(hist_next[sep_idx]) else np.nan,
+                "n_windows": len(variant_windows),
+                "n_subblocks": len(variant_summaries),
+                "total_duration_s": len(variant_summaries) * duration_per_subblock if np.isfinite(duration_per_subblock) else np.nan,
+                "sigma_improvement_factor": first_sigma / sigma_uas if sigma_uas and np.isfinite(first_sigma) else np.nan,
+                "sigma_ratio_to_sqrt_n_expectation": sigma_uas / (first_sigma / math.sqrt(len(variant_windows))) if np.isfinite(first_sigma) and len(variant_windows) else np.nan,
+                "information_rank": _matrix_diagnostics_row(variant_state.information)["rank"],
+                "information_condition_number": _matrix_diagnostics_row(variant_state.information)["condition_number"],
+                "posterior_rank": _matrix_diagnostics_row(variant_post.precision)["rank"],
+                "posterior_condition_number": _matrix_diagnostics_row(variant_post.precision)["condition_number"],
+                "metric_status": "ok",
+            }
+            variant_rows.append(out)
+            if variant == "all_windows":
+                final_rows.append({k: v for k, v in out.items() if k != "cumulative_variant"})
+    return {
+        "inventory": loaded_inventory,
+        "window_summary": pd.DataFrame(window_rows),
+        "posterior_by_label": pd.DataFrame(posterior_rows),
+        "final_summary": pd.DataFrame(final_rows),
+        "variant_summary": pd.DataFrame(variant_rows),
+        "diagnostics": pd.DataFrame(diagnostics_rows),
+        "reference_audit": pd.DataFrame(reference_rows),
+        "likelihood_state": state,
+        "warnings": load_warnings,
+        "accepted_count": int(len(accepted_inventory)),
+        "expected_count": int(len(case_inventory)),
+        "windows": windows,
+    }
+
+
+def _cumulative_status_payload(
+    *,
+    run_root: Path,
+    outdir: Path,
+    mode: str,
+    status: str,
+    warnings: list[dict[str, Any]],
+    outputs: Mapping[str, Any] | None = None,
+    cases_processed: Sequence[str] = (),
+    final_metrics: Sequence[Mapping[str, Any]] = (),
+    prior_provenance: Mapping[str, Any] | None = None,
+    inventory: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    path_counts = {}
+    if inventory is not None and not inventory.empty and "path_resolution_method" in inventory.columns:
+        path_counts = dict(Counter(inventory["path_resolution_method"].astype(str)))
+    return {
+        "schema_version": CUMULATIVE_SCHEMA_VERSION,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "run_root": str(run_root),
+        "review_output_root": str(outdir),
+        "cumulative_mode": mode,
+        "status": status,
+        "cases_processed": list(cases_processed),
+        "expected_summary_count": int(len(inventory)) if inventory is not None else 0,
+        "accepted_summary_count": int(inventory["accepted_for_cumulative"].astype(bool).sum()) if inventory is not None and not inventory.empty else 0,
+        "initial_prior_provenance": _json_scalar(prior_provenance or {}),
+        "label_layout": read_json(run_root / "campaign_plan.json", {}).get("theta_layout", {}),
+        "information_scale_provenance": sorted({str(v) for v in inventory.get("summary_information_scale", pd.Series(dtype=str)).tolist() if str(v).strip()}) if inventory is not None and not inventory.empty else [],
+        "path_resolution_counts": path_counts,
+        "warnings": _json_scalar(warnings),
+        "output_paths": _json_scalar(dict(outputs or {})),
+        "final_cumulative_metrics": _json_scalar(list(final_metrics)),
+        "software_provenance": {
+            "observation_likelihood_state_api": "ObservationLikelihoodState",
+            "reviewer_script": "examples/scripts/analyze_full_fidelity_binary_iterative_campaign.py",
+        },
+    }
+
+
+def _write_cumulative_disabled(outdir: Path, run_root: Path, mode: str) -> dict[str, Any]:
+    cdir = outdir / "cumulative_information"
+    cdir.mkdir(parents=True, exist_ok=True)
+    payload = _cumulative_status_payload(
+        run_root=run_root,
+        outdir=outdir,
+        mode=mode,
+        status="disabled",
+        warnings=[],
+        outputs={"cumulative_summary_json": "cumulative_information/cumulative_summary.json"},
+    )
+    (cdir / "cumulative_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+    return payload
+
+
+def plot_cumulative_information_outputs(
+    outdir: Path,
+    cumulative_window_summary: pd.DataFrame,
+    warnings_list: list[dict[str, Any]],
+) -> list[str]:
+    plot_paths: list[str] = []
+    if plt is None or cumulative_window_summary.empty:
+        return plot_paths
+    plot_dir = outdir / "plots"
+    plot_dir.mkdir(exist_ok=True)
+    for case_name, group in cumulative_window_summary.groupby("case_name", dropna=False):
+        group = group.sort_values("window_index")
+        safe_case = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(case_name))
+        try:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.6)
+            ax.plot(group["window_index"], group["historical_reference_before_error_uas"], marker="o", label="historical reference before")
+            ax.plot(group["window_index"], group["window_local_separation_error_uas"], marker="o", label="window-local posterior")
+            ax.plot(group["window_index"], group["historical_next_reference_error_uas"], marker="o", label="historical next reference")
+            ax.plot(group["window_index"], group["cumulative_separation_error_uas"], marker="o", label="cumulative posterior")
+            ax.set_xlabel("window index")
+            ax.set_ylabel("separation error (uas)")
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            path = plot_dir / f"cumulative_separation_estimate_{safe_case}.png"
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            plot_paths.append(rel(path, outdir))
+        except Exception as exc:
+            _append_plot_warning(warnings_list, f"cumulative separation estimate plot failed: {exc}", context="cumulative_information")
+        try:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            ax.plot(group["n_windows_cumulative"], group["window_local_separation_sigma_uas"], marker="o", label="window-local sigma")
+            ax.plot(group["n_windows_cumulative"], group["cumulative_separation_sigma_uas"], marker="o", label="cumulative sigma")
+            ax.plot(group["n_windows_cumulative"], group["expected_sqrt_n_sigma_uas"], linestyle="--", label="first/sqrt(N)")
+            ax.set_xlabel("cumulative windows")
+            ax.set_ylabel("separation sigma (uas)")
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            path = plot_dir / f"cumulative_separation_sigma_{safe_case}.png"
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            plot_paths.append(rel(path, outdir))
+        except Exception as exc:
+            _append_plot_warning(warnings_list, f"cumulative sigma plot failed: {exc}", context="cumulative_information")
+        try:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.6)
+            ax.plot(group["n_windows_cumulative"], group["cumulative_error_over_sigma"], marker="o")
+            ax.set_xlabel("cumulative windows")
+            ax.set_ylabel("cumulative separation error / sigma")
+            fig.tight_layout()
+            path = plot_dir / f"cumulative_error_over_sigma_{safe_case}.png"
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            plot_paths.append(rel(path, outdir))
+        except Exception as exc:
+            _append_plot_warning(warnings_list, f"cumulative error/sigma plot failed: {exc}", context="cumulative_information")
+    return plot_paths
+
+
+def run_cumulative_information_review(
+    run_root: Path,
+    outdir: Path,
+    *,
+    mode: str,
+    no_plots: bool,
+    review_warnings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if mode == "off":
+        return _write_cumulative_disabled(outdir, run_root, mode)
+    cdir = outdir / "cumulative_information"
+    cdir.mkdir(parents=True, exist_ok=True)
+    plan = read_json(run_root / "campaign_plan.json", {})
+    labels = tuple(str(label) for label in scalar(plan, "theta_layout.labels", []) or [])
+    warnings: list[dict[str, Any]] = []
+    outputs = {
+        "cumulative_input_inventory_csv": "cumulative_information/cumulative_input_inventory.csv",
+        "cumulative_window_summary_csv": "cumulative_information/cumulative_window_summary.csv",
+        "cumulative_posterior_by_label_csv": "cumulative_information/cumulative_posterior_by_label.csv",
+        "cumulative_final_summary_csv": "cumulative_information/cumulative_final_summary.csv",
+        "cumulative_information_diagnostics_csv": "cumulative_information/cumulative_information_diagnostics.csv",
+        "cumulative_reference_audit_csv": "cumulative_information/cumulative_reference_audit.csv",
+        "cumulative_variant_summary_csv": "cumulative_information/cumulative_variant_summary.csv",
+        "cumulative_summary_json": "cumulative_information/cumulative_summary.json",
+        "cumulative_likelihood_state_json": "cumulative_information/cumulative_likelihood_state.json",
+    }
+    if not labels:
+        warning = {"status": "missing_prior", "message": "campaign_plan.json does not contain theta_layout.labels."}
+        warnings.append(warning)
+        if mode == "on":
+            raise RuntimeError(warning["message"])
+        payload = _cumulative_status_payload(run_root=run_root, outdir=outdir, mode=mode, status="missing_prior", warnings=warnings, outputs=outputs)
+        (cdir / "cumulative_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+        review_warnings.extend(warnings)
+        return payload
+
+    inventory = discover_cumulative_summary_inventory(run_root, plan)
+    if inventory.empty:
+        warning = {"status": "missing_summary_inventory", "message": "No cumulative summary inventory could be discovered from status, campaign plan, or per-window summary_paths.csv."}
+        warnings.append(warning)
+        write_csv(inventory, cdir / "cumulative_input_inventory.csv")
+        if mode == "on":
+            raise RuntimeError(warning["message"])
+        payload = _cumulative_status_payload(run_root=run_root, outdir=outdir, mode=mode, status="missing_summary_inventory", warnings=warnings, outputs=outputs, inventory=inventory)
+        (cdir / "cumulative_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+        review_warnings.extend(warnings)
+        return payload
+
+    duplicate_ids = inventory["stable_summary_id"].duplicated(keep=False) if "stable_summary_id" in inventory.columns else pd.Series(dtype=bool)
+    if bool(duplicate_ids.any()):
+        warnings.append({"status": "duplicate_stable_summary_id", "message": "Duplicate case/window/subblock cumulative summary identities were found.", "count": int(duplicate_ids.sum())})
+
+    all_inventory: list[pd.DataFrame] = []
+    window_frames: list[pd.DataFrame] = []
+    posterior_frames: list[pd.DataFrame] = []
+    final_frames: list[pd.DataFrame] = []
+    variant_frames: list[pd.DataFrame] = []
+    diagnostics_frames: list[pd.DataFrame] = []
+    reference_frames: list[pd.DataFrame] = []
+    likelihood_payload: dict[str, Any] = {
+        "schema_version": CUMULATIVE_SCHEMA_VERSION,
+        "states_by_case": {},
+    }
+    prior_provenance_by_case: dict[str, Any] = {}
+    cases_processed: list[str] = []
+    status = "ok"
+    for case_name, case_inventory in inventory.groupby("case_name", dropna=False):
+        case_name = str(case_name)
+        prior, prior_prov, prior_warnings = reconstruct_initial_observation_prior(run_root, plan, case_name, labels)
+        prior_provenance_by_case[case_name] = prior_prov
+        warnings.extend(prior_warnings)
+        if prior is None:
+            status = "missing_prior"
+            all_inventory.append(case_inventory)
+            if mode == "on":
+                raise RuntimeError(f"Cumulative analysis could not reconstruct the initial prior for {case_name}: {prior_prov.get('reason', prior_prov.get('status'))}")
+            continue
+        truth, truth_prov = recover_truth_by_label(run_root, plan, case_name, labels)
+        if not all(np.isfinite(v) for v in truth.values()):
+            warnings.append({"status": "missing_truth", "case": case_name, "message": "Truth values could not be recovered for all labels.", "truth_provenance": truth_prov})
+        try:
+            products = build_cumulative_case_products(run_root, plan, case_name, case_inventory, prior, truth)
+        except Exception as exc:
+            err_text = str(exc)
+            mapped_status = "posterior_solve_error"
+            if "label" in err_text.lower():
+                mapped_status = "label_mismatch"
+            elif "information-scale" in err_text.lower() or "scale" in err_text.lower():
+                mapped_status = "information_scale_mismatch"
+            elif "No accepted summaries" in err_text:
+                mapped_status = "missing_summary_artifact"
+            status = mapped_status
+            warnings.append({"status": mapped_status, "case": case_name, "message": err_text})
+            if mode == "on":
+                raise RuntimeError(f"Cumulative analysis failed for {case_name}: {err_text}") from exc
+            all_inventory.append(case_inventory)
+            continue
+        warnings.extend(products["warnings"])
+        all_inventory.append(products["inventory"])
+        window_frames.append(products["window_summary"])
+        posterior_frames.append(products["posterior_by_label"])
+        final_frames.append(products["final_summary"])
+        variant_frames.append(products["variant_summary"])
+        diagnostics_frames.append(products["diagnostics"])
+        reference_frames.append(products["reference_audit"])
+        likelihood_payload["states_by_case"][case_name] = products["likelihood_state"].to_dict()
+        cases_processed.append(case_name)
+        if products["accepted_count"] < products["expected_count"]:
+            status = "incomplete_window"
+    combined_inventory = pd.concat(all_inventory, ignore_index=True) if all_inventory else inventory
+    cumulative_window = pd.concat(window_frames, ignore_index=True) if window_frames else pd.DataFrame()
+    cumulative_posterior = pd.concat(posterior_frames, ignore_index=True) if posterior_frames else pd.DataFrame()
+    cumulative_final = pd.concat(final_frames, ignore_index=True) if final_frames else pd.DataFrame()
+    cumulative_variant = pd.concat(variant_frames, ignore_index=True) if variant_frames else pd.DataFrame()
+    cumulative_diagnostics = pd.concat(diagnostics_frames, ignore_index=True) if diagnostics_frames else pd.DataFrame()
+    cumulative_reference = pd.concat(reference_frames, ignore_index=True) if reference_frames else pd.DataFrame()
+
+    write_csv(combined_inventory, cdir / "cumulative_input_inventory.csv")
+    write_csv(cumulative_window, cdir / "cumulative_window_summary.csv")
+    write_csv(cumulative_posterior, cdir / "cumulative_posterior_by_label.csv")
+    write_csv(cumulative_final, cdir / "cumulative_final_summary.csv")
+    write_csv(cumulative_diagnostics, cdir / "cumulative_information_diagnostics.csv")
+    write_csv(cumulative_reference, cdir / "cumulative_reference_audit.csv")
+    write_csv(cumulative_variant, cdir / "cumulative_variant_summary.csv")
+    (cdir / "cumulative_likelihood_state.json").write_text(json.dumps(_json_scalar(likelihood_payload), indent=2))
+    plot_paths: list[str] = []
+    if not no_plots:
+        plot_paths = plot_cumulative_information_outputs(outdir, cumulative_window, review_warnings)
+    if not cases_processed and status == "ok":
+        status = "missing_summary_artifact"
+    payload = _cumulative_status_payload(
+        run_root=run_root,
+        outdir=outdir,
+        mode=mode,
+        status=status,
+        warnings=warnings,
+        outputs={**outputs, "plots": plot_paths},
+        cases_processed=cases_processed,
+        final_metrics=cumulative_final.to_dict(orient="records") if not cumulative_final.empty else [],
+        prior_provenance=prior_provenance_by_case,
+        inventory=combined_inventory,
+    )
+    (cdir / "cumulative_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+    review_warnings.extend(warnings)
+    if mode == "on" and status != "ok":
+        raise RuntimeError(f"Cumulative analysis status is {status}; see {cdir / 'cumulative_summary.json'}.")
+    return payload
 
 
 def validate_required(run_root: Path, strict: bool) -> list[str]:
@@ -2198,7 +3232,17 @@ def plot_forecast_outputs(
         plt.close(fig)
 
 
-def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.DataFrame, final: pd.DataFrame, policy: str, image_plots: list[str], final_forecast: pd.DataFrame) -> None:
+def write_report(
+    outdir: Path,
+    run_root: Path,
+    summary: dict[str, Any],
+    win: pd.DataFrame,
+    final: pd.DataFrame,
+    policy: str,
+    image_plots: list[str],
+    final_forecast: pd.DataFrame,
+    cumulative_summary: dict[str, Any] | None = None,
+) -> None:
     completed = summary.get("completed_subblocks", "")
     failed = summary.get("failed_subblocks", "")
     missing = summary.get("missing_output_rows", "")
@@ -2241,6 +3285,37 @@ def write_report(outdir: Path, run_root: Path, summary: dict[str, Any], win: pd.
         "## Projected 30-minute observation forecast",
         "See [final_observation_summary.csv](final_observation_summary.csv), [projected_observation_forecast.csv](projected_observation_forecast.csv), and [window_evolution_actual_and_projected.csv](window_evolution_actual_and_projected.csv). These results are projected from the realized actual windows, not from a fully rendered 60-window observation.",
         "",
+        "## Cumulative information",
+    ]
+    cumulative_summary = cumulative_summary or {}
+    cumulative_status = cumulative_summary.get("status", "not_run")
+    if cumulative_status == "ok" and cumulative_summary.get("final_cumulative_metrics"):
+        metric = cumulative_summary["final_cumulative_metrics"][0]
+        lines += [
+            "The cumulative posterior combines preserved Schur likelihood summaries from all accepted windows with the initial observation prior counted once. It is a retrospective science estimate and is distinct from the historical damped next-reference state.",
+            f"- Status: {cumulative_status}; accepted {cumulative_summary.get('accepted_summary_count', 0)} of {cumulative_summary.get('expected_summary_count', 0)} discovered summaries.",
+            f"- Prior source: {compact(cumulative_summary.get('initial_prior_provenance', {}), max_len=300)}",
+            f"- Final cumulative separation error: {safe_float(metric.get('cumulative_final_sep_err_uas')):.6g} uas.",
+            f"- Final cumulative separation sigma: {safe_float(metric.get('cumulative_final_posterior_sigma_sep_uas')):.6g} uas.",
+            f"- Final cumulative error/sigma: {safe_float(metric.get('cumulative_final_sep_err_over_sigma')):.6g}.",
+            f"- Final window-local separation error/sigma: {safe_float(metric.get('window_local_final_sep_err_uas')):.6g} uas / {safe_float(metric.get('window_local_final_posterior_sigma_sep_uas')):.6g} uas.",
+            f"- Historical final next-reference separation error: {safe_float(metric.get('historical_next_reference_final_sep_err_uas')):.6g} uas.",
+            f"- Sigma improvement factor: {safe_float(metric.get('sigma_improvement_factor')):.6g}; ratio to first-window/sqrt(N) expectation: {safe_float(metric.get('sigma_ratio_to_sqrt_n_expectation')):.6g}.",
+            "See [cumulative_information/](cumulative_information/) for the inventory, cumulative prefix tables, diagnostics, variants, and serialized likelihood state.",
+            "",
+        ]
+    elif cumulative_status == "disabled":
+        lines += [
+            "Cumulative-information analysis was disabled for this review.",
+            "",
+        ]
+    else:
+        lines += [
+            f"Cumulative-information analysis status: `{cumulative_status}`. Existing window-local review products were still generated.",
+            "See [cumulative_information/cumulative_summary.json](cumulative_information/cumulative_summary.json) and [review_warnings.json](review_warnings.json) for structured warnings when available.",
+            "",
+        ]
+    lines += [
         "## Slow-state evolution",
         "See [slow_parameter_error_summary.csv](slow_parameter_error_summary.csv), [slow_state_evolution.csv](slow_state_evolution.csv), and [slow_state_final_summary.csv](slow_state_final_summary.csv). Standard slow-parameter plots include [slow_parameter_final_error_bar.png](plots/slow_parameter_final_error_bar.png), [slow_parameter_final_error_over_sigma_bar.png](plots/slow_parameter_final_error_over_sigma_bar.png), and [slow_parameter_evolution_signed_symlog.png](plots/slow_parameter_evolution_signed_symlog.png).",
         "",
@@ -2377,6 +3452,35 @@ def run(args: argparse.Namespace) -> int:
     )
 
     review_warnings: list[dict[str, Any]] = []
+    cumulative_summary: dict[str, Any] | None = None
+    try:
+        cumulative_summary = run_cumulative_information_review(
+            run_root,
+            outdir,
+            mode=args.cumulative_information,
+            no_plots=args.no_plots,
+            review_warnings=review_warnings,
+        )
+    except Exception as exc:
+        if args.cumulative_information == "on":
+            raise
+        warning = {
+            "status": "cumulative_information_error",
+            "context": "cumulative_information",
+            "message": str(exc),
+        }
+        review_warnings.append(warning)
+        cumulative_summary = _cumulative_status_payload(
+            run_root=run_root,
+            outdir=outdir,
+            mode=args.cumulative_information,
+            status="summary_load_error",
+            warnings=[warning],
+            outputs={"cumulative_summary_json": "cumulative_information/cumulative_summary.json"},
+        )
+        cdir = outdir / "cumulative_information"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "cumulative_summary.json").write_text(json.dumps(_json_scalar(cumulative_summary), indent=2))
     if not args.no_plots:
         for context, func in (
             (
@@ -2420,7 +3524,17 @@ def run(args: argparse.Namespace) -> int:
                 f"optional image comparison generation failed: {exc}",
                 context="representative_image_comparisons",
             )
-    write_report(outdir, run_root, artifacts["campaign_summary"], win, slow_final, local_policy, image_plots, final_forecast)
+    write_report(
+        outdir,
+        run_root,
+        artifacts["campaign_summary"],
+        win,
+        slow_final,
+        local_policy,
+        image_plots,
+        final_forecast,
+        cumulative_summary,
+    )
     write_index(outdir)
     write_review_warnings(outdir, review_warnings)
     if args.open_report:
@@ -2436,6 +3550,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-root", required=True)
     p.add_argument("--outdir")
     p.add_argument("--strict", nargs="?", const=True, default=False, type=parse_bool_arg)
+    p.add_argument(
+        "--cumulative-information",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Run retrospective cumulative-information analysis from preserved Schur summaries.",
+    )
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--image-examples", default="first,median,last")
     p.add_argument("--include-subblock-images", action="store_true")
