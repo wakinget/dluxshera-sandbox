@@ -291,6 +291,61 @@ controller: predicted initialization, adaptive reference acquisition, then
 fixed-reference precision accumulation.  It does not implement that controller
 or simulate a prospective adaptive trajectory from frozen historical summaries.
 
+## M2-center information-rate family aggregation
+
+The dedicated family aggregation workflow is implemented by
+`examples/scripts/aggregate_full_fidelity_information_rate_family.py`.  It is a
+read-only reducer over completed per-root review bundles: it validates
+completion sentinels, provenance, required schemas, accepted-summary counts,
+sequential invariance rows, shared information-rate settings, warning classes,
+and PSD-projection diagnostics, then writes normalized family CSVs plus compact
+JSON, Markdown, and plot products.  It does not recompute Fisher matrices, rerun
+inference, modify campaign roots, or implement an acquisition controller.
+
+Canonical information-mode IDs are root-local in this workflow.  Family-level
+physical summaries must therefore join through the named assignments in
+`adaptive_mode_set_resolution.csv`, with `information_mode_loadings.csv` and
+`information_rate_by_mode.csv` retained as enrichment and provenance.  Numeric
+mode-ID consistency across roots is not interpreted as a physical-assignment
+quality metric.
+
+The family products keep formal precision and actual estimator error separate.
+Formal covariance accumulation comes from information-rate and sequential
+covariance-only tables, while actual separation performance comes from the
+top-level estimator-error summaries.  The 1800-second values are labeled as
+stationary late-tail formal projections only; they are not an achieved
+30-minute astrometric accuracy claim.
+
+Sequential scope semantics remain distinct.  `observation_carry_window_bounded`
+reports cumulative 300-second precision accumulation with temporary buffers
+flushed at historical window boundaries.  `window_restart` reports fresh-prior
+window-local acquisition timing repeated in each historical 30-second window.
+The latter final covariance is not the cumulative 300-second covariance.
+
+The gain-3 family diagnostics summarize first and second natural information
+closures, maximum-latency fallback, and schedule equivalence between
+`astrometric_core` and `high_information_calibration`.  `all_trackable` rows
+retain `selected_mode_ids` in the policy key because membership depends on the
+threshold; they are exploratory trackability diagnostics rather than headline
+controller recommendations.
+
+Quasi-degenerate M2 modes are aggregated as subspaces.  The family reducer
+parses physical composition, then uses subspace singular values and principal
+angles from `mode_overlap.csv` instead of making strong claims about individual
+mode rotation or swapping inside a near-degenerate group.
+
+PSD-projection reporting is preserved from
+`information_rate_input_inventory.csv`: projected-matrix counts, clipped
+eigenvalue totals, raw negative magnitudes, relative and absolute correction
+scales, projection-status counts, and materially-indefinite counts are
+aggregated by root and amplitude.  Materially indefinite inputs remain
+validation failures in strict aggregation.
+
+The resulting report may give evidence-based guidance for a future
+acquire-then-accumulate controller, but only as guidance.  A real controller
+still needs an innovation, score, requested-update, or reference-stability gate
+in addition to information support.
+
 For the first demonstration, the preferred operational pattern is a **batch
 observation update**:
 
