@@ -27,10 +27,14 @@ from dluxshera.inference.observation_information_rate import (
     DEGENERACY_RTOL,
     PSD_ATOL,
     PSD_RTOL,
+    QUASI_DEGENERACY_RTOL,
     canonical_projected_gains,
+    canonical_physical_directions,
     check_projected_gain_monotonicity,
     covariance_square_root,
+    deduplicate_warnings,
     detect_degeneracy_groups,
+    detect_quasi_degeneracy_groups,
     drift_scenario,
     effective_rank,
     fit_information_rate,
@@ -40,6 +44,8 @@ from dluxshera.inference.observation_information_rate import (
     mode_overlap_assignment,
     observability_category,
     posterior_marginal_sigma,
+    resolve_unique_mode_assignments,
+    simulate_sequential_information_gate,
     subspace_overlap_diagnostics,
     symmetric_eigendecomposition,
     threshold_crossings,
@@ -128,6 +134,17 @@ CUMULATIVE_VARIANTS = (
     ("all_windows", 0),
     ("exclude_first_window", 1),
     ("exclude_first_two_windows", 2),
+)
+ADAPTIVE_CADENCE_MODE_SETS = (
+    "astrometric_core",
+    "source_core",
+    "high_information_calibration",
+    "all_trackable",
+)
+SEQUENTIAL_SCOPES = ("window_restart", "observation_carry_window_bounded")
+FROZEN_FACTOR_CAVEAT = (
+    "covariance-only frozen-factor information diagnostic; no score, posterior "
+    "mean, innovation, relinearization, or reference trajectory is simulated"
 )
 
 
@@ -1595,6 +1612,21 @@ def _parse_float_list(value: Any) -> tuple[float, ...]:
     return tuple(out)
 
 
+def _parse_mode_set_list(value: Any) -> tuple[str, ...]:
+    tokens = tuple(token.strip() for token in str(value).split(",") if token.strip())
+    if not tokens:
+        raise argparse.ArgumentTypeError("Expected at least one adaptive cadence mode set.")
+    unknown = [token for token in tokens if token not in ADAPTIVE_CADENCE_MODE_SETS]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            "Unknown adaptive cadence mode set(s): "
+            + ", ".join(unknown)
+            + ". Valid values are: "
+            + ", ".join(ADAPTIVE_CADENCE_MODE_SETS)
+        )
+    return tokens
+
+
 def _summary_matrix_artifact_path(summary_path: Path, payload: Mapping[str, Any]) -> Path | None:
     raw = first_nonblank(payload.get("matrix_artifact_path", ""), payload.get("matrix_npz_path", ""))
     if _is_blank(raw):
@@ -1704,6 +1736,9 @@ def _information_rate_status_payload(
     prior_provenance: Mapping[str, Any] | None = None,
     key_mode_summaries: Sequence[Mapping[str, Any]] = (),
     canonical_provenance: Mapping[str, Any] | None = None,
+    adaptive_mode_set_resolution: Sequence[Mapping[str, Any]] = (),
+    sequential_scope_summaries: Sequence[Mapping[str, Any]] = (),
+    warning_deduplication: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     duration_counts = (
         dict(Counter(inventory["duration_source"].astype(str)))
@@ -1732,9 +1767,24 @@ def _information_rate_status_payload(
         "information_scale_provenance": scale_counts,
         "canonical_spectrum_provenance": _json_scalar(canonical_provenance or {}),
         "degeneracy_settings": {"degeneracy_rtol": DEGENERACY_RTOL},
+        "quasi_degeneracy_settings": {"quasi_degeneracy_rtol": (settings or {}).get("quasi_degeneracy_rtol", QUASI_DEGENERACY_RTOL)},
         "psd_settings": {"psd_atol": PSD_ATOL, "psd_rtol": PSD_RTOL},
         "threshold_settings": list(settings.get("thresholds", ())) if settings else [],
         "adaptive_policy_grid": _json_scalar((settings or {}).get("adaptive_policy_grid", {})),
+        "adaptive_sequential_settings": _json_scalar(
+            {
+                "analysis": (settings or {}).get("adaptive_cadence_analysis", ""),
+                "mode_sets": (settings or {}).get("adaptive_cadence_mode_sets", ()),
+                "gain_thresholds": (settings or {}).get("adaptive_cadence_gain_thresholds", ()),
+                "sigma_ratio_targets": (settings or {}).get("adaptive_cadence_sigma_ratio_targets", {}),
+                "high_information_wfe_count": (settings or {}).get("adaptive_cadence_high_information_wfe_count", 0),
+                "scopes": SEQUENTIAL_SCOPES,
+            }
+        ),
+        "adaptive_mode_set_resolution": _json_scalar(list(adaptive_mode_set_resolution)),
+        "sequential_scope_summaries": _json_scalar(list(sequential_scope_summaries)),
+        "final_information_invariance": _json_scalar(list(sequential_scope_summaries)),
+        "warning_deduplication": _json_scalar(dict(warning_deduplication or {})),
         "key_mode_summaries": _json_scalar(list(key_mode_summaries)),
         "warnings": _json_scalar(warnings),
         "output_paths": _json_scalar(dict(outputs or {})),
@@ -1742,6 +1792,8 @@ def _information_rate_status_payload(
             "1800-second values are diagnostic projections from the late-tail information rate.",
             "Historical frozen-factor prefixes combine factors generated at changing references.",
             "Adaptive-cadence rows evaluate information sufficiency only; no innovation gate is simulated.",
+            "Sequential products are covariance-only information diagnostics; they do not simulate posterior means, requested updates, hypothetical relinearization, or a recovered adaptive reference trajectory.",
+            "Historical window boundaries are retained for the conservative carry scope.",
         ],
         "software_provenance": {
             "numerical_module": "dluxshera.inference.observation_information_rate",
@@ -1865,6 +1917,389 @@ def _group_membership(groups: Sequence[Sequence[int]], mode_count: int) -> dict[
     return out
 
 
+def _loading_fraction_map(loading_rows: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, float]]:
+    out: dict[int, dict[str, float]] = defaultdict(dict)
+    for row in loading_rows:
+        mode_id = int(row["canonical_mode_id"])
+        out[mode_id][str(row["theta_label"])] = float(row["squared_composition_fraction"])
+    return dict(out)
+
+
+def _resolve_adaptive_mode_sets(
+    *,
+    case_name: str,
+    requested_mode_sets: Sequence[str],
+    labels: Sequence[str],
+    loading_rows: Sequence[Mapping[str, Any]],
+    composition_by_mode: Mapping[int, Mapping[str, Any]],
+    canonical_rates: np.ndarray,
+    adaptive_thresholds: Sequence[float],
+    adaptive_max_subblocks: int,
+    median_duration_s: float,
+    high_information_wfe_count: int,
+    warnings: list[dict[str, Any]],
+    mode: str,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, float], tuple[int, ...]]]:
+    loading_map = _loading_fraction_map(loading_rows)
+    label_set = set(str(label) for label in labels)
+    resolution_rows: list[dict[str, Any]] = []
+    selected: dict[tuple[str, float], tuple[int, ...]] = {}
+
+    def assign(name: str, concepts: Sequence[str]) -> tuple[int, ...] | None:
+        missing = [concept for concept in concepts if concept not in label_set]
+        if missing:
+            warning = {
+                "status": "adaptive_mode_set_missing_label",
+                "case": case_name,
+                "mode_set_name": name,
+                "missing_labels": missing,
+                "message": f"Adaptive mode set {name} requires missing label(s): {', '.join(missing)}.",
+            }
+            if mode == "on":
+                raise ValueError(warning["message"])
+            warnings.append(warning)
+            return None
+        assignments = resolve_unique_mode_assignments(loading_map, concepts)
+        modes = tuple(int(a.canonical_mode_id) for a in assignments if a.canonical_mode_id is not None)
+        for assignment in assignments:
+            if "weak_assignment" in assignment.assignment_status or "ambiguous_assignment" in assignment.assignment_status:
+                warnings.append(
+                    {
+                        "status": "adaptive_mode_set_assignment_caution",
+                        "case": case_name,
+                        "mode_set_name": name,
+                        "physical_concept": assignment.concept,
+                        "assignment_status": assignment.assignment_status,
+                        "canonical_mode_id": assignment.canonical_mode_id,
+                        "squared_loading": assignment.squared_loading,
+                    }
+                )
+            resolution_rows.append(
+                {
+                    "case_name": case_name,
+                    "mode_set_name": name,
+                    "mode_set_semantic_name": name,
+                    "gain_threshold": np.nan,
+                    "requested_physical_label_or_group": assignment.concept,
+                    "canonical_mode_id": assignment.canonical_mode_id if assignment.canonical_mode_id is not None else "",
+                    "canonical_rate": canonical_rates[assignment.canonical_mode_id] if assignment.canonical_mode_id is not None else np.nan,
+                    "squared_loading_used_for_assignment": assignment.squared_loading,
+                    "assignment_rank": assignment.assignment_rank,
+                    "next_best_mode": "" if assignment.next_best_mode_id is None else assignment.next_best_mode_id,
+                    "next_best_loading": assignment.next_best_squared_loading,
+                    "assignment_status": assignment.assignment_status,
+                    "threshold_dependency": "none",
+                    "selected_mode_ids": ";".join(str(m) for m in modes),
+                    "wfe_count_setting": high_information_wfe_count,
+                    "trackability_criterion": "",
+                }
+            )
+        return modes
+
+    astrometric = None
+    source = None
+    if any(name in requested_mode_sets for name in ("astrometric_core", "high_information_calibration")):
+        astrometric = assign("astrometric_core", ("source.separation_as", "optics.plate_scale_as_per_pix"))
+        if "astrometric_core" in requested_mode_sets and astrometric is not None:
+            for threshold in adaptive_thresholds:
+                selected[("astrometric_core", float(threshold))] = astrometric
+    if "source_core" in requested_mode_sets:
+        source = assign(
+            "source_core",
+            ("source.separation_as", "source.log_flux_total", "source.contrast", "optics.plate_scale_as_per_pix"),
+        )
+        if source is not None:
+            for threshold in adaptive_thresholds:
+                selected[("source_core", float(threshold))] = source
+    if "high_information_calibration" in requested_mode_sets and astrometric is not None:
+        eligible = [
+            int(mode_id)
+            for mode_id, comp in composition_by_mode.items()
+            if float(comp.get("m1_zernike_squared_norm", 0.0)) + float(comp.get("m2_zernike_squared_norm", 0.0)) >= 0.5
+        ]
+        eligible = sorted(eligible, key=lambda mode_id: (-float(canonical_rates[mode_id]), mode_id))
+        additions = tuple(eligible[: int(high_information_wfe_count)])
+        modes = tuple(dict.fromkeys(tuple(astrometric) + additions))
+        for threshold in adaptive_thresholds:
+            selected[("high_information_calibration", float(threshold))] = modes
+        resolution_rows.append(
+            {
+                "case_name": case_name,
+                "mode_set_name": "high_information_calibration",
+                "mode_set_semantic_name": "astrometric_core_plus_high_information_wfe",
+                "gain_threshold": np.nan,
+                "requested_physical_label_or_group": f"wfe_dominated_top_{int(high_information_wfe_count)}",
+                "canonical_mode_id": ";".join(str(m) for m in additions),
+                "canonical_rate": ";".join(f"{float(canonical_rates[m]):.12g}" for m in additions),
+                "squared_loading_used_for_assignment": np.nan,
+                "assignment_rank": np.nan,
+                "next_best_mode": "",
+                "next_best_loading": np.nan,
+                "assignment_status": "ok",
+                "threshold_dependency": "none",
+                "selected_mode_ids": ";".join(str(m) for m in modes),
+                "wfe_count_setting": high_information_wfe_count,
+                "trackability_criterion": "m1_zernike_squared_norm+m2_zernike_squared_norm>=0.5 ordered by late-tail rate",
+            }
+        )
+    if "all_trackable" in requested_mode_sets:
+        max_duration = float(adaptive_max_subblocks) * float(median_duration_s)
+        for threshold in adaptive_thresholds:
+            modes = tuple(int(i) for i, rate in enumerate(canonical_rates) if float(rate) * max_duration >= float(threshold))
+            selected[("all_trackable", float(threshold))] = modes
+            resolution_rows.append(
+                {
+                    "case_name": case_name,
+                    "mode_set_name": "all_trackable",
+                    "mode_set_semantic_name": "all_trackable_initial",
+                    "gain_threshold": float(threshold),
+                    "requested_physical_label_or_group": "initial_trackability",
+                    "canonical_mode_id": ";".join(str(m) for m in modes),
+                    "canonical_rate": ";".join(f"{float(canonical_rates[m]):.12g}" for m in modes),
+                    "squared_loading_used_for_assignment": np.nan,
+                    "assignment_rank": np.nan,
+                    "next_best_mode": "",
+                    "next_best_loading": np.nan,
+                    "assignment_status": "ok" if modes else "empty_trackability_set",
+                    "threshold_dependency": "gain_threshold",
+                    "selected_mode_ids": ";".join(str(m) for m in modes),
+                    "wfe_count_setting": high_information_wfe_count,
+                    "trackability_criterion": f"late_tail_rate*{max_duration:.12g}s>=gain_threshold",
+                }
+            )
+    return resolution_rows, selected
+
+
+def _marginal_sigma(covariance: np.ndarray, labels: Sequence[str], label: str) -> float:
+    try:
+        idx = tuple(labels).index(label)
+    except ValueError:
+        return np.nan
+    return float(np.sqrt(max(float(covariance[idx, idx]), 0.0)))
+
+
+def _sequential_invariance(
+    precision: np.ndarray,
+    expected: np.ndarray,
+    *,
+    atol: float = 1.0e-8,
+    rtol: float = 1.0e-8,
+) -> dict[str, Any]:
+    diff = 0.5 * (precision + precision.T) - 0.5 * (expected + expected.T)
+    expected_norm = max(float(np.linalg.norm(expected, ord="fro")), 1.0e-15)
+    abs_fro = float(np.linalg.norm(diff, ord="fro"))
+    max_abs = float(np.max(np.abs(diff))) if diff.size else 0.0
+    return {
+        "final_information_frobenius_abs_diff": abs_fro,
+        "final_information_frobenius_rel_diff": abs_fro / expected_norm,
+        "final_information_max_abs_diff": max_abs,
+        "final_information_invariance_status": "pass" if abs_fro <= atol + rtol * expected_norm and max_abs <= atol + rtol * float(np.max(np.abs(expected))) else "fail",
+    }
+
+
+def _build_sequential_outputs(
+    *,
+    case_name: str,
+    labels: Sequence[str],
+    prior_precision: np.ndarray,
+    info_mats: np.ndarray,
+    durations: np.ndarray,
+    windows: np.ndarray,
+    subblocks: np.ndarray,
+    physical_directions: np.ndarray,
+    selected_mode_sets: Mapping[tuple[str, float], tuple[int, ...]],
+    adaptive_thresholds: Sequence[float],
+    adaptive_min_subblocks: int,
+    adaptive_max_subblocks: int,
+    canonical_rates: np.ndarray,
+    composition_by_mode: Mapping[int, Mapping[str, Any]],
+    strict_group_map: Mapping[int, tuple[int, tuple[int, ...]]],
+    quasi_group_map: Mapping[int, tuple[int, tuple[int, ...]]],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    update_rows: list[dict[str, Any]] = []
+    gain_rows: list[dict[str, Any]] = []
+    summary_rows: list[dict[str, Any]] = []
+    unique_windows = sorted(int(w) for w in np.unique(windows))
+    global_boundary = [False] * len(windows)
+    for idx in range(len(windows)):
+        if idx < len(windows) - 1 and int(windows[idx + 1]) != int(windows[idx]):
+            global_boundary[idx] = True
+
+    scopes: list[tuple[str, list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray], list[list[bool]]]] = [
+        ("observation_carry_window_bounded", [np.arange(len(windows))], [windows], [subblocks], [durations], [global_boundary])
+    ]
+    window_idxs = [np.flatnonzero(windows == window) for window in unique_windows]
+    scopes.append(
+        (
+            "window_restart",
+            window_idxs,
+            [windows[idxs] for idxs in window_idxs],
+            [subblocks[idxs] for idxs in window_idxs],
+            [durations[idxs] for idxs in window_idxs],
+            [[False] * len(idxs) for idxs in window_idxs],
+        )
+    )
+
+    for (mode_set_name, threshold), selected_modes in selected_mode_sets.items():
+        if not selected_modes:
+            continue
+        sigma_target = 1.0 / math.sqrt(1.0 + float(threshold))
+        for scope_name, index_groups, window_groups, subblock_groups, duration_groups, boundary_groups in scopes:
+            policy_update_rows: list[dict[str, Any]] = []
+            precision = np.asarray(prior_precision, dtype=float).copy()
+            update_index_offset = 0
+            total_elapsed = 0.0
+            for group_pos, idxs in enumerate(index_groups):
+                if len(idxs) == 0:
+                    continue
+                if scope_name == "window_restart":
+                    precision = np.asarray(prior_precision, dtype=float).copy()
+                    update_index_offset = 0
+                    total_elapsed = 0.0
+                updates = simulate_sequential_information_gate(
+                    precision,
+                    info_mats[idxs],
+                    duration_groups[group_pos],
+                    physical_directions,
+                    selected_modes,
+                    gain_threshold=float(threshold),
+                    minimum_subblocks=adaptive_min_subblocks,
+                    maximum_subblocks=adaptive_max_subblocks,
+                    boundary_after=boundary_groups[group_pos],
+                )
+                local_precision = precision
+                for update in updates:
+                    global_start = int(idxs[update.start_index])
+                    global_end = int(idxs[update.end_index])
+                    before = np.linalg.inv(local_precision)
+                    buffer = np.sum(info_mats[idxs[update.start_index : update.end_index + 1]], axis=0)
+                    after_precision = local_precision + buffer
+                    after_precision = 0.5 * (after_precision + after_precision.T)
+                    after = np.linalg.inv(after_precision)
+                    local_precision = after_precision
+                    total_elapsed += update.block_duration_s
+                    row = {
+                        "case_name": case_name,
+                        "sequence_scope": scope_name,
+                        "historical_window_index": int(windows[global_start]),
+                        "policy_mode_set_name": mode_set_name,
+                        "gain_threshold": float(threshold),
+                        "sigma_ratio_target": sigma_target,
+                        "update_index": int(update.update_index + update_index_offset),
+                        "global_buffer_start_subblock": int(global_start),
+                        "global_buffer_end_subblock": int(global_end),
+                        "window_local_start_subblock": int(subblocks[global_start]),
+                        "window_local_end_subblock": int(subblocks[global_end]),
+                        "block_length": update.block_length,
+                        "block_duration_s": update.block_duration_s,
+                        "cumulative_elapsed_time_s": total_elapsed if scope_name == "window_restart" else update.cumulative_elapsed_s,
+                        "selected_mode_ids": ";".join(str(m) for m in selected_modes),
+                        "controlling_mode_id": update.controlling_mode_id,
+                        "minimum_selected_mode_gain": update.minimum_gain,
+                        "maximum_selected_mode_gain": update.maximum_gain,
+                        "information_trace_in_buffer": float(np.trace(buffer)),
+                        "precision_trace_before": update.precision_trace_before,
+                        "precision_trace_after": float(np.trace(after_precision)),
+                        "covariance_trace_before": float(np.trace(before)),
+                        "covariance_trace_after": float(np.trace(after)),
+                        "separation_marginal_sigma_before": _marginal_sigma(before, labels, "source.separation_as"),
+                        "separation_marginal_sigma_after": _marginal_sigma(after, labels, "source.separation_as"),
+                        "plate_scale_marginal_sigma_before": _marginal_sigma(before, labels, "optics.plate_scale_as_per_pix"),
+                        "plate_scale_marginal_sigma_after": _marginal_sigma(after, labels, "optics.plate_scale_as_per_pix"),
+                        "closure_reason": update.closure_reason,
+                        "triggered_naturally": update.triggered_naturally,
+                        "maximum_latency_reached": update.maximum_latency_reached,
+                        "historical_window_boundary_flush": update.historical_window_boundary_flush,
+                        "end_of_scope_flush": update.end_of_scope_flush,
+                        "information_only_status": update.information_only_status,
+                        "frozen_factor_caveat": FROZEN_FACTOR_CAVEAT,
+                    }
+                    update_rows.append(row)
+                    policy_update_rows.append(row)
+                    selected_dirs = physical_directions[:, selected_modes]
+                    precision_norms = np.einsum("ik,ij,jk->k", selected_dirs, local_precision - buffer, selected_dirs)
+                    absolute = np.einsum("ik,ij,jk->k", selected_dirs, buffer, selected_dirs)
+                    gains = absolute / precision_norms
+                    for pos, mode_id in enumerate(selected_modes):
+                        strict_gid, strict_members = strict_group_map[int(mode_id)]
+                        quasi_gid, quasi_members = quasi_group_map[int(mode_id)]
+                        comp = composition_by_mode[int(mode_id)]
+                        gain_rows.append(
+                            {
+                                "case_name": case_name,
+                                "sequence_scope": scope_name,
+                                "historical_window_index": int(windows[global_start]),
+                                "policy_mode_set_name": mode_set_name,
+                                "gain_threshold": float(threshold),
+                                "sigma_ratio_target": sigma_target,
+                                "update_index": int(update.update_index + update_index_offset),
+                                "canonical_mode_id": int(mode_id),
+                                "mode_physical_interpretation": comp.get("dominant_labels", ""),
+                                "current_precision_norm": float(precision_norms[pos]),
+                                "absolute_buffered_information": float(absolute[pos]),
+                                "current_relative_gain": float(gains[pos]),
+                                "passed_threshold": bool(gains[pos] >= float(threshold)),
+                                "controlling_mode": bool(int(mode_id) == int(update.controlling_mode_id)),
+                                "strict_degeneracy_group": strict_gid,
+                                "strict_degeneracy_group_members": ";".join(str(m) for m in strict_members),
+                                "quasi_degeneracy_group": quasi_gid,
+                                "quasi_degeneracy_group_members": ";".join(str(m) for m in quasi_members),
+                                "quasi_degenerate": len(quasi_members) > 1,
+                                "mode_identity_caution": "quasi_degenerate_subspace_preferred" if len(quasi_members) > 1 else "",
+                            }
+                        )
+                precision = local_precision
+                update_index_offset += len(updates)
+            if policy_update_rows:
+                final_precision = precision
+                if scope_name == "observation_carry_window_bounded":
+                    expected_precision = prior_precision + np.sum(info_mats, axis=0)
+                    total_summaries = len(info_mats)
+                    total_duration = float(np.sum(durations))
+                else:
+                    # Window-restart rows summarize the final processed window for compactness.
+                    last_idxs = index_groups[-1]
+                    expected_precision = prior_precision + np.sum(info_mats[last_idxs], axis=0)
+                    total_summaries = int(sum(row["block_length"] for row in policy_update_rows))
+                    total_duration = float(sum(row["block_duration_s"] for row in policy_update_rows))
+                final_cov = np.linalg.inv(final_precision)
+                inv = _sequential_invariance(final_precision, expected_precision)
+                lengths = [int(row["block_length"]) for row in policy_update_rows]
+                final_dirs = physical_directions[:, selected_modes]
+                final_norms = np.einsum("ik,ij,jk->k", final_dirs, final_precision, final_dirs)
+                summary_rows.append(
+                    {
+                        "case_name": case_name,
+                        "sequence_scope": scope_name,
+                        "policy_mode_set_name": mode_set_name,
+                        "gain_threshold": float(threshold),
+                        "sigma_ratio_target": sigma_target,
+                        "selected_mode_ids": ";".join(str(m) for m in selected_modes),
+                        "update_count": len(policy_update_rows),
+                        "natural_trigger_count": sum(bool(row["triggered_naturally"]) for row in policy_update_rows),
+                        "maximum_latency_count": sum(row["closure_reason"] == "maximum_latency" for row in policy_update_rows),
+                        "historical_boundary_flush_count": sum(row["closure_reason"] == "historical_window_boundary" for row in policy_update_rows),
+                        "end_of_scope_flush_count": sum(row["closure_reason"] == "end_of_scope" for row in policy_update_rows),
+                        "first_block_length": lengths[0],
+                        "median_block_length": float(np.median(lengths)),
+                        "final_block_length": lengths[-1],
+                        "minimum_block_length": min(lengths),
+                        "maximum_block_length": max(lengths),
+                        "maximum_latency_fraction": sum(row["closure_reason"] == "maximum_latency" for row in policy_update_rows) / len(policy_update_rows),
+                        "total_included_summaries": total_summaries,
+                        "total_duration_s": total_duration,
+                        "final_precision_trace": float(np.trace(final_precision)),
+                        "final_covariance_trace": float(np.trace(final_cov)),
+                        "final_separation_sigma": _marginal_sigma(final_cov, labels, "source.separation_as"),
+                        "final_plate_scale_sigma": _marginal_sigma(final_cov, labels, "optics.plate_scale_as_per_pix"),
+                        "final_selected_mode_precision_norms": ";".join(f"{float(v):.12g}" for v in final_norms),
+                        "information_only_status": "covariance_only_frozen_factor",
+                        **inv,
+                    }
+                )
+    return pd.DataFrame(update_rows), pd.DataFrame(gain_rows), pd.DataFrame(summary_rows)
+
+
 def build_information_rate_case_products(
     run_root: Path,
     plan: Mapping[str, Any],
@@ -1876,6 +2311,12 @@ def build_information_rate_case_products(
     tail_windows: int,
     adaptive_min_subblocks: int,
     adaptive_max_subblocks: int,
+    adaptive_cadence_analysis: str = "both",
+    adaptive_mode_sets: Sequence[str] = ADAPTIVE_CADENCE_MODE_SETS,
+    adaptive_gain_thresholds: Sequence[float] = (1.0, 3.0, 10.0, 24.0, 30.0),
+    adaptive_high_information_wfe_count: int = 4,
+    quasi_degeneracy_rtol: float = QUASI_DEGENERACY_RTOL,
+    information_rate_mode: str = "auto",
 ) -> dict[str, Any]:
     labels = tuple(prior.theta_labels)
     summaries, inventory, warnings = _load_information_rate_inputs(case_inventory, labels, plan)
@@ -1912,7 +2353,9 @@ def build_information_rate_case_products(
     canonical_vectors = canonical.eigenvectors
     canonical_rates = canonical.eigenvalues
     groups = detect_degeneracy_groups(canonical_rates)
+    quasi_groups = detect_quasi_degeneracy_groups(canonical_rates, quasi_rtol=quasi_degeneracy_rtol, strict_rtol=DEGENERACY_RTOL)
     group_map = _group_membership(groups, len(labels))
+    quasi_group_map = _group_membership(quasi_groups, len(labels))
     loading_rows, composition_summaries = mode_composition(labels, whitening, canonical_vectors)
     composition_by_mode = {row["canonical_mode_id"]: row for row in composition_summaries}
     top_order = list(np.argsort(-canonical_rates, kind="mergesort"))
@@ -1924,6 +2367,7 @@ def build_information_rate_case_products(
     adaptive_prefix_rows: list[dict[str, Any]] = []
     window_mode_rows: list[dict[str, Any]] = []
     candidate_rows: list[dict[str, Any]] = []
+    quasi_degenerate_rows: list[dict[str, Any]] = []
     prior_sigma = prior.sigma()
 
     def add_physical_rows(scope: str, elapsed: float, information: np.ndarray, window_index: int | float = np.nan) -> None:
@@ -2048,28 +2492,29 @@ def build_information_rate_case_products(
                 for threshold in threshold_values:
                     row[f"crossed_gain_{_threshold_column_suffix(threshold)}"] = bool(projected[mode_id] >= threshold)
                 prefix_rows.append(row)
-            for threshold in threshold_values:
-                sorted_gains = projected[top_order]
-                adaptive_prefix_rows.append(
-                    {
-                        "case_name": case_name,
-                        "window_index": window,
-                        "prefix_index": local_pos,
-                        "elapsed_time_s": elapsed,
-                        "gain_threshold": threshold,
-                        "modes_above_threshold": int(np.count_nonzero(projected >= threshold)),
-                        "top_1_min_gain": float(np.min(sorted_gains[:1])),
-                        "top_2_min_gain": float(np.min(sorted_gains[: min(2, len(sorted_gains))])),
-                        "top_4_min_gain": float(np.min(sorted_gains[: min(4, len(sorted_gains))])),
-                        "top_8_min_gain": float(np.min(sorted_gains[: min(8, len(sorted_gains))])),
-                        "information_trace": float(np.trace(cum_gain)),
-                        "effective_rank": effective_rank(eigvals_nonneg),
-                        "candidate_trigger_top_1": bool(np.min(sorted_gains[:1]) >= threshold and local_pos >= adaptive_min_subblocks),
-                        "candidate_trigger_top_2": bool(np.min(sorted_gains[: min(2, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
-                        "candidate_trigger_top_4": bool(np.min(sorted_gains[: min(4, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
-                        "candidate_trigger_top_8": bool(np.min(sorted_gains[: min(8, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
-                    }
-                )
+            if adaptive_cadence_analysis in {"fixed_prior", "both"}:
+                for threshold in threshold_values:
+                    sorted_gains = projected[top_order]
+                    adaptive_prefix_rows.append(
+                        {
+                            "case_name": case_name,
+                            "window_index": window,
+                            "prefix_index": local_pos,
+                            "elapsed_time_s": elapsed,
+                            "gain_threshold": threshold,
+                            "modes_above_threshold": int(np.count_nonzero(projected >= threshold)),
+                            "top_1_min_gain": float(np.min(sorted_gains[:1])),
+                            "top_2_min_gain": float(np.min(sorted_gains[: min(2, len(sorted_gains))])),
+                            "top_4_min_gain": float(np.min(sorted_gains[: min(4, len(sorted_gains))])),
+                            "top_8_min_gain": float(np.min(sorted_gains[: min(8, len(sorted_gains))])),
+                            "information_trace": float(np.trace(cum_gain)),
+                            "effective_rank": effective_rank(eigvals_nonneg),
+                            "candidate_trigger_top_1": bool(np.min(sorted_gains[:1]) >= threshold and local_pos >= adaptive_min_subblocks),
+                            "candidate_trigger_top_2": bool(np.min(sorted_gains[: min(2, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
+                            "candidate_trigger_top_4": bool(np.min(sorted_gains[: min(4, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
+                            "candidate_trigger_top_8": bool(np.min(sorted_gains[: min(8, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
+                        }
+                    )
             add_physical_rows("per_window_subblock_prefix", elapsed, cum_info, window)
         duration = float(np.sum(durations[idxs]))
         window_gain = np.sum(gain_mats[idxs], axis=0)
@@ -2095,6 +2540,27 @@ def build_information_rate_case_products(
                     "current_eigenvalue": float(np.mean(current_vals[list(group)])),
                     **diag,
                     "assignment_status": "subspace",
+                }
+            )
+        for group_id, group in enumerate(quasi_groups):
+            if len(group) <= 1:
+                continue
+            diag = subspace_overlap_diagnostics(canonical_vectors[:, group], current_vecs[:, group])
+            overlap_rows.append(
+                {
+                    "case_name": case_name,
+                    "comparison_scope": "window_rate_quasi_subspace",
+                    "window_index": window,
+                    "prefix_index": len(idxs),
+                    "canonical_mode_id": "",
+                    "degeneracy_group": group_id,
+                    "assigned_mode": "",
+                    "absolute_overlap": np.nan,
+                    "signed_overlap": np.nan,
+                    "reference_eigenvalue": float(np.mean(canonical_rates[list(group)])),
+                    "current_eigenvalue": float(np.mean(current_vals[list(group)])),
+                    **diag,
+                    "assignment_status": "quasi_subspace",
                 }
             )
         designation = "late_tail" if window in selected_tail_windows else "early"
@@ -2126,44 +2592,45 @@ def build_information_rate_case_products(
                     "early_late_designation": designation,
                 }
             )
-        for threshold in (0.1, 0.25, 1.0):
-            for required in (1, 2, 4, 8):
-                required_modes = top_order[: min(required, len(top_order))]
-                natural = None
-                controlling = ""
-                for pos, gains in enumerate(prefix_gains_by_window[window], start=1):
-                    if pos < adaptive_min_subblocks:
-                        continue
-                    top_gains = gains[required_modes]
-                    if float(np.min(top_gains)) >= threshold:
-                        natural = pos
-                        controlling = ";".join(str(required_modes[int(i)]) for i in np.flatnonzero(np.isclose(top_gains, np.min(top_gains))))
-                        break
-                max_len = min(adaptive_max_subblocks, len(idxs))
-                if natural is None or natural > max_len:
-                    resolved = max_len
-                    reason = "maximum_latency"
-                    controlling = ";".join(str(m) for m in required_modes)
-                    reached_max = True
-                else:
-                    resolved = natural
-                    reason = "information_threshold"
-                    reached_max = False
-                candidate_rows.append(
-                    {
-                        "case_name": case_name,
-                        "window_index": window,
-                        "gain_threshold": threshold,
-                        "required_top_mode_count": required,
-                        "minimum_subblocks": adaptive_min_subblocks,
-                        "maximum_subblocks": adaptive_max_subblocks,
-                        "natural_crossing_prefix": natural if natural is not None else np.nan,
-                        "resolved_candidate_block_length": resolved,
-                        "trigger_reason": reason,
-                        "controlling_modes": controlling,
-                        "maximum_latency_reached": reached_max,
-                    }
-                )
+        if adaptive_cadence_analysis in {"fixed_prior", "both"}:
+            for threshold in (0.1, 0.25, 1.0):
+                for required in (1, 2, 4, 8):
+                    required_modes = top_order[: min(required, len(top_order))]
+                    natural = None
+                    controlling = ""
+                    for pos, gains in enumerate(prefix_gains_by_window[window], start=1):
+                        if pos < adaptive_min_subblocks:
+                            continue
+                        top_gains = gains[required_modes]
+                        if float(np.min(top_gains)) >= threshold:
+                            natural = pos
+                            controlling = ";".join(str(required_modes[int(i)]) for i in np.flatnonzero(np.isclose(top_gains, np.min(top_gains))))
+                            break
+                    max_len = min(adaptive_max_subblocks, len(idxs))
+                    if natural is None or natural > max_len:
+                        resolved = max_len
+                        reason = "maximum_latency"
+                        controlling = ";".join(str(m) for m in required_modes)
+                        reached_max = True
+                    else:
+                        resolved = natural
+                        reason = "information_threshold"
+                        reached_max = False
+                    candidate_rows.append(
+                        {
+                            "case_name": case_name,
+                            "window_index": window,
+                            "gain_threshold": threshold,
+                            "required_top_mode_count": required,
+                            "minimum_subblocks": adaptive_min_subblocks,
+                            "maximum_subblocks": adaptive_max_subblocks,
+                            "natural_crossing_prefix": natural if natural is not None else np.nan,
+                            "resolved_candidate_block_length": resolved,
+                            "trigger_reason": reason,
+                            "controlling_modes": controlling,
+                            "maximum_latency_reached": reached_max,
+                        }
+                    )
 
     window_rate_matrix = np.vstack([window_rates_by_mode[window] for window in unique_windows])
     late_tail_window_rates = window_rate_matrix[[unique_windows.index(w) for w in selected_tail_windows], :]
@@ -2207,6 +2674,10 @@ def build_information_rate_case_products(
             "median_window_overlap": float(np.nanmedian(mode_stability)) if mode_stability else np.nan,
             "degeneracy_group": group_map[mode_id][0],
             "degeneracy_group_members": ";".join(str(m) for m in group_map[mode_id][1]),
+            "quasi_degeneracy_group": quasi_group_map[mode_id][0],
+            "quasi_degeneracy_group_members": ";".join(str(m) for m in quasi_group_map[mode_id][1]),
+            "quasi_degenerate": len(quasi_group_map[mode_id][1]) > 1,
+            "mode_identity_caution": "quasi_degenerate_subspace_preferred" if len(quasi_group_map[mode_id][1]) > 1 else "",
             "mode_identity_status": "degenerate_subspace_only" if len(group_map[mode_id][1]) > 1 else "individual",
             "dominant_labels": comp["dominant_labels"],
             "source_group_squared_norm": comp["source_group_squared_norm"],
@@ -2271,6 +2742,45 @@ def build_information_rate_case_products(
                 "individual_mode_interpretation_validity": "subspace_only" if len(members) > 1 else "individual",
             }
         )
+    for group_id, group in enumerate(quasi_groups):
+        members = tuple(int(i) for i in group)
+        if len(members) <= 1:
+            continue
+        values = canonical_rates[list(members)]
+        rel_gaps = [
+            abs(float(a - b)) / max(abs(float(a)), abs(float(b)), 1.0e-15)
+            for a, b in zip(values[:-1], values[1:])
+        ]
+        group_comp = {
+            "source": float(sum(composition_by_mode[m]["source_group_squared_norm"] for m in members) / len(members)),
+            "plate_scale": float(sum(composition_by_mode[m]["plate_scale_squared_norm"] for m in members) / len(members)),
+            "m1_zernike": float(sum(composition_by_mode[m]["m1_zernike_squared_norm"] for m in members) / len(members)),
+            "m2_zernike": float(sum(composition_by_mode[m]["m2_zernike_squared_norm"] for m in members) / len(members)),
+            "other": float(sum(composition_by_mode[m]["other_squared_norm"] for m in members) / len(members)),
+        }
+        rows = [
+            row
+            for row in overlap_rows
+            if row.get("comparison_scope") == "window_rate_quasi_subspace" and int(row.get("degeneracy_group", -1)) == group_id
+        ]
+        singular = [safe_float(row.get("minimum_subspace_singular_value")) for row in rows if np.isfinite(safe_float(row.get("minimum_subspace_singular_value")))]
+        angles = [safe_float(row.get("maximum_principal_angle_deg")) for row in rows if np.isfinite(safe_float(row.get("maximum_principal_angle_deg")))]
+        quasi_degenerate_rows.append(
+            {
+                "case_name": case_name,
+                "quasi_degeneracy_group": group_id,
+                "member_mode_ids": ";".join(str(m) for m in members),
+                "group_dimension": len(members),
+                "eigenvalue_min": float(np.min(values)),
+                "eigenvalue_max": float(np.max(values)),
+                "adjacent_relative_gaps": ";".join(f"{gap:.6g}" for gap in rel_gaps),
+                "group_physical_composition": json.dumps(group_comp, sort_keys=True),
+                "minimum_subspace_singular_value": float(np.min(singular)) if singular else np.nan,
+                "median_subspace_singular_value": float(np.median(singular)) if singular else np.nan,
+                "maximum_principal_angle_deg": float(np.max(angles)) if angles else np.nan,
+                "individual_mode_interpretation_note": "quasi-degenerate: prefer subspace stability over individual-mode rotation",
+            }
+        )
 
     monotonic_warnings = []
     for mode_id in range(len(labels)):
@@ -2278,6 +2788,44 @@ def build_information_rate_case_products(
         if not diag["monotonic"]:
             monotonic_warnings.append({"status": "projected_gain_nonmonotonic", "case": case_name, "canonical_mode_id": mode_id, **diag})
     warnings.extend(monotonic_warnings)
+    adaptive_resolution_rows: list[dict[str, Any]] = []
+    sequential_updates = pd.DataFrame()
+    sequential_gains = pd.DataFrame()
+    sequential_summary = pd.DataFrame()
+    if adaptive_cadence_analysis in {"sequential", "both"}:
+        adaptive_resolution_rows, selected_mode_sets = _resolve_adaptive_mode_sets(
+            case_name=case_name,
+            requested_mode_sets=adaptive_mode_sets,
+            labels=labels,
+            loading_rows=loading_rows,
+            composition_by_mode=composition_by_mode,
+            canonical_rates=canonical_rates,
+            adaptive_thresholds=adaptive_gain_thresholds,
+            adaptive_max_subblocks=adaptive_max_subblocks,
+            median_duration_s=float(np.median(durations)),
+            high_information_wfe_count=adaptive_high_information_wfe_count,
+            warnings=warnings,
+            mode=information_rate_mode,
+        )
+        physical_dirs = canonical_physical_directions(whitening, canonical_vectors, prior.precision)
+        sequential_updates, sequential_gains, sequential_summary = _build_sequential_outputs(
+            case_name=case_name,
+            labels=labels,
+            prior_precision=prior.precision,
+            info_mats=info_mats,
+            durations=durations,
+            windows=windows,
+            subblocks=subblocks,
+            physical_directions=physical_dirs,
+            selected_mode_sets=selected_mode_sets,
+            adaptive_thresholds=adaptive_gain_thresholds,
+            adaptive_min_subblocks=adaptive_min_subblocks,
+            adaptive_max_subblocks=adaptive_max_subblocks,
+            canonical_rates=canonical_rates,
+            composition_by_mode=composition_by_mode,
+            strict_group_map=group_map,
+            quasi_group_map=quasi_group_map,
+        )
     canonical_provenance = {
         "case_name": case_name,
         "selected_tail_windows": selected_tail_windows,
@@ -2286,6 +2834,7 @@ def build_information_rate_case_products(
         "total_duration_s": tail_duration,
         "reference_eigenvalues": canonical_rates.tolist(),
         "degeneracy_groups": [list(group) for group in groups],
+        "quasi_degeneracy_groups": [list(group) for group in quasi_groups if len(group) > 1],
         "prior_covariance_source": prior.metadata.get("prior_source", ""),
         "tail_matrix_psd_diagnostics": matrix_psd_diagnostics(tail_gain_rate),
     }
@@ -2297,9 +2846,14 @@ def build_information_rate_case_products(
         "mode_loadings": pd.DataFrame(loading_rows),
         "mode_overlap": pd.DataFrame(overlap_rows),
         "degenerate_subspace": pd.DataFrame(degenerate_rows),
+        "quasi_degenerate_subspace": pd.DataFrame(quasi_degenerate_rows),
         "physical_by_label": pd.DataFrame(physical_rows),
         "adaptive_prefix": pd.DataFrame(adaptive_prefix_rows),
         "adaptive_candidates": pd.DataFrame(candidate_rows),
+        "adaptive_mode_set_resolution": pd.DataFrame(adaptive_resolution_rows),
+        "adaptive_sequential_updates": sequential_updates,
+        "adaptive_sequential_gains": sequential_gains,
+        "adaptive_sequential_summary": sequential_summary,
         "drift": pd.DataFrame(drift_rows),
         "warnings": warnings,
         "canonical_provenance": canonical_provenance,
@@ -2323,6 +2877,9 @@ def plot_information_rate_outputs(
     drift: pd.DataFrame,
     thresholds: Sequence[float],
     warnings_list: list[dict[str, Any]],
+    adaptive_sequential_updates: pd.DataFrame | None = None,
+    adaptive_sequential_summary: pd.DataFrame | None = None,
+    quasi_degenerate_subspace: pd.DataFrame | None = None,
 ) -> list[str]:
     plot_paths: list[str] = []
     if plt is None:
@@ -2468,6 +3025,68 @@ def plot_information_rate_outputs(
             save(fig, "drift_observability_scenarios.png")
     except Exception as exc:
         _append_plot_warning(warnings_list, f"drift-observability plot failed: {exc}", context="information_rate")
+    try:
+        seq = adaptive_sequential_updates if adaptive_sequential_updates is not None else pd.DataFrame()
+        if not seq.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            subset = seq[seq["sequence_scope"] == "observation_carry_window_bounded"]
+            for (mode_set, threshold), group in subset.groupby(["policy_mode_set_name", "gain_threshold"]):
+                ax.plot(group["cumulative_elapsed_time_s"], group["block_length"], marker="o", linewidth=1.0, label=f"{mode_set} {threshold:g}")
+            ax.set_xlabel("elapsed time (s)")
+            ax.set_ylabel("block length (subblocks)")
+            ax.legend(fontsize=6, ncol=2)
+            save(fig, "adaptive_sequential_block_length.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"adaptive sequential block-length plot failed: {exc}", context="information_rate")
+    try:
+        seq = adaptive_sequential_updates if adaptive_sequential_updates is not None else pd.DataFrame()
+        if not seq.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            subset = seq[seq["sequence_scope"] == "observation_carry_window_bounded"]
+            for (mode_set, threshold), group in subset.groupby(["policy_mode_set_name", "gain_threshold"]):
+                ax.plot(group["cumulative_elapsed_time_s"], group["minimum_selected_mode_gain"], marker="o", linewidth=1.0, label=f"{mode_set} {threshold:g}")
+                ax.axhline(float(threshold), color="black", linewidth=0.5, alpha=0.2)
+            ax.set_yscale("symlog", linthresh=1.0e-6)
+            ax.set_xlabel("elapsed time (s)")
+            ax.set_ylabel("minimum gain at closure")
+            ax.legend(fontsize=6, ncol=2)
+            save(fig, "adaptive_sequential_gain_at_closure.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"adaptive sequential gain plot failed: {exc}", context="information_rate")
+    try:
+        seq = adaptive_sequential_updates if adaptive_sequential_updates is not None else pd.DataFrame()
+        if not seq.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            subset = seq[seq["sequence_scope"] == "observation_carry_window_bounded"]
+            for column, label in (
+                ("separation_marginal_sigma_after", "source.separation_as"),
+                ("plate_scale_marginal_sigma_after", "optics.plate_scale_as_per_pix"),
+            ):
+                valid = subset[np.isfinite(pd.to_numeric(subset[column], errors="coerce"))]
+                if not valid.empty:
+                    first_policy = valid.groupby(["policy_mode_set_name", "gain_threshold"]).head(999999)
+                    ax.plot(first_policy["cumulative_elapsed_time_s"], first_policy[column], linewidth=1.0, alpha=0.7, label=label)
+                    break
+            ax.set_xlabel("elapsed time (s)")
+            ax.set_ylabel("marginal sigma after update")
+            ax.legend(fontsize=7)
+            save(fig, "adaptive_sequential_sigma_contraction.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"adaptive sequential sigma plot failed: {exc}", context="information_rate")
+    try:
+        quasi = quasi_degenerate_subspace if quasi_degenerate_subspace is not None else pd.DataFrame()
+        quasi_rows = mode_overlap[mode_overlap["comparison_scope"] == "window_rate_quasi_subspace"] if "comparison_scope" in mode_overlap else pd.DataFrame()
+        if not quasi.empty and not quasi_rows.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for group_id, group in quasi_rows.groupby("degeneracy_group"):
+                ax.plot(group["window_index"], group["minimum_subspace_singular_value"], marker="o", label=f"quasi {group_id}")
+            ax.set_ylim(0.0, 1.05)
+            ax.set_xlabel("window")
+            ax.set_ylabel("minimum subspace singular value")
+            ax.legend(fontsize=7)
+            save(fig, "quasi_subspace_overlap_by_window.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"quasi subspace plot failed: {exc}", context="information_rate")
     return plot_paths
 
 
@@ -2482,6 +3101,12 @@ def run_information_rate_review(
     thresholds: Sequence[float],
     adaptive_min_subblocks: int,
     adaptive_max_subblocks: int,
+    adaptive_cadence_analysis: str,
+    adaptive_mode_sets: Sequence[str],
+    adaptive_gain_thresholds: Sequence[float],
+    adaptive_high_information_wfe_count: int,
+    quasi_degeneracy_rtol: float,
+    missing_mode_set_labels_are_errors: bool = False,
 ) -> dict[str, Any]:
     if mode == "off":
         return _write_information_rate_disabled(outdir, run_root, mode)
@@ -2494,6 +3119,12 @@ def run_information_rate_review(
         "thresholds": tuple(float(t) for t in thresholds),
         "adaptive_cadence_min_subblocks": int(adaptive_min_subblocks),
         "adaptive_cadence_max_subblocks": int(adaptive_max_subblocks),
+        "adaptive_cadence_analysis": adaptive_cadence_analysis,
+        "adaptive_cadence_mode_sets": tuple(adaptive_mode_sets),
+        "adaptive_cadence_gain_thresholds": tuple(float(t) for t in adaptive_gain_thresholds),
+        "adaptive_cadence_sigma_ratio_targets": {str(float(t)): 1.0 / math.sqrt(1.0 + float(t)) for t in adaptive_gain_thresholds},
+        "adaptive_cadence_high_information_wfe_count": int(adaptive_high_information_wfe_count),
+        "quasi_degeneracy_rtol": float(quasi_degeneracy_rtol),
         "adaptive_policy_grid": {"gain_thresholds": [0.1, 0.25, 1.0], "required_top_mode_counts": [1, 2, 4, 8]},
     }
     outputs = {
@@ -2505,11 +3136,26 @@ def run_information_rate_review(
         "mode_overlap_csv": "information_rate/mode_overlap.csv",
         "degenerate_subspace_summary_csv": "information_rate/degenerate_subspace_summary.csv",
         "information_by_physical_label_csv": "information_rate/information_by_physical_label.csv",
-        "adaptive_cadence_prefix_diagnostics_csv": "information_rate/adaptive_cadence_prefix_diagnostics.csv",
-        "adaptive_cadence_candidates_csv": "information_rate/adaptive_cadence_candidates.csv",
         "drift_observability_scenarios_csv": "information_rate/drift_observability_scenarios.csv",
         "information_rate_summary_json": "information_rate/information_rate_summary.json",
     }
+    if adaptive_cadence_analysis in {"fixed_prior", "both"}:
+        outputs.update(
+            {
+                "adaptive_cadence_prefix_diagnostics_csv": "information_rate/adaptive_cadence_prefix_diagnostics.csv",
+                "adaptive_cadence_candidates_csv": "information_rate/adaptive_cadence_candidates.csv",
+            }
+        )
+    if adaptive_cadence_analysis in {"sequential", "both"}:
+        outputs.update(
+            {
+                "adaptive_mode_set_resolution_csv": "information_rate/adaptive_mode_set_resolution.csv",
+                "adaptive_cadence_sequential_updates_csv": "information_rate/adaptive_cadence_sequential_updates.csv",
+                "adaptive_cadence_sequential_mode_gains_csv": "information_rate/adaptive_cadence_sequential_mode_gains.csv",
+                "adaptive_cadence_sequential_summary_csv": "information_rate/adaptive_cadence_sequential_summary.csv",
+                "quasi_degenerate_subspace_summary_csv": "information_rate/quasi_degenerate_subspace_summary.csv",
+            }
+        )
     warnings: list[dict[str, Any]] = []
     if not labels:
         warning = {"status": "missing_prior", "message": "campaign_plan.json does not contain theta_layout.labels."}
@@ -2562,6 +3208,12 @@ def run_information_rate_review(
                 tail_windows=tail_windows,
                 adaptive_min_subblocks=adaptive_min_subblocks,
                 adaptive_max_subblocks=adaptive_max_subblocks,
+                adaptive_cadence_analysis=adaptive_cadence_analysis,
+                adaptive_mode_sets=adaptive_mode_sets,
+                adaptive_gain_thresholds=adaptive_gain_thresholds,
+                adaptive_high_information_wfe_count=adaptive_high_information_wfe_count,
+                quasi_degeneracy_rtol=quasi_degeneracy_rtol,
+                information_rate_mode="on" if missing_mode_set_labels_are_errors else "auto",
             )
         except Exception as exc:
             err_text = str(exc)
@@ -2589,9 +3241,14 @@ def run_information_rate_review(
             "mode_loadings",
             "mode_overlap",
             "degenerate_subspace",
+            "quasi_degenerate_subspace",
             "physical_by_label",
             "adaptive_prefix",
             "adaptive_candidates",
+            "adaptive_mode_set_resolution",
+            "adaptive_sequential_updates",
+            "adaptive_sequential_gains",
+            "adaptive_sequential_summary",
             "drift",
         ):
             frames[name].append(products[name])
@@ -2607,9 +3264,14 @@ def run_information_rate_review(
         "mode_loadings",
         "mode_overlap",
         "degenerate_subspace",
+        "quasi_degenerate_subspace",
         "physical_by_label",
         "adaptive_prefix",
         "adaptive_candidates",
+        "adaptive_mode_set_resolution",
+        "adaptive_sequential_updates",
+        "adaptive_sequential_gains",
+        "adaptive_sequential_summary",
         "drift",
     )
     output_frames = {
@@ -2624,8 +3286,15 @@ def run_information_rate_review(
     write_csv(output_frames["mode_overlap"], idir / "mode_overlap.csv")
     write_csv(output_frames["degenerate_subspace"], idir / "degenerate_subspace_summary.csv")
     write_csv(output_frames["physical_by_label"], idir / "information_by_physical_label.csv")
-    write_csv(output_frames["adaptive_prefix"], idir / "adaptive_cadence_prefix_diagnostics.csv")
-    write_csv(output_frames["adaptive_candidates"], idir / "adaptive_cadence_candidates.csv")
+    if adaptive_cadence_analysis in {"fixed_prior", "both"}:
+        write_csv(output_frames["adaptive_prefix"], idir / "adaptive_cadence_prefix_diagnostics.csv")
+        write_csv(output_frames["adaptive_candidates"], idir / "adaptive_cadence_candidates.csv")
+    if adaptive_cadence_analysis in {"sequential", "both"}:
+        write_csv(output_frames["quasi_degenerate_subspace"], idir / "quasi_degenerate_subspace_summary.csv")
+        write_csv(output_frames["adaptive_mode_set_resolution"], idir / "adaptive_mode_set_resolution.csv")
+        write_csv(output_frames["adaptive_sequential_updates"], idir / "adaptive_cadence_sequential_updates.csv")
+        write_csv(output_frames["adaptive_sequential_gains"], idir / "adaptive_cadence_sequential_mode_gains.csv")
+        write_csv(output_frames["adaptive_sequential_summary"], idir / "adaptive_cadence_sequential_summary.csv")
     write_csv(output_frames["drift"], idir / "drift_observability_scenarios.csv")
     plot_paths: list[str] = []
     if not no_plots:
@@ -2641,9 +3310,22 @@ def run_information_rate_review(
             drift=output_frames["drift"],
             thresholds=thresholds,
             warnings_list=review_warnings,
+            adaptive_sequential_updates=output_frames["adaptive_sequential_updates"],
+            adaptive_sequential_summary=output_frames["adaptive_sequential_summary"],
+            quasi_degenerate_subspace=output_frames["quasi_degenerate_subspace"],
         )
     if not cases_processed and status == "ok":
         status = "missing_summary_inventory"
+    resolution_summary = (
+        output_frames["adaptive_mode_set_resolution"].to_dict(orient="records")
+        if "adaptive_mode_set_resolution" in output_frames and not output_frames["adaptive_mode_set_resolution"].empty
+        else []
+    )
+    sequential_scope_summary = (
+        output_frames["adaptive_sequential_summary"].to_dict(orient="records")
+        if "adaptive_sequential_summary" in output_frames and not output_frames["adaptive_sequential_summary"].empty
+        else []
+    )
     payload = _information_rate_status_payload(
         run_root=run_root,
         outdir=outdir,
@@ -2656,6 +3338,8 @@ def run_information_rate_review(
         prior_provenance=prior_provenance_by_case,
         key_mode_summaries=key_modes,
         canonical_provenance=canonical_by_case,
+        adaptive_mode_set_resolution=resolution_summary,
+        sequential_scope_summaries=sequential_scope_summary,
     )
     (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
     review_warnings.extend(warnings)
@@ -4455,6 +5139,26 @@ def write_report(
             "See [information_rate/](information_rate/) for mode rates, loadings, overlaps, adaptive-cadence candidates, marginal-sigma diagnostics, drift scenarios, and the versioned JSON summary.",
             "",
         ]
+        seq_rows = information_rate_summary.get("sequential_scope_summaries", []) or []
+        quasi_rows = []
+        if isinstance(ir_canonical, dict):
+            for case_payload in ir_canonical.values():
+                quasi_rows.extend(case_payload.get("quasi_degeneracy_groups", []) or [])
+        if seq_rows:
+            carry_rows = [row for row in seq_rows if row.get("sequence_scope") == "observation_carry_window_bounded"]
+            example = carry_rows[0] if carry_rows else seq_rows[0]
+            invariance_failures = sum(1 for row in seq_rows if row.get("final_information_invariance_status") != "pass")
+            lines += [
+                "### Sequential information-only cadence",
+                f"- Sequential mode sets: {', '.join(information_rate_summary.get('settings', {}).get('adaptive_cadence_mode_sets', []))}; adaptive gain thresholds: {information_rate_summary.get('settings', {}).get('adaptive_cadence_gain_thresholds', [])}.",
+                f"- Example carry-scope block lengths for `{example.get('policy_mode_set_name')}` at gain {safe_float(example.get('gain_threshold')):g}: first/median/final = {example.get('first_block_length')} / {example.get('median_block_length')} / {example.get('final_block_length')} subblocks.",
+                f"- Example closure counts: natural {example.get('natural_trigger_count')}, maximum latency {example.get('maximum_latency_count')}, historical boundary {example.get('historical_boundary_flush_count')}, end-of-scope {example.get('end_of_scope_flush_count')}.",
+                f"- Final-information invariance failures across sequential rows: {invariance_failures}.",
+                f"- Quasi-degenerate canonical groups: {quasi_rows if quasi_rows else 'none identified'}; strict degeneracy classification is unchanged.",
+                "This is a sequential information-only gating diagnostic. Information sufficiency is only one half of a future gate; a prospective controller also needs innovation/requested-update criteria.",
+                "Maximum-latency closures do not prove a selected mode is adequately constrained, and this review does not identify an acquisition-to-precision transition.",
+                "",
+            ]
     elif ir_status == "disabled":
         lines += [
             "Information-rate analysis was disabled for this review.",
@@ -4536,6 +5240,14 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--adaptive-cadence min/max subblocks must be positive.")
     if args.adaptive_cadence_min_subblocks > args.adaptive_cadence_max_subblocks:
         raise ValueError("--adaptive-cadence-min-subblocks cannot exceed --adaptive-cadence-max-subblocks.")
+    if args.adaptive_cadence_high_information_wfe_count < 0:
+        raise ValueError("--adaptive-cadence-high-information-wfe-count must be non-negative.")
+    if args.quasi_degeneracy_rtol <= DEGENERACY_RTOL:
+        raise ValueError("--quasi-degeneracy-rtol must be greater than the strict degeneracy tolerance.")
+    resolved_adaptive_mode_sets = ADAPTIVE_CADENCE_MODE_SETS if args.adaptive_cadence_mode_sets is None else args.adaptive_cadence_mode_sets
+    explicit_adaptive_mode_sets = args.adaptive_cadence_mode_sets is not None
+    if args.adaptive_cadence_analysis in {"sequential", "both"} and not resolved_adaptive_mode_sets:
+        raise ValueError("--adaptive-cadence-mode-sets must be non-empty when sequential analysis is enabled.")
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "plots").mkdir(exist_ok=True)
     missing = validate_required(run_root, args.strict)
@@ -4650,6 +5362,12 @@ def run(args: argparse.Namespace) -> int:
             thresholds=args.information_gain_thresholds,
             adaptive_min_subblocks=args.adaptive_cadence_min_subblocks,
             adaptive_max_subblocks=args.adaptive_cadence_max_subblocks,
+            adaptive_cadence_analysis=args.adaptive_cadence_analysis,
+            adaptive_mode_sets=resolved_adaptive_mode_sets,
+            adaptive_gain_thresholds=args.adaptive_cadence_gain_thresholds,
+            adaptive_high_information_wfe_count=args.adaptive_cadence_high_information_wfe_count,
+            quasi_degeneracy_rtol=args.quasi_degeneracy_rtol,
+            missing_mode_set_labels_are_errors=bool(args.information_rate == "on" and explicit_adaptive_mode_sets),
         )
     except Exception as exc:
         if args.information_rate == "on":
@@ -4672,6 +5390,11 @@ def run(args: argparse.Namespace) -> int:
                 "thresholds": tuple(float(t) for t in args.information_gain_thresholds),
                 "adaptive_cadence_min_subblocks": int(args.adaptive_cadence_min_subblocks),
                 "adaptive_cadence_max_subblocks": int(args.adaptive_cadence_max_subblocks),
+                "adaptive_cadence_analysis": args.adaptive_cadence_analysis,
+                "adaptive_cadence_mode_sets": resolved_adaptive_mode_sets,
+                "adaptive_cadence_gain_thresholds": args.adaptive_cadence_gain_thresholds,
+                "adaptive_cadence_high_information_wfe_count": int(args.adaptive_cadence_high_information_wfe_count),
+                "quasi_degeneracy_rtol": float(args.quasi_degeneracy_rtol),
             },
         )
         idir = outdir / "information_rate"
@@ -4720,6 +5443,20 @@ def run(args: argparse.Namespace) -> int:
                 f"optional image comparison generation failed: {exc}",
                 context="representative_image_comparisons",
             )
+    warning_count_before_dedup = len(review_warnings)
+    deduped_review_warnings = deduplicate_warnings(review_warnings)
+    review_warnings[:] = deduped_review_warnings
+    warning_deduplication = {
+        "before_count": warning_count_before_dedup,
+        "after_count": len(review_warnings),
+        "duplicates_removed": warning_count_before_dedup - len(review_warnings),
+    }
+    if information_rate_summary is not None:
+        information_rate_summary["warning_deduplication"] = warning_deduplication
+        idir = outdir / "information_rate"
+        summary_path = idir / "information_rate_summary.json"
+        if summary_path.exists():
+            summary_path.write_text(json.dumps(_json_scalar(information_rate_summary), indent=2))
     write_report(
         outdir,
         run_root,
@@ -4761,8 +5498,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--information-rate-tail-windows", type=int, default=5)
     p.add_argument("--information-gain-thresholds", type=_parse_float_list, default=(0.1, 0.25, 1.0, 3.0))
+    p.add_argument("--adaptive-cadence-analysis", choices=("fixed_prior", "sequential", "both"), default="both")
+    p.add_argument("--adaptive-cadence-mode-sets", type=_parse_mode_set_list, default=None)
+    p.add_argument("--adaptive-cadence-gain-thresholds", type=_parse_float_list, default=(1.0, 3.0, 10.0, 24.0, 30.0))
+    p.add_argument("--adaptive-cadence-high-information-wfe-count", type=int, default=4)
     p.add_argument("--adaptive-cadence-min-subblocks", type=int, default=5)
     p.add_argument("--adaptive-cadence-max-subblocks", type=int, default=30)
+    p.add_argument("--quasi-degeneracy-rtol", type=float, default=QUASI_DEGENERACY_RTOL)
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--image-examples", default="first,median,last")
     p.add_argument("--include-subblock-images", action="store_true")

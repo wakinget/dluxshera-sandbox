@@ -6,6 +6,7 @@ know about any campaign directory layout and never mutate input matrices.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -17,15 +18,21 @@ __all__ = [
     "DEGENERACY_RTOL",
     "PSD_ATOL",
     "PSD_RTOL",
+    "QUASI_DEGENERACY_RTOL",
     "DriftScenario",
     "EigenSpectrum",
     "FitDiagnostics",
+    "ModeAssignment",
+    "SequentialInformationGateUpdate",
     "ThresholdCrossing",
     "canonical_projected_gain",
     "canonical_projected_gains",
+    "canonical_physical_directions",
     "check_projected_gain_monotonicity",
     "covariance_square_root",
+    "deduplicate_warnings",
     "detect_degeneracy_groups",
+    "detect_quasi_degeneracy_groups",
     "deterministic_sign_vectors",
     "drift_scenario",
     "effective_rank",
@@ -37,9 +44,14 @@ __all__ = [
     "mode_overlap_assignment",
     "observability_category",
     "posterior_marginal_sigma",
+    "precision_normalized_projected_gain",
+    "precision_normalized_projected_gains",
+    "resolve_unique_mode_assignments",
+    "simulate_sequential_information_gate",
     "subspace_overlap_diagnostics",
     "symmetric_eigendecomposition",
     "threshold_crossings",
+    "update_precision_with_information",
     "whiten_information",
 ]
 
@@ -52,6 +64,9 @@ PSD_RTOL = 1.0e-8
 
 DEGENERACY_RTOL = 1.0e-3
 """Relative eigenvalue-gap tolerance for canonical degeneracy groups."""
+
+QUASI_DEGENERACY_RTOL = 1.0e-2
+"""Relative eigenvalue-gap tolerance for quasi-degenerate mode groups."""
 
 EIGEN_EPS = 1.0e-15
 
@@ -107,6 +122,54 @@ class DriftScenario:
     status: str
 
 
+@dataclass(frozen=True)
+class SequentialInformationGateUpdate:
+    """One closure in a covariance-only sequential information gate.
+
+    The update records precision/covariance diagnostics before and after adding
+    a buffered physical-basis information matrix.  It intentionally contains no
+    score, posterior mean, innovation, or reference-trajectory fields.
+    """
+
+    update_index: int
+    start_index: int
+    end_index: int
+    block_length: int
+    block_duration_s: float
+    cumulative_elapsed_s: float
+    selected_mode_ids: tuple[int, ...]
+    gains: tuple[float, ...]
+    precision_norms_before: tuple[float, ...]
+    absolute_buffered_information: tuple[float, ...]
+    controlling_mode_id: int
+    minimum_gain: float
+    maximum_gain: float
+    information_trace: float
+    precision_trace_before: float
+    precision_trace_after: float
+    covariance_trace_before: float
+    covariance_trace_after: float
+    closure_reason: str
+    triggered_naturally: bool
+    maximum_latency_reached: bool
+    historical_window_boundary_flush: bool
+    end_of_scope_flush: bool
+    information_only_status: str
+
+
+@dataclass(frozen=True)
+class ModeAssignment:
+    """Resolved unique canonical mode assignment for one physical concept."""
+
+    concept: str
+    canonical_mode_id: int | None
+    squared_loading: float
+    assignment_rank: int
+    next_best_mode_id: int | None
+    next_best_squared_loading: float
+    assignment_status: str
+
+
 def _as_square_matrix(values: Sequence[Sequence[float]] | np.ndarray, *, name: str) -> np.ndarray:
     matrix = np.asarray(values, dtype=float)
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
@@ -123,6 +186,121 @@ def _as_vector(values: Sequence[float] | np.ndarray, *, name: str) -> np.ndarray
     if not np.all(np.isfinite(vector)):
         raise ValueError(f"{name} contains non-finite values.")
     return vector
+
+
+def _validate_spd_precision(precision: np.ndarray, *, name: str) -> np.ndarray:
+    prec = 0.5 * (_as_square_matrix(precision, name=name) + np.asarray(precision, dtype=float).T)
+    try:
+        np.linalg.cholesky(prec)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(f"{name} must be positive definite.") from exc
+    return prec
+
+
+def _inverse_spd(matrix: np.ndarray, *, name: str) -> np.ndarray:
+    mat = _validate_spd_precision(matrix, name=name)
+    identity = np.eye(mat.shape[0])
+    try:
+        chol = np.linalg.cholesky(mat)
+        y = np.linalg.solve(chol, identity)
+        inv = np.linalg.solve(chol.T, y)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(f"{name} must be positive definite.") from exc
+    return 0.5 * (inv + inv.T)
+
+
+def canonical_physical_directions(
+    covariance_sqrt: Sequence[Sequence[float]] | np.ndarray,
+    canonical_vectors: Sequence[Sequence[float]] | np.ndarray,
+    prior_precision: Sequence[Sequence[float]] | np.ndarray,
+) -> np.ndarray:
+    """Return fixed physical canonical directions normalized by ``P0``.
+
+    Parameters
+    ----------
+    covariance_sqrt : array_like, shape (n, n)
+        Symmetric square root ``W0`` of the initial covariance.
+    canonical_vectors : array_like, shape (n, m)
+        Prior-whitened canonical eigenvectors stored in columns.
+    prior_precision : array_like, shape (n, n)
+        Initial prior precision ``P0`` used to normalize each physical
+        direction so that ``d_k.T @ P0 @ d_k == 1``.
+
+    Returns
+    -------
+    ndarray, shape (n, m)
+        Physical directions ``d_k`` in fixed native parameter coordinates.
+    """
+
+    w = _as_square_matrix(covariance_sqrt, name="covariance_sqrt")
+    vectors = np.asarray(canonical_vectors, dtype=float)
+    precision = _validate_spd_precision(np.asarray(prior_precision, dtype=float), name="prior_precision")
+    if vectors.ndim != 2 or w.shape[1] != vectors.shape[0] or precision.shape != (w.shape[0], w.shape[0]):
+        raise ValueError("covariance_sqrt, canonical_vectors, and prior_precision shapes are incompatible.")
+    physical = w @ vectors
+    out = physical.copy()
+    for mode_id in range(out.shape[1]):
+        denom = float(out[:, mode_id] @ precision @ out[:, mode_id])
+        if not np.isfinite(denom) or denom <= 0.0:
+            raise ValueError("canonical physical direction has non-positive prior precision norm.")
+        out[:, mode_id] /= np.sqrt(denom)
+    return out
+
+
+def precision_normalized_projected_gain(
+    precision: Sequence[Sequence[float]] | np.ndarray,
+    information: Sequence[Sequence[float]] | np.ndarray,
+    physical_direction: Sequence[float] | np.ndarray,
+) -> float:
+    """Return current-prior-relative gain for one fixed physical direction.
+
+    The gain is ``(d.T @ S @ d) / (d.T @ P_current @ d)``.  This is equivalent
+    to projecting the buffered information after normalizing ``d`` in the
+    current precision metric.
+    """
+
+    prec = _validate_spd_precision(np.asarray(precision, dtype=float), name="precision")
+    info = 0.5 * (_as_square_matrix(information, name="information") + np.asarray(information, dtype=float).T)
+    direction = _as_vector(physical_direction, name="physical_direction")
+    if prec.shape != info.shape or prec.shape != (direction.size, direction.size):
+        raise ValueError("precision, information, and physical_direction shapes are incompatible.")
+    denom = float(direction @ prec @ direction)
+    if not np.isfinite(denom) or denom <= 0.0:
+        raise ValueError("current precision norm must be positive.")
+    return float(direction @ info @ direction / denom)
+
+
+def precision_normalized_projected_gains(
+    precision: Sequence[Sequence[float]] | np.ndarray,
+    information: Sequence[Sequence[float]] | np.ndarray,
+    physical_directions: Sequence[Sequence[float]] | np.ndarray,
+) -> np.ndarray:
+    """Return current-precision-normalized gains for direction columns."""
+
+    prec = _validate_spd_precision(np.asarray(precision, dtype=float), name="precision")
+    info = 0.5 * (_as_square_matrix(information, name="information") + np.asarray(information, dtype=float).T)
+    directions = np.asarray(physical_directions, dtype=float)
+    if directions.ndim != 2 or prec.shape != info.shape or prec.shape != (directions.shape[0], directions.shape[0]):
+        raise ValueError("precision, information, and physical_directions shapes are incompatible.")
+    precision_norms = np.einsum("ik,ij,jk->k", directions, prec, directions)
+    if np.any(~np.isfinite(precision_norms)) or np.any(precision_norms <= 0.0):
+        raise ValueError("all current precision norms must be positive finite values.")
+    absolute = np.einsum("ik,ij,jk->k", directions, info, directions)
+    return absolute / precision_norms
+
+
+def update_precision_with_information(
+    precision: Sequence[Sequence[float]] | np.ndarray,
+    information: Sequence[Sequence[float]] | np.ndarray,
+) -> np.ndarray:
+    """Return ``precision + information`` after validation and symmetrization."""
+
+    prec = _validate_spd_precision(np.asarray(precision, dtype=float), name="precision")
+    info = 0.5 * (_as_square_matrix(information, name="information") + np.asarray(information, dtype=float).T)
+    if prec.shape != info.shape:
+        raise ValueError("precision and information shapes must match.")
+    updated = 0.5 * (prec + info + (prec + info).T)
+    return _validate_spd_precision(updated, name="updated_precision")
 
 
 def covariance_square_root(covariance: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
@@ -285,6 +463,217 @@ def detect_degeneracy_groups(
             current = [i + 1]
     groups.append(current)
     return tuple(tuple(group) for group in groups)
+
+
+def detect_quasi_degeneracy_groups(
+    eigenvalues: Sequence[float] | np.ndarray,
+    *,
+    quasi_rtol: float = QUASI_DEGENERACY_RTOL,
+    strict_rtol: float = DEGENERACY_RTOL,
+    epsilon: float = EIGEN_EPS,
+) -> tuple[tuple[int, ...], ...]:
+    """Return quasi-degenerate groups without changing strict classification.
+
+    Parameters
+    ----------
+    eigenvalues : array_like, shape (n,)
+        Canonical eigenvalues ordered consistently with canonical mode IDs.
+    quasi_rtol : float, default=``QUASI_DEGENERACY_RTOL``
+        Relative adjacent-gap tolerance for cautionary quasi groups.
+    strict_rtol : float, default=``DEGENERACY_RTOL``
+        Formal degeneracy tolerance.  ``quasi_rtol`` must be larger.
+
+    Returns
+    -------
+    tuple of tuple of int
+        Contiguous groups under the quasi tolerance.  Singleton groups are kept
+        so callers can build complete mode-to-group maps deterministically.
+    """
+
+    if not np.isfinite(quasi_rtol) or not np.isfinite(strict_rtol) or quasi_rtol <= strict_rtol:
+        raise ValueError("quasi_rtol must be finite and greater than strict_rtol.")
+    return detect_degeneracy_groups(eigenvalues, rtol=float(quasi_rtol), epsilon=epsilon)
+
+
+def resolve_unique_mode_assignments(
+    loading_fractions: Mapping[int, Mapping[str, float]],
+    requested_concepts: Sequence[str],
+    *,
+    weak_threshold: float = 0.25,
+    ambiguity_ratio: float = 0.9,
+) -> tuple[ModeAssignment, ...]:
+    """Resolve unique canonical modes for requested physical concepts.
+
+    ``loading_fractions`` maps canonical mode IDs to squared whitened loading
+    fractions by physical label.  A deterministic maximum-weight bipartite
+    assignment is used.  Mode ID tie-breaks are encoded as tiny cost offsets,
+    preserving stable behavior when weights are exactly equal.
+    """
+
+    concepts = tuple(str(item) for item in requested_concepts)
+    if not concepts:
+        raise ValueError("requested_concepts must be non-empty.")
+    modes = tuple(sorted(int(mode) for mode in loading_fractions))
+    if not modes:
+        raise ValueError("loading_fractions must contain at least one mode.")
+    for concept in concepts:
+        if not any(concept in fractions for fractions in loading_fractions.values()):
+            raise KeyError(f"Missing physical loading label {concept!r}.")
+    weights = np.zeros((len(concepts), len(modes)), dtype=float)
+    for i, concept in enumerate(concepts):
+        for j, mode in enumerate(modes):
+            weights[i, j] = float(loading_fractions[mode].get(concept, 0.0))
+    if len(modes) < len(concepts):
+        raise ValueError("not enough canonical modes for a unique assignment.")
+    tie = np.asarray(modes, dtype=float)[None, :] * 1.0e-12
+    row_ind, col_ind = linear_sum_assignment(-(weights - tie))
+    assigned_by_row = {int(row): int(col) for row, col in zip(row_ind, col_ind)}
+    assignments: list[ModeAssignment] = []
+    for i, concept in enumerate(concepts):
+        col = assigned_by_row.get(i)
+        if col is None:
+            assignments.append(ModeAssignment(concept, None, 0.0, 0, None, 0.0, "unassigned"))
+            continue
+        order = sorted(range(len(modes)), key=lambda j: (-weights[i, j], modes[j]))
+        best_mode = modes[col]
+        best_weight = float(weights[i, col])
+        rank = int(order.index(col) + 1)
+        next_col = next((j for j in order if j != col), None)
+        next_mode = modes[next_col] if next_col is not None else None
+        next_weight = float(weights[i, next_col]) if next_col is not None else np.nan
+        status_parts = ["ok"]
+        if best_weight < weak_threshold:
+            status_parts.append("weak_assignment")
+        if next_col is not None and next_weight >= ambiguity_ratio * max(best_weight, EIGEN_EPS):
+            status_parts.append("ambiguous_assignment")
+        assignments.append(
+            ModeAssignment(
+                concept=concept,
+                canonical_mode_id=int(best_mode),
+                squared_loading=best_weight,
+                assignment_rank=rank,
+                next_best_mode_id=None if next_mode is None else int(next_mode),
+                next_best_squared_loading=next_weight,
+                assignment_status=";".join(status_parts),
+            )
+        )
+    return tuple(assignments)
+
+
+def simulate_sequential_information_gate(
+    prior_precision: Sequence[Sequence[float]] | np.ndarray,
+    information_matrices: Sequence[Sequence[Sequence[float]]] | np.ndarray,
+    durations_s: Sequence[float] | np.ndarray,
+    physical_directions: Sequence[Sequence[float]] | np.ndarray,
+    selected_mode_ids: Sequence[int],
+    *,
+    gain_threshold: float,
+    minimum_subblocks: int,
+    maximum_subblocks: int,
+    boundary_after: Sequence[bool] | None = None,
+) -> tuple[SequentialInformationGateUpdate, ...]:
+    """Simulate one covariance-only sequential information gate policy.
+
+    The simulation adds accepted subblock information matrices in order, closes
+    buffered blocks by information threshold, maximum latency, historical
+    boundary, or final end-of-scope flush, and updates precision as
+    ``P_after = P_before + S_buffer``.  It never updates a mean or score.
+    """
+
+    precision = _validate_spd_precision(np.asarray(prior_precision, dtype=float), name="prior_precision")
+    infos = np.asarray(information_matrices, dtype=float)
+    durations = _as_vector(durations_s, name="durations_s")
+    directions = np.asarray(physical_directions, dtype=float)
+    modes = tuple(int(mode) for mode in selected_mode_ids)
+    threshold = float(gain_threshold)
+    min_count = int(minimum_subblocks)
+    max_count = int(maximum_subblocks)
+    if infos.ndim != 3 or infos.shape[1] != infos.shape[2] or infos.shape[1:] != precision.shape:
+        raise ValueError("information_matrices must have shape (n_blocks, n, n) matching prior_precision.")
+    if durations.shape != (infos.shape[0],):
+        raise ValueError("durations_s length must match information_matrices.")
+    if directions.ndim != 2 or directions.shape[0] != precision.shape[0]:
+        raise ValueError("physical_directions must have shape (n, n_modes).")
+    if any(mode < 0 or mode >= directions.shape[1] for mode in modes):
+        raise ValueError("selected_mode_ids contains an out-of-range mode.")
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("gain_threshold must be positive and finite.")
+    if min_count < 1 or max_count < min_count:
+        raise ValueError("minimum/maximum subblocks are invalid.")
+    boundaries = tuple(bool(v) for v in (boundary_after if boundary_after is not None else [False] * infos.shape[0]))
+    if len(boundaries) != infos.shape[0]:
+        raise ValueError("boundary_after length must match information_matrices.")
+
+    selected_dirs = directions[:, modes]
+    buffer = np.zeros_like(precision)
+    start_index = 0
+    buffer_duration = 0.0
+    elapsed = 0.0
+    updates: list[SequentialInformationGateUpdate] = []
+
+    for idx, raw_info in enumerate(infos):
+        info = 0.5 * (_as_square_matrix(raw_info, name="information_matrix") + np.asarray(raw_info, dtype=float).T)
+        buffer += info
+        buffer = 0.5 * (buffer + buffer.T)
+        buffer_duration += float(durations[idx])
+        elapsed += float(durations[idx])
+        count = idx - start_index + 1
+        gains = precision_normalized_projected_gains(precision, buffer, selected_dirs)
+        natural = bool(count >= min_count and np.all(gains >= threshold))
+        maxed = bool(count >= max_count)
+        boundary = bool(boundaries[idx])
+        end = bool(idx == infos.shape[0] - 1)
+        reason = ""
+        if natural:
+            reason = "natural_information_trigger"
+        elif maxed:
+            reason = "maximum_latency"
+        elif boundary:
+            reason = "historical_window_boundary"
+        elif end:
+            reason = "end_of_scope"
+        if not reason:
+            continue
+
+        precision_before = precision.copy()
+        covariance_before = _inverse_spd(precision_before, name="precision_before")
+        precision_norms = np.einsum("ik,ij,jk->k", selected_dirs, precision_before, selected_dirs)
+        absolute = np.einsum("ik,ij,jk->k", selected_dirs, buffer, selected_dirs)
+        controlling_pos = int(np.argmin(gains)) if gains.size else 0
+        precision = update_precision_with_information(precision_before, buffer)
+        covariance_after = _inverse_spd(precision, name="precision_after")
+        updates.append(
+            SequentialInformationGateUpdate(
+                update_index=len(updates),
+                start_index=int(start_index),
+                end_index=int(idx),
+                block_length=int(count),
+                block_duration_s=float(buffer_duration),
+                cumulative_elapsed_s=float(elapsed),
+                selected_mode_ids=modes,
+                gains=tuple(float(v) for v in gains),
+                precision_norms_before=tuple(float(v) for v in precision_norms),
+                absolute_buffered_information=tuple(float(v) for v in absolute),
+                controlling_mode_id=int(modes[controlling_pos]) if modes else -1,
+                minimum_gain=float(np.min(gains)) if gains.size else np.nan,
+                maximum_gain=float(np.max(gains)) if gains.size else np.nan,
+                information_trace=float(np.trace(buffer)),
+                precision_trace_before=float(np.trace(precision_before)),
+                precision_trace_after=float(np.trace(precision)),
+                covariance_trace_before=float(np.trace(covariance_before)),
+                covariance_trace_after=float(np.trace(covariance_after)),
+                closure_reason=reason,
+                triggered_naturally=natural,
+                maximum_latency_reached=maxed,
+                historical_window_boundary_flush=bool(boundary and not natural and not maxed),
+                end_of_scope_flush=bool(end and not natural and not maxed and not boundary),
+                information_only_status="covariance_only_frozen_factor",
+            )
+        )
+        buffer = np.zeros_like(precision)
+        buffer_duration = 0.0
+        start_index = idx + 1
+    return tuple(updates)
 
 
 def mode_overlap_assignment(
@@ -617,3 +1006,61 @@ def drift_scenario(rate: float, target_sigma_fraction: float) -> DriftScenario:
         steady_state_sigma=float(sigma),
         status="ok",
     )
+
+
+def _warning_normalized_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return _warning_normalized_value(value.tolist())
+    if isinstance(value, np.generic):
+        return _warning_normalized_value(value.item())
+    if isinstance(value, Mapping):
+        return {str(k): _warning_normalized_value(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_warning_normalized_value(item) for item in value]
+    if isinstance(value, float):
+        return value if np.isfinite(value) else str(value)
+    return str(value) if value.__class__.__name__ == "Path" else value
+
+
+def deduplicate_warnings(
+    warnings: Sequence[Mapping[str, Any]],
+    *,
+    merge_contexts: bool = True,
+) -> list[dict[str, Any]]:
+    """Return warnings with exact semantic duplicates collapsed.
+
+    The first occurrence order is preserved.  The deduplication key is the
+    warning content after JSON-compatible normalization, excluding ``context``
+    when ``merge_contexts`` is true.  Differing contexts are then preserved in a
+    deterministic ``contexts`` list.
+    """
+
+    out: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
+    contexts: dict[int, list[Any]] = {}
+    for raw in warnings:
+        warning = dict(raw)
+        key_payload = dict(warning)
+        context = key_payload.pop("context", None) if merge_contexts else None
+        key = json.dumps(_warning_normalized_value(key_payload), sort_keys=True, separators=(",", ":"))
+        if key in seen:
+            idx = seen[key]
+            if merge_contexts and context not in (None, ""):
+                contexts.setdefault(idx, [])
+                if context not in contexts[idx]:
+                    contexts[idx].append(context)
+                    out[idx]["contexts"] = list(contexts[idx])
+            continue
+        seen[key] = len(out)
+        normalized = _warning_normalized_value(warning)
+        if not isinstance(normalized, dict):
+            normalized = {"message": str(normalized)}
+        out.append(dict(normalized))
+        if merge_contexts:
+            initial_contexts = []
+            if context not in (None, ""):
+                initial_contexts.append(context)
+            if "context" in warning and "context" not in out[-1] and context not in (None, ""):
+                out[-1]["context"] = context
+            contexts[len(out) - 1] = initial_contexts
+    return out

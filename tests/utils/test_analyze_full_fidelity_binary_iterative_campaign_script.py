@@ -51,14 +51,30 @@ def make_cumulative_run(
     duration_conflict: bool = False,
     missing_duration: bool = False,
     shuffle_status: bool = True,
+    include_adaptive_labels: bool = False,
+    prior_context_mismatch: bool = False,
 ) -> Path:
     root = tmp_path / "synthetic_run"
     case = "case_000"
-    labels = ["source.separation_as", "source.contrast"]
-    truth = np.array([0.0, 0.0])
-    prior_mean = np.array([0.006, -0.3])
-    prior_sigma = np.array([0.1, 1.5])
+    if include_adaptive_labels:
+        labels = [
+            "source.separation_as",
+            "source.contrast",
+            "source.log_flux_total",
+            "optics.plate_scale_as_per_pix",
+            "optics.primary.zernike_coeffs_nm[0]",
+            "optics.secondary.zernike_coeffs_nm[0]",
+        ]
+        truth = np.zeros(len(labels))
+        prior_mean = np.array([0.006, -0.3, 0.1, 0.01, 0.2, -0.1])
+        prior_sigma = np.array([0.1, 1.5, 0.5, 0.02, 1.0, 1.0])
+    else:
+        labels = ["source.separation_as", "source.contrast"]
+        truth = np.array([0.0, 0.0])
+        prior_mean = np.array([0.006, -0.3])
+        prior_sigma = np.array([0.1, 1.5])
     prior = ObservationBeliefState.from_diagonal_prior(theta_labels=labels, mean=prior_mean, sigma=prior_sigma)
+    table_prior_mean = prior_mean + (0.001 if prior_context_mismatch else 0.0)
     plan = {
         "schema_version": "synthetic",
         "run_root": f"/cluster/results/{root.name}",
@@ -96,11 +112,11 @@ def make_cumulative_run(
             root / "prior_draws.csv",
             pd.DataFrame(
                 {
-                    "case_name": [case, case],
+                    "case_name": [case] * len(labels),
                     "theta_label": labels,
                     "truth_value": truth,
-                    "prior_mean": prior_mean,
-                    "reference_value": prior_mean,
+                    "prior_mean": table_prior_mean,
+                    "reference_value": table_prior_mean,
                     "prior_sigma": prior_sigma,
                 }
             ),
@@ -114,9 +130,16 @@ def make_cumulative_run(
         window_targets = []
         wdir = root / f"cases/{case}/windows/window_{w:03d}"
         for s in range(n_subblocks):
-            theta_ref = np.array([0.001 * (w + 1) + 0.0001 * s, -0.2 + 0.05 * w + 0.02 * s])
-            info = np.array([[2.0e8 + 2.0e7 * s, 1.5e3], [1.5e3, 2.5 + w]])
-            target = np.array([0.001 + 0.0002 * w, 0.08 - 0.01 * s])
+            if include_adaptive_labels:
+                theta_ref = prior_mean + np.array([0.0001 * (w + s + 1), 0.02 * s, 0.01 * w, 0.00001 * s, 0.01 * w, -0.02 * s])
+                diag = np.array([200.0, 0.8, 20.0, 500.0, 1000.0 + 20 * s, 900.0 + 30 * w])
+                info = np.diag(diag)
+                info[0, 3] = info[3, 0] = 5.0
+                target = np.array([0.001 + 0.0002 * w, 0.08 - 0.01 * s, 0.02, 0.01001, 0.0, 0.0])
+            else:
+                theta_ref = np.array([0.001 * (w + 1) + 0.0001 * s, -0.2 + 0.05 * w + 0.02 * s])
+                info = np.array([[2.0e8 + 2.0e7 * s, 1.5e3], [1.5e3, 2.5 + w]])
+                target = np.array([0.001 + 0.0002 * w, 0.08 - 0.01 * s])
             score = _summary_arrays(theta_ref, info, target)
             actual_labels = ["source.contrast", "source.separation_as"] if label_mismatch and w == 1 and s == 0 else labels
             if actual_labels != labels:
@@ -195,7 +218,7 @@ def make_cumulative_run(
             posterior_sigma = local.sigma()
         else:
             posterior_mean = current
-            posterior_sigma = np.array([np.nan, np.nan])
+            posterior_sigma = np.full(len(labels), np.nan)
         next_ref = posterior_mean.copy()
         post_offsets = dict(zip(labels, (posterior_mean - truth).tolist()))
         current_offsets = dict(zip(labels, (current - truth).tolist()))
@@ -225,8 +248,8 @@ def make_cumulative_run(
                     "posterior_mean": posterior_mean,
                     "posterior_error": posterior_mean - truth,
                     "posterior_sigma": posterior_sigma,
-                    "label_group": ["source", "source"],
-                    "unit": ["arcsec", "dimensionless"],
+                    "label_group": ["source" if str(label).startswith("source.") else "optics" for label in labels],
+                    "unit": ["arcsec" if label == "source.separation_as" else "dimensionless" for label in labels],
                 }
             ),
         )
@@ -490,3 +513,87 @@ def test_information_rate_no_plots_and_json_serialization(tmp_path):
     assert not list((outdir / "information_rate").glob("*.png"))
     summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
     assert summary["schema_version"] == "full_fidelity_information_rate_review.v1"
+
+
+def test_adaptive_cadence_analysis_modes_outputs_and_no_plots(tmp_path):
+    root = make_cumulative_run(tmp_path, n_windows=3, n_subblocks=4, include_adaptive_labels=True)
+    fixed = tmp_path / "fixed"
+    result_fixed = run_script(root, fixed, "--information-rate", "on", "--adaptive-cadence-analysis", "fixed_prior", "--no-plots")
+    assert result_fixed.returncode == 0, result_fixed.stderr
+    assert (fixed / "information_rate/adaptive_cadence_candidates.csv").exists()
+    assert not (fixed / "information_rate/adaptive_cadence_sequential_updates.csv").exists()
+
+    sequential = tmp_path / "sequential"
+    result_seq = run_script(root, sequential, "--information-rate", "on", "--adaptive-cadence-analysis", "sequential", "--adaptive-cadence-min-subblocks", "1", "--adaptive-cadence-max-subblocks", "4", "--no-plots")
+    assert result_seq.returncode == 0, result_seq.stderr
+    assert not (sequential / "information_rate/adaptive_cadence_candidates.csv").exists()
+    updates = read_csv(sequential / "information_rate/adaptive_cadence_sequential_updates.csv")
+    assert not updates.empty
+    assert not list((sequential / "information_rate").glob("adaptive_sequential_*.png"))
+
+    both = tmp_path / "both"
+    result_both = run_script(root, both, "--information-rate", "on", "--adaptive-cadence-analysis", "both", "--adaptive-cadence-min-subblocks", "1", "--adaptive-cadence-max-subblocks", "4", "--no-plots")
+    assert result_both.returncode == 0, result_both.stderr
+    assert not read_csv(both / "information_rate/adaptive_cadence_candidates.csv").empty
+    assert not read_csv(both / "information_rate/adaptive_cadence_sequential_summary.csv").empty
+
+
+def test_named_mode_sets_thresholds_invariance_and_window_boundaries(tmp_path):
+    root = make_cumulative_run(tmp_path, n_windows=3, n_subblocks=5, include_adaptive_labels=True)
+    outdir = tmp_path / "review"
+    result = run_script(
+        root,
+        outdir,
+        "--information-rate",
+        "on",
+        "--information-gain-thresholds",
+        "0.1,0.25",
+        "--adaptive-cadence-gain-thresholds",
+        "1,3",
+        "--adaptive-cadence-min-subblocks",
+        "1",
+        "--adaptive-cadence-max-subblocks",
+        "5",
+        "--no-plots",
+    )
+    assert result.returncode == 0, result.stderr
+    resolution = read_csv(outdir / "information_rate/adaptive_mode_set_resolution.csv")
+    assert {"astrometric_core", "source_core", "high_information_calibration", "all_trackable"}.issubset(set(resolution["mode_set_name"]))
+    astro = resolution[resolution["mode_set_name"] == "astrometric_core"]
+    assert set(astro["requested_physical_label_or_group"]) == {"source.separation_as", "optics.plate_scale_as_per_pix"}
+    summary = read_csv(outdir / "information_rate/adaptive_cadence_sequential_summary.csv")
+    carry = summary[summary["sequence_scope"] == "observation_carry_window_bounded"]
+    assert not carry.empty
+    assert set(carry["final_information_invariance_status"]) == {"pass"}
+    assert set(carry["gain_threshold"]) == {1.0, 3.0}
+    fixed_candidates = read_csv(outdir / "information_rate/adaptive_cadence_candidates.csv")
+    assert set(fixed_candidates["gain_threshold"]) == {0.1, 0.25, 1.0}
+    updates = read_csv(outdir / "information_rate/adaptive_cadence_sequential_updates.csv")
+    carry_updates = updates[updates["sequence_scope"] == "observation_carry_window_bounded"]
+    assert (carry_updates["historical_window_index"] == carry_updates["historical_window_index"]).all()
+    assert (carry_updates["global_buffer_start_subblock"] <= carry_updates["global_buffer_end_subblock"]).all()
+
+
+def test_invalid_adaptive_cli_and_explicit_missing_label_failures(tmp_path):
+    root = make_cumulative_run(tmp_path)
+    bad_threshold = run_script(root, tmp_path / "bad_threshold", "--adaptive-cadence-gain-thresholds", "1,nan", "--no-plots")
+    assert bad_threshold.returncode != 0
+    bad_mode = run_script(root, tmp_path / "bad_mode", "--adaptive-cadence-mode-sets", "unknown", "--no-plots")
+    assert bad_mode.returncode != 0
+    bad_minmax = run_script(root, tmp_path / "bad_minmax", "--adaptive-cadence-min-subblocks", "5", "--adaptive-cadence-max-subblocks", "3", "--no-plots")
+    assert bad_minmax.returncode != 0
+    missing = run_script(root, tmp_path / "missing", "--information-rate", "on", "--adaptive-cadence-mode-sets", "astrometric_core", "--no-plots")
+    assert missing.returncode != 0
+    assert "requires missing label" in missing.stderr
+
+
+def test_duplicate_prior_warning_is_deduplicated(tmp_path):
+    root = make_cumulative_run(tmp_path, prior_context_mismatch=True)
+    outdir = tmp_path / "review"
+    result = run_script(root, outdir, "--cumulative-information", "on", "--information-rate", "on", "--no-plots")
+    assert result.returncode == 0, result.stderr
+    warnings = json.loads((outdir / "review_warnings.json").read_text())
+    statuses = [row.get("status") for row in warnings["warnings"]]
+    assert statuses.count("initial_prior_mean_context_differs") == 1
+    summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
+    assert summary["warning_deduplication"]["duplicates_removed"] >= 1

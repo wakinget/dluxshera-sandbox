@@ -4,9 +4,12 @@ import pytest
 from dluxshera.inference.observation_information_rate import (
     canonical_projected_gain,
     canonical_projected_gains,
+    canonical_physical_directions,
     check_projected_gain_monotonicity,
     covariance_square_root,
+    deduplicate_warnings,
     detect_degeneracy_groups,
+    detect_quasi_degeneracy_groups,
     deterministic_sign_vectors,
     drift_scenario,
     effective_rank,
@@ -17,9 +20,14 @@ from dluxshera.inference.observation_information_rate import (
     mode_overlap_assignment,
     observability_category,
     posterior_marginal_sigma,
+    precision_normalized_projected_gain,
+    precision_normalized_projected_gains,
+    resolve_unique_mode_assignments,
+    simulate_sequential_information_gate,
     subspace_overlap_diagnostics,
     symmetric_eigendecomposition,
     threshold_crossings,
+    update_precision_with_information,
     whiten_information,
 )
 
@@ -175,3 +183,157 @@ def test_duration_weighting_and_posterior_sigma():
     assert np.allclose(pooled, np.diag([2.5, 3.5]))
     sigma = posterior_marginal_sigma(np.eye(2), pooled * 4.0)
     assert sigma.tolist() == pytest.approx((1.0 / np.sqrt([11.0, 15.0])).tolist())
+
+
+def test_canonical_physical_directions_identity_correlated_and_no_mutation():
+    cov = np.array([[2.0, 0.4], [0.4, 1.0]])
+    precision = np.linalg.inv(cov)
+    w = covariance_square_root(cov)
+    vectors = np.eye(2)
+    w_before = w.copy()
+    vectors_before = vectors.copy()
+    directions = canonical_physical_directions(w, vectors, precision)
+    norms = np.einsum("ik,ij,jk->k", directions, precision, directions)
+    assert norms.tolist() == pytest.approx([1.0, 1.0])
+    assert np.allclose(w, w_before)
+    assert np.allclose(vectors, vectors_before)
+    ident = canonical_physical_directions(np.eye(2), np.eye(2), np.eye(2))
+    assert np.allclose(ident, np.eye(2))
+
+
+def test_precision_normalized_gain_scalar_and_initial_whitened_equivalence():
+    precision = np.array([[1.0]])
+    info = np.array([[2.5]])
+    direction = np.array([1.0])
+    assert precision_normalized_projected_gain(precision, info, direction) == pytest.approx(2.5)
+    updated = update_precision_with_information(precision, info)
+    assert updated[0, 0] == pytest.approx(3.5)
+    assert precision_normalized_projected_gain(updated, info, direction) == pytest.approx(2.5 / 3.5)
+    cov = np.array([[4.0, 0.5], [0.5, 1.0]])
+    p0 = np.linalg.inv(cov)
+    w = covariance_square_root(cov)
+    canonical = np.eye(2)
+    dirs = canonical_physical_directions(w, canonical, p0)
+    s = np.array([[0.2, 0.03], [0.03, 0.1]])
+    whitened = whiten_information(s, w)
+    assert precision_normalized_projected_gains(p0, s, dirs).tolist() == pytest.approx(canonical_projected_gains(whitened, canonical).tolist())
+
+
+def test_sequential_scalar_block_growth_maximum_minimum_and_flushes():
+    p0 = np.array([[1.0]])
+    infos = np.asarray([[[0.5]]] * 12)
+    durations = np.ones(12)
+    dirs = np.array([[1.0]])
+    updates = simulate_sequential_information_gate(
+        p0,
+        infos,
+        durations,
+        dirs,
+        [0],
+        gain_threshold=1.0,
+        minimum_subblocks=1,
+        maximum_subblocks=10,
+    )
+    lengths = [u.block_length for u in updates]
+    assert lengths[0] == 2
+    assert lengths[1] > lengths[0]
+    final_precision = p0[0, 0] + np.sum(infos)
+    assert final_precision == pytest.approx(7.0)
+    assert updates[-1].closure_reason == "end_of_scope"
+
+    maxed = simulate_sequential_information_gate(
+        p0,
+        infos[:5],
+        durations[:5],
+        dirs,
+        [0],
+        gain_threshold=100.0,
+        minimum_subblocks=1,
+        maximum_subblocks=3,
+    )
+    assert maxed[0].closure_reason == "maximum_latency"
+    assert maxed[0].minimum_gain < 100.0
+
+    minimum = simulate_sequential_information_gate(
+        p0,
+        np.asarray([[[10.0]]] * 4),
+        durations[:4],
+        dirs,
+        [0],
+        gain_threshold=1.0,
+        minimum_subblocks=3,
+        maximum_subblocks=4,
+    )
+    assert minimum[0].block_length == 3
+    assert minimum[0].closure_reason == "natural_information_trigger"
+
+    boundary = simulate_sequential_information_gate(
+        p0,
+        infos[:5],
+        durations[:5],
+        dirs,
+        [0],
+        gain_threshold=10.0,
+        minimum_subblocks=1,
+        maximum_subblocks=10,
+        boundary_after=[False, True, False, False, False],
+    )
+    assert boundary[0].closure_reason == "historical_window_boundary"
+    assert boundary[0].historical_window_boundary_flush
+
+
+def test_sequential_multivariate_correlated_final_information_invariance():
+    cov = np.array([[1.5, 0.2], [0.2, 0.8]])
+    p0 = np.linalg.inv(cov)
+    w = covariance_square_root(cov)
+    dirs = canonical_physical_directions(w, np.eye(2), p0)
+    infos = np.asarray(
+        [
+            [[0.4, 0.05], [0.05, 0.2]],
+            [[0.3, 0.01], [0.01, 0.25]],
+            [[0.2, 0.02], [0.02, 0.3]],
+        ]
+    )
+    updates = simulate_sequential_information_gate(p0, infos, [1, 1, 1], dirs, [0, 1], gain_threshold=0.2, minimum_subblocks=1, maximum_subblocks=2)
+    precision = p0.copy()
+    for update in updates:
+        precision = precision + np.sum(infos[update.start_index : update.end_index + 1], axis=0)
+    assert np.allclose(precision, p0 + np.sum(infos, axis=0))
+    assert np.all(np.linalg.eigvalsh(precision) > 0.0)
+    assert np.all(np.linalg.eigvalsh(np.linalg.inv(p0) - np.linalg.inv(precision)) >= -1e-12)
+
+
+def test_unique_mode_assignment_named_loadings_and_weak_status():
+    loadings = {
+        0: {"a": 0.8, "b": 0.75},
+        1: {"a": 0.7, "b": 0.2},
+        2: {"a": 0.1, "b": 0.4},
+    }
+    assignments = resolve_unique_mode_assignments(loadings, ["a", "b"])
+    assert [a.canonical_mode_id for a in assignments] == [1, 0]
+    weak = resolve_unique_mode_assignments({0: {"x": 0.1}, 1: {"x": 0.05}}, ["x"])
+    assert "weak_assignment" in weak[0].assignment_status
+    with pytest.raises(KeyError):
+        resolve_unique_mode_assignments(loadings, ["missing"])
+
+
+def test_strict_versus_quasi_degeneracy_groups():
+    vals = np.array([10.0, 9.995, 8.0, 7.94, 1.0])
+    strict = detect_degeneracy_groups(vals, rtol=1e-3)
+    quasi = detect_quasi_degeneracy_groups(vals, quasi_rtol=1e-2, strict_rtol=1e-3)
+    assert strict[0] == (0, 1)
+    assert (2, 3) not in strict
+    assert (2, 3) in quasi
+
+
+def test_warning_deduplication_order_contexts_and_distinct_values():
+    warnings = [
+        {"status": "x", "message": "same", "value": np.float64(1.0), "context": "a"},
+        {"status": "x", "message": "same", "value": 1.0, "context": "b"},
+        {"status": "x", "message": "same", "value": 2.0, "context": "a"},
+    ]
+    deduped = deduplicate_warnings(warnings)
+    assert len(deduped) == 2
+    assert deduped[0]["status"] == "x"
+    assert deduped[0]["contexts"] == ["a", "b"]
+    assert deduped[1]["value"] == 2.0
