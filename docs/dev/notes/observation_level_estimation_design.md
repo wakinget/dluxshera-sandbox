@@ -193,6 +193,18 @@ other labels.  It also reports coordinate-marginal covariance contraction from
 `prior_precision + accumulated_information`; those marginals are coupled
 covariance diagnostics, not independent physical-parameter information rates.
 
+Schur-reduced Fisher matrices can contain tiny negative eigenvalues from
+finite-precision linear algebra.  Information-rate ingestion preserves raw
+eigenvalue diagnostics, then applies the shared PSD tolerance policy
+`PSD_ATOL + PSD_RTOL * max(max(abs(raw_eigenvalues)), 1.0)`.  If a negative
+eigenvalue is below that tolerance in magnitude, it is treated as numerical
+roundoff and explicitly projected to zero by eigendecomposition/reconstruction
+before any downstream information calculation.  Materially indefinite matrices
+remain errors and are not silently regularized.  This projection is a numerical
+consistency correction, not a physical regularization assumption; all canonical
+spectra, prefixes, cadence diagnostics, sequential precision updates, and
+final-information invariance checks use the PSD-projected accepted matrices.
+
 Adaptive-cadence tables from this audit evaluate only whether information is
 sufficient to support an update for the top canonical modes.  A future
 controller still needs an innovation or requested-update criterion.  In other

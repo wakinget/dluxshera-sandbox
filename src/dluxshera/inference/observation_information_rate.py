@@ -23,6 +23,7 @@ __all__ = [
     "EigenSpectrum",
     "FitDiagnostics",
     "ModeAssignment",
+    "PSDProjectionResult",
     "SequentialInformationGateUpdate",
     "ThresholdCrossing",
     "canonical_projected_gain",
@@ -46,6 +47,7 @@ __all__ = [
     "posterior_marginal_sigma",
     "precision_normalized_projected_gain",
     "precision_normalized_projected_gains",
+    "project_information_to_psd",
     "resolve_unique_mode_assignments",
     "simulate_sequential_information_gate",
     "subspace_overlap_diagnostics",
@@ -168,6 +170,14 @@ class ModeAssignment:
     next_best_mode_id: int | None
     next_best_squared_loading: float
     assignment_status: str
+
+
+@dataclass(frozen=True)
+class PSDProjectionResult:
+    """Information-matrix PSD projection result and diagnostics."""
+
+    matrix: np.ndarray
+    diagnostics: dict[str, Any]
 
 
 def _as_square_matrix(values: Sequence[Sequence[float]] | np.ndarray, *, name: str) -> np.ndarray:
@@ -440,6 +450,98 @@ def matrix_psd_diagnostics(
         if np.any(material)
         else ("clipped_tiny_negative" if np.any(clipped) else "not_clipped"),
     }
+
+
+def project_information_to_psd(
+    matrix: Sequence[Sequence[float]] | np.ndarray,
+    *,
+    expected_dimension: int | None = None,
+    psd_atol: float = PSD_ATOL,
+    psd_rtol: float = PSD_RTOL,
+) -> PSDProjectionResult:
+    """Project one finite symmetric information matrix to PSD.
+
+    This helper applies the same PSD tolerance policy used by
+    :func:`matrix_psd_diagnostics`.  Materially negative eigenvalues remain
+    errors.  Tolerated tiny-negative eigenvalues are set to zero and the matrix
+    is reconstructed in the original physical basis.  The input is never
+    mutated.
+
+    Parameters
+    ----------
+    matrix : array_like, shape (n, n)
+        Physical-basis information matrix.
+    expected_dimension : int, optional
+        Required dimension when supplied.
+    psd_atol, psd_rtol : float
+        Absolute and relative PSD tolerances.
+
+    Returns
+    -------
+    PSDProjectionResult
+        Projected matrix plus raw and projected diagnostics.
+
+    Raises
+    ------
+    ValueError
+        If the matrix is non-finite, has an invalid shape, or is materially
+        indefinite under the configured PSD tolerance.
+    """
+
+    arr = np.asarray(matrix, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
+        raise ValueError("information matrix must be a square matrix.")
+    if expected_dimension is not None and arr.shape != (int(expected_dimension), int(expected_dimension)):
+        raise ValueError(
+            "information matrix shape does not match expected dimension: "
+            f"expected {(int(expected_dimension), int(expected_dimension))}, got {arr.shape}."
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("information matrix contains non-finite values.")
+    sym = 0.5 * (arr + arr.T)
+    raw_eigenvalues, raw_eigenvectors = np.linalg.eigh(sym)
+    max_abs = max(float(np.max(np.abs(raw_eigenvalues))) if raw_eigenvalues.size else 0.0, 1.0)
+    tolerance = float(psd_atol + psd_rtol * max_abs)
+    raw_negative = raw_eigenvalues < 0.0
+    material = raw_eigenvalues < -tolerance
+    if np.any(material):
+        raise ValueError(
+            "information matrix is materially indefinite: "
+            f"minimum eigenvalue {float(np.min(raw_eigenvalues)):.12g} is below "
+            f"the PSD tolerance {-tolerance:.12g}."
+        )
+    projected_eigenvalues = np.maximum(raw_eigenvalues, 0.0)
+    clipped = raw_negative
+    if np.any(clipped):
+        projected = (raw_eigenvectors * projected_eigenvalues) @ raw_eigenvectors.T
+    else:
+        projected = sym.copy()
+    projected = 0.5 * (projected + projected.T)
+    if not np.all(np.isfinite(projected)):
+        raise ValueError("PSD projection produced non-finite values.")
+    projected_eigenvalues_check = np.linalg.eigvalsh(projected)
+    projected_negative = projected_eigenvalues_check < 0.0
+    projected_material = projected_eigenvalues_check < -tolerance
+    if np.any(projected_material):
+        raise ValueError("PSD projection produced a materially negative eigenvalue.")
+    delta = projected - sym
+    sym_norm = max(float(np.linalg.norm(sym, ord="fro")), EIGEN_EPS)
+    status = "clipped_tiny_negative" if np.any(clipped) else "not_needed"
+    diagnostics = {
+        "raw_minimum_eigenvalue": float(np.min(raw_eigenvalues)),
+        "raw_maximum_eigenvalue": float(np.max(raw_eigenvalues)),
+        "raw_negative_eigenvalue_count": int(np.count_nonzero(raw_negative)),
+        "psd_tolerance": tolerance,
+        "psd_projection_applied": bool(np.any(clipped)),
+        "psd_projection_clipped_eigenvalue_count": int(np.count_nonzero(clipped)),
+        "projected_minimum_eigenvalue": float(np.min(projected_eigenvalues_check)),
+        "projected_negative_eigenvalue_count": int(np.count_nonzero(projected_negative)),
+        "projection_frobenius_delta": float(np.linalg.norm(delta, ord="fro")),
+        "projection_relative_frobenius_delta": float(np.linalg.norm(delta, ord="fro") / sym_norm),
+        "projection_max_abs_delta": float(np.max(np.abs(delta))) if delta.size else 0.0,
+        "projection_status": status,
+    }
+    return PSDProjectionResult(matrix=projected, diagnostics=diagnostics)
 
 
 def detect_degeneracy_groups(

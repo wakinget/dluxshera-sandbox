@@ -22,6 +22,7 @@ from dluxshera.inference.observation_information_rate import (
     posterior_marginal_sigma,
     precision_normalized_projected_gain,
     precision_normalized_projected_gains,
+    project_information_to_psd,
     resolve_unique_mode_assignments,
     simulate_sequential_information_gate,
     subspace_overlap_diagnostics,
@@ -164,6 +165,93 @@ def test_psd_handling_tiny_and_material_negative():
     assert not tiny["materially_indefinite"]
     material = matrix_psd_diagnostics(np.diag([1.0, -1.0e-3]))
     assert material["materially_indefinite"]
+
+
+def _rotated_symmetric_matrix(eigenvalues: np.ndarray) -> np.ndarray:
+    theta = 0.37
+    rot2 = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    q = np.eye(len(eigenvalues))
+    q[:2, :2] = rot2
+    if len(eigenvalues) >= 3:
+        phi = 0.21
+        rot13 = np.eye(len(eigenvalues))
+        rot13[np.ix_([0, 2], [0, 2])] = [[np.cos(phi), -np.sin(phi)], [np.sin(phi), np.cos(phi)]]
+        q = q @ rot13
+    return q @ np.diag(eigenvalues) @ q.T
+
+
+def test_project_information_to_psd_leaves_psd_matrix_unchanged_and_immutable():
+    matrix = np.array([[2.0, 0.3], [0.3, 1.0]])
+    original = matrix.copy()
+    result = project_information_to_psd(matrix)
+    assert result.diagnostics["projection_status"] == "not_needed"
+    assert not result.diagnostics["psd_projection_applied"]
+    assert result.diagnostics["psd_projection_clipped_eigenvalue_count"] == 0
+    assert np.allclose(result.matrix, matrix)
+    assert np.allclose(matrix, original)
+
+
+def test_project_information_to_psd_clips_tiny_negative_rotated_mode():
+    matrix = _rotated_symmetric_matrix(np.array([10.0, 1.0, -1.0e-12]))
+    original = matrix.copy()
+    result = project_information_to_psd(matrix)
+    assert result.diagnostics["projection_status"] == "clipped_tiny_negative"
+    assert result.diagnostics["psd_projection_applied"]
+    assert result.diagnostics["psd_projection_clipped_eigenvalue_count"] == 1
+    assert result.diagnostics["raw_minimum_eigenvalue"] < 0.0
+    assert result.diagnostics["raw_negative_eigenvalue_count"] == 1
+    assert np.min(np.linalg.eigvalsh(result.matrix)) >= -result.diagnostics["psd_tolerance"]
+    assert result.diagnostics["projected_negative_eigenvalue_count"] <= 1
+    assert np.allclose(matrix, original)
+
+
+def test_project_information_to_psd_accepts_ill_scaled_roundoff_case():
+    matrix = _rotated_symmetric_matrix(np.array([3.0e12, 1.0e6, 1.0, -0.1]))
+    result = project_information_to_psd(matrix)
+    assert result.diagnostics["projection_status"] == "clipped_tiny_negative"
+    assert result.diagnostics["psd_projection_clipped_eigenvalue_count"] == 1
+    assert result.diagnostics["raw_minimum_eigenvalue"] < 0.0
+    assert np.min(np.linalg.eigvalsh(result.matrix)) >= -result.diagnostics["psd_tolerance"]
+
+
+def test_project_information_to_psd_rejects_material_negative():
+    with pytest.raises(ValueError, match="materially indefinite"):
+        project_information_to_psd(np.diag([1.0, -1.0e-3]))
+
+
+def test_project_information_to_psd_symmetrization_and_metrics():
+    matrix = _rotated_symmetric_matrix(np.array([1.0, -1.0e-12]))
+    matrix[0, 1] += 1.0e-13
+    result = project_information_to_psd(matrix)
+    assert np.allclose(result.matrix, result.matrix.T)
+    diag = result.diagnostics
+    assert diag["projection_frobenius_delta"] > 0.0
+    assert diag["projection_relative_frobenius_delta"] >= 0.0
+    assert diag["projection_max_abs_delta"] > 0.0
+    assert diag["raw_negative_eigenvalue_count"] == 1
+    assert diag["projected_negative_eigenvalue_count"] <= 1
+
+
+def test_sequential_accumulation_uses_projected_ill_scaled_information():
+    p0 = np.eye(4)
+    raw = [_rotated_symmetric_matrix(np.array([3.0e12, 1.0e6, 1.0, -0.1])) for _ in range(4)]
+    projected = [project_information_to_psd(matrix).matrix for matrix in raw]
+    assert all(project_information_to_psd(matrix).diagnostics["psd_projection_applied"] for matrix in raw)
+    updates = simulate_sequential_information_gate(
+        p0,
+        projected,
+        np.ones(len(projected)),
+        np.eye(4),
+        [0],
+        gain_threshold=1.0,
+        minimum_subblocks=1,
+        maximum_subblocks=2,
+    )
+    precision = p0.copy()
+    for update in updates:
+        precision = precision + np.sum(projected[update.start_index : update.end_index + 1], axis=0)
+        assert np.all(np.linalg.eigvalsh(0.5 * (precision + precision.T)) > 0.0)
+    assert np.allclose(precision, p0 + np.sum(projected, axis=0))
 
 
 def test_drift_formulas_and_observability():

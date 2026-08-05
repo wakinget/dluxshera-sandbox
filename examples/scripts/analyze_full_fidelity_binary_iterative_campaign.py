@@ -44,6 +44,7 @@ from dluxshera.inference.observation_information_rate import (
     mode_overlap_assignment,
     observability_category,
     posterior_marginal_sigma,
+    project_information_to_psd,
     resolve_unique_mode_assignments,
     simulate_sequential_information_gate,
     subspace_overlap_diagnostics,
@@ -1738,6 +1739,7 @@ def _information_rate_status_payload(
     canonical_provenance: Mapping[str, Any] | None = None,
     adaptive_mode_set_resolution: Sequence[Mapping[str, Any]] = (),
     sequential_scope_summaries: Sequence[Mapping[str, Any]] = (),
+    psd_projection_summary: Mapping[str, Any] | None = None,
     warning_deduplication: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     duration_counts = (
@@ -1784,6 +1786,7 @@ def _information_rate_status_payload(
         "adaptive_mode_set_resolution": _json_scalar(list(adaptive_mode_set_resolution)),
         "sequential_scope_summaries": _json_scalar(list(sequential_scope_summaries)),
         "final_information_invariance": _json_scalar(list(sequential_scope_summaries)),
+        "psd_projection_summary": _json_scalar(dict(psd_projection_summary or {})),
         "warning_deduplication": _json_scalar(dict(warning_deduplication or {})),
         "key_mode_summaries": _json_scalar(list(key_mode_summaries)),
         "warnings": _json_scalar(warnings),
@@ -1840,6 +1843,18 @@ def _load_information_rate_inputs(
         row["maximum_eigenvalue"] = np.nan
         row["negative_eigenvalue_count"] = np.nan
         row["clipping_status"] = ""
+        row["raw_minimum_eigenvalue"] = np.nan
+        row["raw_maximum_eigenvalue"] = np.nan
+        row["raw_negative_eigenvalue_count"] = np.nan
+        row["psd_tolerance"] = np.nan
+        row["psd_projection_applied"] = False
+        row["psd_projection_clipped_eigenvalue_count"] = 0
+        row["projected_minimum_eigenvalue"] = np.nan
+        row["projected_negative_eigenvalue_count"] = np.nan
+        row["projection_frobenius_delta"] = np.nan
+        row["projection_relative_frobenius_delta"] = np.nan
+        row["projection_max_abs_delta"] = np.nan
+        row["projection_status"] = ""
         stable = str(row.get("stable_summary_id", ""))
         if stable in seen_stable:
             row["accepted_status"] = False
@@ -1888,6 +1903,10 @@ def _load_information_rate_inputs(
         row["maximum_eigenvalue"] = diag.get("maximum_eigenvalue", np.nan)
         row["negative_eigenvalue_count"] = diag.get("negative_eigenvalue_count", np.nan)
         row["clipping_status"] = diag.get("clipping_status", "")
+        row["raw_minimum_eigenvalue"] = diag.get("minimum_eigenvalue", np.nan)
+        row["raw_maximum_eigenvalue"] = diag.get("maximum_eigenvalue", np.nan)
+        row["raw_negative_eigenvalue_count"] = diag.get("negative_eigenvalue_count", np.nan)
+        row["psd_tolerance"] = diag.get("psd_tolerance", np.nan)
         if not diag.get("finite", False):
             row["accepted_status"] = False
             row["exclusion_reason"] = "nonfinite_information"
@@ -1896,6 +1915,11 @@ def _load_information_rate_inputs(
             row["accepted_status"] = False
             row["exclusion_reason"] = "materially_indefinite_information"
             warnings.append({"status": "materially_indefinite_information", "summary_identity": stable, "path": str(path), "minimum_eigenvalue": diag.get("minimum_eigenvalue")})
+        elif bool(row.get("accepted_status")):
+            projection = project_information_to_psd(summary.reduced_information, expected_dimension=len(expected_labels))
+            for key, value in projection.diagnostics.items():
+                row[key] = value
+            row["clipping_status"] = "clipped_tiny_negative" if projection.diagnostics["psd_projection_applied"] else "not_clipped"
         if bool(row.get("accepted_status")) and not str(row.get("exclusion_reason", "")).strip():
             row["exclusion_reason"] = ""
             loaded.append(summary)
@@ -1915,6 +1939,46 @@ def _group_membership(groups: Sequence[Sequence[int]], mode_count: int) -> dict[
     for mode_id in range(mode_count):
         out.setdefault(mode_id, (mode_id, (mode_id,)))
     return out
+
+
+def _psd_projection_summary_from_inventory(inventory: pd.DataFrame) -> dict[str, Any]:
+    if inventory is None or inventory.empty or "accepted_status" not in inventory.columns:
+        accepted = pd.DataFrame()
+    else:
+        accepted = inventory[inventory["accepted_status"].astype(bool)].copy()
+    if accepted.empty:
+        return {
+            "total_accepted_matrices": 0,
+            "matrices_requiring_projection": 0,
+            "total_clipped_eigenvalues": 0,
+            "maximum_raw_negative_magnitude": 0.0,
+            "maximum_relative_projection_correction": 0.0,
+            "maximum_frobenius_projection_correction": 0.0,
+            "materially_indefinite_count": int((inventory.get("clipping_status", pd.Series(dtype=str)).astype(str) == "materially_indefinite").sum()) if inventory is not None and not inventory.empty else 0,
+            "projection_policy": "clip tolerated negative eigenvalues to zero under PSD_ATOL + PSD_RTOL * max(max(abs(raw_eigenvalues)), 1.0)",
+            "psd_atol": PSD_ATOL,
+            "psd_rtol": PSD_RTOL,
+            "downstream_information_matrix": "PSD-projected accepted information matrix",
+        }
+    applied = accepted.get("psd_projection_applied", pd.Series(False, index=accepted.index)).astype(bool)
+    raw_min = pd.to_numeric(accepted.get("raw_minimum_eigenvalue", pd.Series(np.nan, index=accepted.index)), errors="coerce")
+    clipped = pd.to_numeric(accepted.get("psd_projection_clipped_eigenvalue_count", pd.Series(0, index=accepted.index)), errors="coerce").fillna(0)
+    rel = pd.to_numeric(accepted.get("projection_relative_frobenius_delta", pd.Series(0.0, index=accepted.index)), errors="coerce").fillna(0.0)
+    frob = pd.to_numeric(accepted.get("projection_frobenius_delta", pd.Series(0.0, index=accepted.index)), errors="coerce").fillna(0.0)
+    material_count = int((inventory.get("clipping_status", pd.Series(dtype=str)).astype(str) == "materially_indefinite").sum()) if inventory is not None and not inventory.empty else 0
+    return {
+        "total_accepted_matrices": int(len(accepted)),
+        "matrices_requiring_projection": int(applied.sum()),
+        "total_clipped_eigenvalues": int(clipped.sum()),
+        "maximum_raw_negative_magnitude": float(np.nanmax(np.maximum(-raw_min.to_numpy(dtype=float), 0.0))) if len(raw_min) else 0.0,
+        "maximum_relative_projection_correction": float(np.nanmax(rel.to_numpy(dtype=float))) if len(rel) else 0.0,
+        "maximum_frobenius_projection_correction": float(np.nanmax(frob.to_numpy(dtype=float))) if len(frob) else 0.0,
+        "materially_indefinite_count": material_count,
+        "projection_policy": "clip tolerated negative eigenvalues to zero under PSD_ATOL + PSD_RTOL * max(max(abs(raw_eigenvalues)), 1.0)",
+        "psd_atol": PSD_ATOL,
+        "psd_rtol": PSD_RTOL,
+        "downstream_information_matrix": "PSD-projected accepted information matrix",
+    }
 
 
 def _loading_fraction_map(loading_rows: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, float]]:
@@ -2321,6 +2385,19 @@ def build_information_rate_case_products(
     labels = tuple(prior.theta_labels)
     summaries, inventory, warnings = _load_information_rate_inputs(case_inventory, labels, plan)
     accepted = inventory[inventory["accepted_status"].astype(bool)].copy()
+    accepted_projection_summary = _psd_projection_summary_from_inventory(inventory)
+    if accepted_projection_summary["matrices_requiring_projection"] > 0:
+        warnings.append(
+            {
+                "status": "tiny_negative_information_projected_to_psd",
+                "case": case_name,
+                "message": "Numerically tiny negative Schur information eigenvalues were projected to zero before information-rate calculations.",
+                "matrices_requiring_projection": accepted_projection_summary["matrices_requiring_projection"],
+                "total_clipped_eigenvalues": accepted_projection_summary["total_clipped_eigenvalues"],
+                "maximum_raw_negative_magnitude": accepted_projection_summary["maximum_raw_negative_magnitude"],
+                "maximum_relative_projection_correction": accepted_projection_summary["maximum_relative_projection_correction"],
+            }
+        )
     exclusion_reasons = set(inventory.get("exclusion_reason", pd.Series(dtype=str)).astype(str))
     for reason in ("label_mismatch", "information_scale_mismatch", "nonfinite_information", "materially_indefinite_information", "missing_duration", "duration_conflict"):
         if reason in exclusion_reasons:
@@ -2335,7 +2412,11 @@ def build_information_rate_case_products(
     durations = pd.to_numeric(ordered["duration_s"], errors="coerce").to_numpy(dtype=float)
     windows = pd.to_numeric(ordered["window_index"], errors="coerce").to_numpy(dtype=int)
     subblocks = pd.to_numeric(ordered["subblock_index"], errors="coerce").to_numpy(dtype=int)
-    info_mats = np.asarray([0.5 * (summary.reduced_information + summary.reduced_information.T) for summary in ordered_summaries], dtype=float)
+    projections = [
+        project_information_to_psd(summary.reduced_information, expected_dimension=len(labels))
+        for summary in ordered_summaries
+    ]
+    info_mats = np.asarray([projection.matrix for projection in projections], dtype=float)
     total_duration = float(np.sum(durations))
     prior_cov = prior.covariance if prior.covariance is not None else np.linalg.pinv(prior.precision, hermitian=True)
     whitening = covariance_square_root(prior_cov)
@@ -3326,6 +3407,7 @@ def run_information_rate_review(
         if "adaptive_sequential_summary" in output_frames and not output_frames["adaptive_sequential_summary"].empty
         else []
     )
+    psd_projection_summary = _psd_projection_summary_from_inventory(combined_inventory)
     payload = _information_rate_status_payload(
         run_root=run_root,
         outdir=outdir,
@@ -3340,6 +3422,7 @@ def run_information_rate_review(
         canonical_provenance=canonical_by_case,
         adaptive_mode_set_resolution=resolution_summary,
         sequential_scope_summaries=sequential_scope_summary,
+        psd_projection_summary=psd_projection_summary,
     )
     (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
     review_warnings.extend(warnings)
@@ -5124,6 +5207,7 @@ def write_report(
     reach_30 = sum(1 for row in key_modes if safe_float(row.get("gain_at_30s")) >= 1.0)
     reach_300 = sum(1 for row in key_modes if safe_float(row.get("gain_at_300s")) >= 1.0)
     reach_1800 = sum(1 for row in key_modes if safe_float(row.get("gain_at_1800s_projected")) >= 1.0)
+    psd_projection = information_rate_summary.get("psd_projection_summary", {}) if isinstance(information_rate_summary, dict) else {}
     lines += [
         "## Information rate and eigenmode stability",
     ]
@@ -5134,6 +5218,7 @@ def write_report(
             f"- Realized duration in accepted summaries: {sum(safe_float(v.get('total_duration_s')) for v in ir_canonical.values()) if isinstance(ir_canonical, dict) else np.nan:.6g} s.",
             f"- Fastest/slowest listed information timescales: {min(finite_times) if finite_times else np.nan:.6g} s / {max(finite_times) if finite_times else np.nan:.6g} s.",
             f"- Listed modes reaching gain 1 within 30 s / 300 s / projected 1800 s: {reach_30} / {reach_300} / {reach_1800}.",
+            f"- PSD projection: {psd_projection.get('matrices_requiring_projection', 0)} accepted summaries required tiny-negative eigenvalue projection; largest relative correction {safe_float(psd_projection.get('maximum_relative_projection_correction', 0.0)):.6g}; materially indefinite summaries {psd_projection.get('materially_indefinite_count', 0)}. Downstream information products use the PSD-projected accepted matrices.",
             "The audit evaluates information sufficiency and eigenmode stability only. It does not apply an innovation gate, simulate a prospective adaptive trajectory, or turn 1800-second projections into realized measurements.",
             "Historical frozen-factor prefixes combine Schur factors generated at changing references; use them as information and covariance diagnostics, not as a relinearized full-observation Fisher matrix.",
             "See [information_rate/](information_rate/) for mode rates, loadings, overlaps, adaptive-cadence candidates, marginal-sigma diagnostics, drift scenarios, and the versioned JSON summary.",

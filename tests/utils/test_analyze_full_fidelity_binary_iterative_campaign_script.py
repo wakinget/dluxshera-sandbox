@@ -53,6 +53,8 @@ def make_cumulative_run(
     shuffle_status: bool = True,
     include_adaptive_labels: bool = False,
     prior_context_mismatch: bool = False,
+    tiny_negative_information: bool = False,
+    material_indefinite_information: bool = False,
 ) -> Path:
     root = tmp_path / "synthetic_run"
     case = "case_000"
@@ -140,6 +142,10 @@ def make_cumulative_run(
                 theta_ref = np.array([0.001 * (w + 1) + 0.0001 * s, -0.2 + 0.05 * w + 0.02 * s])
                 info = np.array([[2.0e8 + 2.0e7 * s, 1.5e3], [1.5e3, 2.5 + w]])
                 target = np.array([0.001 + 0.0002 * w, 0.08 - 0.01 * s])
+            if tiny_negative_information and w == 0 and s == 0:
+                info = np.diag([3.0e12, -0.1])
+            if material_indefinite_information and w == 0 and s == 0:
+                info = np.diag([1.0, -1.0e-3])
             score = _summary_arrays(theta_ref, info, target)
             actual_labels = ["source.contrast", "source.separation_as"] if label_mismatch and w == 1 and s == 0 else labels
             if actual_labels != labels:
@@ -597,3 +603,42 @@ def test_duplicate_prior_warning_is_deduplicated(tmp_path):
     assert statuses.count("initial_prior_mean_context_differs") == 1
     summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
     assert summary["warning_deduplication"]["duplicates_removed"] >= 1
+
+
+def test_information_rate_tiny_negative_matrices_are_projected_downstream(tmp_path):
+    root = make_cumulative_run(tmp_path, n_windows=3, n_subblocks=3, tiny_negative_information=True)
+    outdir = tmp_path / "review"
+    result = run_script(root, outdir, "--cumulative-information", "off", "--information-rate", "on", "--adaptive-cadence-analysis", "both", "--adaptive-cadence-min-subblocks", "1", "--adaptive-cadence-max-subblocks", "3", "--no-plots")
+    assert result.returncode == 0, result.stderr
+    inventory = read_csv(outdir / "information_rate/information_rate_input_inventory.csv")
+    projected = inventory[inventory["psd_projection_applied"].astype(bool)]
+    assert len(projected) == 1
+    row = projected.iloc[0]
+    assert row["minimum_eigenvalue"] < 0.0
+    assert row["raw_minimum_eigenvalue"] < 0.0
+    assert row["clipping_status"] == "clipped_tiny_negative"
+    assert row["projection_status"] == "clipped_tiny_negative"
+    assert row["psd_projection_clipped_eigenvalue_count"] == 1
+    assert row["projected_minimum_eigenvalue"] >= -row["psd_tolerance"]
+    prefix = read_csv(outdir / "information_rate/information_prefix_by_mode.csv")
+    assert not prefix.empty
+    seq = read_csv(outdir / "information_rate/adaptive_cadence_sequential_summary.csv")
+    if not seq.empty:
+        assert set(seq["final_information_invariance_status"]) == {"pass"}
+    summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
+    psd = summary["psd_projection_summary"]
+    assert psd["matrices_requiring_projection"] == 1
+    assert psd["total_clipped_eigenvalues"] == 1
+    assert psd["maximum_relative_projection_correction"] > 0.0
+    warnings = json.loads((outdir / "review_warnings.json").read_text())
+    statuses = [item.get("status") for item in warnings["warnings"]]
+    assert statuses.count("tiny_negative_information_projected_to_psd") == 1
+    assert not list((outdir / "information_rate").glob("*.png"))
+    assert (outdir / "information_rate/adaptive_cadence_candidates.csv").exists()
+
+
+def test_information_rate_materially_indefinite_information_still_fails(tmp_path):
+    root = make_cumulative_run(tmp_path, material_indefinite_information=True)
+    result = run_script(root, tmp_path / "review", "--cumulative-information", "off", "--information-rate", "on", "--no-plots")
+    assert result.returncode != 0
+    assert "materially_indefinite_information" in result.stderr
