@@ -48,6 +48,8 @@ def make_cumulative_run(
     missing_prior: bool = False,
     label_mismatch: bool = False,
     scale_conflict: bool = False,
+    duration_conflict: bool = False,
+    missing_duration: bool = False,
     shuffle_status: bool = True,
 ) -> Path:
     root = tmp_path / "synthetic_run"
@@ -62,7 +64,7 @@ def make_cumulative_run(
         "run_root": f"/cluster/results/{root.name}",
         "theta_layout": {"labels": labels, "size": len(labels), "label_groups": ["source", "source"]},
         "prior_truth_by_label": dict(zip(labels, truth.tolist())),
-        "trace_source": {"subblock_duration_s": 1.0, "n_frames_per_subblock": 1},
+        "trace_source": ({"n_frames_per_subblock": 1} if missing_duration else {"subblock_duration_s": 1.0, "n_frames_per_subblock": 1}),
         "subblock_command_options": {"summary_information_scale": "summed_likelihood"},
         "summary_paths": {case: []},
         "expected_outputs": [],
@@ -113,7 +115,7 @@ def make_cumulative_run(
         wdir = root / f"cases/{case}/windows/window_{w:03d}"
         for s in range(n_subblocks):
             theta_ref = np.array([0.001 * (w + 1) + 0.0001 * s, -0.2 + 0.05 * w + 0.02 * s])
-            info = np.array([[2.0e8 + 2.0e7 * s, 1.5e5], [1.5e5, 2.5 + w]])
+            info = np.array([[2.0e8 + 2.0e7 * s, 1.5e3], [1.5e3, 2.5 + w]])
             target = np.array([0.001 + 0.0002 * w, 0.08 - 0.01 * s])
             score = _summary_arrays(theta_ref, info, target)
             actual_labels = ["source.contrast", "source.separation_as"] if label_mismatch and w == 1 and s == 0 else labels
@@ -134,6 +136,9 @@ def make_cumulative_run(
                 reduced_score=score_to_write,
             )
             scale = "optimizer" if scale_conflict and w == 1 and s == 0 else "summed_likelihood"
+            accounting = {"summary_information_scale": scale}
+            if duration_conflict and w == 1 and s == 0:
+                accounting["total_exposure_time_s"] = 2.0
             write_json(
                 schur / "subblock_summary.json",
                 {
@@ -142,8 +147,8 @@ def make_cumulative_run(
                     "theta_labels": actual_labels,
                     "theta_ref": theta_ref_to_write.tolist(),
                     "matrix_artifact_path": "subblock_summary_matrices.npz",
-                    "information_accounting": {"summary_information_scale": scale},
-                    "summary_diagnostics": {"information_accounting": {"summary_information_scale": scale}},
+                    "information_accounting": accounting,
+                    "summary_diagnostics": {"information_accounting": accounting},
                 },
             )
             recorded = f"/cluster/results/{root.name}/subblock_runs/{case}/window_{w:03d}/subblock_{s:03d}/study/schur_summary/subblock_summary.json"
@@ -390,3 +395,98 @@ def test_existing_output_regression_between_off_and_on(tmp_path):
     assert run_script(root, on, "--cumulative-information", "on", "--no-plots").returncode == 0
     for name in ["iterative_window_progress.csv", "posterior_by_label_combined.csv", "science_summary_combined.csv"]:
         pd.testing.assert_frame_equal(read_csv(off / name), read_csv(on / name))
+
+
+def test_information_rate_auto_and_on_modes_success(tmp_path):
+    root = make_cumulative_run(tmp_path, n_windows=3, n_subblocks=2)
+    outdir = tmp_path / "review_auto"
+    result = run_script(root, outdir, "--no-plots")
+    assert result.returncode == 0, result.stderr
+    summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
+    assert summary["schema_version"] == "full_fidelity_information_rate_review.v1"
+    assert summary["status"] == "ok"
+    assert summary["summary_inventory_counts"]["accepted"] == 6
+    assert summary["duration_provenance_counts"] == {"campaign_plan.trace_source.subblock_duration_s": 6}
+    result_on = run_script(root, tmp_path / "review_on", "--information-rate", "on", "--no-plots")
+    assert result_on.returncode == 0, result_on.stderr
+
+
+def test_information_rate_off_and_cumulative_off_independence(tmp_path):
+    root = make_cumulative_run(tmp_path)
+    off = tmp_path / "off"
+    assert run_script(root, off, "--information-rate", "off", "--no-plots").returncode == 0
+    assert json.loads((off / "information_rate/information_rate_summary.json").read_text())["status"] == "disabled"
+    independent = tmp_path / "independent"
+    result = run_script(root, independent, "--cumulative-information", "off", "--information-rate", "on", "--no-plots")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((independent / "information_rate/information_rate_summary.json").read_text())["status"] == "ok"
+    assert json.loads((independent / "cumulative_information/cumulative_summary.json").read_text())["status"] == "disabled"
+
+
+def test_information_rate_row_counts_repeated_ids_tail_windows_and_candidates(tmp_path):
+    root = make_cumulative_run(tmp_path, n_windows=4, n_subblocks=3, shuffle_status=True)
+    outdir = tmp_path / "review"
+    result = run_script(
+        root,
+        outdir,
+        "--information-rate",
+        "on",
+        "--information-rate-tail-windows",
+        "2",
+        "--adaptive-cadence-min-subblocks",
+        "2",
+        "--adaptive-cadence-max-subblocks",
+        "3",
+        "--no-plots",
+    )
+    assert result.returncode == 0, result.stderr
+    inventory = read_csv(outdir / "information_rate/information_rate_input_inventory.csv")
+    assert inventory["stable_summary_id"].is_unique
+    assert inventory["summary_id"].duplicated().any()
+    prefix = read_csv(outdir / "information_rate/information_prefix_by_mode.csv")
+    # Per-window prefixes plus one chronological frozen-factor prefix for two modes.
+    assert len(prefix[prefix["analysis_scope"] == "per_window_subblock_prefix"]) == 4 * 3 * 2
+    assert len(prefix[prefix["analysis_scope"] == "frozen_factor_observation_prefix"]) == 12 * 2
+    candidates = read_csv(outdir / "information_rate/adaptive_cadence_candidates.csv")
+    assert len(candidates) == 4 * 3 * 4
+    assert candidates["resolved_candidate_block_length"].between(2, 3).all()
+    summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
+    case_prov = next(iter(summary["canonical_spectrum_provenance"].values()))
+    assert case_prov["selected_tail_windows"] == [2, 3]
+
+
+def test_information_rate_duration_conflict_and_missing_duration_modes(tmp_path):
+    conflict = make_cumulative_run(tmp_path / "conflict", duration_conflict=True)
+    auto = run_script(conflict, tmp_path / "conflict_auto", "--information-rate", "auto", "--no-plots")
+    assert auto.returncode == 0, auto.stderr
+    summary = json.loads((tmp_path / "conflict_auto/information_rate/information_rate_summary.json").read_text())
+    assert summary["status"] == "duration_conflict"
+    required = run_script(conflict, tmp_path / "conflict_on", "--information-rate", "on", "--no-plots")
+    assert required.returncode != 0
+    assert "duration_conflict" in required.stderr
+
+    missing = make_cumulative_run(tmp_path / "missing", missing_duration=True)
+    auto_missing = run_script(missing, tmp_path / "missing_auto", "--information-rate", "auto", "--no-plots")
+    assert auto_missing.returncode == 0, auto_missing.stderr
+    assert json.loads((tmp_path / "missing_auto/information_rate/information_rate_summary.json").read_text())["status"] == "missing_duration"
+    required_missing = run_script(missing, tmp_path / "missing_on", "--information-rate", "on", "--no-plots")
+    assert required_missing.returncode != 0
+    assert "missing_duration" in required_missing.stderr
+
+
+@pytest.mark.parametrize("kwargs,status", [({"label_mismatch": True}, "label_mismatch"), ({"scale_conflict": True}, "information_scale_mismatch")])
+def test_information_rate_label_and_scale_rejections(tmp_path, kwargs, status):
+    root = make_cumulative_run(tmp_path, **kwargs)
+    result = run_script(root, tmp_path / "review", "--information-rate", "on", "--no-plots")
+    assert result.returncode != 0
+    assert status in result.stderr
+
+
+def test_information_rate_no_plots_and_json_serialization(tmp_path):
+    root = make_cumulative_run(tmp_path)
+    outdir = tmp_path / "review"
+    result = run_script(root, outdir, "--information-rate", "on", "--no-plots")
+    assert result.returncode == 0, result.stderr
+    assert not list((outdir / "information_rate").glob("*.png"))
+    summary = json.loads((outdir / "information_rate/information_rate_summary.json").read_text())
+    assert summary["schema_version"] == "full_fidelity_information_rate_review.v1"

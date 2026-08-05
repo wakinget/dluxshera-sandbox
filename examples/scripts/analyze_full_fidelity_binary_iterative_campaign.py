@@ -23,7 +23,31 @@ from dluxshera.inference.observation_belief import (
     ObservationBeliefState,
     ObservationLikelihoodState,
 )
+from dluxshera.inference.observation_information_rate import (
+    DEGENERACY_RTOL,
+    PSD_ATOL,
+    PSD_RTOL,
+    canonical_projected_gains,
+    check_projected_gain_monotonicity,
+    covariance_square_root,
+    detect_degeneracy_groups,
+    drift_scenario,
+    effective_rank,
+    fit_information_rate,
+    information_replacement_timescale,
+    matrix_psd_diagnostics,
+    mode_composition,
+    mode_overlap_assignment,
+    observability_category,
+    posterior_marginal_sigma,
+    subspace_overlap_diagnostics,
+    symmetric_eigendecomposition,
+    threshold_crossings,
+    whiten_information,
+)
 from dluxshera.inference.observation_summary import (
+    SUMMARY_INFORMATION_SCALE_SUMMED_LIKELIHOOD,
+    get_summary_information_accounting,
     get_summary_information_scale,
     load_subblock_summary,
     load_subblock_summary_artifact_payload,
@@ -99,6 +123,7 @@ MISMATCH_COMPONENTS = [
 ]
 
 CUMULATIVE_SCHEMA_VERSION = "full_fidelity_cumulative_information_review.v1"
+INFORMATION_RATE_SCHEMA_VERSION = "full_fidelity_information_rate_review.v1"
 CUMULATIVE_VARIANTS = (
     ("all_windows", 0),
     ("exclude_first_window", 1),
@@ -1551,6 +1576,1091 @@ def run_cumulative_information_review(
     review_warnings.extend(warnings)
     if mode == "on" and status != "ok":
         raise RuntimeError(f"Cumulative analysis status is {status}; see {cdir / 'cumulative_summary.json'}.")
+    return payload
+
+
+def _parse_float_list(value: Any) -> tuple[float, ...]:
+    tokens = [token.strip() for token in str(value).split(",") if token.strip()]
+    if not tokens:
+        raise argparse.ArgumentTypeError("Expected at least one comma-separated numeric threshold.")
+    out: list[float] = []
+    for token in tokens:
+        try:
+            number = float(token)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid numeric threshold {token!r}.") from exc
+        if not np.isfinite(number) or number <= 0.0:
+            raise argparse.ArgumentTypeError("Information-gain thresholds must be positive finite numbers.")
+        out.append(number)
+    return tuple(out)
+
+
+def _summary_matrix_artifact_path(summary_path: Path, payload: Mapping[str, Any]) -> Path | None:
+    raw = first_nonblank(payload.get("matrix_artifact_path", ""), payload.get("matrix_npz_path", ""))
+    if _is_blank(raw):
+        return None
+    path = Path(str(raw)).expanduser()
+    if path.is_absolute():
+        return path
+    return summary_path.parent / path
+
+
+def _duration_candidates_from_payload(payload: Mapping[str, Any]) -> tuple[list[tuple[str, float]], float, float]:
+    candidates: list[tuple[str, float]] = []
+    accounting = get_summary_information_accounting(payload)
+    for key in (
+        "total_exposure_time_s",
+        "total_exposure_s",
+        "summary_duration_s",
+        "subblock_duration_s",
+        "duration_s",
+    ):
+        value = safe_float(accounting.get(key, payload.get(key, np.nan)))
+        if np.isfinite(value) and value > 0.0:
+            candidates.append((f"summary_information_accounting.{key}", value))
+            break
+    frame_count = safe_float(
+        first_nonblank(
+            accounting.get("frame_count", ""),
+            accounting.get("n_frames", ""),
+            payload.get("frame_count", ""),
+            payload.get("n_frames", ""),
+            _first_nested_value(payload, {"frame_count", "n_frames", "n_frames_per_subblock"}),
+            default=np.nan,
+        )
+    )
+    frame_exposure = safe_float(
+        first_nonblank(
+            accounting.get("frame_exposure_time_s", ""),
+            accounting.get("exposure_time_s", ""),
+            payload.get("frame_exposure_time_s", ""),
+            payload.get("exposure_time_s", ""),
+            _first_nested_value(payload, {"frame_exposure_time_s", "exposure_time_s"}),
+            default=np.nan,
+        )
+    )
+    if np.isfinite(frame_count) and frame_count > 0.0 and np.isfinite(frame_exposure) and frame_exposure > 0.0:
+        candidates.append(("summary_frame_count_times_exposure", float(frame_count * frame_exposure)))
+    return candidates, frame_count, frame_exposure
+
+
+def _resolve_summary_duration(
+    payload: Mapping[str, Any],
+    inventory_row: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidates, frame_count, frame_exposure = _duration_candidates_from_payload(payload)
+    for key in ("duration_s", "exposure_duration_s", "subblock_duration_s"):
+        value = safe_float(inventory_row.get(key, np.nan))
+        if np.isfinite(value) and value > 0.0:
+            candidates.append((f"inventory.{key}", value))
+            break
+    plan_subblock = safe_float(scalar(dict(plan), "trace_source.subblock_duration_s", np.nan))
+    if np.isfinite(plan_subblock) and plan_subblock > 0.0:
+        candidates.append(("campaign_plan.trace_source.subblock_duration_s", plan_subblock))
+    plan_frames = safe_float(scalar(dict(plan), "trace_source.n_frames_per_subblock", np.nan))
+    plan_exposure = safe_float(scalar(dict(plan), "subblock_command_options.exposure_time_s", np.nan))
+    if np.isfinite(plan_frames) and plan_frames > 0.0 and np.isfinite(plan_exposure) and plan_exposure > 0.0:
+        candidates.append(("campaign_plan.frames_times_exposure", float(plan_frames * plan_exposure)))
+        if not np.isfinite(frame_count):
+            frame_count = plan_frames
+        if not np.isfinite(frame_exposure):
+            frame_exposure = plan_exposure
+
+    if not candidates:
+        return {
+            "duration_s": np.nan,
+            "duration_source": "",
+            "frame_count": frame_count,
+            "frame_exposure_time_s": frame_exposure,
+            "duration_status": "missing_duration",
+            "duration_conflict": False,
+            "duration_candidates": [],
+        }
+    values = np.asarray([value for _, value in candidates], dtype=float)
+    chosen_source, chosen_value = candidates[0]
+    conflict = bool(np.max(np.abs(values - chosen_value)) > max(1.0e-9, abs(chosen_value) * 1.0e-6))
+    return {
+        "duration_s": float(chosen_value),
+        "duration_source": chosen_source,
+        "frame_count": frame_count,
+        "frame_exposure_time_s": frame_exposure,
+        "duration_status": "duration_conflict" if conflict else "ok",
+        "duration_conflict": conflict,
+        "duration_candidates": [{"source": source, "duration_s": float(value)} for source, value in candidates],
+    }
+
+
+def _information_rate_status_payload(
+    *,
+    run_root: Path,
+    outdir: Path,
+    mode: str,
+    status: str,
+    warnings: list[dict[str, Any]],
+    outputs: Mapping[str, Any] | None = None,
+    settings: Mapping[str, Any] | None = None,
+    inventory: pd.DataFrame | None = None,
+    prior_provenance: Mapping[str, Any] | None = None,
+    key_mode_summaries: Sequence[Mapping[str, Any]] = (),
+    canonical_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    duration_counts = (
+        dict(Counter(inventory["duration_source"].astype(str)))
+        if inventory is not None and not inventory.empty and "duration_source" in inventory.columns
+        else {}
+    )
+    scale_counts = (
+        dict(Counter(inventory["information_scale"].astype(str)))
+        if inventory is not None and not inventory.empty and "information_scale" in inventory.columns
+        else {}
+    )
+    return {
+        "schema_version": INFORMATION_RATE_SCHEMA_VERSION,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "run_root": str(run_root),
+        "review_output_root": str(outdir),
+        "audit_mode": mode,
+        "status": status,
+        "settings": _json_scalar(dict(settings or {})),
+        "summary_inventory_counts": {
+            "discovered": int(len(inventory)) if inventory is not None else 0,
+            "accepted": int(inventory["accepted_status"].astype(bool).sum()) if inventory is not None and not inventory.empty and "accepted_status" in inventory.columns else 0,
+        },
+        "prior_provenance": _json_scalar(prior_provenance or {}),
+        "duration_provenance_counts": duration_counts,
+        "information_scale_provenance": scale_counts,
+        "canonical_spectrum_provenance": _json_scalar(canonical_provenance or {}),
+        "degeneracy_settings": {"degeneracy_rtol": DEGENERACY_RTOL},
+        "psd_settings": {"psd_atol": PSD_ATOL, "psd_rtol": PSD_RTOL},
+        "threshold_settings": list(settings.get("thresholds", ())) if settings else [],
+        "adaptive_policy_grid": _json_scalar((settings or {}).get("adaptive_policy_grid", {})),
+        "key_mode_summaries": _json_scalar(list(key_mode_summaries)),
+        "warnings": _json_scalar(warnings),
+        "output_paths": _json_scalar(dict(outputs or {})),
+        "projection_caveats": [
+            "1800-second values are diagnostic projections from the late-tail information rate.",
+            "Historical frozen-factor prefixes combine factors generated at changing references.",
+            "Adaptive-cadence rows evaluate information sufficiency only; no innovation gate is simulated.",
+        ],
+        "software_provenance": {
+            "numerical_module": "dluxshera.inference.observation_information_rate",
+            "reviewer_script": "examples/scripts/analyze_full_fidelity_binary_iterative_campaign.py",
+        },
+    }
+
+
+def _write_information_rate_disabled(outdir: Path, run_root: Path, mode: str) -> dict[str, Any]:
+    idir = outdir / "information_rate"
+    idir.mkdir(parents=True, exist_ok=True)
+    payload = _information_rate_status_payload(
+        run_root=run_root,
+        outdir=outdir,
+        mode=mode,
+        status="disabled",
+        warnings=[],
+        outputs={"information_rate_summary_json": "information_rate/information_rate_summary.json"},
+    )
+    (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+    return payload
+
+
+def _load_information_rate_inputs(
+    case_inventory: pd.DataFrame,
+    labels: Sequence[str],
+    plan: Mapping[str, Any],
+) -> tuple[list[Any], pd.DataFrame, list[dict[str, Any]]]:
+    rows = case_inventory.to_dict(orient="records")
+    loaded: list[Any] = []
+    warnings: list[dict[str, Any]] = []
+    expected_labels = tuple(str(label) for label in labels)
+    seen_stable: set[str] = set()
+    for row in rows:
+        row["accepted_status"] = bool(row.get("accepted_for_cumulative"))
+        row["information_scale"] = ""
+        row["matrix_path"] = ""
+        row["duration_s"] = np.nan
+        row["duration_source"] = ""
+        row["frame_count"] = np.nan
+        row["frame_exposure_time_s"] = np.nan
+        row["symmetry_residual"] = np.nan
+        row["minimum_eigenvalue"] = np.nan
+        row["maximum_eigenvalue"] = np.nan
+        row["negative_eigenvalue_count"] = np.nan
+        row["clipping_status"] = ""
+        stable = str(row.get("stable_summary_id", ""))
+        if stable in seen_stable:
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "duplicate_stable_summary_id"
+            warnings.append({"status": "duplicate_stable_summary_id", "summary_identity": stable})
+            continue
+        seen_stable.add(stable)
+        if not bool(row.get("accepted_for_cumulative")):
+            continue
+        path = Path(str(row.get("resolved_summary_path", "")))
+        try:
+            payload = load_subblock_summary_artifact_payload(path)
+            summary = load_subblock_summary(path)
+        except Exception as exc:
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "summary_load_error"
+            warnings.append({"status": "summary_load_error", "summary_identity": stable, "path": str(path), "message": str(exc)})
+            continue
+        row["summary_id"] = summary.subblock_id
+        row["summary_kind"] = summary.summary_kind
+        row["theta_size"] = summary.theta_size
+        row["information_scale"] = get_summary_information_scale(payload) or ""
+        matrix_path = _summary_matrix_artifact_path(path, payload)
+        row["matrix_path"] = "" if matrix_path is None else str(matrix_path)
+        duration = _resolve_summary_duration(payload, row, plan)
+        row.update({k: v for k, v in duration.items() if k != "duration_candidates"})
+        if duration["duration_status"] == "missing_duration":
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "missing_duration"
+            warnings.append({"status": "missing_duration", "summary_identity": stable, "path": str(path), "duration_candidates": duration["duration_candidates"]})
+        elif duration["duration_status"] == "duration_conflict":
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "duration_conflict"
+            warnings.append({"status": "duration_conflict", "summary_identity": stable, "path": str(path), "duration_candidates": duration["duration_candidates"]})
+        if tuple(summary.theta_labels) != expected_labels:
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "label_mismatch"
+            warnings.append({"status": "label_mismatch", "summary_identity": stable, "path": str(path)})
+        if row["information_scale"] != SUMMARY_INFORMATION_SCALE_SUMMED_LIKELIHOOD:
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "information_scale_mismatch"
+            warnings.append({"status": "information_scale_mismatch", "summary_identity": stable, "path": str(path), "information_scale": row["information_scale"] or "missing"})
+        diag = matrix_psd_diagnostics(summary.reduced_information)
+        row["symmetry_residual"] = diag.get("symmetry_residual", np.nan)
+        row["minimum_eigenvalue"] = diag.get("minimum_eigenvalue", np.nan)
+        row["maximum_eigenvalue"] = diag.get("maximum_eigenvalue", np.nan)
+        row["negative_eigenvalue_count"] = diag.get("negative_eigenvalue_count", np.nan)
+        row["clipping_status"] = diag.get("clipping_status", "")
+        if not diag.get("finite", False):
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "nonfinite_information"
+            warnings.append({"status": "nonfinite_information", "summary_identity": stable, "path": str(path)})
+        elif diag.get("materially_indefinite", False):
+            row["accepted_status"] = False
+            row["exclusion_reason"] = "materially_indefinite_information"
+            warnings.append({"status": "materially_indefinite_information", "summary_identity": stable, "path": str(path), "minimum_eigenvalue": diag.get("minimum_eigenvalue")})
+        if bool(row.get("accepted_status")) and not str(row.get("exclusion_reason", "")).strip():
+            row["exclusion_reason"] = ""
+            loaded.append(summary)
+    return loaded, pd.DataFrame(rows), warnings
+
+
+def _threshold_column_suffix(threshold: float) -> str:
+    return str(threshold).replace(".", "p").replace("-", "m")
+
+
+def _group_membership(groups: Sequence[Sequence[int]], mode_count: int) -> dict[int, tuple[int, tuple[int, ...]]]:
+    out: dict[int, tuple[int, tuple[int, ...]]] = {}
+    for gid, group in enumerate(groups):
+        members = tuple(int(i) for i in group)
+        for mode_id in members:
+            out[mode_id] = (gid, members)
+    for mode_id in range(mode_count):
+        out.setdefault(mode_id, (mode_id, (mode_id,)))
+    return out
+
+
+def build_information_rate_case_products(
+    run_root: Path,
+    plan: Mapping[str, Any],
+    case_name: str,
+    case_inventory: pd.DataFrame,
+    prior: ObservationBeliefState,
+    *,
+    thresholds: Sequence[float],
+    tail_windows: int,
+    adaptive_min_subblocks: int,
+    adaptive_max_subblocks: int,
+) -> dict[str, Any]:
+    labels = tuple(prior.theta_labels)
+    summaries, inventory, warnings = _load_information_rate_inputs(case_inventory, labels, plan)
+    accepted = inventory[inventory["accepted_status"].astype(bool)].copy()
+    exclusion_reasons = set(inventory.get("exclusion_reason", pd.Series(dtype=str)).astype(str))
+    for reason in ("label_mismatch", "information_scale_mismatch", "nonfinite_information", "materially_indefinite_information", "missing_duration", "duration_conflict"):
+        if reason in exclusion_reasons:
+            # Auto mode handles this by recording status; required mode fails at the caller.
+            raise ValueError(f"{reason}: one or more summaries cannot support calibrated information-rate analysis.")
+    if accepted.empty:
+        raise ValueError("missing_summary_inventory: no accepted information-rate summaries are available.")
+    ordered = accepted.sort_values(["window_index", "subblock_index"]).reset_index(drop=True)
+    if len(summaries) != len(ordered):
+        raise RuntimeError("Internal information-rate inventory/load count mismatch.")
+    ordered_summaries = summaries
+    durations = pd.to_numeric(ordered["duration_s"], errors="coerce").to_numpy(dtype=float)
+    windows = pd.to_numeric(ordered["window_index"], errors="coerce").to_numpy(dtype=int)
+    subblocks = pd.to_numeric(ordered["subblock_index"], errors="coerce").to_numpy(dtype=int)
+    info_mats = np.asarray([0.5 * (summary.reduced_information + summary.reduced_information.T) for summary in ordered_summaries], dtype=float)
+    total_duration = float(np.sum(durations))
+    prior_cov = prior.covariance if prior.covariance is not None else np.linalg.pinv(prior.precision, hermitian=True)
+    whitening = covariance_square_root(prior_cov)
+    gain_mats = np.asarray([whiten_information(info, whitening) for info in info_mats], dtype=float)
+
+    unique_windows = sorted(int(w) for w in np.unique(windows))
+    requested_tail = max(1, int(tail_windows))
+    selected_tail_windows = unique_windows[-requested_tail:] if len(unique_windows) >= requested_tail else unique_windows
+    tail_mask = np.isin(windows, selected_tail_windows)
+    tail_duration = float(np.sum(durations[tail_mask]))
+    tail_gain_rate = np.sum(gain_mats[tail_mask], axis=0) / tail_duration
+    tail_info_rate = np.sum(info_mats[tail_mask], axis=0) / tail_duration
+    canonical = symmetric_eigendecomposition(tail_gain_rate)
+    raw_tail = symmetric_eigendecomposition(tail_info_rate)
+    canonical_vectors = canonical.eigenvectors
+    canonical_rates = canonical.eigenvalues
+    groups = detect_degeneracy_groups(canonical_rates)
+    group_map = _group_membership(groups, len(labels))
+    loading_rows, composition_summaries = mode_composition(labels, whitening, canonical_vectors)
+    composition_by_mode = {row["canonical_mode_id"]: row for row in composition_summaries}
+    top_order = list(np.argsort(-canonical_rates, kind="mergesort"))
+    threshold_values = tuple(float(t) for t in thresholds)
+
+    prefix_rows: list[dict[str, Any]] = []
+    overlap_rows: list[dict[str, Any]] = []
+    physical_rows: list[dict[str, Any]] = []
+    adaptive_prefix_rows: list[dict[str, Any]] = []
+    window_mode_rows: list[dict[str, Any]] = []
+    candidate_rows: list[dict[str, Any]] = []
+    prior_sigma = prior.sigma()
+
+    def add_physical_rows(scope: str, elapsed: float, information: np.ndarray, window_index: int | float = np.nan) -> None:
+        sigma = posterior_marginal_sigma(prior.precision, information)
+        for idx, label in enumerate(labels):
+            physical_rows.append(
+                {
+                    "case_name": case_name,
+                    "analysis_scope": scope,
+                    "window_index": window_index,
+                    "theta_label": label,
+                    "prior_sigma": prior_sigma[idx],
+                    "posterior_marginal_sigma": sigma[idx],
+                    "sigma_ratio": sigma[idx] / prior_sigma[idx] if prior_sigma[idx] else np.nan,
+                    "variance_reduction": 1.0 - (sigma[idx] / prior_sigma[idx]) ** 2 if prior_sigma[idx] else np.nan,
+                    "elapsed_time_s": elapsed,
+                }
+            )
+
+    for elapsed in (30.0, 300.0, 1800.0):
+        add_physical_rows(f"late_tail_projection_{int(elapsed)}s", elapsed, tail_info_rate * elapsed)
+
+    full_cum_gain = np.zeros_like(tail_gain_rate)
+    full_cum_info = np.zeros_like(tail_info_rate)
+    full_times: list[float] = []
+    full_projected_by_prefix: list[np.ndarray] = []
+    for idx, (gain, info, duration) in enumerate(zip(gain_mats, info_mats, durations)):
+        full_cum_gain += gain
+        full_cum_info += info
+        elapsed = float(np.sum(durations[: idx + 1]))
+        full_times.append(elapsed)
+        projected = canonical_projected_gains(full_cum_gain, canonical_vectors)
+        full_projected_by_prefix.append(projected)
+        current_spec = symmetric_eigendecomposition(full_cum_gain / elapsed)
+        current_vals, _, assign_rows = mode_overlap_assignment(canonical_vectors, current_spec.eigenvalues, current_spec.eigenvectors)
+        for assign in assign_rows:
+            mode_id = int(assign["canonical_mode_id"])
+            gid, members = group_map[mode_id]
+            row = {
+                "case_name": case_name,
+                "analysis_scope": "frozen_factor_observation_prefix",
+                "window_index": windows[idx],
+                "prefix_index": idx + 1,
+                "elapsed_time_s": elapsed,
+                "prefix_summary_count": idx + 1,
+                "canonical_mode_id": mode_id,
+                "canonical_reference_eigenvalue_rate": canonical_rates[mode_id],
+                "canonical_projected_cumulative_gain": projected[mode_id],
+                "canonical_projected_gain_rate": projected[mode_id] / elapsed,
+                "aligned_instantaneous_eigenvalue": current_vals[mode_id],
+                "overlap": assign["absolute_overlap"],
+                "degeneracy_group": gid,
+                "degeneracy_group_members": ";".join(str(m) for m in members),
+                "mode_identity_status": "degenerate_subspace_only" if len(members) > 1 else "individual",
+                "expected_variance_ratio": 1.0 / (1.0 + projected[mode_id]) if projected[mode_id] > -1.0 else np.nan,
+            }
+            for threshold in threshold_values:
+                row[f"crossed_gain_{_threshold_column_suffix(threshold)}"] = bool(projected[mode_id] >= threshold)
+            prefix_rows.append(row)
+            overlap_rows.append(
+                {
+                    "case_name": case_name,
+                    "comparison_scope": "frozen_factor_observation_prefix",
+                    "window_index": windows[idx],
+                    "prefix_index": idx + 1,
+                    "canonical_mode_id": mode_id,
+                    "degeneracy_group": gid,
+                    "assigned_mode": assign["assigned_mode"],
+                    "absolute_overlap": assign["absolute_overlap"],
+                    "signed_overlap": assign["signed_overlap"],
+                    "reference_eigenvalue": canonical_rates[mode_id],
+                    "current_eigenvalue": current_vals[mode_id],
+                    "minimum_subspace_singular_value": np.nan,
+                    "mean_subspace_singular_value": np.nan,
+                    "maximum_principal_angle_deg": np.nan,
+                    "assignment_status": assign["assignment_status"],
+                }
+            )
+        add_physical_rows("frozen_factor_observation_prefix", elapsed, full_cum_info)
+
+    window_projected: dict[int, np.ndarray] = {}
+    window_rates_by_mode: dict[int, np.ndarray] = {}
+    prefix_gains_by_window: dict[int, list[np.ndarray]] = {}
+    prefix_times_by_window: dict[int, list[float]] = {}
+    for window in unique_windows:
+        idxs = np.flatnonzero(windows == window)
+        cum_gain = np.zeros_like(tail_gain_rate)
+        cum_info = np.zeros_like(tail_info_rate)
+        prefix_gains_by_window[window] = []
+        prefix_times_by_window[window] = []
+        for local_pos, idx in enumerate(idxs, start=1):
+            cum_gain += gain_mats[idx]
+            cum_info += info_mats[idx]
+            elapsed = float(np.sum(durations[idxs[:local_pos]]))
+            projected = canonical_projected_gains(cum_gain, canonical_vectors)
+            prefix_gains_by_window[window].append(projected)
+            prefix_times_by_window[window].append(elapsed)
+            current_spec = symmetric_eigendecomposition(cum_gain / elapsed)
+            current_vals, _, assign_rows = mode_overlap_assignment(canonical_vectors, current_spec.eigenvalues, current_spec.eigenvectors)
+            eigvals_nonneg = np.clip(np.linalg.eigvalsh(cum_gain), 0.0, None)
+            for assign in assign_rows:
+                mode_id = int(assign["canonical_mode_id"])
+                gid, members = group_map[mode_id]
+                row = {
+                    "case_name": case_name,
+                    "analysis_scope": "per_window_subblock_prefix",
+                    "window_index": window,
+                    "prefix_index": local_pos,
+                    "elapsed_time_s": elapsed,
+                    "prefix_summary_count": local_pos,
+                    "canonical_mode_id": mode_id,
+                    "canonical_reference_eigenvalue_rate": canonical_rates[mode_id],
+                    "canonical_projected_cumulative_gain": projected[mode_id],
+                    "canonical_projected_gain_rate": projected[mode_id] / elapsed,
+                    "aligned_instantaneous_eigenvalue": current_vals[mode_id],
+                    "overlap": assign["absolute_overlap"],
+                    "degeneracy_group": gid,
+                    "degeneracy_group_members": ";".join(str(m) for m in members),
+                    "mode_identity_status": "degenerate_subspace_only" if len(members) > 1 else "individual",
+                    "expected_variance_ratio": 1.0 / (1.0 + projected[mode_id]) if projected[mode_id] > -1.0 else np.nan,
+                }
+                for threshold in threshold_values:
+                    row[f"crossed_gain_{_threshold_column_suffix(threshold)}"] = bool(projected[mode_id] >= threshold)
+                prefix_rows.append(row)
+            for threshold in threshold_values:
+                sorted_gains = projected[top_order]
+                adaptive_prefix_rows.append(
+                    {
+                        "case_name": case_name,
+                        "window_index": window,
+                        "prefix_index": local_pos,
+                        "elapsed_time_s": elapsed,
+                        "gain_threshold": threshold,
+                        "modes_above_threshold": int(np.count_nonzero(projected >= threshold)),
+                        "top_1_min_gain": float(np.min(sorted_gains[:1])),
+                        "top_2_min_gain": float(np.min(sorted_gains[: min(2, len(sorted_gains))])),
+                        "top_4_min_gain": float(np.min(sorted_gains[: min(4, len(sorted_gains))])),
+                        "top_8_min_gain": float(np.min(sorted_gains[: min(8, len(sorted_gains))])),
+                        "information_trace": float(np.trace(cum_gain)),
+                        "effective_rank": effective_rank(eigvals_nonneg),
+                        "candidate_trigger_top_1": bool(np.min(sorted_gains[:1]) >= threshold and local_pos >= adaptive_min_subblocks),
+                        "candidate_trigger_top_2": bool(np.min(sorted_gains[: min(2, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
+                        "candidate_trigger_top_4": bool(np.min(sorted_gains[: min(4, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
+                        "candidate_trigger_top_8": bool(np.min(sorted_gains[: min(8, len(sorted_gains))]) >= threshold and local_pos >= adaptive_min_subblocks),
+                    }
+                )
+            add_physical_rows("per_window_subblock_prefix", elapsed, cum_info, window)
+        duration = float(np.sum(durations[idxs]))
+        window_gain = np.sum(gain_mats[idxs], axis=0)
+        window_info = np.sum(info_mats[idxs], axis=0)
+        window_projected[window] = canonical_projected_gains(window_gain, canonical_vectors)
+        window_rates_by_mode[window] = window_projected[window] / duration
+        current_spec = symmetric_eigendecomposition(window_gain / duration)
+        current_vals, current_vecs, assign_rows = mode_overlap_assignment(canonical_vectors, current_spec.eigenvalues, current_spec.eigenvectors)
+        for group_id, group in enumerate(groups):
+            diag = subspace_overlap_diagnostics(canonical_vectors[:, group], current_vecs[:, group])
+            overlap_rows.append(
+                {
+                    "case_name": case_name,
+                    "comparison_scope": "window_rate_subspace",
+                    "window_index": window,
+                    "prefix_index": len(idxs),
+                    "canonical_mode_id": "",
+                    "degeneracy_group": group_id,
+                    "assigned_mode": "",
+                    "absolute_overlap": np.nan,
+                    "signed_overlap": np.nan,
+                    "reference_eigenvalue": float(np.mean(canonical_rates[list(group)])),
+                    "current_eigenvalue": float(np.mean(current_vals[list(group)])),
+                    **diag,
+                    "assignment_status": "subspace",
+                }
+            )
+        designation = "late_tail" if window in selected_tail_windows else "early"
+        increments = np.asarray([canonical_projected_gains(gain_mats[idx], canonical_vectors) for idx in idxs])
+        for assign in assign_rows:
+            mode_id = int(assign["canonical_mode_id"])
+            times = np.asarray(prefix_times_by_window[window], dtype=float)
+            gains = np.asarray([row[mode_id] for row in prefix_gains_by_window[window]], dtype=float)
+            fit = fit_information_rate(times, gains)
+            scatter = float(np.std(increments[:, mode_id]))
+            median_inc = float(np.median(increments[:, mode_id]))
+            window_mode_rows.append(
+                {
+                    "case_name": case_name,
+                    "window_index": window,
+                    "canonical_mode_id": mode_id,
+                    "duration_s": duration,
+                    "projected_gain": window_projected[window][mode_id],
+                    "information_rate": window_rates_by_mode[window][mode_id],
+                    "ratio_to_late_tail_rate": window_rates_by_mode[window][mode_id] / canonical_rates[mode_id] if canonical_rates[mode_id] > 0 else np.nan,
+                    "prefix_slope_rate": fit.through_origin_slope,
+                    "prefix_fit_r_squared": fit.r_squared,
+                    "incremental_gain_median": median_inc,
+                    "incremental_gain_scatter": scatter,
+                    "incremental_gain_coefficient_of_variation": scatter / abs(median_inc) if median_inc else np.nan,
+                    "overlap_with_canonical_mode": assign["absolute_overlap"],
+                    "minimum_subspace_singular_value": np.nan,
+                    "maximum_principal_angle_deg": np.nan,
+                    "early_late_designation": designation,
+                }
+            )
+        for threshold in (0.1, 0.25, 1.0):
+            for required in (1, 2, 4, 8):
+                required_modes = top_order[: min(required, len(top_order))]
+                natural = None
+                controlling = ""
+                for pos, gains in enumerate(prefix_gains_by_window[window], start=1):
+                    if pos < adaptive_min_subblocks:
+                        continue
+                    top_gains = gains[required_modes]
+                    if float(np.min(top_gains)) >= threshold:
+                        natural = pos
+                        controlling = ";".join(str(required_modes[int(i)]) for i in np.flatnonzero(np.isclose(top_gains, np.min(top_gains))))
+                        break
+                max_len = min(adaptive_max_subblocks, len(idxs))
+                if natural is None or natural > max_len:
+                    resolved = max_len
+                    reason = "maximum_latency"
+                    controlling = ";".join(str(m) for m in required_modes)
+                    reached_max = True
+                else:
+                    resolved = natural
+                    reason = "information_threshold"
+                    reached_max = False
+                candidate_rows.append(
+                    {
+                        "case_name": case_name,
+                        "window_index": window,
+                        "gain_threshold": threshold,
+                        "required_top_mode_count": required,
+                        "minimum_subblocks": adaptive_min_subblocks,
+                        "maximum_subblocks": adaptive_max_subblocks,
+                        "natural_crossing_prefix": natural if natural is not None else np.nan,
+                        "resolved_candidate_block_length": resolved,
+                        "trigger_reason": reason,
+                        "controlling_modes": controlling,
+                        "maximum_latency_reached": reached_max,
+                    }
+                )
+
+    window_rate_matrix = np.vstack([window_rates_by_mode[window] for window in unique_windows])
+    late_tail_window_rates = window_rate_matrix[[unique_windows.index(w) for w in selected_tail_windows], :]
+    mode_rows: list[dict[str, Any]] = []
+    drift_rows: list[dict[str, Any]] = []
+    full_times_arr = np.asarray(full_times, dtype=float)
+    full_projected_arr = np.asarray(full_projected_by_prefix, dtype=float)
+    for mode_id in range(len(labels)):
+        rate = float(canonical_rates[mode_id])
+        comp = composition_by_mode[mode_id]
+        full_cross = threshold_crossings(full_times_arr, full_projected_arr[:, mode_id], threshold_values)
+        threshold_cols: dict[str, Any] = {}
+        for crossing in full_cross:
+            suffix = _threshold_column_suffix(crossing.threshold)
+            threshold_cols[f"frozen_observed_gain_{suffix}_crossed"] = crossing.crossed
+            threshold_cols[f"frozen_observed_gain_{suffix}_time_s"] = crossing.interpolated_time_s
+            threshold_cols[f"late_tail_projected_gain_{suffix}_time_s"] = crossing.threshold / rate if rate > 0.0 else np.nan
+            threshold_cols[f"late_tail_projected_gain_{suffix}_crossed_by_1800s"] = bool(rate > 0.0 and rate * 1800.0 >= crossing.threshold)
+        mode_stability = [row["overlap_with_canonical_mode"] for row in window_mode_rows if row["canonical_mode_id"] == mode_id]
+        row = {
+            "case_name": case_name,
+            "canonical_mode_id": mode_id,
+            "canonical_eigenvalue_rate": rate,
+            "raw_information_eigenvalue_rate": raw_tail.eigenvalues[mode_id] if mode_id < len(raw_tail.eigenvalues) else np.nan,
+            "information_replacement_timescale_s": information_replacement_timescale(rate),
+            "gain_at_1s": rate * 1.0,
+            "gain_at_5s": rate * 5.0,
+            "gain_at_10s": rate * 10.0,
+            "gain_at_30s": rate * 30.0,
+            "gain_at_300s": rate * 300.0,
+            "gain_at_1800s_projected": rate * 1800.0,
+            "first_window_rate": window_rate_matrix[0, mode_id],
+            "final_window_rate": window_rate_matrix[-1, mode_id],
+            "median_window_rate": float(np.median(window_rate_matrix[:, mode_id])),
+            "late_tail_rate": rate,
+            "late_tail_median_window_rate": float(np.median(late_tail_window_rates[:, mode_id])),
+            "mean_window_rate": float(np.mean(window_rate_matrix[:, mode_id])),
+            "std_window_rate": float(np.std(window_rate_matrix[:, mode_id])),
+            "window_rate_coefficient_of_variation": float(np.std(window_rate_matrix[:, mode_id]) / abs(np.mean(window_rate_matrix[:, mode_id]))) if np.mean(window_rate_matrix[:, mode_id]) else np.nan,
+            "minimum_window_overlap": float(np.nanmin(mode_stability)) if mode_stability else np.nan,
+            "median_window_overlap": float(np.nanmedian(mode_stability)) if mode_stability else np.nan,
+            "degeneracy_group": group_map[mode_id][0],
+            "degeneracy_group_members": ";".join(str(m) for m in group_map[mode_id][1]),
+            "mode_identity_status": "degenerate_subspace_only" if len(group_map[mode_id][1]) > 1 else "individual",
+            "dominant_labels": comp["dominant_labels"],
+            "source_group_squared_norm": comp["source_group_squared_norm"],
+            "plate_scale_squared_norm": comp["plate_scale_squared_norm"],
+            "m1_zernike_squared_norm": comp["m1_zernike_squared_norm"],
+            "m2_zernike_squared_norm": comp["m2_zernike_squared_norm"],
+            "other_squared_norm": comp["other_squared_norm"],
+            "dominant_physical_group": comp["dominant_physical_group"],
+            "dominant_mirror": comp["dominant_mirror"],
+            "participation_ratio": comp["participation_ratio"],
+            "observability_category": observability_category(rate, threshold=1.0),
+            **threshold_cols,
+        }
+        mode_rows.append(row)
+        for fraction in (1.0, 0.5, 0.25, 0.1):
+            scenario = drift_scenario(rate, fraction)
+            drift_rows.append(
+                {
+                    "case_name": case_name,
+                    "canonical_mode_id": mode_id,
+                    "late_tail_gain_rate": rate,
+                    "target_sigma_fraction": fraction,
+                    "maximum_illustrative_process_variance_rate": scenario.process_variance_rate,
+                    "rms_drift_per_sqrt_second_prior_sigma": scenario.rms_drift_per_sqrt_s,
+                    "one_prior_sigma_drift_timescale_s": scenario.one_prior_sigma_drift_timescale_s,
+                    "dominant_physical_contributors": comp["dominant_labels"],
+                    "caveat_status": scenario.status,
+                }
+            )
+
+    degenerate_rows: list[dict[str, Any]] = []
+    for group_id, group in enumerate(groups):
+        members = tuple(int(i) for i in group)
+        values = canonical_rates[list(members)]
+        rel_gaps = []
+        for a, b in zip(values[:-1], values[1:]):
+            rel_gaps.append(abs(float(a - b)) / max(abs(float(a)), abs(float(b)), 1.0e-15))
+        group_comp = {
+            "source": float(sum(composition_by_mode[m]["source_group_squared_norm"] for m in members) / len(members)),
+            "plate_scale": float(sum(composition_by_mode[m]["plate_scale_squared_norm"] for m in members) / len(members)),
+            "m1_zernike": float(sum(composition_by_mode[m]["m1_zernike_squared_norm"] for m in members) / len(members)),
+            "m2_zernike": float(sum(composition_by_mode[m]["m2_zernike_squared_norm"] for m in members) / len(members)),
+            "other": float(sum(composition_by_mode[m]["other_squared_norm"] for m in members) / len(members)),
+        }
+        overlaps = [
+            row["overlap_with_canonical_mode"]
+            for row in window_mode_rows
+            if row["canonical_mode_id"] in members and np.isfinite(row["overlap_with_canonical_mode"])
+        ]
+        degenerate_rows.append(
+            {
+                "case_name": case_name,
+                "degeneracy_group": group_id,
+                "member_mode_ids": ";".join(str(m) for m in members),
+                "group_dimension": len(members),
+                "eigenvalue_min": float(np.min(values)),
+                "eigenvalue_max": float(np.max(values)),
+                "relative_gaps": ";".join(f"{gap:.6g}" for gap in rel_gaps),
+                "group_physical_composition": json.dumps(group_comp, sort_keys=True),
+                "minimum_overlap_across_windows": float(np.min(overlaps)) if overlaps else np.nan,
+                "median_overlap_across_windows": float(np.median(overlaps)) if overlaps else np.nan,
+                "individual_mode_interpretation_validity": "subspace_only" if len(members) > 1 else "individual",
+            }
+        )
+
+    monotonic_warnings = []
+    for mode_id in range(len(labels)):
+        diag = check_projected_gain_monotonicity(full_projected_arr[:, mode_id])
+        if not diag["monotonic"]:
+            monotonic_warnings.append({"status": "projected_gain_nonmonotonic", "case": case_name, "canonical_mode_id": mode_id, **diag})
+    warnings.extend(monotonic_warnings)
+    canonical_provenance = {
+        "case_name": case_name,
+        "selected_tail_windows": selected_tail_windows,
+        "requested_tail_windows": int(tail_windows),
+        "total_summaries": int(np.count_nonzero(tail_mask)),
+        "total_duration_s": tail_duration,
+        "reference_eigenvalues": canonical_rates.tolist(),
+        "degeneracy_groups": [list(group) for group in groups],
+        "prior_covariance_source": prior.metadata.get("prior_source", ""),
+        "tail_matrix_psd_diagnostics": matrix_psd_diagnostics(tail_gain_rate),
+    }
+    return {
+        "inventory": inventory,
+        "prefix_by_mode": pd.DataFrame(prefix_rows),
+        "rate_by_window_mode": pd.DataFrame(window_mode_rows),
+        "rate_by_mode": pd.DataFrame(mode_rows),
+        "mode_loadings": pd.DataFrame(loading_rows),
+        "mode_overlap": pd.DataFrame(overlap_rows),
+        "degenerate_subspace": pd.DataFrame(degenerate_rows),
+        "physical_by_label": pd.DataFrame(physical_rows),
+        "adaptive_prefix": pd.DataFrame(adaptive_prefix_rows),
+        "adaptive_candidates": pd.DataFrame(candidate_rows),
+        "drift": pd.DataFrame(drift_rows),
+        "warnings": warnings,
+        "canonical_provenance": canonical_provenance,
+        "accepted_count": int(len(accepted)),
+        "expected_count": int(len(case_inventory)),
+        "total_duration_s": total_duration,
+        "windows": unique_windows,
+    }
+
+
+def plot_information_rate_outputs(
+    idir: Path,
+    *,
+    prefix_by_mode: pd.DataFrame,
+    rate_by_mode: pd.DataFrame,
+    rate_by_window_mode: pd.DataFrame,
+    mode_loadings: pd.DataFrame,
+    mode_overlap: pd.DataFrame,
+    physical_by_label: pd.DataFrame,
+    adaptive_candidates: pd.DataFrame,
+    drift: pd.DataFrame,
+    thresholds: Sequence[float],
+    warnings_list: list[dict[str, Any]],
+) -> list[str]:
+    plot_paths: list[str] = []
+    if plt is None:
+        return plot_paths
+    idir.mkdir(parents=True, exist_ok=True)
+
+    def save(fig: Any, name: str) -> None:
+        path = idir / name
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        plot_paths.append(path.name)
+
+    try:
+        obs = prefix_by_mode[prefix_by_mode["analysis_scope"] == "frozen_factor_observation_prefix"]
+        if not obs.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for mode_id, group in obs.groupby("canonical_mode_id"):
+                ax.plot(group["elapsed_time_s"], group["canonical_projected_cumulative_gain"], linewidth=1.0, alpha=0.75)
+            for threshold in thresholds:
+                ax.axhline(threshold, color="black", linewidth=0.7, alpha=0.35)
+            ax.set_yscale("symlog", linthresh=1.0e-6)
+            ax.set_xlabel("elapsed time (s)")
+            ax.set_ylabel("projected prior-whitened gain")
+            save(fig, "whitened_mode_gain_vs_time.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"information-rate gain plot failed: {exc}", context="information_rate")
+    try:
+        if not rate_by_mode.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            ax.bar(rate_by_mode["canonical_mode_id"], rate_by_mode["late_tail_rate"])
+            ax.set_yscale("log")
+            ax.set_xlabel("canonical mode")
+            ax.set_ylabel("late-tail gain rate (1/s)")
+            save(fig, "information_rate_by_mode.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"information-rate by mode plot failed: {exc}", context="information_rate")
+    try:
+        if not rate_by_mode.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for threshold in thresholds:
+                col = f"late_tail_projected_gain_{_threshold_column_suffix(threshold)}_time_s"
+                if col in rate_by_mode:
+                    ax.plot(rate_by_mode["canonical_mode_id"], rate_by_mode[col], marker="o", label=f"gain {threshold:g}")
+            for ref in (30, 300, 1800):
+                ax.axhline(ref, color="black", linewidth=0.7, alpha=0.3)
+            ax.set_yscale("log")
+            ax.set_xlabel("canonical mode")
+            ax.set_ylabel("projected threshold time (s)")
+            ax.legend(fontsize=7)
+            save(fig, "time_to_information_threshold.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"threshold-time plot failed: {exc}", context="information_rate")
+    try:
+        if not mode_loadings.empty:
+            pivot = mode_loadings.pivot_table(index="canonical_mode_id", columns="theta_label", values="squared_composition_fraction", aggfunc="sum").fillna(0.0)
+            fig, ax = plt.subplots(figsize=(10, 5))
+            im = ax.imshow(pivot.to_numpy(), aspect="auto", interpolation="nearest")
+            ax.set_xlabel("physical label")
+            ax.set_ylabel("canonical mode")
+            ax.set_xticks(range(len(pivot.columns)))
+            ax.set_xticklabels(pivot.columns, rotation=90, fontsize=6)
+            fig.colorbar(im, ax=ax, label="squared fraction")
+            save(fig, "mode_composition_heatmap.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"mode-composition plot failed: {exc}", context="information_rate")
+    try:
+        mode_rows = mode_overlap[mode_overlap["comparison_scope"] == "window_rate_subspace"]
+        if not mode_rows.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for group_id, group in mode_rows.groupby("degeneracy_group"):
+                ax.plot(group["window_index"], group["minimum_subspace_singular_value"], marker="o", label=f"group {group_id}")
+            ax.set_ylim(0.0, 1.05)
+            ax.set_xlabel("window")
+            ax.set_ylabel("minimum subspace singular value")
+            ax.legend(fontsize=7, ncol=2)
+            save(fig, "mode_overlap_by_window.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"mode-overlap plot failed: {exc}", context="information_rate")
+    try:
+        if not rate_by_window_mode.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for mode_id, group in rate_by_window_mode.groupby("canonical_mode_id"):
+                ax.plot(group["window_index"], group["ratio_to_late_tail_rate"], linewidth=1.0, alpha=0.75)
+            ax.axhline(1.0, color="black", linewidth=0.8)
+            ax.set_xlabel("window")
+            ax.set_ylabel("window rate / late-tail rate")
+            save(fig, "window_information_rate_ratio.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"window-rate-ratio plot failed: {exc}", context="information_rate")
+    try:
+        obs = physical_by_label[physical_by_label["analysis_scope"] == "frozen_factor_observation_prefix"]
+        if not obs.empty:
+            selected = []
+            for pattern in ("source.separation_as", "optics.plate_scale_as_per_pix", "primary.zernike", "secondary.zernike"):
+                hits = [label for label in obs["theta_label"].unique() if pattern in str(label)]
+                if hits:
+                    selected.append(hits[0])
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for label in dict.fromkeys(selected):
+                group = obs[obs["theta_label"] == label]
+                ax.plot(group["elapsed_time_s"], group["sigma_ratio"], label=label)
+            ax.set_xlabel("elapsed time (s)")
+            ax.set_ylabel("marginal sigma / prior sigma")
+            ax.legend(fontsize=7)
+            save(fig, "physical_marginal_sigma_vs_time.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"physical sigma plot failed: {exc}", context="information_rate")
+    try:
+        if not adaptive_candidates.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            subset = adaptive_candidates[adaptive_candidates["gain_threshold"] == adaptive_candidates["gain_threshold"].min()]
+            for required, group in subset.groupby("required_top_mode_count"):
+                ax.plot(group["window_index"], group["resolved_candidate_block_length"], marker="o", label=f"top {required}")
+            ax.set_xlabel("window")
+            ax.set_ylabel("candidate block length (subblocks)")
+            ax.legend(fontsize=7)
+            save(fig, "adaptive_candidate_block_length.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"adaptive-cadence plot failed: {exc}", context="information_rate")
+    try:
+        if not rate_by_mode.empty:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            ax.bar(rate_by_mode["canonical_mode_id"], rate_by_mode["information_replacement_timescale_s"])
+            ax.set_yscale("log")
+            for ref in (1, 30, 300, 1800):
+                ax.axhline(ref, color="black", linewidth=0.7, alpha=0.3)
+            ax.set_xlabel("canonical mode")
+            ax.set_ylabel("information replacement timescale (s)")
+            save(fig, "information_timescale_by_mode.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"information-timescale plot failed: {exc}", context="information_rate")
+    try:
+        if not drift.empty:
+            pivot = drift.pivot_table(index="canonical_mode_id", columns="target_sigma_fraction", values="rms_drift_per_sqrt_second_prior_sigma", aggfunc="mean")
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for column in pivot.columns:
+                ax.plot(pivot.index, pivot[column], marker="o", label=f"f={column:g}")
+            ax.set_yscale("log")
+            ax.set_xlabel("canonical mode")
+            ax.set_ylabel("trackable RMS drift / sqrt(s)")
+            ax.legend(fontsize=7)
+            save(fig, "drift_observability_scenarios.png")
+    except Exception as exc:
+        _append_plot_warning(warnings_list, f"drift-observability plot failed: {exc}", context="information_rate")
+    return plot_paths
+
+
+def run_information_rate_review(
+    run_root: Path,
+    outdir: Path,
+    *,
+    mode: str,
+    no_plots: bool,
+    review_warnings: list[dict[str, Any]],
+    tail_windows: int,
+    thresholds: Sequence[float],
+    adaptive_min_subblocks: int,
+    adaptive_max_subblocks: int,
+) -> dict[str, Any]:
+    if mode == "off":
+        return _write_information_rate_disabled(outdir, run_root, mode)
+    idir = outdir / "information_rate"
+    idir.mkdir(parents=True, exist_ok=True)
+    plan = read_json(run_root / "campaign_plan.json", {})
+    labels = tuple(str(label) for label in scalar(plan, "theta_layout.labels", []) or [])
+    settings = {
+        "tail_windows": int(tail_windows),
+        "thresholds": tuple(float(t) for t in thresholds),
+        "adaptive_cadence_min_subblocks": int(adaptive_min_subblocks),
+        "adaptive_cadence_max_subblocks": int(adaptive_max_subblocks),
+        "adaptive_policy_grid": {"gain_thresholds": [0.1, 0.25, 1.0], "required_top_mode_counts": [1, 2, 4, 8]},
+    }
+    outputs = {
+        "information_rate_input_inventory_csv": "information_rate/information_rate_input_inventory.csv",
+        "information_prefix_by_mode_csv": "information_rate/information_prefix_by_mode.csv",
+        "information_rate_by_window_mode_csv": "information_rate/information_rate_by_window_mode.csv",
+        "information_rate_by_mode_csv": "information_rate/information_rate_by_mode.csv",
+        "information_mode_loadings_csv": "information_rate/information_mode_loadings.csv",
+        "mode_overlap_csv": "information_rate/mode_overlap.csv",
+        "degenerate_subspace_summary_csv": "information_rate/degenerate_subspace_summary.csv",
+        "information_by_physical_label_csv": "information_rate/information_by_physical_label.csv",
+        "adaptive_cadence_prefix_diagnostics_csv": "information_rate/adaptive_cadence_prefix_diagnostics.csv",
+        "adaptive_cadence_candidates_csv": "information_rate/adaptive_cadence_candidates.csv",
+        "drift_observability_scenarios_csv": "information_rate/drift_observability_scenarios.csv",
+        "information_rate_summary_json": "information_rate/information_rate_summary.json",
+    }
+    warnings: list[dict[str, Any]] = []
+    if not labels:
+        warning = {"status": "missing_prior", "message": "campaign_plan.json does not contain theta_layout.labels."}
+        warnings.append(warning)
+        if mode == "on":
+            raise RuntimeError(warning["message"])
+        payload = _information_rate_status_payload(run_root=run_root, outdir=outdir, mode=mode, status="missing_prior", warnings=warnings, outputs=outputs, settings=settings)
+        (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+        review_warnings.extend(warnings)
+        return payload
+
+    inventory = discover_cumulative_summary_inventory(run_root, plan)
+    if inventory.empty:
+        warning = {"status": "missing_summary_inventory", "message": "No summary inventory could be discovered for information-rate analysis."}
+        warnings.append(warning)
+        write_csv(inventory, idir / "information_rate_input_inventory.csv")
+        if mode == "on":
+            raise RuntimeError(warning["message"])
+        payload = _information_rate_status_payload(run_root=run_root, outdir=outdir, mode=mode, status="missing_summary_inventory", warnings=warnings, outputs=outputs, settings=settings, inventory=inventory)
+        (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+        review_warnings.extend(warnings)
+        return payload
+
+    frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
+    all_inventory: list[pd.DataFrame] = []
+    prior_provenance_by_case: dict[str, Any] = {}
+    canonical_by_case: dict[str, Any] = {}
+    key_modes: list[dict[str, Any]] = []
+    status = "ok"
+    cases_processed: list[str] = []
+    for case_name, case_inventory in inventory.groupby("case_name", dropna=False):
+        case_name = str(case_name)
+        prior, prior_prov, prior_warnings = reconstruct_initial_observation_prior(run_root, plan, case_name, labels)
+        prior_provenance_by_case[case_name] = prior_prov
+        warnings.extend(prior_warnings)
+        if prior is None:
+            status = "missing_prior"
+            all_inventory.append(case_inventory)
+            if mode == "on":
+                raise RuntimeError(f"Information-rate analysis could not reconstruct the initial prior for {case_name}: {prior_prov.get('reason', prior_prov.get('status'))}")
+            continue
+        try:
+            products = build_information_rate_case_products(
+                run_root,
+                plan,
+                case_name,
+                case_inventory,
+                prior,
+                thresholds=thresholds,
+                tail_windows=tail_windows,
+                adaptive_min_subblocks=adaptive_min_subblocks,
+                adaptive_max_subblocks=adaptive_max_subblocks,
+            )
+        except Exception as exc:
+            err_text = str(exc)
+            mapped_status = "information_rate_error"
+            for candidate in ("missing_duration", "duration_conflict", "label_mismatch", "information_scale_mismatch", "nonfinite_information", "materially_indefinite_information", "missing_summary_inventory"):
+                if candidate in err_text:
+                    mapped_status = candidate
+                    break
+            status = mapped_status
+            warnings.append({"status": mapped_status, "case": case_name, "message": err_text})
+            if mode == "on":
+                raise RuntimeError(f"Information-rate analysis failed for {case_name}: {err_text}") from exc
+            loaded_summaries, loaded_inventory, load_warnings = _load_information_rate_inputs(case_inventory, labels, plan)
+            all_inventory.append(loaded_inventory)
+            warnings.extend(load_warnings)
+            continue
+        warnings.extend(products["warnings"])
+        all_inventory.append(products["inventory"])
+        canonical_by_case[case_name] = products["canonical_provenance"]
+        cases_processed.append(case_name)
+        for name in (
+            "prefix_by_mode",
+            "rate_by_window_mode",
+            "rate_by_mode",
+            "mode_loadings",
+            "mode_overlap",
+            "degenerate_subspace",
+            "physical_by_label",
+            "adaptive_prefix",
+            "adaptive_candidates",
+            "drift",
+        ):
+            frames[name].append(products[name])
+        if not products["rate_by_mode"].empty:
+            key_modes.extend(products["rate_by_mode"].head(5).to_dict(orient="records"))
+        if products["accepted_count"] < products["expected_count"] and status == "ok":
+            status = "missing_summary_inventory"
+    combined_inventory = pd.concat(all_inventory, ignore_index=True) if all_inventory else inventory
+    frame_names = (
+        "prefix_by_mode",
+        "rate_by_window_mode",
+        "rate_by_mode",
+        "mode_loadings",
+        "mode_overlap",
+        "degenerate_subspace",
+        "physical_by_label",
+        "adaptive_prefix",
+        "adaptive_candidates",
+        "drift",
+    )
+    output_frames = {
+        name: pd.concat(frames.get(name, []), ignore_index=True) if frames.get(name) else pd.DataFrame()
+        for name in frame_names
+    }
+    write_csv(combined_inventory, idir / "information_rate_input_inventory.csv")
+    write_csv(output_frames["prefix_by_mode"], idir / "information_prefix_by_mode.csv")
+    write_csv(output_frames["rate_by_window_mode"], idir / "information_rate_by_window_mode.csv")
+    write_csv(output_frames["rate_by_mode"], idir / "information_rate_by_mode.csv")
+    write_csv(output_frames["mode_loadings"], idir / "information_mode_loadings.csv")
+    write_csv(output_frames["mode_overlap"], idir / "mode_overlap.csv")
+    write_csv(output_frames["degenerate_subspace"], idir / "degenerate_subspace_summary.csv")
+    write_csv(output_frames["physical_by_label"], idir / "information_by_physical_label.csv")
+    write_csv(output_frames["adaptive_prefix"], idir / "adaptive_cadence_prefix_diagnostics.csv")
+    write_csv(output_frames["adaptive_candidates"], idir / "adaptive_cadence_candidates.csv")
+    write_csv(output_frames["drift"], idir / "drift_observability_scenarios.csv")
+    plot_paths: list[str] = []
+    if not no_plots:
+        plot_paths = plot_information_rate_outputs(
+            idir,
+            prefix_by_mode=output_frames["prefix_by_mode"],
+            rate_by_mode=output_frames["rate_by_mode"],
+            rate_by_window_mode=output_frames["rate_by_window_mode"],
+            mode_loadings=output_frames["mode_loadings"],
+            mode_overlap=output_frames["mode_overlap"],
+            physical_by_label=output_frames["physical_by_label"],
+            adaptive_candidates=output_frames["adaptive_candidates"],
+            drift=output_frames["drift"],
+            thresholds=thresholds,
+            warnings_list=review_warnings,
+        )
+    if not cases_processed and status == "ok":
+        status = "missing_summary_inventory"
+    payload = _information_rate_status_payload(
+        run_root=run_root,
+        outdir=outdir,
+        mode=mode,
+        status=status,
+        warnings=warnings,
+        outputs={**outputs, "plots": [f"information_rate/{p}" for p in plot_paths]},
+        settings=settings,
+        inventory=combined_inventory,
+        prior_provenance=prior_provenance_by_case,
+        key_mode_summaries=key_modes,
+        canonical_provenance=canonical_by_case,
+    )
+    (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(payload), indent=2))
+    review_warnings.extend(warnings)
+    if mode == "on" and status != "ok":
+        raise RuntimeError(f"Information-rate analysis status is {status}; see {idir / 'information_rate_summary.json'}.")
     return payload
 
 
@@ -3242,6 +4352,7 @@ def write_report(
     image_plots: list[str],
     final_forecast: pd.DataFrame,
     cumulative_summary: dict[str, Any] | None = None,
+    information_rate_summary: dict[str, Any] | None = None,
 ) -> None:
     completed = summary.get("completed_subblocks", "")
     failed = summary.get("failed_subblocks", "")
@@ -3315,6 +4426,46 @@ def write_report(
             "See [cumulative_information/cumulative_summary.json](cumulative_information/cumulative_summary.json) and [review_warnings.json](review_warnings.json) for structured warnings when available.",
             "",
         ]
+    information_rate_summary = information_rate_summary or {}
+    ir_status = information_rate_summary.get("status", "not_run")
+    ir_inventory = information_rate_summary.get("summary_inventory_counts", {})
+    ir_canonical = information_rate_summary.get("canonical_spectrum_provenance", {})
+    first_case_canonical = next(iter(ir_canonical.values()), {}) if isinstance(ir_canonical, dict) and ir_canonical else {}
+    key_modes = information_rate_summary.get("key_mode_summaries", []) or []
+    finite_times = [
+        safe_float(row.get("information_replacement_timescale_s"))
+        for row in key_modes
+        if np.isfinite(safe_float(row.get("information_replacement_timescale_s")))
+    ]
+    reach_30 = sum(1 for row in key_modes if safe_float(row.get("gain_at_30s")) >= 1.0)
+    reach_300 = sum(1 for row in key_modes if safe_float(row.get("gain_at_300s")) >= 1.0)
+    reach_1800 = sum(1 for row in key_modes if safe_float(row.get("gain_at_1800s_projected")) >= 1.0)
+    lines += [
+        "## Information rate and eigenmode stability",
+    ]
+    if ir_status == "ok":
+        lines += [
+            f"- Status: {ir_status}; accepted {ir_inventory.get('accepted', 0)} of {ir_inventory.get('discovered', 0)} discovered summaries.",
+            f"- Late-tail windows used: {first_case_canonical.get('selected_tail_windows', [])}; canonical modes: {len(first_case_canonical.get('reference_eigenvalues', []) or [])}; degenerate groups: {len(first_case_canonical.get('degeneracy_groups', []) or [])}.",
+            f"- Realized duration in accepted summaries: {sum(safe_float(v.get('total_duration_s')) for v in ir_canonical.values()) if isinstance(ir_canonical, dict) else np.nan:.6g} s.",
+            f"- Fastest/slowest listed information timescales: {min(finite_times) if finite_times else np.nan:.6g} s / {max(finite_times) if finite_times else np.nan:.6g} s.",
+            f"- Listed modes reaching gain 1 within 30 s / 300 s / projected 1800 s: {reach_30} / {reach_300} / {reach_1800}.",
+            "The audit evaluates information sufficiency and eigenmode stability only. It does not apply an innovation gate, simulate a prospective adaptive trajectory, or turn 1800-second projections into realized measurements.",
+            "Historical frozen-factor prefixes combine Schur factors generated at changing references; use them as information and covariance diagnostics, not as a relinearized full-observation Fisher matrix.",
+            "See [information_rate/](information_rate/) for mode rates, loadings, overlaps, adaptive-cadence candidates, marginal-sigma diagnostics, drift scenarios, and the versioned JSON summary.",
+            "",
+        ]
+    elif ir_status == "disabled":
+        lines += [
+            "Information-rate analysis was disabled for this review.",
+            "",
+        ]
+    else:
+        lines += [
+            f"Information-rate analysis status: `{ir_status}`. Existing review products were still generated.",
+            "See [information_rate/information_rate_summary.json](information_rate/information_rate_summary.json) and [review_warnings.json](review_warnings.json) for structured warnings when available.",
+            "",
+        ]
     lines += [
         "## Slow-state evolution",
         "See [slow_parameter_error_summary.csv](slow_parameter_error_summary.csv), [slow_state_evolution.csv](slow_state_evolution.csv), and [slow_state_final_summary.csv](slow_state_final_summary.csv). Standard slow-parameter plots include [slow_parameter_final_error_bar.png](plots/slow_parameter_final_error_bar.png), [slow_parameter_final_error_over_sigma_bar.png](plots/slow_parameter_final_error_over_sigma_bar.png), and [slow_parameter_evolution_signed_symlog.png](plots/slow_parameter_evolution_signed_symlog.png).",
@@ -3379,6 +4530,12 @@ def parse_bool_arg(value: Any) -> bool:
 def run(args: argparse.Namespace) -> int:
     run_root = Path(args.run_root).resolve()
     outdir = Path(args.outdir).resolve() if args.outdir else run_root / "analysis" / "full_fidelity_review"
+    if args.information_rate_tail_windows <= 0:
+        raise ValueError("--information-rate-tail-windows must be positive.")
+    if args.adaptive_cadence_min_subblocks <= 0 or args.adaptive_cadence_max_subblocks <= 0:
+        raise ValueError("--adaptive-cadence min/max subblocks must be positive.")
+    if args.adaptive_cadence_min_subblocks > args.adaptive_cadence_max_subblocks:
+        raise ValueError("--adaptive-cadence-min-subblocks cannot exceed --adaptive-cadence-max-subblocks.")
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "plots").mkdir(exist_ok=True)
     missing = validate_required(run_root, args.strict)
@@ -3453,6 +4610,7 @@ def run(args: argparse.Namespace) -> int:
 
     review_warnings: list[dict[str, Any]] = []
     cumulative_summary: dict[str, Any] | None = None
+    information_rate_summary: dict[str, Any] | None = None
     try:
         cumulative_summary = run_cumulative_information_review(
             run_root,
@@ -3481,6 +4639,44 @@ def run(args: argparse.Namespace) -> int:
         cdir = outdir / "cumulative_information"
         cdir.mkdir(parents=True, exist_ok=True)
         (cdir / "cumulative_summary.json").write_text(json.dumps(_json_scalar(cumulative_summary), indent=2))
+    try:
+        information_rate_summary = run_information_rate_review(
+            run_root,
+            outdir,
+            mode=args.information_rate,
+            no_plots=args.no_plots,
+            review_warnings=review_warnings,
+            tail_windows=args.information_rate_tail_windows,
+            thresholds=args.information_gain_thresholds,
+            adaptive_min_subblocks=args.adaptive_cadence_min_subblocks,
+            adaptive_max_subblocks=args.adaptive_cadence_max_subblocks,
+        )
+    except Exception as exc:
+        if args.information_rate == "on":
+            raise
+        warning = {
+            "status": "information_rate_error",
+            "context": "information_rate",
+            "message": str(exc),
+        }
+        review_warnings.append(warning)
+        information_rate_summary = _information_rate_status_payload(
+            run_root=run_root,
+            outdir=outdir,
+            mode=args.information_rate,
+            status="information_rate_error",
+            warnings=[warning],
+            outputs={"information_rate_summary_json": "information_rate/information_rate_summary.json"},
+            settings={
+                "tail_windows": int(args.information_rate_tail_windows),
+                "thresholds": tuple(float(t) for t in args.information_gain_thresholds),
+                "adaptive_cadence_min_subblocks": int(args.adaptive_cadence_min_subblocks),
+                "adaptive_cadence_max_subblocks": int(args.adaptive_cadence_max_subblocks),
+            },
+        )
+        idir = outdir / "information_rate"
+        idir.mkdir(parents=True, exist_ok=True)
+        (idir / "information_rate_summary.json").write_text(json.dumps(_json_scalar(information_rate_summary), indent=2))
     if not args.no_plots:
         for context, func in (
             (
@@ -3534,6 +4730,7 @@ def run(args: argparse.Namespace) -> int:
         image_plots,
         final_forecast,
         cumulative_summary,
+        information_rate_summary,
     )
     write_index(outdir)
     write_review_warnings(outdir, review_warnings)
@@ -3556,6 +4753,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Run retrospective cumulative-information analysis from preserved Schur summaries.",
     )
+    p.add_argument(
+        "--information-rate",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Run retrospective prior-whitened information-rate and eigenmode-stability analysis.",
+    )
+    p.add_argument("--information-rate-tail-windows", type=int, default=5)
+    p.add_argument("--information-gain-thresholds", type=_parse_float_list, default=(0.1, 0.25, 1.0, 3.0))
+    p.add_argument("--adaptive-cadence-min-subblocks", type=int, default=5)
+    p.add_argument("--adaptive-cadence-max-subblocks", type=int, default=30)
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--image-examples", default="first,median,last")
     p.add_argument("--include-subblock-images", action="store_true")
