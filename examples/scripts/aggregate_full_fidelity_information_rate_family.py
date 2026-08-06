@@ -468,6 +468,26 @@ def psd_root_summary(inventory: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def parse_count_string(value: Any) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for token in str(value or "").split(";"):
+        if not token:
+            continue
+        if ":" not in token:
+            counts[token] += 1
+            continue
+        key, raw = token.rsplit(":", maxsplit=1)
+        try:
+            counts[key] += int(float(raw))
+        except ValueError:
+            counts[key] += 1
+    return counts
+
+
+def format_counts(counts: Counter[str]) -> str:
+    return ";".join(f"{key}:{counts[key]}" for key in sorted(counts) if key)
+
+
 def settings_signature(summary: Mapping[str, Any]) -> dict[str, Any]:
     settings = summary.get("settings", {}) if isinstance(summary, dict) else {}
     seq = summary.get("adaptive_sequential_settings", {}) if isinstance(summary, dict) else {}
@@ -762,8 +782,9 @@ def build_physical_assignments(resolution: pd.DataFrame, rates: pd.DataFrame) ->
         )
         .reset_index()
     )
+    compact = compact_physical_assignments(root, include_all_trackable=False)
     amp_rows: list[dict[str, Any]] = []
-    for key, group in root.groupby(["m2_ke_nm", "physical_concept"], dropna=False, sort=True):
+    for key, group in compact.groupby(["m2_ke_nm", "physical_concept"], dropna=False, sort=True):
         amp, concept = key
         successful = group["assignment_status"].astype(str).str.contains("ok|unique", case=False, regex=True)
         unique = group["assignment_status"].astype(str).str.contains("unique|ok", case=False, regex=True) & ~group["assignment_status"].astype(str).str.contains("ambiguous|weak", case=False, regex=True)
@@ -788,8 +809,49 @@ def build_physical_assignments(resolution: pd.DataFrame, rates: pd.DataFrame) ->
     return root.sort_values(["m2_ke_nm", "draw_index", "physical_concept"], kind="mergesort").reset_index(drop=True), amp_df
 
 
+def compact_physical_assignments(assignments: pd.DataFrame, *, include_all_trackable: bool = False) -> pd.DataFrame:
+    """Return one row per root, physical concept, and canonical assignment."""
+
+    if assignments.empty:
+        return pd.DataFrame()
+    use = assignments.copy()
+    if not include_all_trackable:
+        use = use[use["physical_concept"] != "all-trackable threshold set"].copy()
+    if use.empty:
+        return pd.DataFrame(columns=assignments.columns)
+    group_cols = ["run_name", "physical_concept", "canonical_mode_id"]
+    compact = (
+        use.groupby(group_cols, dropna=False, sort=True)
+        .agg(
+            {
+                "m2_ke_nm": "first",
+                "draw_index": "first",
+                "requested_physical_label_or_group": "first",
+                "mode_set_source": semicolon_join,
+                "canonical_rate": "first",
+                "squared_loading_used_for_assignment": "first",
+                "assignment_rank": "first",
+                "next_best_mode": "first",
+                "next_best_loading": "first",
+                "loading_margin": "first",
+                "assignment_status": semicolon_join,
+                "threshold_dependency": semicolon_join,
+                "selected_mode_ids": semicolon_join,
+                "quasi_degenerate": "first",
+                "mode_identity_caution": "first",
+            }
+        )
+        .reset_index()
+    )
+    return compact.sort_values(["m2_ke_nm", "draw_index", "physical_concept", "canonical_mode_id"], kind="mergesort").reset_index(drop=True)
+
+
 def build_physical_rates(assignments: pd.DataFrame, rates: pd.DataFrame, window_rates: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if assignments.empty or rates.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty
+    assignments = compact_physical_assignments(assignments, include_all_trackable=False)
+    if assignments.empty:
         empty = pd.DataFrame()
         return empty, empty, empty, empty
     rows: list[dict[str, Any]] = []
@@ -1109,7 +1171,7 @@ def parse_composition(value: Any) -> tuple[dict[str, float], str]:
     return parsed, dominant
 
 
-def build_quasi(quasi: pd.DataFrame, overlaps: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_quasi(quasi: pd.DataFrame, overlaps: pd.DataFrame, inventory: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     rows: list[dict[str, Any]] = []
     if not quasi.empty:
         for _, r in quasi.iterrows():
@@ -1135,20 +1197,25 @@ def build_quasi(quasi: pd.DataFrame, overlaps: pd.DataFrame) -> tuple[pd.DataFra
             )
     by_root = pd.DataFrame(rows)
     amp_rows: list[dict[str, Any]] = []
-    if not by_root.empty:
-        included_roots = by_root.groupby("m2_ke_nm")["run_name"].nunique().to_dict()
-        for amp, group in by_root.groupby("m2_ke_nm", dropna=False, sort=True):
+    included = inventory[inventory["inclusion_status"] == "included"].copy() if not inventory.empty else pd.DataFrame()
+    total_roots_by_amp = included.groupby("m2_ke_nm", dropna=False)["run_name"].nunique().to_dict() if not included.empty else {}
+    if total_roots_by_amp:
+        for amp in sorted(total_roots_by_amp):
+            group = by_root[by_root["m2_ke_nm"] == amp] if not by_root.empty else pd.DataFrame()
+            roots_with_group = int(group["run_name"].nunique()) if not group.empty else 0
+            total_roots = int(total_roots_by_amp.get(amp, 0))
             amp_rows.append(
                 {
                     "m2_ke_nm": amp,
-                    "roots_with_at_least_one_quasi_degenerate_group": int(group["run_name"].nunique()),
-                    "fraction_roots_with_a_group": np.nan,
+                    "total_included_roots_at_amplitude": total_roots,
+                    "roots_with_at_least_one_quasi_degenerate_group": roots_with_group,
+                    "fraction_roots_with_a_group": float(roots_with_group / total_roots) if total_roots else np.nan,
                     "number_of_groups": int(len(group)),
-                    "group_dimension_distribution": ";".join(f"{k}:{v}" for k, v in sorted(Counter(group["group_dimension"].astype(str)).items())),
-                    "dominant_composition_distribution": ";".join(f"{k}:{v}" for k, v in sorted(Counter(group["dominant_physical_group"].astype(str)).items())),
-                    "minimum_subspace_singular_value_min": float(pd.to_numeric(group["minimum_subspace_singular_value"], errors="coerce").min()),
-                    "median_subspace_singular_value_median": float(pd.to_numeric(group["median_subspace_singular_value"], errors="coerce").median()),
-                    "maximum_principal_angle_deg_max": float(pd.to_numeric(group["maximum_principal_angle_deg"], errors="coerce").max()),
+                    "group_dimension_distribution": ";".join(f"{k}:{v}" for k, v in sorted(Counter(group["group_dimension"].astype(str)).items())) if not group.empty else "",
+                    "dominant_composition_distribution": ";".join(f"{k}:{v}" for k, v in sorted(Counter(group["dominant_physical_group"].astype(str)).items())) if not group.empty else "",
+                    "minimum_subspace_singular_value_min": float(pd.to_numeric(group["minimum_subspace_singular_value"], errors="coerce").min()) if not group.empty else np.nan,
+                    "median_subspace_singular_value_median": float(pd.to_numeric(group["median_subspace_singular_value"], errors="coerce").median()) if not group.empty else np.nan,
+                    "maximum_principal_angle_deg_max": float(pd.to_numeric(group["maximum_principal_angle_deg"], errors="coerce").max()) if not group.empty else np.nan,
                 }
             )
     stability_rows: list[dict[str, Any]] = []
@@ -1326,6 +1393,27 @@ def build_accuracy(inventory: pd.DataFrame, tables_by_run: Mapping[str, Mapping[
     for label, group in [("all", root), *[(f"m2_ke_nm={amp:g}", g) for amp, g in root.groupby("m2_ke_nm", dropna=False, sort=True)]]:
         for x, y in pairs:
             data = group[[x, y]].apply(pd.to_numeric, errors="coerce").dropna()
+            x_std = float(data[x].std(ddof=1)) if len(data) >= 2 else np.nan
+            y_std = float(data[y].std(ddof=1)) if len(data) >= 2 else np.nan
+            if len(data) < 2:
+                status = "undefined"
+                reason = "fewer_than_two_finite_pairs"
+                pearson = np.nan
+                rank = np.nan
+            elif x_std == 0.0 or y_std == 0.0:
+                status = "undefined"
+                reason = "constant_metric"
+                pearson = np.nan
+                rank = np.nan
+            else:
+                rank_x = data[x].rank()
+                rank_y = data[y].rank()
+                rank_x_std = float(rank_x.std(ddof=1))
+                rank_y_std = float(rank_y.std(ddof=1))
+                pearson = float(data[x].corr(data[y], method="pearson"))
+                rank = float(rank_x.corr(rank_y, method="pearson")) if rank_x_std != 0.0 and rank_y_std != 0.0 else np.nan
+                status = "ok" if np.isfinite(pearson) and np.isfinite(rank) else "undefined"
+                reason = "" if status == "ok" else "constant_rank_metric"
             corr_rows.append(
                 {
                     "group": label,
@@ -1333,9 +1421,13 @@ def build_accuracy(inventory: pd.DataFrame, tables_by_run: Mapping[str, Mapping[
                     "x_metric": x,
                     "y_metric": y,
                     "N": int(len(data)),
-                    "pearson_correlation": float(data[x].corr(data[y], method="pearson")) if len(data) >= 2 else np.nan,
-                    "rank_correlation": float(data[x].rank().corr(data[y].rank(), method="pearson")) if len(data) >= 2 else np.nan,
-                    "interpretation": "descriptive only; no causal claim; per-amplitude N is small",
+                    "pearson_correlation": pearson,
+                    "rank_correlation": rank,
+                    "correlation_status": status,
+                    "undefined_reason": reason,
+                    "x_standard_deviation": x_std,
+                    "y_standard_deviation": y_std,
+                    "interpretation": "cross-amplitude descriptive association; no causal claim" if label == "all" else "within-amplitude descriptive only; N is small",
                 }
             )
     return root, amp, pd.DataFrame(corr_rows)
@@ -1350,6 +1442,9 @@ def build_psd(inventory: pd.DataFrame, tables_by_run: Mapping[str, Mapping[str, 
     root = pd.DataFrame(root_rows).sort_values(["m2_ke_nm", "draw_index", "run_name"], kind="mergesort").reset_index(drop=True) if root_rows else pd.DataFrame()
     amp_rows: list[dict[str, Any]] = []
     for amp, group in root.groupby("m2_ke_nm", dropna=False, sort=True):
+        status_counts: Counter[str] = Counter()
+        for value in group["projection_status_counts"]:
+            status_counts.update(parse_count_string(value))
         amp_rows.append(
             {
                 "m2_ke_nm": amp,
@@ -1362,7 +1457,9 @@ def build_psd(inventory: pd.DataFrame, tables_by_run: Mapping[str, Mapping[str, 
                 "maximum_relative_frobenius_correction": float(pd.to_numeric(group["maximum_relative_projection_correction"], errors="coerce").max()),
                 "maximum_absolute_correction": float(pd.to_numeric(group["maximum_absolute_correction"], errors="coerce").max()),
                 "materially_indefinite_count": int(pd.to_numeric(group["materially_indefinite_count"], errors="coerce").sum()),
-                "projection_status_counts": semicolon_join(group["projection_status_counts"]),
+                "projection_status_counts": format_counts(status_counts),
+                "projection_status_not_needed": int(status_counts.get("not_needed", 0)),
+                "projection_status_clipped_tiny_negative": int(status_counts.get("clipped_tiny_negative", 0)),
             }
         )
     amp_df = pd.DataFrame(amp_rows)
@@ -1552,6 +1649,38 @@ def markdown_table(df: pd.DataFrame, max_rows: int = 8) -> str:
     return "\n".join(lines)
 
 
+def schedule_equivalence_markdown(schedule: pd.DataFrame) -> str:
+    if schedule.empty:
+        return "_No rows._"
+    root_rows = schedule[schedule.get("run_name", pd.Series(dtype=str)) != "__amplitude_summary__"].copy()
+    if root_rows.empty:
+        return markdown_table(schedule, 8)
+    compact = (
+        root_rows.groupby(["m2_ke_nm", "sequence_scope", "gain_threshold"], dropna=False, sort=True)
+        .agg(
+            root_count=("run_name", "nunique"),
+            exact_match_count=("exact_schedule_match", lambda s: int(pd.Series(s).astype(bool).sum())),
+            exact_match_fraction=("exact_schedule_match", lambda s: float(pd.Series(s).astype(bool).mean())),
+            update_count_match_fraction=("update_count_match", lambda s: float(pd.Series(s).astype(bool).mean())),
+            block_lengths_match_fraction=("block_lengths_match", lambda s: float(pd.Series(s).astype(bool).mean())),
+            closure_reasons_match_fraction=("closure_reasons_match", lambda s: float(pd.Series(s).astype(bool).mean())),
+        )
+        .reset_index()
+    )
+    text = markdown_table(compact, 12)
+    mismatch = root_rows[~root_rows["exact_schedule_match"].astype(bool)]
+    if not mismatch.empty:
+        first = mismatch.sort_values(["m2_ke_nm", "draw_index", "sequence_scope", "gain_threshold", "run_name"], kind="mergesort").iloc[0]
+        text += (
+            "\n\nFirst mismatch example: "
+            f"`{first.get('run_name', '')}`, scope `{first.get('sequence_scope', '')}`, "
+            f"gain `{safe_float(first.get('gain_threshold')):g}`, first difference index "
+            f"`{safe_int(first.get('first_difference_index'))}`. Full schedule signatures are in "
+            "`family_policy_schedule_equivalence.csv`."
+        )
+    return text
+
+
 def build_markdown(summary: Mapping[str, Any], frames: Mapping[str, pd.DataFrame]) -> str:
     validation = summary["input_validation"]
     headlines = [
@@ -1575,7 +1704,7 @@ def build_markdown(summary: Mapping[str, Any], frames: Mapping[str, pd.DataFrame
         ("5. Sequential acquisition behavior", markdown_table(frames["sequential_amp"], 8)),
         ("6. Gain-3 astrometric policy", markdown_table(frames["gain3_amp"][frames["gain3_amp"].get("policy_mode_set_name", pd.Series(dtype=str)).isin(HEADLINE_POLICIES)] if not frames["gain3_amp"].empty else pd.DataFrame(), 8)),
         ("7. Source-core contrast limitation", markdown_table(frames["controlling_amp"][frames["controlling_amp"].get("policy_mode_set_name", pd.Series(dtype=str)) == "source_core"] if not frames["controlling_amp"].empty else pd.DataFrame(), 8)),
-        ("8. High-information WFE policy comparison", markdown_table(frames["schedule_equivalence"], 8)),
+        ("8. High-information WFE policy comparison", schedule_equivalence_markdown(frames["schedule_equivalence"])),
         ("9. Quasi-degenerate M2 subspaces", markdown_table(frames["quasi_amp"], 8)),
         ("10. Formal uncertainty versus actual estimator error", markdown_table(frames["accuracy_amp"], 8)),
         ("11. PSD-projection numerical diagnostics", markdown_table(frames["psd_amp"], 8)),
@@ -1636,7 +1765,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     schedule_equivalence = build_schedule_equivalence(updates)
     controlling_root, controlling_amp = build_controlling_modes(gains, updates, assignments_root)
     fixed_root, fixed_amp = build_fixed_prior(candidates, prefix)
-    quasi_root, quasi_amp, quasi_stability = build_quasi(quasi, overlaps)
+    quasi_root, quasi_amp, quasi_stability = build_quasi(quasi, overlaps, inventory)
     formal_root, formal_amp = build_formal_uncertainty(sequential_root, physical, args.strict)
     accuracy_root, accuracy_amp, correlations = build_accuracy(inventory, tables_by_run, formal_root, physical_rates_root)
     psd_root, psd_amp, psd_summary_extra = build_psd(inventory, tables_by_run)
@@ -1716,10 +1845,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "roots_excluded": int((inventory["inclusion_status"] != "included").sum()) if not inventory.empty else 0,
         "commit_matches": int((inventory["commit_matches_expected"] == True).sum()) if args.expected_commit and not inventory.empty else None,
         "status_ok": int((inventory["status"] == "ok").sum()) if not inventory.empty else 0,
+        "accepted_300": int((inventory["accepted_summary_count"] == 300).sum()) if not inventory.empty else 0,
         "accepted_summaries_300": int((inventory["accepted_summary_count"] == 300).sum()) if not inventory.empty else 0,
         "sequential_rows_40": int((inventory["sequential_summary_row_count"] == 40).sum()) if not inventory.empty else 0,
         "invariance_pass": int(inventory["invariance_all_pass"].astype(bool).sum()) if not inventory.empty else 0,
+        "missing_required_file_count": int(sum(len(paths) for paths in validation_diag["missing_files"].values())),
+        "materially_indefinite_count": int(pd.to_numeric(psd_root.get("materially_indefinite_count", pd.Series(dtype=float)), errors="coerce").sum()) if not psd_root.empty else 0,
         "materially_indefinite_inputs": int(pd.to_numeric(psd_root.get("materially_indefinite_count", pd.Series(dtype=float)), errors="coerce").sum()) if not psd_root.empty else 0,
+        "strict_mode_status": "pass" if args.strict and not expectation_issues and (inventory["inclusion_status"] == "included").all() else ("non_strict" if not args.strict else "failed"),
         "expectation_issues": expectation_issues,
         "settings_consistent": validation_diag["settings_consistent"],
     }
@@ -1735,6 +1868,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "amplitude_list": sorted(float(v) for v in inventory["m2_ke_nm"].dropna().unique()) if not inventory.empty else [],
         "draws_per_amplitude": {str(k): int(v) for k, v in amplitude_counts.items()},
         "input_validation": validation_summary,
+        "input_validation_summary": {
+            key: validation_summary[key]
+            for key in (
+                "roots_discovered",
+                "roots_included",
+                "roots_excluded",
+                "commit_matches",
+                "status_ok",
+                "accepted_300",
+                "sequential_rows_40",
+                "invariance_pass",
+                "missing_required_file_count",
+                "materially_indefinite_count",
+                "strict_mode_status",
+            )
+        },
         "warning_inventory": dict(sorted(warning_inventory.items())),
         "information_rate_settings": validation_diag["information_rate_settings"],
         "physical_assignment_summary": assignments_amp.to_dict(orient="records"),

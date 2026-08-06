@@ -41,7 +41,7 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 
 def run_script(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
-    env = dict(**os_environ(), PYTHONPATH="src:.")
+    env = {**os_environ(), "PYTHONPATH": "src:."}
     return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=Path.cwd(), env=env, text=True, capture_output=True, check=False)
 
 
@@ -200,6 +200,32 @@ def make_review_root(
             "assignment_status": "ok_unique",
             "threshold_dependency": "none",
             "selected_mode_ids": f"{separation_mode};{plate_mode}",
+        },
+        {
+            "mode_set_name": "source_core",
+            "requested_physical_label_or_group": "source.separation_as",
+            "canonical_mode_id": separation_mode,
+            "canonical_rate": 1.2,
+            "squared_loading_used_for_assignment": 0.95,
+            "assignment_rank": 1,
+            "next_best_mode": plate_mode,
+            "next_best_loading": 0.05,
+            "assignment_status": "ok_unique",
+            "threshold_dependency": "none",
+            "selected_mode_ids": f"{separation_mode};{plate_mode};0;4",
+        },
+        {
+            "mode_set_name": "source_core",
+            "requested_physical_label_or_group": "optics.plate_scale_as_per_pix",
+            "canonical_mode_id": plate_mode,
+            "canonical_rate": 0.9,
+            "squared_loading_used_for_assignment": 0.9,
+            "assignment_rank": 1,
+            "next_best_mode": separation_mode,
+            "next_best_loading": 0.06,
+            "assignment_status": "ok_unique",
+            "threshold_dependency": "none",
+            "selected_mode_ids": f"{separation_mode};{plate_mode};0;4",
         },
         {
             "mode_set_name": "source_core",
@@ -497,10 +523,22 @@ def test_strict_integration_outputs_root_local_joins_and_no_plots(tmp_path):
     assert set(inventory["inclusion_status"]) == {"included"}
     assignments = read_csv(out / "family_physical_mode_assignments_by_root.csv")
     sep = assignments[assignments["physical_concept"] == "source separation"].sort_values("m2_ke_nm")
-    assert pd.to_numeric(sep["canonical_mode_id"]).tolist() == [1, 2]
+    assert len(sep) == 4
+    assert set(sep["mode_set_source"]) == {"astrometric_core", "source_core"}
+    assign_amp = read_csv(out / "family_physical_mode_assignments_by_amplitude.csv")
+    sep_amp = assign_amp[assign_amp["physical_concept"] == "source separation"].sort_values("m2_ke_nm")
+    assert sep_amp["N_roots"].tolist() == [1, 1]
+    assert not assign_amp["physical_concept"].astype(str).str.contains("all-trackable").any()
     rates = read_csv(out / "family_physical_information_rates_by_root.csv")
     sep_rates = rates[rates["physical_concept"] == "source separation"]
     assert set(sep_rates["canonical_mode_id"]) == {1, 2}
+    assert len(sep_rates) == 2
+    rates_amp = read_csv(out / "family_physical_information_rates_by_amplitude.csv")
+    assert rates_amp[rates_amp["physical_concept"] == "source separation"]["N"].tolist() == [1, 1]
+    stability_root = read_csv(out / "family_physical_rate_stability_by_root.csv")
+    assert len(stability_root[stability_root["physical_concept"] == "source separation"]) == 2
+    stability_amp = read_csv(out / "family_physical_rate_stability_by_amplitude.csv")
+    assert stability_amp[stability_amp["physical_concept"] == "source separation"]["N"].tolist() == [1, 1]
     seq_amp = read_csv(out / "family_sequential_policy_by_amplitude.csv")
     assert {"observation_carry_window_bounded", "window_restart"} == set(seq_amp["sequence_scope"])
     all_trackable = seq_amp[seq_amp["policy_mode_set_name"] == "all_trackable"]
@@ -508,6 +546,9 @@ def test_strict_integration_outputs_root_local_joins_and_no_plots(tmp_path):
     assert not (out / "plots").exists()
     summary = json.loads((out / "family_information_rate_summary.json").read_text())
     assert summary["input_validation"]["roots_included"] == 2
+    assert summary["input_validation_summary"]["accepted_300"] == 2
+    assert summary["input_validation_summary"]["missing_required_file_count"] == 0
+    assert summary["input_validation_summary"]["strict_mode_status"] == "pass"
     assert "future-controller guidance" in summary
     report = (out / "family_information_rate_summary.md").read_text()
     assert "## 10. Formal uncertainty versus actual estimator error" in report
@@ -560,6 +601,10 @@ def test_gain3_event_extraction_schedule_equivalence_and_controlling_modes(tmp_p
     ctrl = read_csv(out / "family_controlling_modes_by_amplitude.csv")
     source_core = ctrl[ctrl["policy_mode_set_name"] == "source_core"]
     assert source_core["physical_interpretation"].astype(str).str.contains("contrast").any()
+    report = (out / "family_information_rate_summary.md").read_text()
+    assert "exact_match_count" in report
+    assert "Full schedule signatures are in `family_policy_schedule_equivalence.csv`" in report
+    assert "astrometric_schedule_signature" not in report
 
 
 def test_policy_independent_covariance_rejects_material_inconsistency(tmp_path):
@@ -573,6 +618,7 @@ def test_quasi_psd_accuracy_and_correlation_outputs(tmp_path):
     per_root, root_list, out = make_family(tmp_path)
     result = run_script(tmp_path, "--per-root-dir", str(per_root), "--root-list", str(root_list), "--outdir", str(out), "--expected-commit", COMMIT, "--strict", "true", "--no-plots")
     assert result.returncode == 0, result.stderr
+    assert "RuntimeWarning" not in result.stderr
     quasi = read_csv(out / "family_quasi_degenerate_subspaces_by_root.csv")
     assert not quasi.empty
     assert quasi["dominant_physical_group"].iloc[0] == "m2_zernike"
@@ -581,11 +627,17 @@ def test_quasi_psd_accuracy_and_correlation_outputs(tmp_path):
     psd = read_csv(out / "family_psd_projection_by_amplitude.csv")
     assert int(psd["projected_matrix_count"].sum()) == 13
     assert int(psd["clipped_eigenvalue_count"].sum()) == 13
+    counts = dict(zip(psd["m2_ke_nm"], psd["projection_status_counts"]))
+    assert counts[0.5] == "clipped_tiny_negative:3;not_needed:297"
+    assert counts[1.0] == "clipped_tiny_negative:10;not_needed:290"
     accuracy = read_csv(out / "family_accuracy_and_information_by_root.csv")
     assert accuracy["signed_final_separation_error_uas"].tolist() == [10.0, 11.0]
     assert accuracy["absolute_final_separation_error_uas"].tolist() == [10.0, 11.0]
     corr = read_csv(out / "family_accuracy_information_correlations.csv")
-    assert {"pearson_correlation", "rank_correlation"}.issubset(corr.columns)
+    assert {"pearson_correlation", "rank_correlation", "correlation_status", "undefined_reason", "x_standard_deviation", "y_standard_deviation"}.issubset(corr.columns)
+    constant = corr[(corr["x_metric"] == "signed_final_separation_error_uas") & (corr["y_metric"] == "formal_information_sigma_300s_uas") & (corr["group"] == "all")]
+    assert constant.iloc[0]["correlation_status"] == "undefined"
+    assert constant.iloc[0]["undefined_reason"] == "constant_metric"
 
 
 def test_empty_optional_quasi_table_is_allowed(tmp_path):
@@ -595,6 +647,40 @@ def test_empty_optional_quasi_table_is_allowed(tmp_path):
     result = run_script(tmp_path, "--review-root", str(root), "--outdir", str(out), "--expected-commit", COMMIT, "--expected-root-count", "1", "--strict", "true", "--no-plots")
     assert result.returncode == 0, result.stderr
     assert (out / "family_quasi_degenerate_subspaces_by_root.csv").exists()
+
+
+def test_quasi_fraction_uses_total_included_roots_at_amplitude():
+    module = load_module()
+    inventory = pd.DataFrame(
+        {
+            "run_name": [f"run_{i}" for i in range(10)],
+            "m2_ke_nm": [0.1] * 10,
+            "draw_index": list(range(10)),
+            "inclusion_status": ["included"] * 10,
+        }
+    )
+    quasi = pd.DataFrame(
+        {
+            "run_name": ["run_0", "run_1"],
+            "m2_ke_nm": [0.1, 0.1],
+            "draw_index": [0, 1],
+            "quasi_degeneracy_group": [0, 0],
+            "member_mode_ids": ["3;4", "3;4"],
+            "group_dimension": [2, 2],
+            "eigenvalue_min": [0.1, 0.1],
+            "eigenvalue_max": [0.11, 0.11],
+            "adjacent_relative_gaps": ["0.01", "0.01"],
+            "group_physical_composition": [json.dumps({"m2_zernike": 1.0}), json.dumps({"m2_zernike": 1.0})],
+            "minimum_subspace_singular_value": [0.9, 0.91],
+            "median_subspace_singular_value": [0.92, 0.93],
+            "maximum_principal_angle_deg": [5.0, 4.0],
+        }
+    )
+    _, amp, _ = module.build_quasi(quasi, pd.DataFrame(), inventory)
+    row = amp.iloc[0]
+    assert row["total_included_roots_at_amplitude"] == 10
+    assert row["roots_with_at_least_one_quasi_degenerate_group"] == 2
+    assert row["fraction_roots_with_a_group"] == pytest.approx(0.2)
 
 
 def test_determinism_ignoring_timestamps(tmp_path):
