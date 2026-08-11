@@ -479,3 +479,45 @@ def test_trace_with_initial_point_does_not_duplicate_existing_iter0():
     assert trace_with_init["theta"].shape == (2, 2)
     assert jnp.allclose(trace_with_init["theta"][0], theta0)
     assert trace_with_init["loss"].shape == (2,)
+
+
+def test_apply_variance_floor_allows_noiseless_gaussian_nll_variance():
+    m = _load_module()
+    var = jnp.zeros((2, 2))
+
+    floored = m._apply_variance_floor(var, variance_floor=0.5)
+
+    assert jnp.allclose(floored, 0.5)
+
+
+def test_apply_variance_floor_rejects_negative_values():
+    m = _load_module()
+    var = jnp.zeros((2, 2))
+
+    try:
+        m._apply_variance_floor(var, variance_floor=-1.0)
+    except ValueError as exc:
+        assert "noise.variance_floor" in str(exc)
+    else:
+        raise AssertionError("Expected negative variance_floor to raise ValueError.")
+
+
+def test_deterministic_noiseless_variance_defaults_to_canonical_floor():
+    m = _load_module()
+    image = jnp.asarray([[0.2, 2.0], [5.0, 0.0]])
+
+    var = m._deterministic_noiseless_variance(image, noise_cfg={})
+
+    assert jnp.allclose(var, jnp.asarray([[1.0, 2.0], [5.0, 1.0]]))
+
+
+def test_deterministic_noiseless_variance_uses_configured_floor():
+    m = _load_module()
+    image = jnp.asarray([[0.2, 2.0], [5.0, 0.0]])
+
+    var = m._deterministic_noiseless_variance(
+        image,
+        noise_cfg={"variance_floor": 0.5},
+    )
+
+    assert jnp.allclose(var, jnp.asarray([[0.5, 2.0], [5.0, 0.5]]))

@@ -242,6 +242,39 @@ def _noise_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     return noise_block
 
 
+def _apply_variance_floor(
+    variance: Any,
+    *,
+    variance_floor: Any,
+    path: str = "noise.variance_floor",
+):
+    """Return variance with an optional nonnegative scalar floor applied."""
+    if variance_floor is None:
+        return variance
+    floor = float(
+        coerce_numeric_value(
+            variance_floor,
+            path=path,
+            must_be_nonnegative=True,
+        )
+    )
+    return jnp.maximum(variance, floor)
+
+
+def _deterministic_noiseless_variance(
+    image: Any,
+    *,
+    noise_cfg: dict[str, Any],
+    path: str = "noise.variance_floor",
+):
+    """Return canonical deterministic variance for disabled-noise images."""
+    return _apply_variance_floor(
+        image,
+        variance_floor=noise_cfg.get("variance_floor", 1.0),
+        path=path,
+    )
+
+
 def _outputs_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(experiment_cfg.get("outputs", {}) or {})
 
@@ -2350,6 +2383,18 @@ def main() -> None:
             detector_spec=getattr(binder_data.detector, "spec", None),
             exposure_time_s=truth_store_data.get("source.exposure_time_s", default=None),
         )
+        if not add_noise:
+            data_var = _deterministic_noiseless_variance(
+                data_psf,
+                noise_cfg=noise_cfg_run,
+                path=f"run {run_id} noise.variance_floor",
+            )
+        else:
+            data_var = _apply_variance_floor(
+                data_var,
+                variance_floor=noise_cfg_run.get("variance_floor"),
+                path=f"run {run_id} noise.variance_floor",
+            )
 
         noise_model = "gaussian"
         reduce = "sum"
