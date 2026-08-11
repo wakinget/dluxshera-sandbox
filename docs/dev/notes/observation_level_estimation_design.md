@@ -33,6 +33,14 @@ guide staged implementation.
 This note is intended to complement, not replace,
 ``docs/dev/obs_subblock_inference_design.md``.
 
+For the current reviewed observation-level information-rate findings, cadence
+interpretation, M2 knowledge-error conclusions, and future implementation
+parking lot, use
+[Observation information-rate consolidation](../observation_information_rate_consolidation.md)
+as the
+authoritative consolidation record. This design note retains the broader
+observation-level architecture context.
+
 That note already defines:
 
 - the distinction between **belief state**, **active inference state**, and

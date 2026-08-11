@@ -55,6 +55,17 @@ Roadmap priorities are intentionally coarse and mostly unchanged from the previo
 - Experiment metadata capture has improved (experiment-level notes and per-run notes), which supports comparison and reporting workflows.
 - Remaining active gaps are mostly depth/completeness issues (e.g., broader regression matrices, fuller profiles/IO, and richer preconditioning options) rather than missing foundational architecture.
 
+## Progress Snapshot (2026-08)
+
+Observation-level information-rate work has produced a reviewed developer
+record rather than a new controller. The current evidence supports additive
+one-second Schur information products, prior-whitened canonical observability
+diagnostics, and information-only adaptive-cadence replay. The next long-horizon
+architecture direction is an acquire-then-accumulate observation workflow that
+combines information support with innovation/reference-stability tests before a
+fixed-reference precision-accumulation phase. See
+[Observation information-rate consolidation](observation_information_rate_consolidation.md).
+
 ---
 
 ## Themes
@@ -87,6 +98,8 @@ Focus areas:
 - Consistent loss construction (Binder-based NLLs)
 - Eigenmode inference workflows
 - Fisher Information Matrix validation
+- Observation-level Schur information accumulation and information-rate
+  diagnostics, with formal uncertainty kept distinct from estimator accuracy
 - Agreement between eager vs JIT execution paths
 - Clear diagnostics when inference fails or stalls
 

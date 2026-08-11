@@ -25,6 +25,18 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 
 - Added projected iterative observation forecasting for full-fidelity campaigns. The campaign can run the first K actual info-damped update windows and project to a 60-window / 1800-subblock / 30-minute observation endpoint, producing final separation residual and uncertainty summaries without rendering every subblock in the full observation. This is intended for deadline-sensitive production-ish campaigns where the first several windows are used to characterize update behavior and accumulated information.
 
+## Progress refresh (2026-08-10)
+
+- Consolidated the reviewed observation-level information-rate findings in
+  [Observation information-rate consolidation](observation_information_rate_consolidation.md).
+  The note is
+  now the authoritative dev-facing record for the current iterative workflow,
+  additive one-second Schur information products, prior-whitened canonical
+  modes, adaptive-cadence replay interpretation, the M2 knowledge-error
+  information-versus-bias result, and the proposed future
+  acquire-then-accumulate architecture. This is documentation only; no new
+  controller has been implemented.
+
 ---
 
 ## 1) Context & Problem Statement
@@ -141,6 +153,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
   - Tutorials: `docs/tutorials/canonical_astrometry_demo.md`
   - Dev-facing: this plan (`docs/dev/working_plan.md`)
   - Dev-facing: `docs/dev/style_guide.md` (Style guide)
+  - Dev-facing: [Observation information-rate consolidation](observation_information_rate_consolidation.md) (reviewed observation-level information-rate findings and future implementation notes)
 
 ---
 
