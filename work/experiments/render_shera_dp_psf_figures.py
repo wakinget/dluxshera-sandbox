@@ -90,6 +90,13 @@ FIGURE_DPI = 600
 OPD_CMAP_NAME = "inferno_nan"
 PSF_CMAP_NAME = "inferno"
 
+FONT_FAMILY = "sans-serif"
+TITLE_FONT_SIZE = 20
+AXIS_LABEL_FONT_SIZE = 16
+TICK_LABEL_FONT_SIZE = 13
+COLORBAR_LABEL_FONT_SIZE = 15
+COLORBAR_TICK_LABEL_FONT_SIZE = 12
+
 
 # -------------------------------------------------------------------------
 # Small plotting / coordinate helpers
@@ -206,6 +213,30 @@ def _extract_m1_support(binder: SheraBinder) -> np.ndarray:
     except AttributeError:
         transmission = binder.telescope.optics.aperture.transmission
     return np.asarray(transmission, dtype=float) > 0.0
+
+
+def _apply_axis_typography(ax: plt.Axes) -> None:
+    """Apply report-tunable typography to one Matplotlib axis."""
+
+    ax.title.set_fontfamily(FONT_FAMILY)
+    ax.title.set_fontsize(TITLE_FONT_SIZE)
+    ax.xaxis.label.set_fontfamily(FONT_FAMILY)
+    ax.xaxis.label.set_fontsize(AXIS_LABEL_FONT_SIZE)
+    ax.yaxis.label.set_fontfamily(FONT_FAMILY)
+    ax.yaxis.label.set_fontsize(AXIS_LABEL_FONT_SIZE)
+    ax.tick_params(axis="both", labelsize=TICK_LABEL_FONT_SIZE)
+    for label in [*ax.get_xticklabels(), *ax.get_yticklabels()]:
+        label.set_fontfamily(FONT_FAMILY)
+
+
+def _apply_colorbar_typography(cbar: Any) -> None:
+    """Apply report-tunable typography to one Matplotlib colorbar."""
+
+    cbar.ax.yaxis.label.set_fontfamily(FONT_FAMILY)
+    cbar.ax.yaxis.label.set_fontsize(COLORBAR_LABEL_FONT_SIZE)
+    cbar.ax.tick_params(labelsize=COLORBAR_TICK_LABEL_FONT_SIZE)
+    for label in cbar.ax.get_yticklabels():
+        label.set_fontfamily(FONT_FAMILY)
 
 
 def _neutralize_detector_downsample_layers(system_cfg: dict[str, Any]) -> None:
@@ -433,8 +464,10 @@ def build_dp_opd_plot(
     ax.set_xlabel("X (cm)")
     ax.set_ylabel("Y (cm)")
     ax.set_aspect("equal")
+    _apply_axis_typography(ax)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("OPD [nm]")
+    _apply_colorbar_typography(cbar)
     fig.tight_layout()
     return fig, ax
 
@@ -479,8 +512,10 @@ def build_single_star_psf_plot(
     ax.set_xlabel("X (arcsec)")
     ax.set_ylabel("Y (arcsec)")
     ax.set_aspect("equal")
+    _apply_axis_typography(ax)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label(f"Normalized Intensity ({stretch})")
+    _apply_colorbar_typography(cbar)
     fig.tight_layout()
     return fig, ax
 
@@ -557,7 +592,7 @@ def _print_diagnostics(
 def main() -> None:
     """Render and save the two standalone figure files."""
 
-    apply_plot_defaults(figure_dpi=120)
+    apply_plot_defaults(font_family=FONT_FAMILY, figure_dpi=120)
     get_default_cmaps(bad_color="0.5", bad_alpha=1.0)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
