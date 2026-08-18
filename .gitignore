@@ -230,6 +230,10 @@ examples/recipes/full_fidelity_howfe_field_dither_20260720/family_manifest.json
 # Generated target-registry campaign instances. Keep the generator itself.
 examples/recipes/full_fidelity_algorithm_campaign_template/target_registry_no_ke_hardloworder/*.yaml
 
+# Historical/generated full-fidelity campaign instances.
+examples/recipes/full_fidelity_algorithm_campaign_template/full_fidelity_zernike_2x2_self_correction_hpc_v1_eigen_info_damped.yaml
+examples/recipes/observation_bias_campaign_template/nonzero_wfe_recovered20_ke1p0nm_8draw_6block.yaml
+
 # Materialized HPC campaign/shard trees.
 work/full_fidelity_condition_draw_shards/
 work/full_fidelity_target_registry_*_shards/
