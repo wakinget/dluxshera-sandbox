@@ -1,0 +1,131 @@
+system:
+  preset: SHERA_TESTBED_3P
+#  detector:
+#    model: HWK4123
+#    layers:
+#      - name: downsample
+#        kind: Downsample
+#        kernel_size: 3
+  detector:
+    model: GSENSE2020BSI
+    layers:
+      - name: downsample
+        kind: Downsample
+        kernel_size: 3
+      - name: pixel_offsets
+        kind: ApplyPixelOffsets
+        dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
+        dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
+      - name: pixel_response
+        kind: ApplyPixelResponse
+        prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
+      - name: jitter
+        kind: ApplyJitter
+
+experiment:
+  kind: prescribed_mc
+  notes: "Astrometry Monte Carlo test."
+  seed: 42
+
+  monte_carlo:
+    n_runs: 2
+    run_id_prefix: mc
+    results_filename: results.csv
+    results_orientation: col    # col | row
+    run_plan: null
+    reuse_fim: true
+
+  optimizer:
+    kind: sgd   # sgd | adam
+    loss: nll   # map | nll
+    n_iter: 50
+    base_lr: 0.5
+    kwargs: {} # Additional kwargs for optimizer.
+    # sgd: {momentum: 0.1, nesterov: true}
+    # adam: {"b1": 0.9, "b2": 0.999, "eps": 1e-8}
+
+  eigenmodes:
+    enable: true
+    whiten: true
+    truncate_k: null
+    truncate_by_eigval: null
+
+  # Optional alternate system used only by the inference model.
+  # If omitted, inference should inherit the resolved top-level system.
+#  inference_system:
+#    preset: SHERA_TESTBED_3P
+#    detector:
+#      model: GSENSE2020BSI
+#      layers:
+#        - name: downsample
+#          kind: Downsample
+#          kernel_size: 3
+#        - name: pixel_offsets
+#          kind: ApplyPixelOffsets
+#          dx_path: src/dluxshera/data/pixel_offsets/dx_baseline.fits
+#          dy_path: src/dluxshera/data/pixel_offsets/dy_baseline.fits
+#          knowledge_error:
+#            model: gaussian # gaussian | uniform
+#            scale: 1e-3
+#        - name: pixel_response
+#          kind: ApplyPixelResponse
+#          prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
+#          knowledge_error:
+#            model: gaussian
+#            scale: 1e-3
+
+  infer_keys:
+    - source.separation_as
+    - source.position_angle_deg
+    - source.x_position_as
+    - source.y_position_as
+    - source.log_flux_total
+    - source.contrast
+    - optics.plate_scale_as_per_pix
+    - optics.primary.zernike_coeffs_nm
+    - optics.secondary.zernike_coeffs_nm
+
+  noise:
+    enabled: true
+    photon_noise: true
+    read_noise: false
+    dark_current: false
+
+  outputs:
+    outdir: null
+    plots: true
+    save_results: true
+
+  init:
+    sampling: prior # prior | explicit
+    # prior: Initial model sampled with priors around truth.
+    # explicit: Initial model uses explicit values below, any omitted values default to truth.
+
+  priors:
+    source.separation_as:
+      dist: Normal
+      sigma: 1.0e-4
+    source.position_angle_deg:
+      dist: Uniform
+      sigma: 1.0e-3
+    source.x_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.y_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.log_flux_total:
+      dist: LogNormal
+      sigma: 1.0e-3
+    source.contrast:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.plate_scale_as_per_pix:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.primary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
+    optics.secondary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0

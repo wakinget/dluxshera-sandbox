@@ -16,11 +16,17 @@ from typing import TYPE_CHECKING
 from .losses import gaussian_image_nll
 from .run_artifacts import _now_iso_local_ms, save_run
 from .preconditioning import PreconditioningConfig, compute_precond_vectors
+from .schedules import (
+    build_scalar_lr_schedule,
+    build_schedule_factor_history,
+    validate_optimizer_schedule_config,
+)
 
 from ..systems.three_plane import SheraThreePlaneConfig
 from ..systems.two_plane import SheraTwoPlaneConfig
+from ..config import resolve_config
 from ..params.spec import ParamSpec, ParamKey
-from ..params.store import ParameterStore, strip_structural, subset_store
+from ..params.store import ParameterStore, subset_store
 from ..params.packing import (
     build_index_map,
     pack_params as store_pack_params,
@@ -28,8 +34,7 @@ from ..params.packing import (
 )
 
 if TYPE_CHECKING:
-    from ..systems.three_plane import SheraThreePlaneBinder
-    from ..systems.two_plane import SheraTwoPlaneBinder
+    from ..systems import SheraBinder
 
 
 def _build_artifacts_mapping(
@@ -57,6 +62,75 @@ def _build_artifacts_mapping(
 
     return artifacts or None
 
+
+@dataclass(frozen=True)
+class EarlyStoppingConfig:
+    enabled: bool = False
+    min_iter: int = 0
+    patience: int = 5
+    loss_rtol: float | None = None
+    loss_atol: float | None = None
+    step_atol: float | None = None
+    grad_norm_atol: float | None = None
+    require_finite_loss: bool = True
+    restore_best: bool = False
+    monitor: str = "loss"
+
+
+def normalize_early_stopping_config(
+    cfg: Mapping[str, Any] | EarlyStoppingConfig | None,
+    *,
+    path: str = "optimizer.early_stopping",
+) -> EarlyStoppingConfig:
+    if cfg is None:
+        return EarlyStoppingConfig()
+    if isinstance(cfg, EarlyStoppingConfig):
+        return cfg
+    if not isinstance(cfg, Mapping):
+        raise ValueError(f"{path} must be a mapping when provided.")
+    data = dict(cfg)
+    allowed = {
+        "enabled",
+        "min_iter",
+        "patience",
+        "loss_rtol",
+        "loss_atol",
+        "step_atol",
+        "grad_norm_atol",
+        "require_finite_loss",
+        "restore_best",
+        "monitor",
+    }
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(f"{path} contains unsupported keys: {', '.join(unknown)}.")
+    enabled = bool(data.get("enabled", False))
+    min_iter = int(data.get("min_iter", 0))
+    patience = int(data.get("patience", 5))
+    if min_iter < 0:
+        raise ValueError(f"{path}.min_iter must be >= 0.")
+    if patience <= 0:
+        raise ValueError(f"{path}.patience must be > 0.")
+    monitor = str(data.get("monitor", "loss"))
+    if monitor != "loss":
+        raise ValueError(f"{path}.monitor currently supports only 'loss'.")
+    def _optf(k):
+        v = data.get(k)
+        if v is None:
+            return None
+        value = float(v)
+        if not onp.isfinite(value) or value < 0.0:
+            raise ValueError(f"{path}.{k} must be finite and >= 0.")
+        return value
+    return EarlyStoppingConfig(
+        enabled=enabled, min_iter=min_iter, patience=patience,
+        loss_rtol=_optf("loss_rtol"), loss_atol=_optf("loss_atol"),
+        step_atol=_optf("step_atol"), grad_norm_atol=_optf("grad_norm_atol"),
+        require_finite_loss=bool(data.get("require_finite_loss", True)),
+        restore_best=bool(data.get("restore_best", False)),
+        monitor=monitor,
+    )
+
 ############################
 # Exports
 ############################
@@ -72,6 +146,7 @@ __all__ = [
     "make_loss_fn",
     "make_image_nll_fn",
     "make_binder_nll_fn",
+    "diagnose_first_step",
 
     # simple θ–space optimizer
     "run_simple_gd",
@@ -88,6 +163,12 @@ __all__ = [
     # reparameterisation utils
     "generate_fim_labels",
     "map_labels_to_keys",
+    "build_fim_diagonal_preconditioner",
+    "build_scalar_lr_schedule",
+    "build_schedule_factor_history",
+    "validate_optimizer_schedule_config",
+    "EarlyStoppingConfig",
+    "normalize_early_stopping_config",
 ]
 
 
@@ -284,7 +365,7 @@ def make_loss_fn(
 # NLL -> Negative Log-Likelihood
 def make_image_nll_fn(
     cfg: SheraThreePlaneConfig,
-    inference_spec: ParamSpec,
+    forward_spec: ParamSpec,
     base_store: ParameterStore,
     infer_keys: Sequence[ParamKey],
     data: np.ndarray,
@@ -303,9 +384,9 @@ def make_image_nll_fn(
     ----------
     cfg
         Structural SheraThreePlaneConfig (testbed vs flight, etc.).
-    inference_spec
-        ParamSpec describing the inference-space keys
-        (typically `build_inference_spec_basic()`).
+    forward_spec
+        Full forward ParamSpec catalog. Inference-space layout is defined by
+        ``forward_spec.subset(infer_keys)``.
     base_store
         ParameterStore providing a baseline set of parameter values.
         This is the state we *overlay* when unpacking theta.
@@ -322,7 +403,7 @@ def make_image_nll_fn(
     reduce
         "sum" or "mean" reduction over pixels inside the NLL kernels.
     build_model_fn
-        Callable (cfg, inference_spec, store) -> model. If None, a
+        Callable (cfg, forward_spec, store) -> model. If None, a
         default Shera three-plane builder is imported lazily.
 
     Returns
@@ -332,10 +413,10 @@ def make_image_nll_fn(
         Signature: loss_fn(theta) -> scalar.
     theta0
         Initial packed parameter vector constructed from
-        (inference_spec, base_store, infer_keys).
+        (forward_spec.subset(infer_keys), base_store).
     """
-    # Subset spec to just the keys we want to infer
-    sub_spec = inference_spec.subset(infer_keys)
+    # Inference layout is derived directly from the forward spec.
+    sub_spec = forward_spec.subset(infer_keys)
 
     # Pack base_store → theta0 (this defines ordering of infer_keys)
     theta0 = store_pack_params(sub_spec, base_store)
@@ -368,8 +449,8 @@ def make_image_nll_fn(
         # NOTE: unpack_params(spec_subset, theta, base_store)
         store_theta = store_unpack_params(sub_spec, theta, base_store)
 
-        # Build model from cfg + (inference_spec, store_theta)
-        model = build_model_fn(cfg, inference_spec, store_theta)
+        # Build model from cfg + (forward_spec, store_theta)
+        model = build_model_fn(cfg, forward_spec, store_theta)
 
         # Evaluate loss
         return _model_loss(model, data, var)
@@ -438,12 +519,27 @@ def make_binder_nll_fn(
 
     def theta_to_store_delta(theta: np.ndarray) -> ParameterStore:
         full_store = store_unpack_params(sub_spec, theta, base_forward_store)
-        # Protect binder.model from structural keys while keeping fast path intact.
-        structural_keys = binder.structural_store_keys()
-        return strip_structural(
-            subset_store(full_store, infer_keys),
-            structural_keys=structural_keys,
-        )
+        store_delta = subset_store(full_store, infer_keys)
+
+        # Keep binder.model on the non-structural fast path when the binder
+        # exposes the full convenience API, but allow lightweight binder test
+        # doubles that only advertise structural keys.
+        strip_structural = getattr(binder, "strip_structural", None)
+        if callable(strip_structural):
+            return strip_structural(store_delta)
+
+        structural_store_keys = getattr(binder, "structural_store_keys", None)
+        if callable(structural_store_keys):
+            structural = structural_store_keys()
+            if structural:
+                filtered = {
+                    key: value
+                    for key, value in store_delta.items()
+                    if key not in structural
+                }
+                return ParameterStore.from_dict(filtered)
+
+        return store_delta
 
     def loss_fn(theta: np.ndarray) -> np.ndarray:
         store_delta = theta_to_store_delta(theta)
@@ -476,7 +572,7 @@ def make_binder_image_nll_fn(
     Callable[[np.ndarray], np.ndarray], np.ndarray, Callable[[np.ndarray], np.ndarray]
 ]:
     """
-    Canonical θ-space image NLL using :class:`SheraThreePlaneBinder`.
+    Canonical θ-space image NLL using :class:`SheraBinder`.
 
     The returned loss is intentionally explicit:
 
@@ -492,7 +588,7 @@ def make_binder_image_nll_fn(
     data, var
         Observed image and per-pixel variance.
     binder
-        Optional pre-built :class:`SheraThreePlaneBinder`. If omitted a binder
+        Optional pre-built :class:`SheraBinder`. If omitted a binder
         is constructed using ``cfg``, ``forward_spec``, and ``base_forward_store``.
     noise_model, reduce
         Noise model selector and reduction for the NLL.
@@ -504,8 +600,7 @@ def make_binder_image_nll_fn(
         unexpectedly non-zero). Set to ``False`` for the standard
         loss-only tuple.
     """
-    from ..systems.three_plane import SheraThreePlaneBinder
-    from ..systems.two_plane import SheraTwoPlaneBinder
+    from ..systems import SheraBinder
 
     if binder is not None:
         mismatches = []
@@ -532,21 +627,37 @@ def make_binder_image_nll_fn(
             return_predict_fn=return_predict_fn,
         )
 
-    if isinstance(cfg, SheraThreePlaneConfig):
-        binder_obj = SheraThreePlaneBinder(
+    if isinstance(cfg, Mapping):
+        resolved_cfg = resolve_config(cfg)
+        if "system" not in resolved_cfg:
+            raise ValueError(
+                "cfg must contain a top-level 'system' block when provided as a mapping."
+            )
+        cfg = {"system": resolved_cfg["system"]}
+
+    if isinstance(cfg, Mapping):
+        binder_obj = SheraBinder(
+            cfg,
+            forward_spec,
+            base_forward_store,
+        )
+    elif isinstance(cfg, SheraThreePlaneConfig):
+        binder_obj = SheraBinder(
             cfg,
             forward_spec,
             base_forward_store,
         )
     elif isinstance(cfg, SheraTwoPlaneConfig):
-        binder_obj = SheraTwoPlaneBinder(
+        binder_obj = SheraBinder(
             cfg,
             forward_spec,
             base_forward_store,
         )
     else:
         raise TypeError(
-            "cfg must be a SheraThreePlaneConfig or SheraTwoPlaneConfig for binder construction"
+            "cfg must be either a resolved nested config mapping (system/experiment schema) "
+            "or a SheraThreePlaneConfig/SheraTwoPlaneConfig dataclass. "
+            "Legacy flat config schemas are not supported."
         )
 
     return make_binder_nll_fn(
@@ -584,7 +695,7 @@ def loss_canonical(
         SheraThreePlaneConfig describing the structural optical configuration.
     forward_spec : ParamSpec
         Forward-model ParamSpec describing *all* parameters in the model, both
-        inferred and fixed. This is what the SheraThreePlaneBinder validates
+        inferred and fixed. This is what the SheraBinder validates
         against.
     infer_keys : tuple[str, ...]
         Keys of the parameters that live in θ-space (and their ordering).
@@ -637,6 +748,54 @@ def _resolve_run_dir(
     return resolved, resolved_run_id
 
 
+def _history_to_schedule(
+    values: Sequence[float],
+    *,
+    path: str,
+) -> tuple[onp.ndarray, Callable[[np.ndarray], np.ndarray]]:
+    """Convert a per-step scalar history into a clipped Optax schedule."""
+
+    history = onp.asarray(values, dtype=float).reshape(-1)
+    if history.size == 0:
+        raise ValueError(f"{path} must contain at least one value.")
+    if not onp.all(onp.isfinite(history)):
+        raise ValueError(f"{path} must contain only finite values.")
+    if onp.any(history < 0.0):
+        raise ValueError(f"{path} must contain only non-negative values.")
+
+    history_jax = np.asarray(history)
+    last_index = int(history.size - 1)
+
+    def schedule_fn(step: np.ndarray) -> np.ndarray:
+        clipped = np.clip(step, 0, last_index)
+        return history_jax[clipped]
+
+    return history, schedule_fn
+
+
+def _completed_step_history(
+    values: Sequence[float],
+    *,
+    history_name: str,
+    actual_steps: int,
+    configured_steps: int,
+    early_stopping: Mapping[str, Any],
+) -> onp.ndarray:
+    """Return one scalar per completed optimizer update."""
+
+    trace = onp.asarray(values, dtype=float).reshape(-1)
+    if trace.shape[0] < actual_steps:
+        raise ValueError(
+            f"History length mismatch for {history_name}: expected "
+            f"actual_steps={actual_steps}, got {trace.shape[0]}. "
+            f"reference_n_iter={configured_steps}, early_stopping="
+            f"{bool(early_stopping.get('enabled', False))}, "
+            f"stop_reason={early_stopping.get('stop_reason')}, "
+            f"stopped_early={early_stopping.get('stopped_early')}."
+        )
+    return trace[:actual_steps]
+
+
 def _gd_loop(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta0: np.ndarray,
@@ -645,6 +804,7 @@ def _gd_loop(
     num_steps: int = 100,
     optimizer: Optional[optax.GradientTransformation] = None,
     show_progress: bool = True,
+    early_stopping: EarlyStoppingConfig | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
     Run a pure in-memory gradient-descent loop in θ-space.
@@ -709,13 +869,22 @@ def _gd_loop(
     grad_norms = []
     step_norms = []
 
+    stop_cfg = early_stopping or EarlyStoppingConfig()
     iterator = range(num_steps)
     if show_progress:
         iterator = tqdm(iterator)
 
-    for _ in iterator:
+    stopped_early = False
+    stop_reason: str | None = None
+    stop_iteration: int | None = None
+    for step_idx in iterator:
         loss, g = jax.value_and_grad(loss_fn)(theta)
         losses.append(loss)
+        if stop_cfg.enabled and stop_cfg.require_finite_loss and not bool(np.isfinite(loss)):
+            stopped_early = True
+            stop_reason = "non_finite_loss"
+            stop_iteration = int(step_idx)
+            break
 
         updates, opt_state = optimizer.update(g, opt_state, params=theta)
         theta = optax.apply_updates(theta, updates)
@@ -723,6 +892,27 @@ def _gd_loop(
         grad_norms.append(np.linalg.norm(g))
         step_norms.append(np.linalg.norm(updates))
         theta_history.append(theta)
+        if stop_cfg.enabled and step_idx + 1 >= max(stop_cfg.min_iter, stop_cfg.patience):
+            recent_losses = losses[-(stop_cfg.patience + 1):]
+            if len(recent_losses) >= stop_cfg.patience + 1:
+                l_old = recent_losses[0]
+                l_new = recent_losses[-1]
+                delta = np.abs(l_old - l_new)
+                rel = delta / np.maximum(np.abs(l_old), 1.0)
+                if stop_cfg.loss_atol is not None and bool(delta <= stop_cfg.loss_atol):
+                    stopped_early, stop_reason, stop_iteration = True, "loss_atol_patience", int(step_idx)
+                    break
+                if stop_cfg.loss_rtol is not None and bool(rel <= stop_cfg.loss_rtol):
+                    stopped_early, stop_reason, stop_iteration = True, "loss_rtol_patience", int(step_idx)
+                    break
+            if stop_cfg.step_atol is not None and len(step_norms) >= stop_cfg.patience:
+                if bool(np.all(np.asarray(step_norms[-stop_cfg.patience:]) <= stop_cfg.step_atol)):
+                    stopped_early, stop_reason, stop_iteration = True, "step_atol_patience", int(step_idx)
+                    break
+            if stop_cfg.grad_norm_atol is not None and len(grad_norms) >= stop_cfg.patience:
+                if bool(np.all(np.asarray(grad_norms[-stop_cfg.patience:]) <= stop_cfg.grad_norm_atol)):
+                    stopped_early, stop_reason, stop_iteration = True, "grad_norm_atol_patience", int(step_idx)
+                    break
 
     losses.append(loss_fn(theta))
 
@@ -734,6 +924,33 @@ def _gd_loop(
         trace["grad_norm"] = np.stack(grad_norms)
     if step_norms:
         trace["step_norm"] = np.stack(step_norms)
+    loss_arr = np.stack(losses)
+    best_iter = int(onp.nanargmin(onp.asarray(loss_arr))) if loss_arr.size else None
+    trace["early_stopping"] = {
+        "enabled": bool(stop_cfg.enabled),
+        "stopped_early": bool(stopped_early),
+        "triggered": bool(stopped_early),
+        "stop_iteration": stop_iteration,
+        "final_iteration_index": (
+            None if len(theta_history) <= 1 else int(len(theta_history) - 2)
+        ),
+        "configured_n_iter": int(num_steps),
+        "configured_max_iterations": int(num_steps),
+        "actual_n_iter": int(len(theta_history) - 1),
+        "actual_optimizer_steps": int(len(theta_history) - 1),
+        "stop_reason": stop_reason,
+        "best_iteration": best_iter,
+        "best_loss": float(loss_arr[best_iter]) if best_iter is not None else None,
+        "final_loss": float(loss_arr[-1]) if loss_arr.size else None,
+        "min_iter": int(stop_cfg.min_iter),
+        "patience": int(stop_cfg.patience),
+        "loss_rtol": stop_cfg.loss_rtol,
+        "loss_atol": stop_cfg.loss_atol,
+        "step_atol": stop_cfg.step_atol,
+        "grad_norm_atol": stop_cfg.grad_norm_atol,
+    }
+    if stop_cfg.restore_best and best_iter is not None and 0 <= best_iter < len(theta_history):
+        theta = theta_history[best_iter]
 
     return theta, trace
 
@@ -889,6 +1106,9 @@ def run_gd_with_artifacts(
     learning_rate: float = 1e-2,
     num_steps: int = 100,
     optimizer: Optional[optax.GradientTransformation] = None,
+    scalar_lr_history: Optional[Sequence[float]] = None,
+    schedule_factor_history: Optional[Sequence[float]] = None,
+    schedule_meta: Optional[Mapping[str, Any]] = None,
     index_map: Optional[Mapping[str, Any]] = None,
     run_dir: Optional[str | Path] = None,
     runs_dir: Optional[str | Path] = None,
@@ -900,6 +1120,7 @@ def run_gd_with_artifacts(
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
     show_progress: bool = True,
+    early_stopping: Mapping[str, Any] | EarlyStoppingConfig | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Run θ-space gradient descent and assemble canonical optimization artifacts.
@@ -990,6 +1211,7 @@ def run_gd_with_artifacts(
     docs/architecture/optimization_artifacts_and_plotting.md : Artifact schema.
     docs/architecture/inference_and_loss.md : Inference/loss pipeline context.
     """
+    stop_cfg = normalize_early_stopping_config(early_stopping)
     theta, full_trace = _gd_loop(
         loss_fn,
         theta0,
@@ -997,11 +1219,14 @@ def run_gd_with_artifacts(
         num_steps=num_steps,
         optimizer=optimizer,
         show_progress=show_progress,
+        early_stopping=stop_cfg,
     )
 
+    early_stopping_result = dict(full_trace.get("early_stopping", {}))
+    actual_steps = int(early_stopping_result.get("actual_n_iter", full_trace["theta"].shape[0] - 1))
     history = {
-        "loss": full_trace["loss"][:-1],
-        "theta": full_trace["theta"][1:],
+        "loss": full_trace["loss"][:actual_steps],
+        "theta": full_trace["theta"][1 : actual_steps + 1],
     }
 
     trace: Dict[str, np.ndarray] = {
@@ -1009,10 +1234,32 @@ def run_gd_with_artifacts(
         "theta": history["theta"],
     }
     if "grad_norm" in full_trace:
-        trace["grad_norm"] = full_trace["grad_norm"]
+        trace["grad_norm"] = full_trace["grad_norm"][:actual_steps]
     if "step_norm" in full_trace:
-        trace["step_norm"] = full_trace["step_norm"]
+        trace["step_norm"] = full_trace["step_norm"][:actual_steps]
+    if "early_stopping" in full_trace:
+        history["early_stopping"] = full_trace["early_stopping"]
     trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
+    if scalar_lr_history is not None:
+        scalar_lr_trace = _completed_step_history(
+            scalar_lr_history,
+            history_name="scalar_lr_history",
+            actual_steps=actual_steps,
+            configured_steps=int(num_steps),
+            early_stopping=early_stopping_result,
+        )
+        trace["scalar_lr"] = scalar_lr_trace
+        history["scalar_lr"] = scalar_lr_trace
+    if schedule_factor_history is not None:
+        factor_trace = _completed_step_history(
+            schedule_factor_history,
+            history_name="schedule_factor_history",
+            actual_steps=actual_steps,
+            configured_steps=int(num_steps),
+            early_stopping=early_stopping_result,
+        )
+        trace["schedule_factor"] = factor_trace
+        history["schedule_factor"] = factor_trace
 
     artifacts_enabled = run_dir is not None or runs_dir is not None
     resolved_run_dir = None
@@ -1033,8 +1280,13 @@ def run_gd_with_artifacts(
             "name": "sgd" if optimizer is None else type(optimizer).__name__,
             "learning_rate": learning_rate,
             "num_steps": num_steps,
+            "configured_num_steps": int(num_steps),
+            "actual_num_steps": int(actual_steps),
+            "early_stopping": early_stopping_result,
         },
     }
+    if schedule_meta is not None:
+        base_meta["optimizer"]["schedule"] = dict(schedule_meta)
     if index_map is not None:
         base_meta["theta"]["index_map"] = index_map
 
@@ -1060,6 +1312,7 @@ def run_gd_with_artifacts(
         "num_steps_completed": int(loss_array.size),
         "loss_init": loss_init,
         "loss_final": loss_final,
+        "early_stopping": early_stopping_result,
     }
 
     if extra_summary:
@@ -1122,6 +1375,9 @@ def run_shera_gd(
     learning_rate: float = 0.5,
     lr_vec: Optional[np.ndarray] = None,
     num_steps: int = 100,
+    scalar_lr_history: Optional[Sequence[float]] = None,
+    schedule_factor_history: Optional[Sequence[float]] = None,
+    schedule_meta: Optional[Mapping[str, Any]] = None,
     optimizer_kind: str = "sgd",
     optimizer_kwargs: Optional[Mapping[str, Any]] = None,
     run_dir: Optional[str | Path] = None,
@@ -1134,6 +1390,7 @@ def run_shera_gd(
     extra_summary: Optional[Mapping[str, Any]] = None,
     return_artifacts: bool = True,
     show_progress: bool = True,
+    early_stopping: Mapping[str, Any] | EarlyStoppingConfig | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]] | Tuple[np.ndarray, Dict[str, np.ndarray], Optional[dict]]:
     """
     Shera-specific front end for θ-space gradient descent.
@@ -1221,7 +1478,21 @@ def run_shera_gd(
     optimizer: optax.GradientTransformation | None = None
 
     if optimizer_kind == "sgd":
-        if lr_vec is not None:
+        if scalar_lr_history is not None:
+            _, scalar_lr_schedule = _history_to_schedule(
+                scalar_lr_history,
+                path="scalar_lr_history",
+            )
+            if lr_vec is not None:
+                lr_vec_jax = np.asarray(lr_vec)
+
+                def scheduled_lr(step: np.ndarray) -> np.ndarray:
+                    return scalar_lr_schedule(step) * lr_vec_jax
+
+                optimizer = optax.sgd(learning_rate=scheduled_lr, **opt_kwargs)
+            else:
+                optimizer = optax.sgd(learning_rate=scalar_lr_schedule, **opt_kwargs)
+        elif lr_vec is not None:
             scaled_lr_vec = learning_rate * np.asarray(lr_vec)
             optimizer = optax.sgd(learning_rate=scaled_lr_vec, **opt_kwargs)
         else:
@@ -1230,12 +1501,23 @@ def run_shera_gd(
         txs = [optax.scale_by_adam(**opt_kwargs)]
         if lr_vec is not None:
             txs.append(_scale_by_vector(lr_vec))
-        txs.append(optax.scale(-learning_rate))
+        if scalar_lr_history is not None:
+            _, scalar_lr_schedule = _history_to_schedule(
+                scalar_lr_history,
+                path="scalar_lr_history",
+            )
+            txs.append(optax.scale_by_learning_rate(scalar_lr_schedule))
+        else:
+            txs.append(optax.scale(-learning_rate))
         optimizer = optax.chain(*txs)
     else:
         raise ValueError(
             f"Unsupported optimizer_kind={optimizer_kind!r}; expected 'sgd' or 'adam'."
         )
+
+    if scalar_lr_history is not None and schedule_factor_history is None:
+        scalar_lr_array = onp.asarray(scalar_lr_history, dtype=float)
+        schedule_factor_history = scalar_lr_array / float(learning_rate)
 
     return run_gd_with_artifacts(
         loss_fn,
@@ -1243,6 +1525,9 @@ def run_shera_gd(
         learning_rate=learning_rate,
         num_steps=num_steps,
         optimizer=optimizer,
+        scalar_lr_history=scalar_lr_history,
+        schedule_factor_history=schedule_factor_history,
+        schedule_meta=schedule_meta,
         index_map=index_map,
         run_dir=run_dir,
         runs_dir=runs_dir,
@@ -1254,7 +1539,116 @@ def run_shera_gd(
         extra_summary=extra_summary,
         return_artifacts=return_artifacts,
         show_progress=show_progress,
+        early_stopping=early_stopping,
     )
+
+
+def diagnose_first_step(
+    *,
+    loss_fn: Callable[[np.ndarray], np.ndarray],
+    theta0: np.ndarray,
+    learning_rate: float = 1e-2,
+    lr_vec: Optional[np.ndarray] = None,
+    optimizer_kind: str = "sgd",
+    index_map: Optional[Mapping[str, Any]] = None,
+    verbose: bool = False,
+    top_k: int = 10,
+) -> dict[str, object]:
+    """
+    Minimal first-step diagnostic for θ-space optimizers.
+
+    Evaluates loss/grad at ``theta0`` and simulates the first update using the
+    same SGD/Adam wrappers as ``run_shera_gd``. Returns a payload with finiteness
+    flags and the proposed ``theta1``. When ``verbose`` is ``True`` and any
+    non-finite values are detected, offending indices (and IndexMap labels when
+    provided) are printed to stderr/stdout.
+    """
+    theta0 = np.asarray(theta0)
+    loss0 = np.asarray(loss_fn(theta0))
+    grad_fn = jax.grad(lambda th: np.asarray(loss_fn(th)))
+    grad0 = np.asarray(grad_fn(theta0))
+
+    def _print_nonfinite(arr, label):
+        mask = ~np.isfinite(arr)
+        if not mask.any():
+            return
+        idx = np.where(mask)[0]
+        print(f"[diagnose_first_step] non-finite {label} at indices {idx}")
+        if index_map and isinstance(index_map, Mapping):
+            entries = index_map.get("entries", [])
+            for i in idx:
+                for entry in entries:
+                    if entry.get("start") <= i < entry.get("stop"):
+                        name = entry.get("name", "unknown")
+                        print(f"  index {i} -> {name}")
+                        break
+
+    opt_kwargs = {}
+    optimizer: optax.GradientTransformation
+
+    if optimizer_kind == "adam":
+        def _scale_by_vector(vec: np.ndarray) -> optax.GradientTransformation:
+            vec = np.asarray(vec)
+            def init_fn(_):
+                return None
+            def update_fn(updates, state, params=None):
+                return jax.tree_util.tree_map(lambda g: g * vec, updates), state
+            return optax.GradientTransformation(init_fn, update_fn)
+
+        txs = [optax.scale_by_adam(**opt_kwargs)]
+        if lr_vec is not None:
+            txs.append(_scale_by_vector(lr_vec))
+        txs.append(optax.scale(-learning_rate))
+        optimizer = optax.chain(*txs)
+    else:
+        if lr_vec is not None:
+            optimizer = optax.sgd(learning_rate=learning_rate * np.asarray(lr_vec), **opt_kwargs)
+        else:
+            optimizer = optax.sgd(learning_rate=learning_rate, **opt_kwargs)
+
+    opt_state = optimizer.init(theta0)
+    updates, _ = optimizer.update(grad0, opt_state, params=theta0)
+    theta1 = optax.apply_updates(theta0, updates)
+    loss1 = np.asarray(loss_fn(theta1))
+    delta = theta1 - theta0
+
+    if verbose:
+        if not np.isfinite(loss0):
+            print("[diagnose_first_step] non-finite loss0")
+        if not np.isfinite(loss1):
+            print("[diagnose_first_step] non-finite loss1")
+        _print_nonfinite(grad0, "grad0")
+        _print_nonfinite(theta1, "theta1")
+
+    # Top-k magnitude helpers
+    def _top_entries(arr):
+        flat = np.abs(arr).ravel()
+        if flat.size == 0:
+            return []
+        k = min(top_k, flat.size)
+        idx_sorted = np.argsort(flat)[::-1][:k]
+        return [(int(i), float(arr.ravel()[i])) for i in idx_sorted]
+
+    return {
+        "loss0": float(loss0),
+        "loss0_finite": bool(np.isfinite(loss0)),
+        "grad0": grad0,
+        "grad0_finite": bool(np.all(np.isfinite(grad0))),
+        "theta0_min": float(np.min(theta0)),
+        "theta0_max": float(np.max(theta0)),
+        "theta1": theta1,
+        "theta1_finite": bool(np.all(np.isfinite(theta1))),
+        "loss1": float(loss1),
+        "loss1_finite": bool(np.isfinite(loss1)),
+        "grad0_min": float(np.min(grad0)),
+        "grad0_max": float(np.max(grad0)),
+        "delta_min": float(np.min(delta)),
+        "delta_max": float(np.max(delta)),
+        "lr_vec_min": float(np.min(lr_vec)) if lr_vec is not None else None,
+        "lr_vec_max": float(np.max(lr_vec)) if lr_vec is not None else None,
+        "top_grad": _top_entries(grad0),
+        "top_delta": _top_entries(delta),
+    }
 
 
 def run_image_gd(
@@ -1283,7 +1677,7 @@ def run_image_gd(
     """
     Run gradient descent in θ-space for image-based NLL using the Shera model.
 
-    Now uses SheraThreePlaneBinder + `make_binder_image_nll_fn` under the hood.
+    Now uses SheraBinder + `make_binder_image_nll_fn` under the hood.
 
     Parameters
     ----------
@@ -1460,7 +1854,7 @@ def run_image_gd(
 def generate_fim_labels(
     infer_keys: Sequence[ParamKey],
     *,
-    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | None,
+    cfg: SheraThreePlaneConfig | SheraTwoPlaneConfig | Mapping[str, Any] | None,
     store: ParameterStore | None = None,
 ) -> list[str]:
     """
@@ -1472,7 +1866,7 @@ def generate_fim_labels(
         Ordered parameter keys that define the packed θ vector.
     cfg :
         Shera config used to resolve Zernike Noll indices for
-        ``primary.zernike_coeffs_nm`` and ``secondary.zernike_coeffs_nm``.
+        ``optics.primary.zernike_coeffs_nm`` and ``optics.secondary.zernike_coeffs_nm``.
     store :
         Optional ParameterStore providing concrete values. When present, this
         is used to infer vector lengths. If absent (or missing a key), the
@@ -1483,21 +1877,21 @@ def generate_fim_labels(
     -----
     - Scalar parameters are labeled with their key as-is.
     - Vector parameters are expanded:
-        * ``primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
+        * ``optics.primary.zernike_coeffs_nm`` → ``M1 Z{n}`` using
           ``cfg.primary_noll_indices``.
-        * ``secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
+        * ``optics.secondary.zernike_coeffs_nm`` → ``M2 Z{n}`` using
           ``cfg.secondary_noll_indices``.
         * Other vectors use ``"{key}[{i}]"`` based on the inferred length.
     """
     spec = None
     translations = {
-        "system.plate_scale_as_per_pix": "Plate Scale",
-        "binary.contrast": "Contrast",
-        "binary.log_flux_total": "Log Flux",
-        "binary.x_position_as": "Binary X",
-        "binary.y_position_as": "Binary Y",
-        "binary.separation_as": "Binary Separation",
-        "binary.position_angle_deg": "Position Angle",
+        "optics.plate_scale_as_per_pix": "Plate Scale",
+        "source.contrast": "Contrast",
+        "source.log_flux_total": "Log Flux",
+        "source.x_position_as": "Binary X",
+        "source.y_position_as": "Binary Y",
+        "source.separation_as": "Binary Separation",
+        "source.position_angle_deg": "Position Angle",
     }
 
     def _vector_length(key: ParamKey) -> int | None:
@@ -1507,7 +1901,7 @@ def generate_fim_labels(
                 arr = np.asarray(value)
                 if arr.ndim > 0:
                     return int(arr.size)
-        if cfg is None:
+        if cfg is None or isinstance(cfg, Mapping):
             return None
         nonlocal spec
         if spec is None:
@@ -1537,13 +1931,21 @@ def generate_fim_labels(
             labels.append(key)
             continue
 
-        if key == "primary.zernike_coeffs_nm":
-            nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
+        if key == "optics.primary.zernike_coeffs_nm":
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", cfg)
+                nolls = optics_block.get("primary_noll_indices", ())
+            else:
+                nolls = getattr(cfg, "primary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M1 Z{n}" for n in nolls])
                 continue
-        if key == "secondary.zernike_coeffs_nm":
-            nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
+        if key == "optics.secondary.zernike_coeffs_nm":
+            if isinstance(cfg, Mapping):
+                optics_block = cfg.get("optics", cfg)
+                nolls = optics_block.get("secondary_noll_indices", ())
+            else:
+                nolls = getattr(cfg, "secondary_noll_indices", ()) if cfg is not None else ()
             if nolls:
                 labels.extend([f"M2 Z{n}" for n in nolls])
                 continue
@@ -1664,6 +2066,86 @@ def fim_theta(
 
     # We don't need any special tricks here; θ is already flat.
     return jax.hessian(loss_fn)(theta_ref)
+
+
+def build_fim_diagonal_preconditioner(
+    fim: np.ndarray,
+    *,
+    curvature_floor: float = 1e-8,
+    eps: float = 1e-12,
+    lr_clip: Optional[tuple[float, float]] = None,
+) -> dict[str, onp.ndarray | dict[str, object]]:
+    """Build the canonical primitive-theta diagonal FIM preconditioner.
+
+    This implements the convention used by the canonical astrometry recipe:
+
+    ``curvature_vec = max(diag(FIM), curvature_floor)``
+    ``lr_vec = 1 / (curvature_vec + eps)``
+
+    ``lr_vec`` is a scale vector only. ``run_shera_gd`` applies the global
+    ``learning_rate`` separately, yielding SGD updates
+    ``theta <- theta - learning_rate * lr_vec * grad``.
+    """
+
+    fim_arr = onp.asarray(fim, dtype=float)
+    if fim_arr.ndim != 2 or fim_arr.shape[0] != fim_arr.shape[1]:
+        raise ValueError("FIM must be a square matrix.")
+    if not onp.all(onp.isfinite(fim_arr)):
+        raise ValueError("FIM contains non-finite values.")
+
+    curvature_floor = float(curvature_floor)
+    eps = float(eps)
+    if curvature_floor < 0.0:
+        raise ValueError("curvature_floor must be non-negative.")
+    if eps < 0.0:
+        raise ValueError("eps must be non-negative.")
+
+    fim_sym = 0.5 * (fim_arr + fim_arr.T)
+    fim_diag = onp.diag(fim_sym)
+    curvature_floored_count = int(onp.count_nonzero(fim_diag < curvature_floor))
+    curvature_vec = onp.maximum(fim_diag, curvature_floor)
+    lr_vec_unclipped = onp.reciprocal(curvature_vec + eps)
+    lr_vec = onp.array(lr_vec_unclipped, copy=True)
+    lr_clip_applied_count = 0
+    if lr_clip is not None:
+        lr_min, lr_max = lr_clip
+        lr_min = float(lr_min)
+        lr_max = float(lr_max)
+        if lr_min <= 0.0:
+            raise ValueError("lr_clip lower bound must be positive.")
+        if lr_max < lr_min:
+            raise ValueError("lr_clip upper bound must be >= lower bound.")
+        lr_clip_applied_count = int(
+            onp.count_nonzero((lr_vec < lr_min) | (lr_vec > lr_max))
+        )
+        lr_vec = onp.clip(lr_vec, lr_min, lr_max)
+
+    for name, arr in {
+        "fim_diag": fim_diag,
+        "curvature_vec": curvature_vec,
+        "lr_vec_unclipped": lr_vec_unclipped,
+        "lr_vec": lr_vec,
+    }.items():
+        if not onp.all(onp.isfinite(arr)):
+            raise ValueError(f"Non-finite values encountered in {name}.")
+    if onp.any(lr_vec <= 0.0):
+        raise ValueError("Preconditioning vector must be strictly positive.")
+
+    return {
+        "fim": fim_sym,
+        "fim_diag": fim_diag,
+        "curvature_vec": curvature_vec,
+        "lr_vec_unclipped": lr_vec_unclipped,
+        "lr_vec": lr_vec,
+        "config": {
+            "method": "fim_diag",
+            "curvature_floor": curvature_floor,
+            "curvature_floored_count": curvature_floored_count,
+            "eps": eps,
+            "lr_clip": None if lr_clip is None else [float(lr_clip[0]), float(lr_clip[1])],
+            "lr_clip_applied_count": lr_clip_applied_count,
+        },
+    }
 
 
 def fim_theta_shera(

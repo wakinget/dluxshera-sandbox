@@ -1,79 +1,93 @@
-"""
-Canonical astrometry retrieval recipe (Shera three-plane).
+"""Canonical astrometry retrieval recipe.
 
-This script is the primary, end-to-end onboarding example for the dLuxShera workflow.
-It is designed to be read like a Matlab script from top to bottom.
-Open this in your editor and run it.
+Configuration model
+-------------------
+This recipe uses the canonical nested config schema and resolves configuration
+in two layers:
+
+1. Preset seeds:
+   - system presets contain only top-level ``system``.
+   - experiment presets contain only top-level ``experiment``.
+2. Optional prescription file:
+   - passed via ``--prescription`` (``--config`` remains an alias).
+   - may contain ``experiment`` only, or ``experiment`` plus an optional
+     top-level ``system`` block.
+   - values in the prescription deep-merge over the preset seeds before
+     ``resolve_config()`` validates and resolves each block.
+
+The built-in ``CANONICAL_ASTROMETRY`` preset is intentionally experiment-only.
+An example full prescription lives next to this recipe at
+``examples/recipes/canonical_astrometry_prescription.yaml``.
+
+Execution flow
+--------------
+1. Load preset seeds plus optional prescription YAML/JSON.
+2. Resolve with ``resolve_config`` (preset merge + validation).
+3. Build the binder from the resolved ``system`` block.
+4. Drive inference settings from the resolved ``experiment`` block.
 
 What this recipe demonstrates
-- Building/choosing a three-plane Shera configuration and applying small overrides.
-- Constructing ParameterSpecs:
-    - a forward spec describing the simulation parameters ("forward_spec")
-    - an inference spec describing the solved-for parameters ("inference_spec")
-- Initializing a ParameterStore (values) and populating derived parameters
-  (e.g., plate scale computed from focal lengths + pixel pitch via registered
-  transforms).
-- Building a SheraThreePlaneBinder to bind parameters to optics/source/detector.
-- Generating synthetic data (optionally with noise).
-- Defining inference keys + priors, sampling an initial state from priors.
-- Defining the loss (typically NLL; MAP variants also available).
-- Running a single optimization loop and saving/plotting results using the
-  repository’s built-in artifacts + plotting utilities.
+-----------------------------
+- Choosing a three-plane Shera configuration and applying overrides.
+- Constructing a forward ParameterSpec and an inference subspec from
+  ``experiment.infer_keys``.
+- Initializing a ParameterStore from the resolved system truth values and
+  refreshing derived parameters.
+- Building a SheraBinder that dispatches source/optics/detector by kind.
+- Generating synthetic data with optional observation noise.
+- Defining inference priors and initialization from the resolved experiment
+  config.
+- Running a single optimization loop and saving plots/artifacts.
 
-Eigenmode re-parameterization (recommended default)
+Eigenmode re-parameterization
+-----------------------------
 This recipe supports an optional eigenmode parameterization of the inference
-variables. When enabled, the optimization runs in an eigen-basis derived from
-curvature information (e.g., Fisher Information Matrix), which can improve
-conditioning and convergence. You can disable eigenmodes to run in the “raw”
-parameter basis for clarity or debugging.
-
-How to use
-1) Scan the configuration + “options” block near the top (runtime, noise, eigen).
-2) Run the script top-to-bottom.
-3) Inspect the printed summary and saved artifacts/plots in the run directory.
-
-Outputs
-- A run directory containing saved artifacts (e.g., parameters, metrics, traces,
-  and optionally checkpoints), plus summary figures produced by the built-in
-  plotting utilities.
-
-Notes
-- This recipe is intentionally explicit to avoid any hidden helper layers.
-  If you want to adapt the workflow, copy this file and edit the explicit steps.
-- For deeper background, see docs on Params/Stores, inference/losses, eigenmodes,
-  and optimization artifacts in the repository documentation.
+variables. When enabled, optimization runs in an eigen-basis derived from the
+Fisher information matrix. ``experiment.eigenmodes`` provides the config
+defaults; CLI flags can still disable eigenmode optimization explicitly.
 """
 from __future__ import annotations
 
+import argparse
 import datetime
+import json
 import time
 from pathlib import Path
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.io import fits
 
 from dluxshera.inference.optimization import (
     EigenThetaMap,
+    build_fim_diagonal_preconditioner,
     fim_theta,
     generate_fim_labels,
     make_binder_nll_fn,
     map_labels_to_keys,
     run_shera_gd,
+    diagnose_first_step,
 )
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import build_param_summary, patch_summary
 from dluxshera.inference.signals import build_signals
+from dluxshera.config.io import load_user_config
+from dluxshera.config.numeric import coerce_numeric_value, normalize_optimizer_kwargs
+from dluxshera.config.resolver import resolve_config
 from dluxshera.params.packing import (
     build_eigen_index_map,
     build_index_map,
     pack_params,
     unpack_params as store_unpack_params,
 )
-from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
-from dluxshera.params.store import ParameterStore, strip_structural
+from dluxshera.params.store import ParameterStore
+from dluxshera.utils.dtype_diagnostics import print_dtype_audit
+from dluxshera.utils.noise import apply_observation_noise
+from dluxshera.utils.obs_subblock_io import write_obs_subblock_cube_fits
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
@@ -84,27 +98,20 @@ from dluxshera.plot.plotting import (
     plot_signals_grid,
 )
 from dluxshera.plot.printing import print_optimization_summary
-from dluxshera.systems.three_plane import (
-    SheraThreePlaneConfig,
-    SHERA_TESTBED_CONFIG,
-    SHERA_FLIGHT_CONFIG,
-    SheraThreePlaneBinder,
-    build_forward_spec_from_config,
-)
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.base import compose_forward_spec
 
-# ----------------------------
-# User-facing toggles (edit me)
-# ----------------------------
+##############################
+# MAIN SIMULATION PARAMETERS #
+##############################
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PRESCRIPTION = REPO_ROOT / "examples/recipes/canonical_astrometry_prescription.yaml"
+
 JAX_ENABLE_X64 = True
-RNG_SEED = 42
 FAST_MODE = False
-ADD_NOISE = True
 SAVE_PLOTS = True
 PLOT_EIGEN_SPECTRUM = True
-
-# Telescope Config Selection (9cm testbed vs 22cm flight design)
-# Options: None, SHERA_TESTBED_CONFIG / SHERA_FLIGHT_CONFIG
-CONFIG = SHERA_TESTBED_CONFIG
 
 # Eigenmode settings
 USE_EIGEN = True           # Enables re-parameterization
@@ -112,27 +119,33 @@ WHITEN_BASIS = True        # If True, scales each eigenvector by 1/sqrt(lambda)
 TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
 TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
 
-# Inference settings
-N_ITER = 40
-FAST_ITER = 30
-BASE_LR = 0.5
+DEFAULT_SEED = 42
+DEFAULT_N_ITER = 50
 
-INFER_KEYS = (
-    "binary.separation_as",
-    "binary.position_angle_deg",
-    "binary.x_position_as",
-    "binary.y_position_as",
-    "binary.log_flux_total",
-    "binary.contrast",
-    "system.plate_scale_as_per_pix",
-    "primary.zernike_coeffs_nm",
-    "secondary.zernike_coeffs_nm",  # Optionally comment this one out
+DEFAULT_FAST_ITER = 30
+DEFAULT_BASE_LR = 0.5
+
+# User may comment out any keys they wish not to include in the optimization
+DEFAULT_INFER_KEYS = (
+    # "source.separation_as",
+    "source.position_angle_deg",
+    "source.x_position_as",
+    "source.y_position_as",
+    # "source.log_flux_total",
+    # "source.contrast",
+    # "optics.plate_scale_as_per_pix",
+    # "optics.primary.zernike_coeffs_nm",
+    # "optics.secondary.zernike_coeffs_nm",
 )
+
+# Presets
+DEFAULT_SYSTEM_PRESET = "SHERA_FLIGHT_3P" # System presets describe the source, optics, + detector
+DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY" # Experiment presets describe what to do + default settings
 
 # Directories
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_astrometry" / TIMESTAMP)
+
 
 # Plotting defaults
 _ = get_default_cmaps()
@@ -142,130 +155,190 @@ plt.rcParams["image.cmap"] = "inferno_nan"
 
 def main(
     *,
-    config: SheraThreePlaneConfig | None = CONFIG,
+    prescription_path: Path | None = PRESCRIPTION,
+    system_preset: str = DEFAULT_SYSTEM_PRESET,
+    experiment_preset: str = DEFAULT_EXPERIMENT_PRESET,
     fast: bool = FAST_MODE,
-    save_plots: bool = SAVE_PLOTS,
-    add_noise: bool = ADD_NOISE,
     results_dir: Path | None = None,
-    use_eigen: bool = USE_EIGEN,
-    whiten_basis: bool = WHITEN_BASIS,
-    truncate_k: int | None = TRUNCATE_K,
-    truncate_by_eigval: float | None = TRUNCATE_BY_EIGVAL,
+    use_eigen: bool | None = None,
+    whiten_basis: bool | None = None,
+    truncate_k: int | None = None,
+    truncate_by_eigval: float | None = None,
+    fits_roundtrip_diagnostic: bool | None = None,
+    fits_roundtrip_use_readback: bool | None = None,
 ) -> None:
     """Run the canonical astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    rng_key = jr.PRNGKey(RNG_SEED)
-    results_dir = results_dir or DEFAULT_RESULTS_DIR
+    user_cfg = load_user_config(
+        config_path=prescription_path,
+        system_preset=system_preset,
+        experiment_preset=experiment_preset,
+    )
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    experiment_cfg = resolved_cfg.get("experiment")
+
+    if system_cfg is None:
+        raise ValueError("canonical_astrometry requires a 'system' block ...")
+    if experiment_cfg is None:
+        raise ValueError("canonical_astrometry requires an 'experiment' block ...")
+
+    resolved_prescription = _repo_relative_path(prescription_path)
+    print(
+        f"Resolved prescription path: {resolved_prescription or prescription_path}"
+        if prescription_path is not None
+        else "Resolved prescription path: None (using preset seeds only)"
+    )
+    print(f"System preset: {_selected_preset(user_cfg, 'system') or 'custom'}")
+    print(f"Experiment preset: {_selected_preset(user_cfg, 'experiment') or 'custom'}")
+
+    # --- Optional explicit override: replace detector.layers within config ---
+    # Demonstrates how we might manually change the detector layers
+    # detector_cfg = system_cfg.get("detector", {}) # Copy the default detector config
+    # detector_cfg["layers"] = [{"name": "downsample", "kind": "Downsample", "factor": 3}]
+    # detector_cfg["layers"] = [  # This example defines two named layers
+    #     {"name": "downsample", "kind": "Downsample", "factor": 3},
+    #     {"name": "jitter", "kind": "ApplyJitter", "sigma": 1.0e-1},
+    #     {
+    #         "name": "diffusion",
+    #         "kind": "ApplyConvolution",
+    #         "kernel": {
+    #             "kind": "gaussian",
+    #             "sigma_x": 0.30,
+    #             "sigma_y": 0.20,
+    #             "theta_deg": 15.0,
+    #             "kernel_size": 9,
+    #             "units": "detector_pix",
+    #         },
+    #     },
+    # ]
+    # system_cfg["detector"] = detector_cfg # Insert into the system config
+    # -------------------------------------------------------------
+
+    experiment = _validate_experiment(experiment_cfg)
+    eigen_cfg = experiment["eigenmodes"]
+    infer_keys = tuple(experiment["infer_keys"])
+    rng_key = jr.PRNGKey(int(experiment["seed"]))
+    save_plots = bool(experiment["outputs"]["plots"])
+    noise_cfg = experiment["noise"]
+    optimizer_cfg = experiment["optimizer"]
+    fits_roundtrip_cfg = dict(experiment["diagnostics"]["fits_roundtrip"])
+    if fits_roundtrip_diagnostic is not None:
+        fits_roundtrip_cfg["enabled"] = bool(fits_roundtrip_diagnostic)
+    if fits_roundtrip_use_readback is not None:
+        fits_roundtrip_cfg["use_readback"] = bool(fits_roundtrip_use_readback)
+        if fits_roundtrip_cfg["use_readback"]:
+            fits_roundtrip_cfg["enabled"] = True
+
+    use_eigen = eigen_cfg["enable"] if use_eigen is None else bool(use_eigen)
+    whiten_basis = eigen_cfg["whiten"] if whiten_basis is None else bool(whiten_basis)
+    truncate_k = eigen_cfg["truncate_k"] if truncate_k is None else truncate_k
+    truncate_by_eigval = (
+        eigen_cfg["truncate_by_eigval"]
+        if truncate_by_eigval is None
+        else truncate_by_eigval
+    )
+
+    results_dir, results_dir_source = _resolve_results_dir(
+        cli_results_dir=results_dir,
+        experiment_cfg=experiment,
+        prescription_path=prescription_path,
+    )
     results_dir.mkdir(parents=True, exist_ok=True)
+
+    forward_spec = compose_forward_spec(system_cfg)
+    truth_store = ParameterStore.from_spec_defaults(forward_spec)
+    truth_store = truth_store.refresh_derived(forward_spec)
 
     print("Starting Simulation...")
     print("Creating Config, Spec, Store, and Binder...")
+    print(f"Resolved results_dir: {results_dir} ({results_dir_source})")
     print("Eigenmode configuration:")
     print(f"  use_eigen={use_eigen}")
     print(f"  whiten_basis={whiten_basis}")
     print(f"  truncate_k={truncate_k}")
     print(f"  truncate_by_eigval={truncate_by_eigval}")
+    print("Observation noise configuration:")
+    print(f"  enabled={noise_cfg['enabled']}")
+    print(f"  photon_noise={noise_cfg['photon_noise']}")
+    print(f"  read_noise={noise_cfg['read_noise']}")
+    print(f"  dark_current={noise_cfg['dark_current']}")
+    if fits_roundtrip_cfg["enabled"]:
+        print("FITS round-trip diagnostic:")
+        print(f"  enabled={fits_roundtrip_cfg['enabled']}")
+        print(f"  use_readback={fits_roundtrip_cfg['use_readback']}")
 
     t0_script = time.time()
 
-    cfg = config or SHERA_TESTBED_CONFIG
-    cfg = cfg.replace(
-        primary_noll_indices=tuple(range(4, 12)),
-        secondary_noll_indices=tuple(range(4, 12)),)
     if fast:
-        cfg = cfg.replace(n_lambda=1,
-            primary_noll_indices=tuple(range(4, 9)),
-            secondary_noll_indices=tuple(range(4, 9)))
+        print("FAST_MODE enabled: using reduced iteration count.")
 
-    forward_spec = build_forward_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic(cfg)
-
-    truth_store = ParameterStore.from_spec_defaults(forward_spec)
-    truth_store = truth_store.replace(
-        {
-            "binary.separation_as": 10.0,
-            "binary.position_angle_deg": 90.0,
-            "binary.x_position_as": 0.0,
-            "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1800.,
-        }
-    )
-    truth_store = truth_store.refresh_derived(forward_spec)
-
-    binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+    binder = SheraBinder(system_cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
-    data_psf = binder.model()
+    data_psf, data, data_var, rng_key = _render_synthetic_observation(
+        binder=binder,
+        truth_store=truth_store,
+        noise_cfg=noise_cfg,
+        rng_key=rng_key,
+    )
+    if not noise_cfg["enabled"]:
+        print("Observation noise disabled: data is the deterministic model image.")
 
-    # Optionally add noise to the data
-    if add_noise:
-        rng_key, split_key = jr.split(rng_key)
-        if np.min(data_psf) > 100:
-            # Use gaussian approximation to shot noise if image is bright enough
-            data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
-        else:
-            # Otherwise use poisson statistics
-            data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
-            # Casting back to float is important for the optimization
-    else: # No noise
-        data = data_psf
-
-    # Define data variance = data_psf -> Shot noise dominated
-    # Add a minimum variance floor to avoid any division by zero
-    data_var = jnp.maximum(data_psf, 1.0)
+    fits_roundtrip_summary: dict[str, Any] | None = None
+    if bool(fits_roundtrip_cfg["enabled"]):
+        data, fits_roundtrip_summary = _run_fits_roundtrip_diagnostic(
+            data=data,
+            output_dir=results_dir,
+            use_readback=bool(fits_roundtrip_cfg["use_readback"]),
+        )
 
     print("Configuring Inference...")
-    # We create a subspec here because the user may have
-    # removed one or more keys from the complete list
-    inference_subspec = make_inference_subspec(
-        base_spec=inference_spec,
-        infer_keys=INFER_KEYS,
-        cfg=cfg,
-    )
+    # Phase 5 migration note: inference layout is now defined directly from
+    # the forward spec. This file demonstrates the new pattern:
+    #   inference_subspec = forward_spec.subset(INFER_KEYS)
+    # Pack/unpack operate on this subspec, and derived-labeled keys remain
+    # inferable directly (store-wins, no forced runtime recomputation).
+    inference_subspec = forward_spec.subset(infer_keys)
 
-    # prior_info defines our initial knowledge of each parameter,
-    # and determines the amplitude of the random perturbation applied to the model
-    prior_info = {
-        "binary.separation_as":          {"sigma": 1e-3, "dist": "Normal"},
-        "binary.position_angle_deg":     {"sigma": 1.67e-2, "dist": "Uniform"}, # 1.67e-2 deg = 1 arcmin
-        "binary.x_position_as":          {"sigma": 1e-2, "dist": "Normal"},
-        "binary.y_position_as":          {"sigma": 1e-2, "dist": "Normal"},
-        "binary.log_flux_total":         {"sigma": 4.3e-3, "dist": "Normal"}, # 4.3e-3 log-flux -> 1% flux cal
-        "binary.contrast":               {"sigma": 6e-3, "dist": "LogNormal"}, # 6e-3 log-contrast -> indep. 1% star cal
-        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"}, # 4.3e-3 log-platescale -> 1% cal
-        "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"),2),
-            "dist": "Normal",
-        },
-        "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"),2),
-            "dist": "Normal",
-        },
-    }
+    prior_info = experiment["priors"] or _default_prior_info(truth_store)
     prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
-    print("Drawing starting point from priors...")
-    rng_key, split_key = jr.split(rng_key)
-    init_store = prior_spec.sample(rng_key=split_key, keys=INFER_KEYS)
+    init_mode = experiment["init"]["sampling"]
+    print(f"Initialization mode: {init_mode!r}")
+    if init_mode == "prior":
+        print("Drawing starting point from priors...")
+        rng_key, split_key = jr.split(rng_key)
+        prior_sample = prior_spec.sample(rng_key=split_key, keys=infer_keys)
+        # Seed structural defaults from the truth store, then apply sampled infer keys
+        init_store = truth_store.replace(prior_sample.as_dict())
+    elif init_mode in {"explicit", "truth"}:
+        print("Using truth store as initialization.")
+        init_store = truth_store
+    else:
+        raise ValueError(
+            f"Unsupported experiment.init.mode={init_mode!r}. "
+            "Supported modes: 'prior_sample', 'truth'."
+        )
     # Apply the randomly drawn perturbations to the model and produce an image
-    # We use strip_structural() here to remove any structural parameters present in the store
-    # Otherwise, the presence of structural parameters requires rebuilding the model
+    # Use binder.strip_structural() so structural keys are removed using
+    # the binder's contract-driven structural policy before binder.model().
     init_psf = binder.model(
-        strip_structural(init_store, structural_keys=binder.structural_store_keys())
+        binder.strip_structural(init_store)
     )
 
     print("Building the loss function...")
     nll_loss_fn, theta0 = make_binder_nll_fn(
         binder=binder,
-        infer_keys=INFER_KEYS,
+        infer_keys=infer_keys,
         data=data,
         var=data_var,
         noise_model="gaussian",
         reduce="sum",
         theta0_store=init_store,
     )
-    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
+    fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=init_store)
 
     def map_loss_fn(theta: np.ndarray) -> np.ndarray:
         store_theta = store_unpack_params(inference_subspec, theta, init_store)
@@ -273,20 +346,34 @@ def main(
         prior_gaussian_loss = prior_spec.quadratic_penalty(
             store_theta,
             center_store=truth_store,
-            keys=INFER_KEYS,
+            keys=infer_keys,
         )
         return nll_loss + prior_gaussian_loss
 
-    loss_fn = nll_loss_fn
+    loss_kind = optimizer_cfg["loss"]
+    loss_fn = map_loss_fn if loss_kind == "map" else nll_loss_fn
 
     theta_true = pack_params(inference_subspec, truth_store)
     loss_true = loss_fn(theta_true)
     loss0 = loss_fn(theta0)
+    print_dtype_audit(
+        "canonical_astrometry data_and_loss",
+        {
+            "data_psf": data_psf,
+            "data": data,
+            "data_var": data_var,
+            "init_psf": init_psf,
+            "theta_true": theta_true,
+            "theta0": theta0,
+            "loss_true": loss_true,
+            "loss0": loss0,
+        },
+    )
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
     F = fim_theta(nll_loss_fn, fim_point)
-    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=init_store)
+    fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=init_store)
     if save_plots:
         plot_fim(
             F,
@@ -389,8 +476,8 @@ def main(
             lr_vec = np.ones_like(z0)
             curvature_vec = np.ones_like(z0)
         else:
-            lr_vec = 1.0 / (eigvals_kept + 1e-12)
-            curvature_vec = eigvals_kept
+            curvature_vec = np.maximum(eigvals_kept, 1e-8)
+            lr_vec = 1.0 / (curvature_vec + 1e-12)
 
         index_map = build_eigen_index_map(eigen_map)
         loss_opt = lambda z: loss_fn(eigen_map.theta_from_z(z))
@@ -404,12 +491,27 @@ def main(
         }
     else:
         index_map = build_index_map(inference_subspec, init_store, theta=theta0)
-        lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
-        curvature_vec = fim_diag
+        primitive_precond = build_fim_diagonal_preconditioner(F)
+        curvature_vec = np.asarray(primitive_precond["curvature_vec"])
+        lr_vec = np.asarray(primitive_precond["lr_vec"])
         loss_opt = loss_fn
         theta0_opt = theta0
         theta_space = "primitive"
-        precond_meta = {"lr_vec": lr_vec}
+        precond_meta = {
+            **primitive_precond["config"],
+            "lr_vec": lr_vec,
+        }
+
+    print_dtype_audit(
+        "canonical_astrometry optimizer",
+        {
+            "F": F,
+            "fim_diag": fim_diag,
+            "theta0_opt": theta0_opt,
+            "curvature_vec": curvature_vec,
+            "lr_vec": lr_vec,
+        },
+    )
 
     print(
         "FIM diag: min={:.3e}, max={:.3e}".format(
@@ -449,32 +551,99 @@ def main(
                 )
 
     labels_by_key = map_labels_to_keys(
-        INFER_KEYS,
+        infer_keys,
         fim_labels,
         store=init_store if use_eigen else None,
         index_map=None if use_eigen else index_map,
     )
 
     print("Running preconditioned gradient descent...")
-    n_iter = FAST_ITER if fast else N_ITER
+    if optimizer_cfg["kind"] not in {"sgd", "adam"}:
+        raise ValueError(
+            f"Unsupported experiment.optimizer.kind={optimizer_cfg['kind']!r}. "
+            "Supported kinds: 'sgd'/'adam'."
+        )
+    n_iter = int(optimizer_cfg["n_iter_fast"] if fast else optimizer_cfg["n_iter"])
     metric_payload = {
         "theta_ref": np.asarray(theta0_opt),
         "metric_diag": np.asarray(curvature_vec),
         "lr_scale": np.asarray(lr_vec),
     }
+
+    run_diagnosis = False
+    if run_diagnosis:
+        diag = diagnose_first_step(
+            loss_fn=loss_opt,
+            theta0=theta0_opt,
+            learning_rate=float(optimizer_cfg["base_lr"]),
+            lr_vec=lr_vec,
+            optimizer_kind="sgd",
+            index_map=index_map,
+            verbose=True,
+        )
+        print("First-step diagnostic:")
+        print(
+            f"  loss0={diag['loss0']:.6g} finite={diag['loss0_finite']} | "
+            f"grad_finite={diag['grad0_finite']} | theta1_finite={diag['theta1_finite']} | "
+            f"loss1={diag['loss1']:.6g} finite={diag['loss1_finite']}"
+        )
+        print(
+            f"  grad0 min/max={diag['grad0_min']:.3e}/{diag['grad0_max']:.3e} | "
+            f"delta min/max={diag['delta_min']:.3e}/{diag['delta_max']:.3e}"
+        )
+        if lr_vec is not None:
+            print(
+                f"  lr_vec min/max={diag['lr_vec_min']:.3e}/{diag['lr_vec_max']:.3e}"
+            )
+        if diag.get("top_grad"):
+            topg = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_grad"])
+            print(f"  top |grad|: {topg}")
+        if diag.get("top_delta"):
+            topl = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_delta"])
+            print(f"  top |delta|: {topl}")
+
+        diag_unscaled = diagnose_first_step(
+            loss_fn=loss_opt,
+            theta0=theta0_opt,
+            learning_rate=float(optimizer_cfg["base_lr"]),
+            lr_vec=None,
+            optimizer_kind="sgd",
+        )
+        diag_tiny = diagnose_first_step(
+            loss_fn=loss_opt,
+            theta0=theta0_opt,
+            learning_rate=float(optimizer_cfg["base_lr"]) * 1e-3,
+            lr_vec=None,
+            optimizer_kind="sgd",
+        )
+        print(
+            "Variant first-step diagnostics: "
+            f"unscaled loss1_finite={diag_unscaled['loss1_finite']} "
+            f"theta1_finite={diag_unscaled['theta1_finite']}; "
+            f"tiny loss1_finite={diag_tiny['loss1_finite']} "
+            f"theta1_finite={diag_tiny['theta1_finite']}"
+        )
+
     theta_final_opt, trace = run_shera_gd(
         loss_fn=loss_opt,
         theta0=theta0_opt,
         index_map=index_map,
-        learning_rate=BASE_LR,
+        learning_rate=float(optimizer_cfg["base_lr"]),
         lr_vec=lr_vec,
         num_steps=n_iter,
+        optimizer_kind=str(optimizer_cfg["kind"]),
+        optimizer_kwargs=dict(optimizer_cfg["kwargs"]),
         run_dir=results_dir,
         return_artifacts=False,
         theta_space=theta_space,
         metric=metric_payload,
         extra_meta={
-            "optimizer": {"preconditioning": precond_meta},
+            "optimizer": {
+                "preconditioning": precond_meta,
+                "kind": optimizer_cfg["kind"],
+                "kwargs": dict(optimizer_cfg["kwargs"]),
+                "loss": optimizer_cfg["loss"],
+            },
             "theta": {"labels_by_key": labels_by_key},
         },
     )
@@ -486,8 +655,34 @@ def main(
 
     final_store = store_unpack_params(inference_subspec, theta_final, init_store)
     final_psf = binder.model(
-        strip_structural(final_store, structural_keys=binder.structural_store_keys())
+        binder.strip_structural(final_store)
     )
+    final_loss_value = float(loss_fn(theta_final))
+    if fits_roundtrip_summary is not None:
+        final_model_residual = np.asarray(final_psf, dtype=float) - np.asarray(
+            data,
+            dtype=float,
+        )
+        theta_error = np.asarray(theta_final, dtype=float) - np.asarray(
+            theta_true,
+            dtype=float,
+        )
+        fits_roundtrip_summary["optimization"] = {
+            "loss_true": float(loss_true),
+            "loss_initial": float(loss0),
+            "loss_final": final_loss_value,
+            "theta_final_minus_truth_max_abs": float(np.max(np.abs(theta_error))),
+            "final_model_minus_data_max_abs": float(
+                np.max(np.abs(final_model_residual))
+            ),
+            "final_model_minus_data_rms": float(
+                np.sqrt(np.mean(final_model_residual * final_model_residual))
+            ),
+        }
+        _write_json(
+            Path(str(fits_roundtrip_summary["summary_path"])),
+            fits_roundtrip_summary,
+        )
 
     print("\n==============================")
     if use_eigen:
@@ -498,12 +693,12 @@ def main(
     print(f"n_iter = {n_iter}")
     print(f"loss(true theta) = {loss_true:.8g}")
     print(f"loss(init theta0) = {loss0:.8g}")
-    print(f"loss(final theta)       = {float(loss_fn(theta_final)):.8g}")
+    print(f"loss(final theta)       = {final_loss_value:.8g}")
     print("")
 
-    summary_true = {k: truth_store.get(k) for k in INFER_KEYS}
-    summary_init = {k: init_store.get(k) for k in INFER_KEYS}
-    summary_final = {k: final_store.get(k) for k in INFER_KEYS}
+    summary_true = {k: truth_store.get(k) for k in infer_keys}
+    summary_init = {k: init_store.get(k) for k in infer_keys}
+    summary_final = {k: final_store.get(k) for k in infer_keys}
     param_summary = build_param_summary(summary_init, summary_final, truth=summary_true)
     patch_summary(results_dir, {"param_summary": param_summary})
     print_optimization_summary(
@@ -516,8 +711,8 @@ def main(
     if save_plots:
         print("Plotting outputs...")
         psf_extent_as = (
-            binder.cfg.psf_npix
-            * binder.base_forward_store.get("system.plate_scale_as_per_pix")
+            binder.base_forward_store.get("optics.psf_npix")
+            * binder.base_forward_store.get("optics.plate_scale_as_per_pix")
             / 2
             * np.array([-1, 1, -1, 1])
         )
@@ -570,13 +765,13 @@ def main(
                 inference_subspec,
                 eigen_map.theta_from_z(z),
                 init_store,
-            ).refresh_derived(inference_spec)
+            ).refresh_derived(forward_spec)
         else:
             decoder = lambda theta: store_unpack_params(
                 inference_subspec,
                 theta,
                 init_store,
-            ).refresh_derived(inference_spec)
+            ).refresh_derived(forward_spec)
 
         signals = build_signals(
             trace,
@@ -597,5 +792,523 @@ def main(
     print("Script finished in %.3f sec" % (t1_script - t0_script))
 
 
+def _require_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"experiment.{key} must be a mapping")
+    return value
+
+
+def _optional_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"experiment.{key} must be a mapping when provided")
+    return dict(value)
+
+
+def _require_bool(parent: dict[str, Any], key: str) -> bool:
+    value = parent.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"Expected boolean for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_bool(parent: dict[str, Any], key: str, default: bool) -> bool:
+    value = parent.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Expected boolean for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_bool_alias(
+    parent: dict[str, Any],
+    primary_key: str,
+    alias_keys: tuple[str, ...],
+    default: bool,
+) -> bool:
+    if primary_key in parent:
+        value = parent[primary_key]
+    else:
+        value = default
+        for alias in alias_keys:
+            if alias in parent:
+                value = parent[alias]
+                break
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"Expected boolean for {primary_key!r}, got {type(value).__name__}"
+        )
+    return value
+
+
+def _require_int(parent: dict[str, Any], key: str) -> int:
+    value = parent.get(key)
+    if not isinstance(value, int):
+        raise ValueError(f"Expected integer for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_int(parent: dict[str, Any], key: str, default: int) -> int:
+    value = parent.get(key, default)
+    if not isinstance(value, int):
+        raise ValueError(f"Expected integer for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _require_number(parent: dict[str, Any], key: str) -> float:
+    value = parent.get(key)
+    return float(coerce_numeric_value(value, path=f"experiment.{key}"))
+
+
+def _optional_number(parent: dict[str, Any], key: str, default: float) -> float:
+    value = parent.get(key, default)
+    return float(coerce_numeric_value(value, path=f"experiment.{key}"))
+
+
+def _require_str(parent: dict[str, Any], key: str) -> str:
+    value = parent.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"Expected string for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _optional_str(parent: dict[str, Any], key: str, default: str) -> str:
+    value = parent.get(key, default)
+    if not isinstance(value, str):
+        raise ValueError(f"Expected string for {key!r}, got {type(value).__name__}")
+    return value
+
+
+def _require_str_list(parent: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = parent.get(key)
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ValueError(f"{key!r} must be a list of strings")
+    return tuple(value)
+
+
+def _normalize_init_sampling(raw_value: str) -> str:
+    if raw_value in {"prior", "prior_sample"}:
+        return "prior"
+    if raw_value in {"explicit", "truth"}:
+        return "explicit"
+    raise ValueError(
+        f"Unsupported experiment.init sampling mode {raw_value!r}; "
+        "expected 'prior', 'prior_sample', 'explicit', or 'truth'."
+    )
+
+
+def _default_prior_info(truth_store: ParameterStore) -> dict[str, Any]:
+    return {
+        "source.separation_as": {"sigma": 1e-3, "dist": "Normal"},
+        "source.position_angle_deg": {
+            "sigma": 1.67e-2,
+            "dist": "Uniform",
+        },
+        "source.x_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "source.y_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "source.log_flux_total": {"sigma": 4.3e-3, "dist": "Normal"},
+        "source.contrast": {"sigma": 6e-3, "dist": "LogNormal"},
+        "optics.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"},
+        "optics.primary.zernike_coeffs_nm": {
+            "sigma": np.full_like(
+                truth_store.get("optics.primary.zernike_coeffs_nm"),
+                2,
+            ),
+            "dist": "Normal",
+        },
+        "optics.secondary.zernike_coeffs_nm": {
+            "sigma": np.full_like(
+                truth_store.get("optics.secondary.zernike_coeffs_nm"),
+                2,
+            ),
+            "dist": "Normal",
+        },
+    }
+
+
+def _selected_preset(user_cfg: dict[str, Any], block_name: str) -> str | None:
+    block = user_cfg.get(block_name)
+    if not isinstance(block, dict):
+        return None
+    preset = block.get("preset")
+    if isinstance(preset, str) and preset:
+        return preset
+    return None
+
+
+def _repo_relative_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _resolve_results_dir(
+    *,
+    cli_results_dir: Path | None,
+    experiment_cfg: dict[str, Any],
+    prescription_path: Path | None,
+) -> tuple[Path, str]:
+    if cli_results_dir is not None:
+        return Path(cli_results_dir), "--results-dir"
+
+    outputs_cfg = experiment_cfg.get("outputs", {})
+    outdir_value = outputs_cfg.get("outdir")
+    if outdir_value is None:
+        return DEFAULT_RESULTS_DIR, "default timestamped directory"
+
+    outdir_path = Path(outdir_value).expanduser()
+    if not outdir_path.is_absolute() and prescription_path is not None:
+        outdir_path = (prescription_path.parent / outdir_path).resolve()
+        return outdir_path, "experiment.outputs.outdir (relative to prescription)"
+    return outdir_path, "experiment.outputs.outdir"
+
+
+def _render_synthetic_observation(
+    *,
+    binder: SheraBinder,
+    truth_store: ParameterStore,
+    noise_cfg: dict[str, Any],
+    rng_key: jr.KeyArray,
+) -> tuple[jax.Array, jax.Array, jax.Array, jr.KeyArray]:
+    """Render the synthetic observation and honor the resolved noise config."""
+    data_psf = binder.model()
+    if not noise_cfg["enabled"]:
+        # No observational image noise is sampled in this branch; data is the
+        # deterministic detector-rendered model image. data_var remains the
+        # Gaussian weighting image used by the downstream NLL/Z-score plots.
+        return data_psf, data_psf, jnp.maximum(data_psf, 1.0), rng_key
+
+    rng_key, noise_key = jr.split(rng_key)
+    data, data_var = apply_observation_noise(
+        data_psf,
+        noise_cfg=noise_cfg,
+        rng_key=noise_key,
+        detector_spec=getattr(binder.detector, "spec", None),
+        exposure_time_s=truth_store.get("source.exposure_time_s", default=None),
+    )
+    return data_psf, data, data_var, rng_key
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write a small JSON artifact with stable formatting."""
+
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def _read_subblock_style_cube(path: Path) -> tuple[np.ndarray, str]:
+    """Read a FITS cube using the same style as subblock inference."""
+
+    with fits.open(path) as hdul:
+        raw_data = hdul[0].data
+        raw_dtype = str(np.asarray(raw_data).dtype)
+        cube = np.asarray(raw_data, dtype=float)
+    if cube.ndim != 3:
+        raise ValueError(
+            "FITS round-trip cube must have shape (n_frame, ny, nx), "
+            f"got {cube.shape}."
+        )
+    if int(cube.shape[0]) != 1:
+        raise ValueError(
+            "Canonical FITS round-trip diagnostic expects a 1-frame cube, "
+            f"got n_frame={int(cube.shape[0])}."
+        )
+    return cube, raw_dtype
+
+
+def _run_fits_roundtrip_diagnostic(
+    *,
+    data: jax.Array,
+    output_dir: Path,
+    use_readback: bool,
+) -> tuple[jax.Array, dict[str, Any]]:
+    """Write/read canonical data through the subblock FITS cube path."""
+
+    original = np.asarray(data)
+    cube = original[None, :, :]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cube_path = output_dir / "canonical_fits_roundtrip_cube.fits"
+    summary_path = output_dir / "fits_roundtrip_summary.json"
+
+    write_obs_subblock_cube_fits(
+        output_path=cube_path,
+        cube=cube,
+        header_cards={
+            "SCHEMA": "CANONRT",
+            "NFRAME": 1,
+        },
+    )
+    read_cube, fits_dtype_before_cast = _read_subblock_style_cube(cube_path)
+    readback = read_cube[0]
+    diff = readback - np.asarray(original, dtype=float)
+    abs_diff = np.abs(diff)
+
+    summary: dict[str, Any] = {
+        "schema_version": "canonical_fits_roundtrip.v1",
+        "cube_path": str(cube_path),
+        "summary_path": str(summary_path),
+        "optimizer_data_source": "fits_readback" if use_readback else "in_memory",
+        "use_readback_for_optimization": bool(use_readback),
+        "original_shape": list(original.shape),
+        "cube_shape": list(read_cube.shape),
+        "original_dtype": str(original.dtype),
+        "fits_dtype_before_subblock_cast": fits_dtype_before_cast,
+        "readback_dtype": str(readback.dtype),
+        "max_abs_diff": float(np.max(abs_diff)),
+        "mean_abs_diff": float(np.mean(abs_diff)),
+        "rms_diff": float(np.sqrt(np.mean(diff * diff))),
+        "sum_diff": float(np.sum(diff)),
+        "exact_equal": bool(np.array_equal(original, readback)),
+        "allclose_zero_tolerance": bool(
+            np.allclose(original, readback, rtol=0.0, atol=0.0)
+        ),
+        "allclose_default": bool(np.allclose(original, readback)),
+    }
+
+    print("FITS round-trip diagnostic summary:")
+    print(f"  cube_path={cube_path}")
+    print(f"  original dtype/shape={summary['original_dtype']} {summary['original_shape']}")
+    print(
+        "  readback dtype/shape="
+        f"{summary['readback_dtype']} {summary['cube_shape']}"
+    )
+    print(
+        "  diff: "
+        f"max_abs={summary['max_abs_diff']:.6e} "
+        f"mean_abs={summary['mean_abs_diff']:.6e} "
+        f"rms={summary['rms_diff']:.6e}"
+    )
+    print(
+        "  equality: "
+        f"exact={summary['exact_equal']} "
+        f"allclose_zero_tol={summary['allclose_zero_tolerance']} "
+        f"allclose_default={summary['allclose_default']}"
+    )
+    print(f"  optimizer_data_source={summary['optimizer_data_source']}")
+
+    _write_json(summary_path, summary)
+
+    if use_readback:
+        return jnp.asarray(readback), summary
+    return data, summary
+
+
+def _validate_experiment(cfg: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(cfg, dict):
+        raise ValueError("experiment config must be a mapping")
+
+    if "experiment" in cfg:
+        experiment_cfg = cfg["experiment"]
+        if not isinstance(experiment_cfg, dict):
+            raise ValueError("cfg['experiment'] must be a mapping")
+    else:
+        experiment_cfg = cfg
+
+    seed = _require_int(experiment_cfg, "seed")
+    infer_keys = _require_str_list(experiment_cfg, "infer_keys")
+
+    noise_cfg = _optional_dict(experiment_cfg, "noise")
+    init_cfg = _optional_dict(experiment_cfg, "init")
+    optimizer_cfg = _optional_dict(experiment_cfg, "optimizer")
+    outputs_cfg = _optional_dict(experiment_cfg, "outputs")
+    priors_cfg = _optional_dict(experiment_cfg, "priors")
+    diagnostics_cfg = _optional_dict(experiment_cfg, "diagnostics")
+    fits_roundtrip_cfg_raw = _optional_dict(diagnostics_cfg, "fits_roundtrip")
+
+    eigen_cfg_raw = experiment_cfg.get("eigenmodes", experiment_cfg.get("eigen"))
+    if eigen_cfg_raw is None:
+        eigen_cfg = {}
+    elif isinstance(eigen_cfg_raw, dict):
+        eigen_cfg = dict(eigen_cfg_raw)
+    else:
+        raise ValueError("experiment.eigenmodes must be a mapping when provided")
+
+    init_sampling_raw = init_cfg.get("sampling", init_cfg.get("mode", "prior"))
+    if not isinstance(init_sampling_raw, str):
+        raise ValueError("experiment.init.sampling must be a string")
+    init_sampling = _normalize_init_sampling(init_sampling_raw)
+
+    optimizer_kind = _optional_str(optimizer_cfg, "kind", "sgd")
+    if optimizer_kind not in {"sgd", "adam"}:
+        raise ValueError(
+            f"Unsupported experiment.optimizer.kind {optimizer_kind!r}; "
+            "expected 'sgd' or 'adam'."
+        )
+    loss_kind = _optional_str(optimizer_cfg, "loss", "nll")
+    if loss_kind not in {"nll", "map"}:
+        raise ValueError(
+            f"Unsupported experiment.optimizer.loss {loss_kind!r}; "
+            "expected 'nll' or 'map'."
+        )
+
+    plots_enabled = outputs_cfg.get("plots", outputs_cfg.get("save_plots", SAVE_PLOTS))
+    if not isinstance(plots_enabled, bool):
+        raise ValueError("experiment.outputs.plots must be a boolean")
+    outdir_value = outputs_cfg.get("outdir")
+    if outdir_value is not None and not isinstance(outdir_value, str):
+        raise ValueError("experiment.outputs.outdir must be a string or null")
+    fits_roundtrip_use_readback = _optional_bool(
+        fits_roundtrip_cfg_raw,
+        "use_readback",
+        False,
+    )
+    fits_roundtrip_enabled = (
+        _optional_bool(fits_roundtrip_cfg_raw, "enabled", False)
+        or fits_roundtrip_use_readback
+    )
+
+    truncate_k_value = eigen_cfg.get("truncate_k", TRUNCATE_K)
+    if truncate_k_value is not None and not isinstance(truncate_k_value, int):
+        raise ValueError("experiment.eigenmodes.truncate_k must be an integer or null")
+    truncate_by_eigval_value = eigen_cfg.get(
+        "truncate_by_eigval",
+        TRUNCATE_BY_EIGVAL,
+    )
+    if truncate_by_eigval_value is not None and not isinstance(
+        truncate_by_eigval_value,
+        (int, float),
+    ):
+        raise ValueError(
+            "experiment.eigenmodes.truncate_by_eigval must be a number or null"
+        )
+
+    return {
+        "seed": seed,
+        "infer_keys": infer_keys,
+        "noise": {
+            "enabled": _optional_bool_alias(
+                noise_cfg,
+                "enabled",
+                ("add_noise",),
+                False,
+            ),
+            "photon_noise": _optional_bool(noise_cfg, "photon_noise", True),
+            "read_noise": _optional_bool(noise_cfg, "read_noise", False),
+            "dark_current": _optional_bool(noise_cfg, "dark_current", False),
+        },
+        "init": {"sampling": init_sampling},
+        "optimizer": {
+            "kind": optimizer_kind,
+            "loss": loss_kind,
+            "n_iter": _optional_int(optimizer_cfg, "n_iter", DEFAULT_N_ITER),
+            "n_iter_fast": _optional_int(
+                optimizer_cfg,
+                "n_iter_fast",
+                DEFAULT_FAST_ITER,
+            ),
+            "base_lr": _optional_number(optimizer_cfg, "base_lr", DEFAULT_BASE_LR),
+            "kwargs": normalize_optimizer_kwargs(
+                optimizer_kind,
+                optimizer_cfg.get("kwargs", {}),
+                path="experiment.optimizer.kwargs",
+            ),
+        },
+        "outputs": {
+            "plots": plots_enabled,
+            "outdir": outdir_value,
+        },
+        "diagnostics": {
+            "fits_roundtrip": {
+                "enabled": fits_roundtrip_enabled,
+                "use_readback": fits_roundtrip_use_readback,
+            },
+        },
+        "priors": priors_cfg,
+        "eigenmodes": {
+            "enable": _optional_bool_alias(
+                eigen_cfg,
+                "enable",
+                ("use_eigen",),
+                USE_EIGEN,
+            ),
+            "whiten": _optional_bool_alias(
+                eigen_cfg,
+                "whiten",
+                ("whiten_basis",),
+                WHITEN_BASIS,
+            ),
+            "truncate_k": truncate_k_value,
+            "truncate_by_eigval": (
+                float(truncate_by_eigval_value)
+                if truncate_by_eigval_value is not None
+                else None
+            ),
+        },
+    }
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Canonical astrometry recipe with preset seeds plus optional prescription overrides"
+    )
+    parser.add_argument(
+        "--config",
+        "--prescription",
+        dest="prescription",
+        type=Path,
+        default=PRESCRIPTION,
+        help=(
+            "Path to YAML/JSON prescription. A prescription may contain "
+            "top-level experiment only, or experiment plus an optional system "
+            "block. Values deep-merge over --system-preset/--experiment-preset. "
+            f"Defaults to {_repo_relative_path(PRESCRIPTION)}."
+        ),
+    )
+    parser.add_argument(
+        "--no-prescription",
+        dest="prescription",
+        action="store_const",
+        const=None,
+        help="Use preset seeds only and do not load the bundled prescription.",
+    )
+    parser.add_argument("--system-preset", type=str, default=DEFAULT_SYSTEM_PRESET)
+    parser.add_argument("--experiment-preset", type=str, default=DEFAULT_EXPERIMENT_PRESET)
+    parser.add_argument("--results-dir", type=Path, default=None)
+    parser.add_argument("--fast", action="store_true", help="Use reduced optimization iterations.")
+    parser.add_argument(
+        "--no-eigen",
+        dest="use_eigen",
+        action="store_false",
+        default=None,
+        help="Disable eigenmode optimization (overrides experiment.eigenmodes.enable).",
+    )
+    parser.add_argument(
+        "--fits-roundtrip-diagnostic",
+        dest="fits_roundtrip_diagnostic",
+        action="store_true",
+        default=None,
+        help=(
+            "Opt in to writing canonical data as a 1-frame subblock-style FITS "
+            "cube, reading it back, and writing fits_roundtrip_summary.json."
+        ),
+    )
+    parser.add_argument(
+        "--fits-roundtrip-use-readback",
+        dest="fits_roundtrip_use_readback",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable the FITS round-trip diagnostic and optimize canonical "
+            "astrometry on the read-back frame instead of the in-memory image."
+        ),
+    )
+    return parser
+
+
 if __name__ == "__main__":
-    main()
+    args = _build_parser().parse_args()
+    main(
+        prescription_path=args.prescription,
+        system_preset=args.system_preset,
+        experiment_preset=args.experiment_preset,
+        fast=bool(args.fast),
+        results_dir=args.results_dir,
+        use_eigen=args.use_eigen,
+        fits_roundtrip_diagnostic=args.fits_roundtrip_diagnostic,
+        fits_roundtrip_use_readback=args.fits_roundtrip_use_readback,
+    )

@@ -13,11 +13,12 @@ It is intentionally brief and points to canonical sources.
 From repository root:
 
 ```bash
-# Install (editable)
-python -m pip install -e .
+# Install editable + dev extras (canonical path)
+python -m pip install -e ".[dev]"
 
-# If you need dev tools / test extras
-python -m pip install -r requirements-dev.txt
+# On systems where `python` is unavailable, use `python3`.
+# Compatibility shim still available:
+# python -m pip install -r requirements-dev.txt
 
 # Run tests
 pytest

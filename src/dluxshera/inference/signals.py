@@ -15,6 +15,7 @@ from typing import Callable, Mapping, MutableMapping, Optional
 
 import numpy as np
 
+from dluxshera.components.sources import compute_source_flux_diagnostics
 from dluxshera.params.store import ParameterStore
 
 DecodedMapping = Mapping[str, object]
@@ -39,6 +40,28 @@ def _lookup(decoded: DecodedMapping, key: str) -> np.ndarray:
     raise KeyError(f"Decoded mapping is missing required key {key!r}")
 
 
+def _diagnostic_store(decoded: DecodedMapping, source_kind: str) -> ParameterStore:
+    """Return a small store containing keys needed for flux diagnostics."""
+
+    values = {"source.log_flux_total": _lookup(decoded, "source.log_flux_total")}
+    if source_kind.lower() not in {"single_star"}:
+        values["source.contrast"] = _lookup(decoded, "source.contrast")
+    return ParameterStore.from_dict(values)
+
+
+def _compute_raw_fluxes(decoded: DecodedMapping, source_kind: str = "binary_target") -> np.ndarray:
+    """Compute report-only source component fluxes from primitive values."""
+
+    diagnostics = compute_source_flux_diagnostics(
+        source_kind,
+        _diagnostic_store(decoded, source_kind),
+    )
+    components = diagnostics["component_fluxes"]
+    if source_kind.lower() == "single_star":
+        return np.asarray([components["star"]], dtype=float)
+    return np.asarray([components["primary"], components["secondary"]], dtype=float)
+
+
 def _broadcast_truth(truth: Optional[Mapping[str, object]], key: str, shape) -> Optional[np.ndarray]:
     if truth is None:
         return None
@@ -55,6 +78,21 @@ def _broadcast_truth(truth: Optional[Mapping[str, object]], key: str, shape) -> 
         return np.broadcast_to(value, shape)
     except ValueError:
         return value
+
+
+def _truth_raw_fluxes(
+    truth: Optional[Mapping[str, object]],
+    shape,
+    source_kind: str = "binary_target",
+) -> Optional[np.ndarray]:
+    """Return truth component fluxes computed from source photometric primitives."""
+    if truth is None:
+        return None
+    try:
+        computed = _compute_raw_fluxes(truth, source_kind=source_kind)
+    except KeyError:
+        return None
+    return np.broadcast_to(np.asarray(computed), shape)
 
 
 def _residual(est: np.ndarray, truth: Optional[np.ndarray]) -> np.ndarray:
@@ -107,6 +145,7 @@ def build_signals(
 
     theta = np.asarray(trace["theta"])
     T = theta.shape[0]
+    source_kind = str(meta.get("source_kind", "binary_target")).lower()
 
     decoded_steps: list[DecodedMapping] = []
     if callable(decoder):
@@ -121,43 +160,53 @@ def build_signals(
 
     signals: MutableMapping[str, np.ndarray] = {}
 
-    x_est = stack_decoded("binary.x_position_as")
-    y_est = stack_decoded("binary.y_position_as")
-    sep_est = stack_decoded("binary.separation_as")
-    pa_est = stack_decoded("binary.position_angle_deg")
-    ps_est = stack_decoded("system.plate_scale_as_per_pix")
-    raw_flux_est = stack_decoded("binary.raw_fluxes")
-    zern_est = stack_decoded("primary.zernike_coeffs_nm")
+    x_est = stack_decoded("source.x_position_as")
+    y_est = stack_decoded("source.y_position_as")
+    if source_kind == "single_star":
+        sep_est = np.full((T,), np.nan, dtype=float)
+    else:
+        sep_est = stack_decoded("source.separation_as")
+    pa_est = stack_decoded("source.position_angle_deg")
+    ps_est = stack_decoded("optics.plate_scale_as_per_pix")
+    raw_flux_est = np.stack(
+        [_compute_raw_fluxes(decoded, source_kind=source_kind) for decoded in decoded_steps],
+        axis=0,
+    )
+    zern_est = stack_decoded("optics.primary.zernike_coeffs_nm")
     try:
-        sec_zern_est = stack_decoded("secondary.zernike_coeffs_nm")
+        sec_zern_est = stack_decoded("optics.secondary.zernike_coeffs_nm")
     except KeyError:
         sec_zern_est = None
 
-    x_true = _broadcast_truth(truth, "binary.x_position_as", x_est.shape)
-    y_true = _broadcast_truth(truth, "binary.y_position_as", y_est.shape)
-    sep_true = _broadcast_truth(truth, "binary.separation_as", sep_est.shape)
-    pa_true = _broadcast_truth(truth, "binary.position_angle_deg", pa_est.shape)
-    ps_true = _broadcast_truth(truth, "system.plate_scale_as_per_pix", ps_est.shape)
-    raw_flux_true = _broadcast_truth(truth, "binary.raw_fluxes", raw_flux_est.shape)
-    zern_true = _broadcast_truth(truth, "primary.zernike_coeffs_nm", zern_est.shape)
+    x_true = _broadcast_truth(truth, "source.x_position_as", x_est.shape)
+    y_true = _broadcast_truth(truth, "source.y_position_as", y_est.shape)
+    sep_true = (
+        None
+        if source_kind == "single_star"
+        else _broadcast_truth(truth, "source.separation_as", sep_est.shape)
+    )
+    pa_true = _broadcast_truth(truth, "source.position_angle_deg", pa_est.shape)
+    ps_true = _broadcast_truth(truth, "optics.plate_scale_as_per_pix", ps_est.shape)
+    raw_flux_true = _truth_raw_fluxes(truth, raw_flux_est.shape, source_kind=source_kind)
+    zern_true = _broadcast_truth(truth, "optics.primary.zernike_coeffs_nm", zern_est.shape)
 
-    signals["binary.x_error_uas"] = 1e6 * _residual(x_est, x_true).reshape((T,))
-    signals["binary.y_error_uas"] = 1e6 * _residual(y_est, y_true).reshape((T,))
-    signals["binary.separation_error_uas"] = 1e6 * _residual(sep_est, sep_true).reshape((T,))
-    signals["binary.position_angle_error_as"] = (
+    signals["source.x_error_uas"] = 1e6 * _residual(x_est, x_true).reshape((T,))
+    signals["source.y_error_uas"] = 1e6 * _residual(y_est, y_true).reshape((T,))
+    signals["source.separation_error_uas"] = 1e6 * _residual(sep_est, sep_true).reshape((T,))
+    signals["source.position_angle_error_as"] = (
         3600 * _residual(pa_est, pa_true).reshape((T,))
     )
 
     ps_residual = _residual(ps_est, ps_true)
     if ps_true is None:
-        signals["system.plate_scale_error_ppm"] = np.full((T,), np.nan, dtype=float)
+        signals["optics.plate_scale_error_ppm"] = np.full((T,), np.nan, dtype=float)
     else:
-        signals["system.plate_scale_error_ppm"] = 1e6 * (ps_residual / ps_true).reshape((T,))
+        signals["optics.plate_scale_error_ppm"] = 1e6 * (ps_residual / ps_true).reshape((T,))
 
-    signals["binary.raw_flux_error_ppm"] = _ppm_error(raw_flux_est, raw_flux_true)
+    signals["source.raw_flux_error_ppm"] = _ppm_error(raw_flux_est, raw_flux_true)
 
     zern_error = _residual(zern_est, zern_true)
-    signals["primary.zernike_error_nm"] = zern_error
+    signals["optics.primary.zernike_error_nm"] = zern_error
     zern_mask = np.isfinite(zern_error)
     sum_sq = np.nansum(np.square(zern_error), axis=-1)
     counts = np.sum(zern_mask, axis=-1)
@@ -168,10 +217,10 @@ def build_signals(
 
     if sec_zern_est is not None:
         sec_zern_true = _broadcast_truth(
-            truth, "secondary.zernike_coeffs_nm", sec_zern_est.shape
+            truth, "optics.secondary.zernike_coeffs_nm", sec_zern_est.shape
         )
         sec_zern_error = _residual(sec_zern_est, sec_zern_true)
-        signals["secondary.zernike_error_nm"] = sec_zern_error
+        signals["optics.secondary.zernike_error_nm"] = sec_zern_error
         sec_mask = np.isfinite(sec_zern_error)
         sec_sum_sq = np.nansum(np.square(sec_zern_error), axis=-1)
         sec_counts = np.sum(sec_mask, axis=-1)

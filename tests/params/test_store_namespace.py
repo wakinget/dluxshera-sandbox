@@ -5,11 +5,11 @@ from dluxshera.params.store import StoreNamespace
 
 
 def test_attribute_access_returns_prefixed_value():
-    store = ParameterStore.from_dict({"system.plate_scale_as_per_pix": 0.025})
+    store = ParameterStore.from_dict({"optics.plate_scale_as_per_pix": 0.025})
 
-    ns = StoreNamespace(store, "system")
+    ns = StoreNamespace(store, "optics")
 
-    assert ns.plate_scale_as_per_pix == store.get("system.plate_scale_as_per_pix")
+    assert ns.plate_scale_as_per_pix == store.get("optics.plate_scale_as_per_pix")
 
 
 def test_missing_leaf_raises_attribute_error():

@@ -1,0 +1,37 @@
+schema_version: howfe_field_dither_campaign_family.v1
+base_config: examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_hoke_0p1nm_loz0p01nm_n10_w10x30_projected_30min_v1.yaml
+truth_seed: 20260610
+knowledge_error_seed: 20260720
+low_order_prior_sigma_nm: 1.0
+amplitudes_nm_rms:
+- 0.01
+- 0.05
+- 0.1
+- 0.5
+- 1.0
+field_offsets:
+- token: xp0p0_yp0p0
+  x_as: 0.0
+  y_as: 0.0
+  pa_deg: 0.0
+- token: xp1p0_yp0p0
+  x_as: 1.0
+  y_as: 0.0
+  pa_deg: 0.0
+- token: xm1p0_yp0p0
+  x_as: -1.0
+  y_as: 0.0
+  pa_deg: 0.0
+- token: xp0p0_yp1p0
+  x_as: 0.0
+  y_as: 1.0
+  pa_deg: 0.0
+- token: xp0p0_ym1p0
+  x_as: 0.0
+  y_as: -1.0
+  pa_deg: 0.0
+production_conditions: 50
+production_ho_ke_draw_shards: 500
+control_conditions: 5
+control_draw_shards: 50
+validation_conditions: 8

@@ -99,7 +99,7 @@ def test_run_image_gd_writes_index_map_metadata(tmp_path: Path):
 
     forward_spec = build_forward_spec_from_config(cfg)
     store_init = ParameterStore.from_spec_defaults(forward_spec).refresh_derived(forward_spec)
-    infer_keys = ("binary.separation_as",)
+    infer_keys = ("source.separation_as",)
 
     # Build synthetic data directly from the binder-backed predict_fn to keep the
     # smoke test cheap and deterministic.

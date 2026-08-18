@@ -8,3 +8,19 @@ Binder-aware loss helpers accept a parameter vector θ, convert it to a `Paramet
 
 ## Optimisation
 Gradient-based optimisers (such as small Optax loops) consume the Binder-backed losses and apply updates to θ. The helpers in the canonical demos are intentionally lightweight convenience routines rather than a full inference framework; they make it easy to prototype and to plug in alternative parameterisations like eigenmodes when desired. More advanced inference methods (e.g., NumPyro or HMC) can layer on later without changing the Binder-facing loss surface.
+
+## Observation-Level Schur Information
+
+Image-backed subblock workflows can export Schur-reduced local quadratics over
+slow observation-level parameters after eliminating fast nuisance variables.
+The current retrospective analysis code can accumulate those one-second
+reduced information matrices and form prior-whitened information-rate
+diagnostics, but its adaptive-cadence replay is covariance/information only: it
+does not update scores, posterior means, innovation gates, relinearized factors,
+or a prospective reference trajectory.
+
+The detailed consolidation record is
+[Observation information-rate consolidation](../dev/observation_information_rate_consolidation.md).
+Treat its
+future acquire-then-accumulate discussion as proposed architecture, not current
+campaign behavior.

@@ -46,9 +46,9 @@ def run_shera_image_gd_basic(
     *,
     cfg: SheraThreePlaneConfig = SHERA_TESTBED_CONFIG,
     infer_keys: Sequence[ParamKey] = (
-        "binary.separation_as",
-        "binary.x_position_as",
-        "binary.y_position_as",
+        "source.separation_as",
+        "source.x_position_as",
+        "source.y_position_as",
     ),
     init_overrides: Optional[Dict[ParamKey, Any]] = None,
     noise_model: NoiseModel = "gaussian",
@@ -82,7 +82,7 @@ def run_shera_image_gd_basic(
     infer_keys :
         Sequence of parameter keys (in the ParameterStore) to infer.
         Defaults to separation and centroid:
-          ("binary.separation_as", "binary.x_position_as", "binary.y_position_as")
+          ("source.separation_as", "source.x_position_as", "source.y_position_as")
     init_overrides :
         Optional dict of {ParamKey: value} used to override the default
         ParameterStore initialisation (e.g. to start from a biased guess
@@ -179,36 +179,6 @@ def run_shera_image_gd_basic(
             save_checkpoints=save_checkpoints,
         )
 
-    loss_fn, theta0 = make_binder_image_nll_fn(
-        cfg,
-        forward_spec,
-        store_init,
-        infer_keys,
-        data,
-        var,
-        noise_model=noise_model,
-        reduce="sum",
-    )
-
-    sub_spec = forward_spec.subset(infer_keys)
-    theta_flip = theta0 - (theta_final - theta0)
-
-    grid_offsets = jnp.asarray([-1.5, -1.0, -0.5, 0.0, 0.5, 1.0], dtype=theta0.dtype)
-    candidates = []
-
-    for offset in grid_offsets:
-        theta_candidate = theta0 + offset
-        loss_val = float(loss_fn(theta_candidate))
-        store_candidate = store_unpack_params(sub_spec, theta_candidate, store_init)
-        candidates.append((theta_candidate, store_candidate, loss_val))
-
-    theta_final, store_final, _ = min(candidates, key=lambda item: item[2])
-
-    sep_init_val = store_init.get("binary.separation_as")
-    adjusted_sep = sep_init_val - 0.9
-    store_final = store_final.replace({"binary.separation_as": adjusted_sep})
-    theta_final = jnp.asarray([adjusted_sep], dtype=theta_final.dtype)
-
     return theta_final, store_final, history
 
 
@@ -234,9 +204,9 @@ def run_shera_image_gd_eigen(
     base_forward_store: Optional[ParameterStore] = None,
     base_store: Optional[ParameterStore] = None,
     infer_keys: Sequence[ParamKey] = (
-        "binary.separation_as",
-        "binary.x_position_as",
-        "binary.y_position_as",
+        "source.separation_as",
+        "source.x_position_as",
+        "source.y_position_as",
     ),
     data: Optional[jnp.ndarray] = None,
     var: Optional[jnp.ndarray] = None,

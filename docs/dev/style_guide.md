@@ -24,7 +24,7 @@ functional updates, predictable IO).
   - `return_wf`, `return_psf`, `use_eigen`, `whiten_basis`
 - Domain parameters should be explicit and unit-aware:
   - e.g., `pupil_npix`, `wavelength_m`, `binary.x_position_as`,
-    `system.plate_scale_as_per_pix`, etc.
+    `optics.plate_scale_as_per_pix`, etc.
 
 ## 3) Type hints and explicit attributes
 

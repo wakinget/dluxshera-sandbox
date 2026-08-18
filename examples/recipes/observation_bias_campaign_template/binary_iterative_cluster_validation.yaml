@@ -1,0 +1,122 @@
+experiment:
+  kind: observation_bias_campaign
+  seed: 20260608
+  run_name: binary_iterative_cluster_validation_v1
+
+  notes:
+    purpose: >-
+      First bounded binary iterative validation: from two biased prior draws,
+      test whether three repeated IID-jitter binary windows reduce separation
+      and slow-state reference error under physical_full updates.
+    not_production_science: true
+
+  system:
+    preset: SHERA_FLIGHT_3P
+    source:
+      kind: binary
+
+  subblocks:
+    # Iterative mode expands this to windows_per_draw * subblocks_per_window.
+    n_subblocks: 6
+    n_frames: 20
+    noise: enabled
+    # For a cheaper orchestration-only run, set noise: disabled.
+    phi_ref: recovered
+    schur_curvature_method: auto
+    max_dense_dim: 40
+    schur_damping: 1.0e-8
+    summary_information_scale: summed_likelihood
+    exposure_time_s: 0.05
+    reference_diagnostics_profile: basic
+    reference_n_iter: 120
+    reference_base_lr: 0.2
+    reference_early_stopping_enabled: true
+    reference_early_stopping_min_iter: 40
+    reference_early_stopping_patience: 12
+    reference_early_stopping_loss_rtol: 1.0e-8
+    reference_early_stopping_loss_atol: 0.0
+    reference_early_stopping_step_atol: 1.0e-10
+    reference_early_stopping_grad_norm_atol: 1.0e-8
+    schur_frame_quality_policy: mask
+    schur_frame_chi2_threshold: 10.0
+    schur_frame_quality_missing: allow_all
+    schur_frame_mask_denominator: original
+    schur_frame_mask_min_good_frames: 3
+    variance_floor: 1.0
+    trace_source:
+      mode: iid_jitter
+    trace_jitter:
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+
+  iterative:
+    enabled: true
+    windows_per_draw: 3
+    subblocks_per_window: 2
+    update_gain: 1.0
+    update_mode: physical_full
+    carry_prior_mean_with_reference: true
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 20260608
+
+  observation_theta:
+    source:
+      separation_as: true
+      log_flux_total: true
+      contrast: true
+    optics:
+      plate_scale_as_per_pix: true
+      primary_zernikes:
+        enabled: true
+        indices: [0, 1, 2, 3]
+      secondary_zernikes:
+        enabled: true
+        indices: [0, 1, 2, 3]
+
+  bias_cases: []
+  case_generation:
+    include_implicit_zero_bias: false
+
+  prior_draws:
+    enabled: true
+    n_cases: 2
+    center: truth
+    distribution: normal
+    draw_seed: 20260608
+    case_name_template: binary_iter_validation_draw_{draw_index:03d}
+    sigmas:
+      source.separation_as:
+        kind: absolute
+        sigma: 8.0e-6
+        unit: arcsec
+      source.log_flux_total:
+        kind: absolute
+        sigma: 3.0e-5
+        unit: log_flux
+      source.contrast:
+        kind: fractional
+        sigma: 3.0e-4
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 2.0e-6
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.25
+        unit: nm
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.25
+        unit: nm
+
+  truth_realization:
+    enabled: false
+
+  eigenbasis:
+    enabled: false
+
+  forecast:
+    enabled: false
+    plots: false

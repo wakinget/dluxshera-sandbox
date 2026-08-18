@@ -1,0 +1,127 @@
+experiment:
+  kind: observation_bias_campaign
+  seed: 42
+  run_name: full_zernike_bias_smoke
+
+  subblocks:
+    n_subblocks: 3
+    n_frames: 3
+    noise: disabled
+    phi_ref: truth_when_available
+    schur_curvature_method: auto
+    max_dense_dim: 40
+    schur_damping: 1.0e-8
+    reference_early_stopping_enabled: false
+    reference_early_stopping_min_iter: null
+    reference_early_stopping_patience: null
+    reference_early_stopping_loss_rtol: null
+    reference_early_stopping_loss_atol: null
+    reference_early_stopping_step_atol: null
+    reference_early_stopping_grad_norm_atol: null
+    trace_jitter:
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 42
+
+  observation_theta:
+    source:
+      separation_as: true
+      log_flux_total: true
+      contrast: true
+    optics:
+      plate_scale_as_per_pix: true
+      primary_zernikes:
+        enabled: true
+        indices: from_system
+        include: null
+        exclude: []
+      secondary_zernikes:
+        enabled: true
+        indices: from_system
+        include: null
+        exclude: []
+
+  state_partition:
+    observation_theta_keys: from_layout
+    local_eliminated_keys:
+      - source.x_position_as
+      - source.y_position_as
+      - source.position_angle_deg
+    subblock_shared_active_keys: []
+    report_only_keys: []
+
+  eigenbasis:
+    enabled: true
+    sources:
+      - accumulated_information
+      - posterior_precision
+    whiten: true
+    eig_floor_abs: 0.0
+    eig_floor_rel: 1.0e-12
+    top_k_contributors: 8
+
+  bias_cases:
+    - case_name: zero_bias_full_zernike
+      theta_reference_offsets: {}
+
+    - case_name: scalar_plus_zernike_smoke
+      theta_reference_offsets:
+        optics.plate_scale_as_per_pix: 1.0e-5
+        source.contrast: 1.0e-3
+        optics.primary.zernike_coeffs_nm[0]: 5.0
+        optics.secondary.zernike_coeffs_nm[0]: -5.0
+
+  prior_draws:
+    enabled: false
+    n_cases: 3
+    center: truth
+    distribution: normal
+    draw_seed: 12345
+    case_name_template: prior_draw_{draw_index:03d}
+    sigmas:
+      source.separation_as:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: arcsec
+      source.log_flux_total:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: log_flux
+      source.contrast:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 1.0e-1
+        unit: nm
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 1.0e-1
+        unit: nm
+
+  forecast:
+    enabled: true
+    modes:
+      - replicate
+      - fixed_information_score_noise
+    n_subblocks_grid: [1, 3, 5, 10, 30, 100, 300, 1000, 1800]
+    subblock_duration_s: 1.0
+    single_observation_n_subblocks: 1800
+    replicate:
+      enabled: true
+    fixed_information_score_noise:
+      enabled: true
+      n_trials: 100
+      seed: 2026
+      score_noise_alpha: 1.0
+      score_noise_eig_floor_abs: 0.0
+      score_noise_eig_floor_rel: 1.0e-12
+      truth_mode: campaign_truth
+    plots: true

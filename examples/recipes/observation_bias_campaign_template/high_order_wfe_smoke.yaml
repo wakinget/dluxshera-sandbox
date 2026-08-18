@@ -1,0 +1,82 @@
+experiment:
+  kind: observation_bias_campaign
+  seed: 42
+  run_name: observation_bias_high_order_wfe_smoke
+
+  high_order_wfe:
+    enabled: true
+    truth:
+      enabled: true
+      mirrors: [primary, secondary]
+      mode: synthetic
+      npix: 16
+      amplitude_nm_rms: 1.0
+      seed: 20260610
+      seed_policy: derive_from_campaign_case
+      pairing: independent
+      remove_low_order_zernikes: true
+      remove_zernike_modes: from_observation_theta_or_default
+    inference:
+      enabled: true
+      mode: knowledge_error
+      use_truth_common_map: true
+      knowledge_error:
+        enabled: true
+        amplitude_nm_rms: 0.3
+        seed: null
+        seed_policy: derive_from_campaign_case
+        realization_policy: fixed_per_case
+    artifacts:
+      write_maps: false
+      write_png_quicklooks: false
+      write_summary_json: true
+    validation:
+      require_nonzero_difference_when_enabled: true
+      max_abs_low_order_projection_nm: null
+
+  subblocks:
+    n_subblocks: 1
+    n_frames: 3
+    noise: disabled
+    phi_ref: truth_when_available
+    schur_curvature_method: auto
+    max_dense_dim: 40
+    schur_damping: 1.0e-8
+    exposure_time_s: 0.05
+    reference_diagnostics_profile: none
+    reference_optimizer_kind: sgd
+    reference_base_lr: 0.4
+    reference_n_iter: 3
+    summary_information_scale: summed_likelihood
+    trace_jitter:
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 42
+
+  observation_theta:
+    source:
+      separation_as: true
+      log_flux_total: false
+      contrast: false
+    optics:
+      plate_scale_as_per_pix: false
+      primary_zernikes:
+        enabled: false
+      secondary_zernikes:
+        enabled: false
+
+  eigenbasis:
+    enabled: false
+
+  bias_cases:
+    - case_name: zero_bias
+      theta_reference_offsets: {}
+
+  prior_draws:
+    enabled: false
+  forecast:
+    enabled: false

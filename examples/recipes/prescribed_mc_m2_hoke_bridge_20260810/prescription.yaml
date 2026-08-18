@@ -1,0 +1,325 @@
+system:
+  source:
+    kind: binary_target
+    target: ALPHA_CEN
+    wavelength_m: 5.5e-07
+    bandwidth_m: 4.000000000000004e-08
+    n_lambda: 3
+    exposure_time_s: 1800.0
+    x_position_as: 0.0
+    y_position_as: 0.0
+    wavelengths_m: [5.3e-07, 5.5e-07, 5.7e-07]
+    component_weights:
+      - [0.34305960086816806, 0.34628788740839944, 0.31065251172343256]
+      - [0.3219365046096522, 0.3499431439554433, 0.3281203514349045]
+  optics:
+    kind: three_plane
+    psf_npix: 256
+    oversample: 3
+    pupil_npix: 256
+    m1_diameter_m: 0.22
+    m2_diameter_m: 0.025
+    m1_focal_length_m: 0.604353
+    m2_focal_length_m: -0.0545
+    m1_m2_separation_m: 0.55413
+    pixel_pitch_m: 4.6e-06
+    n_struts: 3
+    strut_width_m: 0.002
+    strut_rotation_deg: -90.0
+    throughput: 1.0
+    primary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+    secondary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+    dp_path: src/dluxshera/data/pupils/diffractive_pupil.npy
+    dp_design_wavelength_m: 5.5e-07
+    high_order_wfe:
+      enabled: true
+      schema_version: campaign_high_order_wfe.v1
+      primary:
+        enabled: true
+        map:
+          kind: precomputed_array_nm
+          rms_nm: 18.272960757661174
+          seed: 20261621
+          array_path: Results/hpc_imports/m2_hoke_canonical_bridge_0p5nm_center/model_split/high_order_wfe/config_maps/primary_high_order_truth_opd_nm.npy
+        knowledge_error:
+          enabled: false
+      secondary:
+        enabled: true
+        map:
+          kind: precomputed_array_nm
+          rms_nm: 16.243746781693204
+          seed: 20262621
+          array_path: Results/hpc_imports/m2_hoke_canonical_bridge_0p5nm_center/model_split/high_order_wfe/config_maps/secondary_high_order_truth_opd_nm.npy
+        knowledge_error:
+          enabled: false
+  detector:
+    model: HWK4123
+    layers:
+      - name: pixel_mtf
+        kind: ApplyConvolution
+        kernel:
+          kind: box
+          width_x: 1.0
+          width_y: 1.0
+          kernel_size: 3
+          units: detector_pix
+      - name: diffusion
+        kind: ApplyConvolution
+        kernel:
+          kind: gaussian
+          sigma_x: 0.15
+          sigma_y: 0.15
+          theta_deg: 0.0
+          kernel_size: 9
+          units: detector_pix
+      - name: pixel_offsets
+        kind: ApplyPixelOffsets
+        dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
+        dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
+      - name: pixel_response
+        kind: ApplyPixelResponse
+        prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
+      - name: jitter
+        kind: ApplyConvolution
+        kernel:
+          kind: gaussian
+          sigma_x: 0.001
+          sigma_y: 0.001
+          theta_deg: 0.0
+          kernel_size: 3
+          units: detector_pix
+
+experiment:
+  kind: prescribed_mc
+  notes: >-
+    Single-trial prescribed-MC bridge for the imported 0.5 nm M2 high-order WFE
+    knowledge-error map at center field. The source bundle under Results/hpc_imports
+    is treated as immutable.
+  seed: 20260810
+
+  inference_system:
+    source:
+      kind: binary_target
+      target: ALPHA_CEN
+      wavelength_m: 5.5e-07
+      bandwidth_m: 4.000000000000004e-08
+      n_lambda: 3
+      exposure_time_s: 1800.0
+      x_position_as: 0.0
+      y_position_as: 0.0
+      wavelengths_m: [5.3e-07, 5.5e-07, 5.7e-07]
+      component_weights:
+        - [0.34305960086816806, 0.34628788740839944, 0.31065251172343256]
+        - [0.3219365046096522, 0.3499431439554433, 0.3281203514349045]
+    optics:
+      kind: three_plane
+      psf_npix: 256
+      oversample: 3
+      pupil_npix: 256
+      m1_diameter_m: 0.22
+      m2_diameter_m: 0.025
+      m1_focal_length_m: 0.604353
+      m2_focal_length_m: -0.0545
+      m1_m2_separation_m: 0.55413
+      pixel_pitch_m: 4.6e-06
+      n_struts: 3
+      strut_width_m: 0.002
+      strut_rotation_deg: -90.0
+      throughput: 1.0
+      primary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+      secondary_noll_indices: [4, 5, 6, 7, 8, 9, 10, 11]
+      dp_path: src/dluxshera/data/pupils/diffractive_pupil.npy
+      dp_design_wavelength_m: 5.5e-07
+      high_order_wfe:
+        enabled: true
+        schema_version: campaign_high_order_wfe.v1
+        primary:
+          enabled: true
+          map:
+            kind: precomputed_array_nm
+            rms_nm: 18.272960757661174
+            seed: 20261621
+            array_path: Results/hpc_imports/m2_hoke_canonical_bridge_0p5nm_center/model_split/high_order_wfe/config_maps/primary_high_order_truth_opd_nm.npy
+          knowledge_error:
+            enabled: false
+        secondary:
+          enabled: true
+          map:
+            kind: precomputed_array_nm
+            rms_nm: 16.243746781693204
+            seed: 20262621
+            array_path: Results/hpc_imports/m2_hoke_canonical_bridge_0p5nm_center/model_split/high_order_wfe/config_maps/secondary_high_order_truth_opd_nm.npy
+          knowledge_error:
+            enabled: true
+            kind: precomputed_array_nm
+            rms_nm: 0.5
+            seed: 221835431
+            array_path: Results/hpc_imports/m2_hoke_canonical_bridge_0p5nm_center/model_split/high_order_wfe/config_maps/secondary_high_order_error_opd_nm.npy
+    detector:
+      model: HWK4123
+      layers:
+        - name: pixel_mtf
+          kind: ApplyConvolution
+          kernel:
+            kind: box
+            width_x: 1.0
+            width_y: 1.0
+            kernel_size: 3
+            units: detector_pix
+        - name: diffusion
+          kind: ApplyConvolution
+          kernel:
+            kind: gaussian
+            sigma_x: 0.15
+            sigma_y: 0.15
+            theta_deg: 0.0
+            kernel_size: 9
+            units: detector_pix
+        - name: pixel_offsets
+          kind: ApplyPixelOffsets
+          dx_path: src/dluxshera/data/pixel_offsets/dx_fpa_realization_01.fits
+          dy_path: src/dluxshera/data/pixel_offsets/dy_fpa_realization_01.fits
+        - name: pixel_response
+          kind: ApplyPixelResponse
+          prf_path: src/dluxshera/data/pixel_response/prf_baseline.fits
+        - name: jitter
+          kind: ApplyConvolution
+          kernel:
+            kind: gaussian
+            sigma_x: 0.001
+            sigma_y: 0.001
+            theta_deg: 0.0
+            kernel_size: 3
+            units: detector_pix
+
+  monte_carlo:
+    n_runs: 1
+    run_id_prefix: bridge
+    results_filename: results.csv
+    results_orientation: row
+    run_plan: null
+    reuse_fim: false
+    defaults:
+      truth:
+        source:
+          x_position_as: 0.0
+          y_position_as: 0.0
+          position_angle_deg: 14.508
+          separation_as: 9.765000343322754
+          contrast: 3.3659327030181885
+        optics:
+          primary:
+            zernike_coeffs_nm:
+              - -5.624845213999503
+              - 0.43023100324609587
+              - 2.341710164919189
+              - 1.2570150006097005
+              - -3.5840662520293924
+              - -1.6546439831658215
+              - -3.00291790926396
+              - 1.8437660342871325
+          secondary:
+            zernike_coeffs_nm:
+              - 1.6238167133221695
+              - -1.4305510033042417
+              - -9.938972900704362
+              - 0.10131325735755377
+              - 4.504256888351566
+              - -2.866470252598662
+              - -0.2543698808233613
+              - 2.68635816431924
+      init:
+        optics.plate_scale_as_per_pix: 0.12320370683047092
+        source:
+          log_flux_total: 11.561392568976858
+          contrast: 3.365639644136482
+          separation_as: 9.764857960819109
+        optics:
+          primary:
+            zernike_coeffs_nm:
+              - -5.700188521010024
+              - -0.3106536488395132
+              - 0.9739174631362455
+              - 1.9059078028027403
+              - -3.2230081389744973
+              - -3.6075070461780117
+              - -0.6555082548851083
+              - 2.812262940039056
+          secondary:
+            zernike_coeffs_nm:
+              - 0.8644295328976629
+              - -0.5283527290919899
+              - -10.405926074024913
+              - 0.04062373862052579
+              - 5.293101232870767
+              - -4.123138385738338
+              - 0.3214876335725674
+              - 4.085337159042959
+
+  optimizer:
+    kind: sgd
+    kwargs: {}
+    n_iter: 100
+    base_lr: 0.5
+    loss: nll
+
+  eigenmodes:
+    enable: true
+    whiten: true
+    truncate_k: null
+    truncate_by_eigval: null
+
+  infer_keys:
+    - source.x_position_as
+    - source.y_position_as
+    - source.position_angle_deg
+    - source.log_flux_total
+    - source.contrast
+    - source.separation_as
+    - optics.plate_scale_as_per_pix
+    - optics.primary.zernike_coeffs_nm
+    - optics.secondary.zernike_coeffs_nm
+
+  noise:
+    enabled: false
+    photon_noise: false
+    read_noise: false
+    dark_current: false
+    variance_floor: 0.5
+
+  outputs:
+    outdir: ../../../Results/prescribed_mc_m2_hoke_bridge_20260810
+    plots: false
+    save_results: true
+
+  init:
+    sampling: prior
+
+  priors:
+    source.x_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.y_position_as:
+      dist: Normal
+      sigma: 1.0e-3
+    source.position_angle_deg:
+      dist: Uniform
+      sigma: 1.0e-2
+    source.log_flux_total:
+      dist: LogNormal
+      sigma: 1.0e-3
+    source.contrast:
+      dist: LogNormal
+      sigma: 1.0e-3
+    source.separation_as:
+      dist: Normal
+      sigma: 1.0e-4
+    optics.plate_scale_as_per_pix:
+      dist: LogNormal
+      sigma: 1.0e-3
+    optics.primary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0
+    optics.secondary.zernike_coeffs_nm:
+      dist: Normal
+      sigma: 1.0

@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+from importlib import resources
 import math
+from pathlib import Path
 from typing import Any, Mapping
 
+import jax.numpy as jnp
 import numpy as np
 
+from ..components.sources import (
+    binary_component_fluxes_from_total_and_contrast,
+    get_target_spec,
+    linear_total_flux_from_log10,
+)
+from ..utils.source_photometry import (
+    build_wavelength_grid_m,
+    derive_source_photometry,
+    target_sed_root,
+)
 from .spec import ParamKey
 from .transform_registry import DEFAULT_SYSTEM_ID, register_transform
 
@@ -41,16 +55,16 @@ ARCSEC_PER_RAD = 206264.8062470963551565  # 180 / pi * 3600
 
 
 @register_for_systems(
-    "system.focal_length_m",
+    "optics.focal_length_m",
     depends_on=(
-        "system.m1_focal_length_m",
-        "system.m2_focal_length_m",
-        "system.m1_m2_separation_m",
+        "optics.m1_focal_length_m",
+        "optics.m2_focal_length_m",
+        "optics.m1_m2_separation_m",
     ),
 )
-def transform_system_focal_length_m(ctx: Ctx) -> float:
+def transform_3P_focal_length_m(ctx: Ctx) -> float:
     """
-    Compute the effective telescope focal length for the Shera two-mirror relay.
+    Compute the effective telescope focal length for the Shera 3-plane system.
 
         1 / f_eff = 1 / f1 + 1 / f2 - sep / (f1 * f2)
 
@@ -59,9 +73,9 @@ def transform_system_focal_length_m(ctx: Ctx) -> float:
         f2  = secondary focal length
         sep = axial separation between mirrors
     """
-    f1 = float(ctx["system.m1_focal_length_m"])
-    f2 = float(ctx["system.m2_focal_length_m"])
-    sep = float(ctx["system.m1_m2_separation_m"])
+    f1 = float(ctx["optics.m1_focal_length_m"])
+    f2 = float(ctx["optics.m2_focal_length_m"])
+    sep = float(ctx["optics.m1_m2_separation_m"])
 
     denom = (1.0 / f1) + (1.0 / f2) - sep / (f1 * f2)
     # Optionally: guard against denom ≈ 0.0 and raise a TransformError.
@@ -70,33 +84,26 @@ def transform_system_focal_length_m(ctx: Ctx) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Plate scale: system.plate_scale_as_per_pix
+# Plate scale: optics.plate_scale_as_per_pix
 # ---------------------------------------------------------------------------
 
 
 @register_for_systems(
-    "system.plate_scale_as_per_pix",
+    "optics.plate_scale_as_per_pix",
     depends_on=(
-        "system.focal_length_m",
-        "system.pixel_pitch_m",
+        "optics.focal_length_m",
+        "detector.pixel_pitch_m",
     ),
 )
-def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
+def transform_3P_plate_scale_as_per_pix(ctx: Ctx) -> float:
     """
     Compute the geometric plate scale in arcseconds per pixel.
 
         plate_scale_rad_per_pix = pixel_pitch_m / f_eff
         plate_scale_as_per_pix  = plate_scale_rad_per_pix * ARCSEC_PER_RAD
-
-    This is equivalent to:
-
-        dLux.utils.rad2arcsec(pixel_pitch_m / f_eff)
-
-    but kept self-contained to avoid a heavy dependency on dLux in the
-    parameter transforms layer.
     """
-    f_eff = float(ctx["system.focal_length_m"])
-    pixel_pitch = float(ctx["system.pixel_pitch_m"])
+    f_eff = float(ctx["optics.focal_length_m"])
+    pixel_pitch = float(ctx["detector.pixel_pitch_m"])
 
     plate_scale_rad = pixel_pitch / f_eff
     plate_scale_as = plate_scale_rad * ARCSEC_PER_RAD
@@ -104,73 +111,126 @@ def transform_system_plate_scale_as_per_pix(ctx: Ctx) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Log-flux: binary.log_flux_total
+# Log-flux: source.log_flux_total
 # ---------------------------------------------------------------------------
 
 
 @register_for_systems(
-    "binary.log_flux_total",
+    "source.log_flux_total",
     depends_on=(
-        "system.m1_diameter_m",
-        "band.bandwidth_m",
-        "imaging.exposure_time_s",
-        "imaging.throughput",
-        "binary.spectral_flux_density",
+        "source.target",
+        "source.vmag_a",
+        "source.vmag_b",
+        "source.wavelength_m",
+        "optics.m1_diameter_m",
+        "source.bandwidth_m",
+        "source.n_lambda",
+        "source.exposure_time_s",
+        "optics.throughput",
     ),
 )
-def transform_binary_log_flux_total(ctx: Ctx) -> float:
+def transform_source_log_flux_total(ctx: Ctx) -> float:
     """
-    Compute the truth-level log10 total photon count over the exposure.
+    Compute total detected ``log10(photons)`` from authoritative source photometry.
 
-    Model:
-
-        area         = π (D / 2)^2
-        total_flux   = spectral_flux_density * bandwidth_m
-                       * area * exposure_time_s * throughput
-        log_flux_tot = log10(total_flux)
-
-    where:
-        D                      = primary mirror diameter [m]
-        spectral_flux_density  = mean photon flux density at the pupil in
-                                 ph/s/m^2 per *meter* of band
-        bandwidth_m            = bandpass width [m]
-        exposure_time_s        = integration time [s]
-        throughput             = end-to-end efficiency (0–1)
+    This transform uses curated target component SEDs when available. If SEDs
+    are missing, it falls back to a documented Johnson-V/Vega-style
+    approximation using component V magnitudes.
     """
-    D = float(ctx["system.m1_diameter_m"])
-    bandwidth_m = float(ctx["band.bandwidth_m"])
-    t_exp = float(ctx["imaging.exposure_time_s"])
-    throughput = float(ctx["imaging.throughput"])
-    flux_density = float(ctx["binary.spectral_flux_density"])
+    target_key_raw = ctx.get("source.target", None)
+    target_key = str(target_key_raw).strip() if target_key_raw not in (None, "") else None
+    target_spec = get_target_spec(target_key) if target_key else None
 
-    area = math.pi * (D / 2.0) ** 2
-    total_flux = flux_density * bandwidth_m * area * t_exp * throughput
+    vmag_a_raw = ctx.get("source.vmag_a", None)
+    vmag_b_raw = ctx.get("source.vmag_b", None)
+    vmag_a = float(vmag_a_raw) if vmag_a_raw is not None else (target_spec.vmag_a if target_spec else None)
+    vmag_b = float(vmag_b_raw) if vmag_b_raw is not None else (target_spec.vmag_b if target_spec else None)
 
-    # total_flux should be > 0 for physical configurations
-    if not (total_flux > 0.0):
-        # Optional guard; you could also just let log10 blow up.
-        raise ValueError(
-            f"Non-positive total_flux={total_flux} in binary_log_flux_total "
-            "(check flux_density, bandwidth, area, exposure_time, throughput)."
+    D = float(ctx["optics.m1_diameter_m"])
+    wavelength_m = float(ctx["source.wavelength_m"])
+    bandwidth_m = float(ctx["source.bandwidth_m"])
+    n_lambda = int(ctx["source.n_lambda"])
+    t_exp = float(ctx["source.exposure_time_s"])
+    throughput = float(ctx["optics.throughput"])
+    area_m2 = math.pi * (D / 2.0) ** 2
+    wavelength_grid_m = build_wavelength_grid_m(
+        wavelength_m=wavelength_m,
+        bandwidth_m=bandwidth_m,
+        n_lambda=n_lambda,
+    )
+
+    sed_a_ref = None
+    sed_b_ref = None
+    if target_spec and target_spec.sed_a_file and target_spec.sed_b_file:
+        sed_root = target_sed_root()
+        sed_a_ref = sed_root.joinpath(target_spec.sed_a_file)
+        sed_b_ref = sed_root.joinpath(target_spec.sed_b_file)
+
+    if sed_a_ref is not None and sed_b_ref is not None and sed_a_ref.is_file() and sed_b_ref.is_file():
+        with ExitStack() as stack:
+            sed_a_path = Path(stack.enter_context(resources.as_file(sed_a_ref)))
+            sed_b_path = Path(stack.enter_context(resources.as_file(sed_b_ref)))
+            photometry = derive_source_photometry(
+                wavelength_grid_m=wavelength_grid_m,
+                bandwidth_m=bandwidth_m,
+                collecting_area_m2=area_m2,
+                exposure_time_s=t_exp,
+                throughput=throughput,
+                sed_a_path=sed_a_path,
+                sed_b_path=sed_b_path,
+                vmag_a=vmag_a,
+                vmag_b=vmag_b,
+            )
+    else:
+        photometry = derive_source_photometry(
+            wavelength_grid_m=wavelength_grid_m,
+            bandwidth_m=bandwidth_m,
+            collecting_area_m2=area_m2,
+            exposure_time_s=t_exp,
+            throughput=throughput,
+            sed_a_path=None,
+            sed_b_path=None,
+            vmag_a=vmag_a,
+            vmag_b=vmag_b,
         )
 
-    log_flux = math.log10(total_flux)
-    return log_flux
+    return float(photometry.log_flux_total)
 
 
 # ---------------------------------------------------------------------------
-# Raw fluxes: binary.raw_fluxes
+# Raw fluxes: source.raw_fluxes
 # ---------------------------------------------------------------------------
+
+
+def compute_source_raw_fluxes_from_log_flux_total_and_contrast(
+    log_flux_total: Any,
+    contrast: Any,
+) -> jnp.ndarray:
+    """Return source raw fluxes using the canonical Alpha Cen convention.
+
+    Notes
+    -----
+    This helper is intentionally JAX-safe. It matches the documented transform
+    semantics for ``source.raw_fluxes`` but avoids Python scalar coercion so it
+    can be reused inside traced local inference objectives.
+    """
+
+    total_flux = linear_total_flux_from_log10(log_flux_total)
+    flux_a, flux_b = binary_component_fluxes_from_total_and_contrast(
+        total_flux,
+        contrast,
+    )
+    return jnp.stack((flux_a, flux_b), axis=0)
 
 
 @register_for_systems(
-    "binary.raw_fluxes",
+    "source.raw_fluxes",
     depends_on=(
-        "binary.log_flux_total",
-        "binary.contrast",
+        "source.log_flux_total",
+        "source.contrast",
     ),
 )
-def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
+def transform_source_raw_fluxes(ctx: Ctx) -> np.ndarray:
     """
     Compute raw fluxes for the binary pair (photons for star A and B).
 
@@ -180,11 +240,12 @@ def transform_binary_raw_fluxes(ctx: Ctx) -> np.ndarray:
         flux_A = total_flux * contrast / (1 + contrast)
         flux_B = total_flux / (1 + contrast)
     """
-    log_flux = float(ctx["binary.log_flux_total"])
-    contrast = float(ctx["binary.contrast"])
-
-    total_flux = 10.0 ** log_flux
-    flux_B = total_flux / (1.0 + contrast)
-    flux_A = contrast * flux_B
-
-    return np.asarray([flux_A, flux_B])
+    log_flux = float(ctx["source.log_flux_total"])
+    contrast = float(ctx["source.contrast"])
+    return np.asarray(
+        compute_source_raw_fluxes_from_log_flux_total_and_contrast(
+            log_flux,
+            contrast,
+        ),
+        dtype=float,
+    )

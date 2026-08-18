@@ -1,13 +1,13 @@
 import pytest
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder, SHERA_TESTBED_CONFIG
-from dluxshera.params.store import StoreNamespace
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG
 from tests.conftest import make_forward_store
 
 
 def _make_binder():
     forward_spec, forward_store = make_forward_store(SHERA_TESTBED_CONFIG)
-    return SheraThreePlaneBinder(
+    return SheraBinder(
         SHERA_TESTBED_CONFIG,
         forward_spec,
         forward_store,
@@ -17,11 +17,10 @@ def _make_binder():
 def test_binder_ns_returns_store_namespace():
     binder = _make_binder()
 
-    system_ns = binder.ns("system")
+    optics_ns = binder.ns("optics")
 
-    assert (
-        system_ns.plate_scale_as_per_pix
-        == binder.base_forward_store.get("system.plate_scale_as_per_pix")
+    assert optics_ns.plate_scale_as_per_pix == binder.base_forward_store.get(
+        "optics.plate_scale_as_per_pix"
     )
 
 
@@ -36,15 +35,11 @@ def test_binder_ns_validation(prefix):
 def test_binder_store_prefix_attr_access():
     binder = _make_binder()
 
-    system_ns = binder.system
+    optics = binder.optics
 
-    assert isinstance(system_ns, StoreNamespace)
-    assert system_ns.plate_scale_as_per_pix == binder.base_forward_store.get(
-        "system.plate_scale_as_per_pix"
-    )
-    assert binder.binary.x_position_as == binder.base_forward_store.get(
-        "binary.x_position_as"
-    )
+    assert optics is binder.telescope.optics
+    assert binder.source is binder.telescope.source
+    assert binder.detector is binder.telescope.detector
 
 
 def test_binder_store_prefix_missing_attr_raises_attribute_error():
@@ -52,6 +47,3 @@ def test_binder_store_prefix_missing_attr_raises_attribute_error():
 
     with pytest.raises(AttributeError):
         binder.this_prefix_does_not_exist
-
-    with pytest.raises(AttributeError):
-        binder.system.this_does_not_exist

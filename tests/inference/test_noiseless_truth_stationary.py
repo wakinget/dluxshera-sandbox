@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
+from dluxshera.systems import SheraBinder
 from dluxshera.systems.three_plane import build_forward_spec_from_config
 from dluxshera.inference.optimization import make_binder_nll_fn
 from dluxshera.params.packing import pack_params
@@ -25,28 +25,28 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_store = truth_store.replace(
         {
-            "binary.separation_as": 10.0,
-            "binary.position_angle_deg": 90.0,
-            "binary.x_position_as": 0.0,
-            "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1.0,
+            "source.separation_as": 10.0,
+            "source.position_angle_deg": 90.0,
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
+            "source.exposure_time_s": 1.0,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder_truth = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+    binder_truth = SheraBinder(cfg, forward_spec, truth_store)
     data = binder_truth.model()
     var = jnp.ones_like(data)
 
     infer_keys = (
-        "binary.separation_as",
-        "binary.position_angle_deg",
-        "binary.x_position_as",
-        "binary.y_position_as",
-        "binary.log_flux_total",
-        "binary.contrast",
-        "system.plate_scale_as_per_pix",
-        "primary.zernike_coeffs_nm",
+        "source.separation_as",
+        "source.position_angle_deg",
+        "source.x_position_as",
+        "source.y_position_as",
+        "source.log_flux_total",
+        "source.contrast",
+        "optics.plate_scale_as_per_pix",
+        "optics.primary.zernike_coeffs_nm",
     )
     inference_subspec = make_inference_subspec(
         base_spec=forward_spec, infer_keys=infer_keys, cfg=cfg
@@ -57,7 +57,7 @@ def test_noiseless_truth_is_stationary_for_gaussian_nll(shera_smoke_cfg):
     # this via theta0_store must not affect the unpack base used by the binder
     # inside the loss.
     mismatched_base = truth_store.replace(
-        {"imaging.exposure_time_s": truth_store.get("imaging.exposure_time_s") * 2.0}
+        {"source.exposure_time_s": truth_store.get("source.exposure_time_s") * 2.0}
     )
 
     loss_fn, _theta0, predict_fn = make_binder_nll_fn(

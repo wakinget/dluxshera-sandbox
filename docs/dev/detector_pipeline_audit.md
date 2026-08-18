@@ -22,43 +22,25 @@ Inspected files include:
 ### What detector object is built today
 
 - `build_detector(cfg)` returns a `SheraDetector`, which subclasses `dLux.LayeredDetector` and adds non-pytree metadata via `.spec`.
-  - Builder: `src/dluxshera/builders/detector.py` (`build_detector`, line ~138).
-  - Wrapper class: `src/dluxshera/components/detectors.py` (`class SheraDetector`, line ~54).
+  - Builder: `src/dluxshera/builders/detector.py` (`build_detector`).
+  - Wrapper class: `src/dluxshera/components/detectors.py` (`class SheraDetector`).
 - In practice, binders consume it as a `dl.LayeredDetector` and pass it to `dl.Telescope`.
 
-### Default layer pipeline and ordering
+### Layer pipeline and ordering
 
-Current layer list is hardcoded and ordered in `build_detector(cfg)`:
-
-1. `("downsample", Downsample(cfg.oversample))`
-2. `("pixel_offsets", ApplyPixelOffsets(...))`
-3. `("pixel_response", ApplyPixelResponse(pixel_response))`
-4. `("jitter", ApplyJitter(...))`
-
-This ordering is defined directly in `layers = [...]` in `src/dluxshera/builders/detector.py` (lines ~176–181).
+- Layers are **declarative**: `system.detector.layers` lists ordered layer configs (downsample, pixel_offsets, pixel_response, jitter supported today).
+- Each layer entry is converted via `build_detector_layer(name, layer_cfg, target_shape)`, and `target_shape` is derived from `system.optics.psf_npix`.
 
 ### Config keys currently read for detector construction
 
-Detector builder reads **flat top-level config attributes** via `getattr(cfg, ...)` and direct fields:
-
-- Required/assumed present:
-  - `cfg.psf_npix`
-  - `cfg.oversample`
-- Optional (with defaults):
-  - `detector_model` (default metadata spec: GSENSE2020BSI)
-  - `ppu_dx_path`, `ppu_dy_path`
-  - `ppu_interp_method` (default: `"cubic2"`)
-  - `prf_path`
-  - `jitter_sigma` (default: `1e-12`)
-  - `jitter_kernel_size` (default: `3`)
-
-No nested config like `cfg.detector.*` is currently read by the detector builder.
+- Preferred path: nested detector block (`system.detector`), including:
+  - `model` (metadata/spec selection)
+  - `layers` (ordered detector pipeline)
+- The builder normalizes nested detector blocks via `_normalize_detector_cfg`; declarative `system.detector.layers` is required.
 
 ### Config declarations in dataclasses
 
-- `SheraThreePlaneConfig` includes `detector_model` as an explicit dataclass field.
-- `SheraTwoPlaneConfig` does **not** explicitly declare detector fields (including `detector_model`).
-- Because the detector builder uses `getattr`, two-plane can still run with builder defaults as long as `psf_npix` and `oversample` exist.
+- `SheraThreePlaneConfig` and `SheraTwoPlaneConfig` include `detector_model` and `detector_layers` fields; defaults seed the declarative detector pipeline directly.
 
 ---
 
@@ -73,8 +55,8 @@ No nested config like `cfg.detector.*` is currently read by the detector builder
 5. `BaseSheraBinder.__init__` then builds a cached `self.telescope = self._build_telescope(..., detector=detector)`.
 6. `model()` behavior:
    - `model(store_delta=None)`: uses cached `self.telescope.model()` (no detector rebuild).
-   - `model(store_delta=...)`: applies runtime updates via `_apply_runtime_updates`; detector updates currently no-op because detector runtime bindings are empty.
-   - structural rebuild path (`update_store(..., allow_rebuild=True)`): detector is rebuilt only if detector is marked structural. Today `_detector_structural_keys()` returns empty set, so detector is not structurally keyed via store changes.
+   - `model(store_delta=...)`: applies runtime updates via `_apply_runtime_updates`; detector runtime updates are limited to jitter sigma plus any explicit detector bindings (currently none beyond jitter).
+   - structural rebuild path (`update_store(..., allow_rebuild=True)`): detector is rebuilt only if detector is marked structural. Today detector structural keys are empty, so detector rebuilds remain rare.
 
 ### Key functions and locations
 
@@ -240,3 +222,31 @@ This allows gradual migration while avoiding breaking existing examples and bind
 3. **Calibration maps:** file-loaded from `.npy/.npz`; default identity maps when missing; all conditioned through `_condition_detector_map`.
 4. **Path handling:** repo-root-relative resolution already exists in detector builder; not CWD-based there.
 5. **Best hook for future `system.detector.layers`:** detector builder layer assembly in `build_detector`, preserving existing helpers/defaults and introducing an ordered layer-construction helper.
+
+## 2026-06-23 update: detector calibration-map knowledge error
+
+Detector calibration-map knowledge errors are now wired into the
+full-fidelity/observation-bias campaign model split. The campaign-level
+`experiment.detector_calibration_knowledge_error` block can independently add
+seeded Gaussian inference-side perturbations to `pixel_offsets.dx_map`,
+`pixel_offsets.dy_map`, and `pixel_response.pixel_response` while leaving
+truth/render maps nominal by default.
+
+The implementation reuses the detector builder's existing
+`detector.layers[*].knowledge_error` path and centralizes normalization,
+realization-policy seeding, campaign-side patching, and provenance summaries in
+`src/dluxshera/utils/detector_knowledge_error.py`. The older prescribed Monte
+Carlo script now delegates detector KE seed policy helpers to that shared
+module while retaining its existing private wrapper names for compatibility.
+
+Nominal full-fidelity detector KE values are `0.001` detector pixels RMS for
+pixel offsets and `0.001` fractional response RMS for pixel response. Model
+split provenance records the perturbed side, layer names, field names, seeds,
+realization policy, requested RMS values, and realized map hashes/statistics
+when map files are available. Because full-fidelity trace/render/inference
+templates are global model-split artifacts, campaign-level detector KE is
+fixed across cases and subblocks. The older prescribed-MC layer-level path
+continues to support `per_run` realizations through the shared seed helper.
+Pixel-response campaign KE writes an explicit `clip_min: 0.0` bound into the
+layer `knowledge_error` block so larger response-map experiments cannot
+silently produce negative multiplicative responses.

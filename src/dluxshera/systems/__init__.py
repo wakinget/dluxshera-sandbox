@@ -1,21 +1,18 @@
-from .base import BaseConfig, BaseSheraBinder, BINDER_RESERVED_NAMES
+from .base import BaseConfig, BINDER_RESERVED_NAMES, SheraBinder
 from .three_plane import (
     DEFAULT_DP_PATH,
     SHERA_FLIGHT_CONFIG,
     SHERA_TESTBED_CONFIG,
-    SheraThreePlaneBinder,
     SheraThreePlaneConfig,
 )
-from .two_plane import SheraTwoPlaneBinder, SheraTwoPlaneConfig
+from .two_plane import SheraTwoPlaneConfig
 
 __all__ = [
     "BaseConfig",
-    "BaseSheraBinder",
+    "SheraBinder",
     "BINDER_RESERVED_NAMES",
     "SheraTwoPlaneConfig",
-    "SheraTwoPlaneBinder",
     "SheraThreePlaneConfig",
-    "SheraThreePlaneBinder",
     "DEFAULT_DP_PATH",
     "SHERA_TESTBED_CONFIG",
     "SHERA_FLIGHT_CONFIG",

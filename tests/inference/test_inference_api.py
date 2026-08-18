@@ -9,22 +9,22 @@ from dluxshera.inference.inference import run_shera_image_gd_basic
 def test_run_shera_image_gd_basic_separation_smoke(
     shera_smoke_cfg,
     shera_smoke_inference,
-    shera_smoke_model_data,
+    shera_smoke_binder_data,
 ):
     _, store_true = shera_smoke_inference
-    data, var = shera_smoke_model_data
+    _, data, var = shera_smoke_binder_data
 
     # 2) Start from a slightly wrong separation via init_overrides
-    sep_true = store_true.get("binary.separation_as")
+    sep_true = store_true.get("source.separation_as")
     sep_init = sep_true * 1.1
-    init_overrides = {"binary.separation_as": sep_init}
+    init_overrides = {"source.separation_as": sep_init}
 
     # 3) Call the high-level API
     theta_final, store_final, history = run_shera_image_gd_basic(
         data,
         var,
         cfg=shera_smoke_cfg,
-        infer_keys=("binary.separation_as",),
+        infer_keys=("source.separation_as",),
         init_overrides=init_overrides,
         noise_model="gaussian",
         learning_rate=1e-1,
@@ -40,5 +40,5 @@ def test_run_shera_image_gd_basic_separation_smoke(
     assert loss_end < loss_start
 
     # Separation should move closer to the truth than the initial guess
-    sep_est = store_final.get("binary.separation_as")
+    sep_est = store_final.get("source.separation_as")
     assert abs(sep_est - sep_true) < abs(sep_init - sep_true)

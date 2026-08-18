@@ -17,7 +17,7 @@
 #   The store holds parameter values
 #   The store uses a helper function to compute and populate derived values like the system plate scale
 #       Transforms registered to each derived parameter are used to compute from primitive parameters
-# Build a SheraThreePlaneBinder from config, forward_spec, and forward_truth_store
+# Build a SheraBinder from config, forward_spec, and forward_truth_store
 #   The binder is what 'binds' the parameters to the optics, source, and detector objects from dLux
 # Use the binder to generate synthetic Data
 #   Optionally add noise to the data
@@ -46,7 +46,7 @@ import jax.random as jr
 from dluxshera.systems.three_plane import (
     SHERA_TESTBED_CONFIG,
     SHERA_FLIGHT_CONFIG,
-    SheraThreePlaneBinder,
+    SheraBinder,
     build_forward_spec_from_config,
 )
 from dluxshera.params.packing import unpack_params as store_unpack_params
@@ -193,7 +193,7 @@ forward_truth_store = forward_truth_store.refresh_derived(forward_spec)
 # If desired, could I update the 'system.plate_scale_as_per_pix' here?
 
 # Create the Binder
-binder = SheraThreePlaneBinder(cfg, forward_spec, forward_truth_store)
+binder = SheraBinder(cfg, forward_spec, forward_truth_store)
 # The binder is the object that acts like the dLux Telescope.
 # It holds the source, optics + detector, and exposes the .model() method
 
