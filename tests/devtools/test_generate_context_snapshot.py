@@ -16,8 +16,8 @@ def test_context_snapshot_reports_param_specs_and_transforms(tmp_path):
         "forward_threeplane",
         "forward_twoplane",
         "inference_basic",
-        "system.plate_scale_as_per_pix",
-        "binary.log_flux_total",
+        "optics.plate_scale_as_per_pix",
+        "source.log_flux_total",
     ):
         assert expected in md_text
 
@@ -28,5 +28,5 @@ def test_context_snapshot_reports_param_specs_and_transforms(tmp_path):
     transforms = meta.get("transforms", {}).get("systems", {})
     assert "shera_threeplane" in transforms
     transform_keys = transforms["shera_threeplane"].get("transform_keys", [])
-    assert "system.plate_scale_as_per_pix" in transform_keys
-    assert "binary.log_flux_total" in transform_keys
+    assert "optics.plate_scale_as_per_pix" in transform_keys
+    assert "source.log_flux_total" in transform_keys

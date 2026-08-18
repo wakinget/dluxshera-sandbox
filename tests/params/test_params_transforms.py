@@ -21,22 +21,22 @@ def test_simple_transform_separation_pix():
     registry = TransformRegistry()
 
     transform = Transform(
-        key="binary.separation_pix",
-        depends_on=("binary.separation_as", "imaging.plate_scale_as_per_pix"),
+        key="source.separation_pix",
+        depends_on=("source.separation_as", "optics.plate_scale_as_per_pix"),
         doc="Convert binary separation from arcsec to pixels.",
-        fn=lambda ctx: ctx["binary.separation_as"]
-        / ctx["imaging.plate_scale_as_per_pix"],
+        fn=lambda ctx: ctx["source.separation_as"]
+        / ctx["optics.plate_scale_as_per_pix"],
     )
     registry.register(transform)
 
     store = ParameterStore.from_dict(
         {
-            "binary.separation_as": 10.0,  # arcsec
-            "imaging.plate_scale_as_per_pix": 0.5,  # arcsec/pixel
+            "source.separation_as": 10.0,  # arcsec
+            "optics.plate_scale_as_per_pix": 0.5,  # arcsec/pixel
         }
     )
 
-    value = registry.compute("binary.separation_pix", store)
+    value = registry.compute("source.separation_pix", store)
     assert value == pytest.approx(20.0)
 
 

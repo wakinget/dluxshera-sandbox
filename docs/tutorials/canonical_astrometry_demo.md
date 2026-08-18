@@ -1,43 +1,23 @@
 # Canonical astrometry demo (three-plane)
 
-The canonical recipe in `examples/recipes/canonical_astrometry.py` builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. A thin runner lives at `examples/runners/run_canonical_astrometry.py`. The recipe highlights the current stack: `ParamSpec`/`ParameterStore`, binder-only model evaluation, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs toggled near the top of the file).
+The canonical recipe in `examples/recipes/canonical_astrometry.py` builds a Shera-like three-plane optical system, generates synthetic binary-star data, and recovers the scene with gradient-based optimisation. A thin runner lives at `examples/runners/run_canonical_astrometry.py`. The recipe highlights the current stack: config resolution (`load_user_config` ➜ `resolve_config`), forward-spec composition, binder-first evaluation, image NLL construction, and optimisation in θ-space (with optional eigen-θ runs).
 
 ## What the demo covers
 - Shera-style three-plane optical path with Fresnel propagation.
+- Declarative detector composition via `system.detector.layers` (defaults to identity/no-op layers when omitted).
 - Synthetic truth generation for a binary target and noisy observations.
-- Pure θ-space gradient descent for MAP estimation, with a note about eigen-θ optimisation when enabled in the script.
+- Pure θ-space gradient descent for MAP estimation, with an optional eigen-θ parameterisation.
 - Plotting helpers for PSF comparison and parameter history.
 
-## Step-by-step walkthrough
-- **Build the config and forward ParamSpec (config → spec):** The script seeds a Shera configuration, then calls the forward `ParamSpec` builder (see `build_forward_spec` in the script) to define primitives and derived fields for inference. Shera configs are frozen dataclasses for structural hashing/caching, so tweak predefined designs (e.g., `SHERA_TESTBED_CONFIG`) with the ergonomic `.replace(...)` helper rather than attribute assignment, for example:
-
-  ```python
-  cfg = SHERA_TESTBED_CONFIG.replace(
-      primary_noll_indices=(4, 5, 6, 7, 8),
-      secondary_noll_indices=(4, 5, 6, 7, 8),
-      oversample=4,
-  )
-  ```
-- **Create the base forward ParameterStore:** Use the spec defaults to create a primitives-only store and call `store.refresh_derived(forward_spec)` to populate values such as pixel scale and log flux. Derived transform modules are registered lazily, so the store method is the one-stop "compute deriveds" entrypoint. We typically do not construct a separate `inference_store`; instead we reuse `forward_store` (or `init_store`) as the base store for packing/unpacking.
-- **Define the inference view (spec → inference):** Choose the subset/order of parameters to infer (e.g., astrometry-only) and build an inference subspec directly from the forward spec using `make_inference_subspec`. Validate that the base store already contains the needed keys (and shapes) with `validate_inference_base_store` before packing θ vectors, for example:
-
-  ```python
-  inference_subspec = make_inference_subspec(
-      base_spec=forward_spec,
-      infer_keys=["binary.separation_as", "binary.position_angle_deg"],
-      cfg=cfg,
-      include_secondary=False,
-  )
-  validate_inference_base_store(forward_store, inference_subspec)
-  ```
-- **Construct the Binder (spec → Binder):** Instantiate a `SheraThreePlaneBinder` so evaluation is a single `binder.model(store_delta)` call. Calling `binder.model()` with no delta takes the fast-path through the cached telescope; pass a non-structural delta to update values per call. If you need to persist a new baseline (or apply a structural change), build a new binder via `binder.update_store(...)` (or `binder.with_store(...)` when you just want to swap the baseline without structural intent).
-- **Simulate observations (Binder → data):** Draw a "truth" `ParameterStore`, evaluate the binder to get a noiseless image, and add Gaussian noise to obtain observations.
-- **Build the loss + inference setup (data → θ):** `make_binder_image_nll_fn` returns a θ-packing loss and the initial θ vector. The demo adds a quadratic prior penalty for MAP optimisation and optionally wraps the loss via `EigenThetaMap` when eigenmodes are enabled.
-- **Run inference (θ → best-fit):** The main loop applies Optax updates to θ in pure θ-space; when eigenmode helpers are enabled, the same loss is optimized in eigen-θ coordinates. When you unpack θ into a full `ParameterStore`, use `subset_store(store, infer_keys)` to form a safe delta before calling `binder.model(store_delta)`, and reserve `binder.update_store(...)` for true baseline changes (e.g., structural edits).
-- **Plot + inspect results (artifacts + figures):** The script saves PSF comparison plots and parameter history grids (see `plot_psf_comparison` and `plot_parameter_history_grid`), writing outputs when an output directory is provided. The run directory is also where optimization artifacts are saved when enabled; see `docs/architecture/optimization_artifacts_and_plotting.md` for the expected layout and file names.
-
-## Looking ahead: two-plane canonical demo
-A forthcoming two-plane canonical demo will follow the same structure with a simplified optical path. Expect the same flow—config ➜ forward spec ➜ base store ➜ Binder ➜ loss ➜ optimisation—but with fewer planes to help new users get started quickly.
+## Step-by-step walkthrough (matches the recipe)
+- **Load + resolve config (user → system/experiment):** The script loads YAML/JSON via `load_user_config`, then calls `resolve_config` to apply presets, deep-merge overrides, and validation. The resolved config exposes `system` (physical model) and `experiment` (workflow settings). Detector layers can be overridden by editing `system.detector.layers` before composing the spec.
+- **Compose the forward spec (system → spec):** `compose_forward_spec(system_cfg)` builds the contract from source/optics/detector builders. All parameter keys are component-prefixed (e.g., `source.*`, `optics.*`, `detector.*`), and bindings capture runtime paths for binder access and runtime patching.
+- **Create the base store (spec → values):** `ParameterStore.from_spec_defaults(forward_spec)` seeds primitives, then `.refresh_derived(forward_spec)` fills derived values such as `optics.plate_scale_as_per_pix`. The same store serves as both truth and inference baseline.
+- **Build the Binder (system + spec + store):** `SheraBinder(system_cfg, forward_spec, forward_store)` is the runtime model. `binder.model()` uses cached optics/detector; pass `binder.strip_structural(delta_store)` for per-call, non-structural updates. Structural edits still require `binder.update_store(..., allow_rebuild=True)`.
+- **Simulate observations (Binder → data):** Evaluate the binder for a noiseless PSF, then add optional noise (Gaussian or Poisson) to form the observed image. Variance is set from the noiseless PSF with a floor to avoid divide-by-zero in the NLL.
+- **Define inference layout (spec → subset):** Choose inference keys from the forward spec and build `inference_subspec = forward_spec.subset(infer_keys)`. Packing/unpacking (`pack_params`, `store_unpack_params`) operate on this subspec; derived-labelled keys remain inferable (store-wins) without special casing.
+- **Initialise and run optimisation (θ → best-fit):** Priors are defined per key; initial stores come from prior samples or truth depending on `experiment.init.mode`. Loss construction uses `make_binder_nll_fn`, with optional eigenmode wrapping via `EigenThetaMap`. The optimisation loop updates θ in pure θ-space while binder calls stay store-based.
+- **Plot + inspect results (artifacts + figures):** The script writes PSF comparisons, parameter histories, and optional eigen spectra to the run directory alongside optimisation artifacts. See `docs/architecture/optimization_artifacts_and_plotting.md` for layout details.
 
 ## Running the script
 From the repository root:
@@ -46,7 +26,7 @@ From the repository root:
 python examples/runners/run_canonical_astrometry.py
 ```
 
-Use the `--fast` runner flag for a quick smoke run, or edit the `FAST_MODE`/`SAVE_PLOTS` toggles near the top of the recipe, for example:
+Use the `--fast` runner flag for a quick smoke run, or edit the `FAST_MODE`/`SAVE_PLOTS` toggles near the top of the recipe:
 
 ```bash
 python examples/runners/run_canonical_astrometry.py --fast

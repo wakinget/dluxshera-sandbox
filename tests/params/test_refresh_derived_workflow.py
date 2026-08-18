@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import math
-
 import pytest
 
-from dluxshera.systems.three_plane import (
-    SHERA_TESTBED_CONFIG,
-    build_forward_spec_from_config,
+from dluxshera.utils.source_photometry import (
+    build_wavelength_grid_m,
+    derive_source_photometry,
 )
 from dluxshera.params.spec import ParamField, ParamSpec
 from dluxshera.params.store import ParameterStore, refresh_derived
+from dluxshera.systems.three_plane import SHERA_TESTBED_CONFIG, build_forward_spec_from_config
 
 
 def test_refresh_derived_lazy_registration_threeplane():
@@ -18,27 +17,45 @@ def test_refresh_derived_lazy_registration_threeplane():
     spec = build_forward_spec_from_config(SHERA_TESTBED_CONFIG)
     store = ParameterStore.from_spec_defaults(spec).replace(
         {
-            "imaging.exposure_time_s": 2.0,
-            "imaging.throughput": 0.9,
-            "binary.spectral_flux_density": 2.0e17,
+            "source.target": None,
+            "source.vmag_a": 1.5,
+            "source.vmag_b": 2.2,
+            "source.exposure_time_s": 2.0,
+            "optics.throughput": 0.9,
         }
     )
 
     refreshed = store.refresh_derived(spec)
 
-    assert "system.plate_scale_as_per_pix" in refreshed
-    assert "binary.log_flux_total" in refreshed
-    # Compare against a simple analytic log-flux to ensure transforms executed.
-    D = float(refreshed.get("system.m1_diameter_m"))
-    bandwidth_m = float(refreshed.get("band.bandwidth_m"))
-    t_exp = float(refreshed.get("imaging.exposure_time_s"))
-    throughput = float(refreshed.get("imaging.throughput"))
-    flux_density = float(refreshed.get("binary.spectral_flux_density"))
+    assert "optics.plate_scale_as_per_pix" in refreshed
+    assert "source.log_flux_total" in refreshed
 
-    area = math.pi * (D / 2.0) ** 2
-    expected_log_flux = math.log10(flux_density * bandwidth_m * area * t_exp * throughput)
+    D = float(refreshed.get("optics.m1_diameter_m"))
+    wavelength_m = float(refreshed.get("source.wavelength_m"))
+    bandwidth_m = float(refreshed.get("source.bandwidth_m"))
+    n_lambda = int(refreshed.get("source.n_lambda"))
+    t_exp = float(refreshed.get("source.exposure_time_s"))
+    throughput = float(refreshed.get("optics.throughput"))
+    area_m2 = float(3.141592653589793 * (D / 2.0) ** 2)
 
-    assert refreshed.get("binary.log_flux_total") == pytest.approx(expected_log_flux)
+    wavelength_grid_m = build_wavelength_grid_m(
+        wavelength_m=wavelength_m,
+        bandwidth_m=bandwidth_m,
+        n_lambda=n_lambda,
+    )
+    expected = derive_source_photometry(
+        wavelength_grid_m=wavelength_grid_m,
+        bandwidth_m=bandwidth_m,
+        collecting_area_m2=area_m2,
+        exposure_time_s=t_exp,
+        throughput=throughput,
+        sed_a_path=None,
+        sed_b_path=None,
+        vmag_a=1.5,
+        vmag_b=2.2,
+    )
+
+    assert refreshed.get("source.log_flux_total") == pytest.approx(expected.log_flux_total)
 
 
 def test_refresh_derived_deterministic_ordering():

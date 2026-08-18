@@ -18,9 +18,6 @@ from typing import List, Mapping, MutableSequence, Optional, Sequence, Tuple, Un
 import math
 
 import matplotlib
-
-matplotlib.use("Agg", force=True)
-
 import jax.numpy as np
 import matplotlib.pyplot as plt
 import numpy as onp
@@ -41,6 +38,8 @@ __all__ = [
     "plot_psf_single",
     "plot_psf_comparison",
     "plot_opd_surface",
+    "plot_pixel_offset_maps",
+    "plot_pixel_response_maps",
     "choose_subplot_grid",
     "plot_parameter_sweeps",
     "plot_fim",
@@ -68,6 +67,7 @@ def make_nan_cmaps(
     *,
     bad_color: str = "k",
     bad_alpha: float = 0.5,
+    register: bool = True,
 ) -> Mapping[str, matplotlib.colors.Colormap]:
     """Create colormaps with NaNs rendered as a specified color.
 
@@ -79,6 +79,9 @@ def make_nan_cmaps(
         Color to use for NaNs/invalid entries.
     bad_alpha : float
         Alpha value to use for NaNs/invalid entries.
+    register : bool
+        When True, register ``<name>_nan`` with Matplotlib. When False, skip
+        registration to avoid repeated overwrite warnings.
 
     Returns
     -------
@@ -92,8 +95,9 @@ def make_nan_cmaps(
         cmap.set_bad(bad_color, bad_alpha)
         cmaps[name] = cmap
         registered_name = f"{name}_nan"
-        matplotlib.colormaps.register(cmap, name=registered_name, force=True)
-        cmaps[registered_name] = cmap
+        if register and registered_name not in matplotlib.colormaps:
+            matplotlib.colormaps.register(cmap, name=registered_name, force=True)
+        cmaps[registered_name] = matplotlib.colormaps.get(registered_name, cmap)
     return cmaps
 
 
@@ -101,13 +105,15 @@ def get_default_cmaps(
     *,
     bad_color: str = "k",
     bad_alpha: float = 0.5,
+    register: bool = True,
 ) -> Mapping[str, matplotlib.colors.Colormap]:
     """Return the default plotting colormaps with NaN handling."""
 
     return make_nan_cmaps(
-        ["inferno", "seismic", "coolwarm"],
+        ["inferno", "viridis", "seismic", "coolwarm"],
         bad_color=bad_color,
         bad_alpha=bad_alpha,
+        register=register,
     )
 
 
@@ -158,23 +164,63 @@ def _plot_lines_on_ax(
     labels,
     title: str,
     ylabel: str,
+    *,
+    show_final_values: bool = False,
 ) -> None:
-    for y, label in zip(ys, labels):
-        ax.plot(x, y, label=label)
+    legend_labels: list[str | None] = []
+    for i, y in enumerate(ys):
+        label = labels[i] if i < len(labels) else None
+        plot_label = label
+        if show_final_values:
+            arr = onp.asarray(y)
+            base_label = label if label else f"y{i + 1}"
+            if arr.size == 0:
+                plot_label = f"{base_label}=nan"
+            else:
+                final_val = float(arr.reshape(-1)[-1])
+                plot_label = f"{base_label}={_format_scalar_for_legend(final_val)}"
+        ax.plot(x, y, label=plot_label)
+        legend_labels.append(plot_label)
+
     ax.axhline(0, linestyle="--", color="k", alpha=0.6)
     ax.set_title(title)
     ax.set_xlabel("Step")
     ax.set_ylabel(ylabel)
-    if labels:
+    if any(lbl is not None for lbl in legend_labels):
         ax.legend()
 
 
-def _plot_lines(x, ys, labels, title: str, ylabel: str, save_path: Path) -> None:
+def _plot_lines(
+    x,
+    ys,
+    labels,
+    title: str,
+    ylabel: str,
+    save_path: Path,
+    *,
+    show_final_values: bool = False,
+) -> None:
     fig, ax = plt.subplots()
-    _plot_lines_on_ax(ax, x, ys, labels, title, ylabel)
+    _plot_lines_on_ax(
+        ax,
+        x,
+        ys,
+        labels,
+        title,
+        ylabel,
+        show_final_values=show_final_values,
+    )
     fig.tight_layout()
     fig.savefig(save_path, dpi=200)
     plt.close(fig)
+
+
+def _format_scalar_for_legend(value: float) -> str:
+    if not onp.isfinite(value):
+        return "nan"
+    if value == 0.0:
+        return "0"
+    return f"{value:.3g}"
 
 
 def _iter_signal_panels(
@@ -188,8 +234,8 @@ def _iter_signal_panels(
         return f"{title_prefix} — {base}" if title_prefix else base
 
     astrometry = [
-        ("binary.x_error_uas", "Δx"),
-        ("binary.y_error_uas", "Δy"),
+        ("source.x_error_uas", "Δx"),
+        ("source.y_error_uas", "Δy"),
     ]
     if all(key in signals for key, _ in astrometry):
         ys = [signals[key] for key, _ in astrometry]
@@ -202,35 +248,35 @@ def _iter_signal_panels(
             "filename": "astrometry_residuals_uas.png",
         }
 
-    if "binary.separation_error_uas" in signals:
+    if "source.separation_error_uas" in signals:
         yield {
             "title": title("Separation residual (µas)"),
             "ylabel": "Residual (µas)",
-            "ys": [signals["binary.separation_error_uas"]],
+            "ys": [signals["source.separation_error_uas"]],
             "labels": ["Δρ"],
             "filename": "separation_residual_uas.png",
         }
 
-    if "binary.position_angle_error_as" in signals:
+    if "source.position_angle_error_as" in signals:
         yield {
             "title": title("Position angle residual (arcsec)"),
             "ylabel": "Residual (arcsec)",
-            "ys": [signals["binary.position_angle_error_as"]],
+            "ys": [signals["source.position_angle_error_as"]],
             "labels": ["ΔPA"],
             "filename": "position_angle_residual_as.png",
         }
 
-    if "system.plate_scale_error_ppm" in signals:
+    if "optics.plate_scale_error_ppm" in signals:
         yield {
             "title": title("Plate scale error (ppm)"),
             "ylabel": "Error (ppm)",
-            "ys": [signals["system.plate_scale_error_ppm"]],
+            "ys": [signals["optics.plate_scale_error_ppm"]],
             "labels": ["Plate scale"],
             "filename": "plate_scale_error_ppm.png",
         }
 
-    if "binary.raw_flux_error_ppm" in signals:
-        flux_err = signals["binary.raw_flux_error_ppm"]
+    if "source.raw_flux_error_ppm" in signals:
+        flux_err = signals["source.raw_flux_error_ppm"]
         if flux_err.ndim == 2 and flux_err.shape[1] >= 2:
             ys = [flux_err[:, 0], flux_err[:, 1]]
             labels = ["Star A", "Star B"]
@@ -245,8 +291,8 @@ def _iter_signal_panels(
             "filename": "raw_flux_error_ppm.png",
         }
 
-    if "primary.zernike_error_nm" in signals:
-        zerr = signals["primary.zernike_error_nm"]
+    if "optics.primary.zernike_error_nm" in signals:
+        zerr = signals["optics.primary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
             ys = [zerr[:, i] for i in range(zerr.shape[1])]
             labels = [f"M1 Z{i + 4}" for i in range(zerr.shape[1])]
@@ -267,8 +313,8 @@ def _iter_signal_panels(
             "filename": "m1_zernike_rms_nm.png",
         }
 
-    if "secondary.zernike_error_nm" in signals:
-        zerr = signals["secondary.zernike_error_nm"]
+    if "optics.secondary.zernike_error_nm" in signals:
+        zerr = signals["optics.secondary.zernike_error_nm"]
         if zerr.ndim == 2 and zerr.shape[1] > 0:
             ys = [zerr[:, i] for i in range(zerr.shape[1])]
             labels = [f"M2 Z{i + 4}" for i in range(zerr.shape[1])]
@@ -294,6 +340,17 @@ def merge_cbar(ax):
     """Append a slim colourbar axis flush with ``ax`` and return it."""
 
     return make_axes_locatable(ax).append_axes("right", size="5%", pad=0.0)
+
+
+def _imshow_panel(ax, data, *, title, cmap, vmin=None, vmax=None):
+    im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title(title)
+    ax.set_xlabel("X (px)")
+    ax.set_ylabel("Y (px)")
+    cax = merge_cbar(ax)
+    ax.figure.colorbar(im, cax=cax)
+
+    return im
 
 
 def plot_parameter_history(
@@ -426,6 +483,7 @@ def plot_signals_panels(
     *,
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
+    show_final_values: bool = False,
 ) -> PanelPaths:
     """
     Render standard diagnostic panels from Signals.
@@ -440,6 +498,8 @@ def plot_signals_panels(
         Optional prefix applied to each panel title.
     include_zernike_rms:
         Whether to include M1/M2 Zernike RMS panels (default False).
+    show_final_values:
+        Whether to append per-series final values to legend labels.
 
     Returns
     -------
@@ -458,7 +518,15 @@ def plot_signals_panels(
         include_zernike_rms=include_zernike_rms,
     ):
         path = Path(out_dir / panel["filename"] )
-        _plot_lines(x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"], path)
+        _plot_lines(
+            x,
+            panel["ys"],
+            panel["labels"],
+            panel["title"],
+            panel["ylabel"],
+            path,
+            show_final_values=show_final_values,
+        )
         saved.append(path)
 
     return saved
@@ -470,6 +538,7 @@ def plot_signals_grid(
     *,
     title_prefix: Optional[str] = None,
     include_zernike_rms: bool = False,
+    show_final_values: bool = False,
     figsize: Optional[Tuple[float, float]] = None,
     show: bool = False,
     close: bool = True,
@@ -487,6 +556,8 @@ def plot_signals_grid(
         Optional prefix applied to each panel title.
     include_zernike_rms:
         Whether to include M1/M2 Zernike RMS panels (default False).
+    show_final_values:
+        Whether to append per-series final values to legend labels.
     figsize:
         Optional explicit figure size.
     show:
@@ -520,7 +591,15 @@ def plot_signals_grid(
     axes_flat = axes.flatten()
 
     for ax, panel in zip(axes_flat, panels):
-        _plot_lines_on_ax(ax, x, panel["ys"], panel["labels"], panel["title"], panel["ylabel"])
+        _plot_lines_on_ax(
+            ax,
+            x,
+            panel["ys"],
+            panel["labels"],
+            panel["title"],
+            panel["ylabel"],
+            show_final_values=show_final_values,
+        )
 
     for ax in axes_flat[len(panels):]:
         fig.delaxes(ax)
@@ -857,6 +936,126 @@ def plot_psf_comparison(
         plt.close(fig)
 
     return fig, axs
+
+
+def plot_pixel_offset_maps(
+    data_dx,
+    data_dy,
+    infer_dx,
+    infer_dy,
+    *,
+    figsize=(10, 12),
+    cmap: str = "viridis_nan",
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot data vs inference pixel-offset maps plus their differences (3x2 grid)."""
+
+    # Ensure NaN-safe colormaps are registered
+    get_default_cmaps()
+
+    data_dx = onp.asarray(data_dx)
+    data_dy = onp.asarray(data_dy)
+    infer_dx = onp.asarray(infer_dx)
+    infer_dy = onp.asarray(infer_dy)
+
+    if data_dx.shape != infer_dx.shape or data_dy.shape != infer_dy.shape:
+        raise ValueError("Pixel offset map shapes must match between data and inference systems.")
+
+    diff_dx = data_dx - infer_dx
+    diff_dy = data_dy - infer_dy
+
+    dx_min = onp.nanmin([onp.nanmin(data_dx), onp.nanmin(infer_dx)])
+    dx_max = onp.nanmax([onp.nanmax(data_dx), onp.nanmax(infer_dx)])
+    dy_min = onp.nanmin([onp.nanmin(data_dy), onp.nanmin(infer_dy)])
+    dy_max = onp.nanmax([onp.nanmax(data_dy), onp.nanmax(infer_dy)])
+
+    diff_dx_abs = onp.nanmax(onp.abs(diff_dx))
+    diff_dy_abs = onp.nanmax(onp.abs(diff_dy))
+
+    fig, axes = plt.subplots(3, 2, figsize=figsize, squeeze=False)
+    _imshow_panel(axes[0, 0], data_dx, title="Data dx_map", cmap=cmap, vmin=dx_min, vmax=dx_max)
+    _imshow_panel(axes[0, 1], data_dy, title="Data dy_map", cmap=cmap, vmin=dy_min, vmax=dy_max)
+    _imshow_panel(axes[1, 0], infer_dx, title="Inference dx_map", cmap=cmap, vmin=dx_min, vmax=dx_max)
+    _imshow_panel(axes[1, 1], infer_dy, title="Inference dy_map", cmap=cmap, vmin=dy_min, vmax=dy_max)
+    _imshow_panel(
+        axes[2, 0],
+        diff_dx,
+        title="dx_map (data - inference)",
+        cmap=cmap,
+        vmin=-diff_dx_abs,
+        vmax=diff_dx_abs,
+    )
+    _imshow_panel(
+        axes[2, 1],
+        diff_dy,
+        title="dy_map (data - inference)",
+        cmap=cmap,
+        vmin=-diff_dy_abs,
+        vmax=diff_dy_abs,
+    )
+
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, axes
+
+
+def plot_pixel_response_maps(
+    data_prf,
+    infer_prf,
+    *,
+    figsize=(9, 9),
+    cmap: str = "viridis_nan",
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    close: bool = True,
+):
+    """Plot data vs inference pixel-response maps plus their difference (3x1 grid)."""
+
+    get_default_cmaps()
+
+    data_prf = onp.asarray(data_prf)
+    infer_prf = onp.asarray(infer_prf)
+
+    if data_prf.shape != infer_prf.shape:
+        raise ValueError("Pixel response map shapes must match between data and inference systems.")
+
+    diff_prf = data_prf - infer_prf
+
+    prf_min = onp.nanmin([onp.nanmin(data_prf), onp.nanmin(infer_prf)])
+    prf_max = onp.nanmax([onp.nanmax(data_prf), onp.nanmax(infer_prf)])
+    diff_abs = onp.nanmax(onp.abs(diff_prf))
+
+    fig, axes = plt.subplots(3, 1, figsize=figsize, squeeze=False)
+    _imshow_panel(axes[0, 0], data_prf, title="Data pixel_response", cmap=cmap, vmin=prf_min, vmax=prf_max)
+    _imshow_panel(
+        axes[1, 0], infer_prf, title="Inference pixel_response", cmap=cmap, vmin=prf_min, vmax=prf_max
+    )
+    _imshow_panel(
+        axes[2, 0],
+        diff_prf,
+        title="pixel_response (data - inference)",
+        cmap=cmap,
+        vmin=-diff_abs,
+        vmax=diff_abs,
+    )
+
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+
+    if show:
+        plt.show()
+    elif close:
+        plt.close(fig)
+
+    return fig, axes
 
 
 def plot_opd_surface(

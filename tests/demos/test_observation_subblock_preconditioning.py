@@ -1,0 +1,739 @@
+"""Focused tests for observation sub-block theta preconditioning helpers."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+def _load_recipe_module():
+    repo_root = Path(__file__).resolve().parents[2]
+    recipe_path = repo_root / "examples" / "recipes" / "observation_subblock_inference.py"
+    spec = importlib.util.spec_from_file_location(
+        "observation_subblock_inference_recipe_precond_tests",
+        recipe_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load recipe at {recipe_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _active_spec(recipe, key: str) -> object:
+    return recipe.ActiveKeySpec(
+        canonical=key,
+        address=recipe.parse_obs_subblock_varying_keys([key])[0],
+        kind="primitive",
+    )
+
+
+def test_theta_preconditioning_bundle_shapes_match_theta_dim():
+    recipe = _load_recipe_module()
+
+    curvature = np.array([[4.0, 1.2], [1.2, 2.5]], dtype=float)
+
+    def loss_fn(theta):
+        return 0.5 * theta @ curvature @ theta
+
+    theta_ref = np.array([0.25, -0.75], dtype=float)
+    bundle = recipe._build_theta_preconditioning_bundle(
+        loss_fn=loss_fn,
+        theta_ref=theta_ref,
+        base_lr=0.1,
+        cfg={
+            "damping": 1e-6,
+            "eig_floor_rel": 1e-6,
+            "eig_floor_abs": 1e-8,
+            "lr_clip": [1e-4, 1.0],
+        },
+    )
+
+    assert bundle.fim.shape == (theta_ref.size, theta_ref.size)
+    assert bundle.eigvals.shape == (theta_ref.size,)
+    assert bundle.eigvals_stable.shape == (theta_ref.size,)
+    assert bundle.fim_diag.shape == (theta_ref.size,)
+    assert bundle.curvature_vec.shape == (theta_ref.size,)
+    assert bundle.lr_vec.shape == (theta_ref.size,)
+    assert np.all(np.isfinite(bundle.lr_vec))
+    assert np.all(bundle.lr_vec > 0.0)
+
+
+def test_theta_preconditioning_lr_vec_is_scale_only_not_base_lr_scaled(monkeypatch):
+    recipe = _load_recipe_module()
+
+    curvature = np.array([[4.0, 1.2], [1.2, 2.5]], dtype=float)
+    monkeypatch.setattr(recipe, "fim_theta", lambda loss_fn, theta_ref: curvature)
+
+    def loss_fn(theta):
+        return 0.5 * theta @ recipe.jnp.asarray(curvature) @ theta
+
+    theta_ref = np.array([0.25, -0.75], dtype=float)
+    cfg = {
+        "damping": 1e-6,
+        "eig_floor_rel": 1e-6,
+        "eig_floor_abs": 1e-8,
+        "lr_clip": None,
+    }
+    bundle_low_lr = recipe._build_theta_preconditioning_bundle(
+        loss_fn=loss_fn,
+        theta_ref=theta_ref,
+        base_lr=0.1,
+        cfg=cfg,
+    )
+    bundle_high_lr = recipe._build_theta_preconditioning_bundle(
+        loss_fn=loss_fn,
+        theta_ref=theta_ref,
+        base_lr=0.2,
+        cfg=cfg,
+    )
+
+    np.testing.assert_allclose(bundle_low_lr.curvature_vec, np.diag(curvature))
+    np.testing.assert_allclose(
+        bundle_low_lr.lr_vec_unclipped,
+        1.0 / (np.diag(curvature) + 1e-12),
+    )
+    np.testing.assert_allclose(bundle_low_lr.lr_vec, bundle_low_lr.lr_vec_unclipped)
+    np.testing.assert_allclose(bundle_high_lr.lr_vec, bundle_low_lr.lr_vec)
+
+
+def test_theta_preconditioning_matches_canonical_fim_diag_formula(monkeypatch):
+    recipe = _load_recipe_module()
+
+    curvature = np.array([[9.0, 4.0], [4.0, 16.0]], dtype=float)
+    monkeypatch.setattr(recipe, "fim_theta", lambda loss_fn, theta_ref: curvature)
+
+    def loss_fn(theta):
+        return 0.5 * theta @ recipe.jnp.asarray(curvature) @ theta
+
+    theta_ref = np.array([0.25, -0.75], dtype=float)
+    bundle = recipe._build_theta_preconditioning_bundle(
+        loss_fn=loss_fn,
+        theta_ref=theta_ref,
+        base_lr=0.1,
+        cfg={
+            "damping": 1e-6,
+            "eig_floor_rel": 1e-6,
+            "eig_floor_abs": 1e-8,
+            "lr_clip": None,
+        },
+    )
+
+    expected_curvature = np.array([9.0, 16.0])
+    expected_lr_vec = 1.0 / (expected_curvature + 1e-12)
+    np.testing.assert_allclose(bundle.curvature_vec, expected_curvature)
+    np.testing.assert_allclose(bundle.lr_vec, expected_lr_vec)
+
+
+def test_theta_preconditioning_reference_uses_truth_trace_when_available():
+    recipe = _load_recipe_module()
+
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            recipe.ActiveKeySpec(
+                canonical="source.x_position_as",
+                address=recipe.ObsSubblockKeyAddress(
+                    base_key="source.x_position_as",
+                    index=None,
+                ),
+                kind="primitive",
+            ),
+        ),
+        shared_specs=(),
+        n_frame=1,
+    )
+    theta0 = recipe.jnp.asarray([0.0])
+    initial_state = recipe.ActiveState(
+        frame=recipe.jnp.asarray([[0.0]]),
+        shared=recipe.jnp.asarray([]),
+    )
+    trace = recipe.ObsSubblockTrace(
+        rows=(
+            {
+                "frame_index": 0,
+                "time_s": 0.0,
+                "source.x_position_as": 0.123,
+            },
+        ),
+        required_columns=("frame_index", "time_s", "source.x_position_as"),
+        extra_columns=(),
+        source_path=Path("truth.csv"),
+    )
+    truth = recipe._build_truth_frame_matrix(
+        trace,
+        layout=layout,
+        base_store=recipe.ParameterStore.from_dict({}),
+        n_frame=1,
+    )
+
+    theta_ref, source = recipe._resolve_theta_preconditioning_reference(
+        layout=layout,
+        theta0=theta0,
+        initial_state=initial_state,
+        truth=truth,
+        reference_mode="truth_when_available",
+    )
+
+    assert source == "truth_trace"
+    np.testing.assert_allclose(np.asarray(theta_ref), [0.123])
+
+
+def test_truth_frame_matrix_fills_missing_active_key_from_resolved_store():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.log_flux_total"),
+        ),
+        shared_specs=(),
+        n_frame=2,
+    )
+    trace = recipe.ObsSubblockTrace(
+        rows=(
+            {"frame_index": 0, "time_s": 0.0, "source.x_position_as": "0.1"},
+            {"frame_index": 1, "time_s": 1.0, "source.x_position_as": "0.2"},
+        ),
+        required_columns=("frame_index", "time_s"),
+        extra_columns=("source.x_position_as",),
+        source_path=Path("truth.csv"),
+    )
+
+    truth = recipe._build_truth_frame_matrix(
+        trace,
+        layout=layout,
+        base_store=recipe.ParameterStore.from_dict({"source.log_flux_total": 9.5}),
+        n_frame=2,
+    )
+
+    assert truth.sources == {
+        "source.x_position_as": "trace_csv",
+        "source.log_flux_total": "resolved_store",
+    }
+    assert truth.complete is True
+    np.testing.assert_allclose(truth.matrix, [[0.1, 9.5], [0.2, 9.5]])
+
+
+def test_truth_frame_matrix_marks_missing_unrecoverable_key_unavailable(capsys):
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.log_flux_total"),
+        ),
+        shared_specs=(),
+        n_frame=1,
+    )
+    trace = recipe.ObsSubblockTrace(
+        rows=({"frame_index": 0, "time_s": 0.0, "source.x_position_as": "0.1"},),
+        required_columns=("frame_index", "time_s"),
+        extra_columns=("source.x_position_as",),
+        source_path=Path("truth.csv"),
+    )
+
+    truth = recipe._build_truth_frame_matrix(
+        trace,
+        layout=layout,
+        base_store=recipe.ParameterStore.from_dict({}),
+        n_frame=1,
+    )
+
+    assert truth.sources["source.x_position_as"] == "trace_csv"
+    assert truth.sources["source.log_flux_total"] == "unavailable"
+    assert truth.complete is False
+    assert truth.unavailable_keys == ("source.log_flux_total",)
+    assert np.isnan(truth.matrix[0, 1])
+    assert "truth unavailable for active frame keys" in capsys.readouterr().out
+
+
+def test_theta_preconditioning_reference_uses_mixed_truth_sources_when_complete():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.log_flux_total"),
+        ),
+        shared_specs=(),
+        n_frame=2,
+    )
+    initial_state = recipe.ActiveState(
+        frame=recipe.jnp.asarray([[0.0, 0.0], [0.0, 0.0]]),
+        shared=recipe.jnp.asarray([]),
+    )
+    trace = recipe.ObsSubblockTrace(
+        rows=(
+            {"frame_index": 0, "time_s": 0.0, "source.x_position_as": "0.1"},
+            {"frame_index": 1, "time_s": 1.0, "source.x_position_as": "0.2"},
+        ),
+        required_columns=("frame_index", "time_s"),
+        extra_columns=("source.x_position_as",),
+        source_path=Path("truth.csv"),
+    )
+    truth = recipe._build_truth_frame_matrix(
+        trace,
+        layout=layout,
+        base_store=recipe.ParameterStore.from_dict({"source.log_flux_total": 9.5}),
+        n_frame=2,
+    )
+
+    theta_ref, source = recipe._resolve_theta_preconditioning_reference(
+        layout=layout,
+        theta0=recipe.jnp.zeros(layout.theta_size),
+        initial_state=initial_state,
+        truth=truth,
+        reference_mode="truth_when_available",
+    )
+
+    assert source == "truth_mixed"
+    np.testing.assert_allclose(np.asarray(theta_ref), [0.1, 9.5, 0.2, 9.5])
+
+
+def test_theta_preconditioning_reference_falls_back_for_incomplete_truth(capsys):
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.log_flux_total"),
+        ),
+        shared_specs=(),
+        n_frame=1,
+    )
+    initial_state = recipe.ActiveState(
+        frame=recipe.jnp.asarray([[0.0, 0.0]]),
+        shared=recipe.jnp.asarray([]),
+    )
+    trace = recipe.ObsSubblockTrace(
+        rows=({"frame_index": 0, "time_s": 0.0, "source.x_position_as": "0.1"},),
+        required_columns=("frame_index", "time_s"),
+        extra_columns=("source.x_position_as",),
+        source_path=Path("truth.csv"),
+    )
+    truth = recipe._build_truth_frame_matrix(
+        trace,
+        layout=layout,
+        base_store=recipe.ParameterStore.from_dict({}),
+        n_frame=1,
+    )
+
+    theta_ref, source = recipe._resolve_theta_preconditioning_reference(
+        layout=layout,
+        theta0=recipe.jnp.asarray([3.0, 4.0]),
+        initial_state=initial_state,
+        truth=truth,
+        reference_mode="truth_when_available",
+    )
+
+    assert source == "initial_fallback_incomplete_truth"
+    np.testing.assert_allclose(np.asarray(theta_ref), [3.0, 4.0])
+    assert "preconditioning reference is incomplete" in capsys.readouterr().out
+
+
+def test_preconditioned_sgd_effective_step_scales_linearly_with_base_lr(monkeypatch):
+    recipe = _load_recipe_module()
+
+    curvature = np.array([[3.0, 0.4], [0.4, 1.5]], dtype=float)
+    monkeypatch.setattr(recipe, "fim_theta", lambda loss_fn, theta_ref: curvature)
+
+    def loss_fn(theta):
+        return 0.5 * theta @ recipe.jnp.asarray(curvature) @ theta
+
+    theta0 = np.array([0.5, -0.25], dtype=float)
+    cfg = {
+        "damping": 1e-6,
+        "eig_floor_rel": 1e-6,
+        "eig_floor_abs": 1e-8,
+        "lr_clip": None,
+    }
+    bundle_low_lr = recipe._build_theta_preconditioning_bundle(
+        loss_fn=loss_fn,
+        theta_ref=theta0,
+        base_lr=0.1,
+        cfg=cfg,
+    )
+    bundle_high_lr = recipe._build_theta_preconditioning_bundle(
+        loss_fn=loss_fn,
+        theta_ref=theta0,
+        base_lr=0.2,
+        cfg=cfg,
+    )
+
+    step_low_lr = recipe._optimizer_first_step(
+        loss_fn=loss_fn,
+        theta0=recipe.jnp.asarray(theta0),
+        learning_rate=0.1,
+        lr_vec=bundle_low_lr.lr_vec,
+        optimizer_kind="sgd",
+        optimizer_kwargs={},
+    )
+    step_high_lr = recipe._optimizer_first_step(
+        loss_fn=loss_fn,
+        theta0=recipe.jnp.asarray(theta0),
+        learning_rate=0.2,
+        lr_vec=bundle_high_lr.lr_vec,
+        optimizer_kind="sgd",
+        optimizer_kwargs={},
+    )
+
+    np.testing.assert_allclose(bundle_high_lr.lr_vec, bundle_low_lr.lr_vec)
+    np.testing.assert_allclose(
+        step_high_lr["delta0"],
+        2.0 * step_low_lr["delta0"],
+        rtol=1e-6,
+    )
+
+
+def test_pack_unpack_active_state_with_frame_and_shared_roundtrips():
+    recipe = _load_recipe_module()
+
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            recipe.ActiveKeySpec(
+                canonical="source.x_position_as",
+                address=recipe.ObsSubblockKeyAddress(base_key="source.x_position_as", index=None),
+                kind="primitive",
+            ),
+            recipe.ActiveKeySpec(
+                canonical="source.y_position_as",
+                address=recipe.ObsSubblockKeyAddress(base_key="source.y_position_as", index=None),
+                kind="primitive",
+            ),
+        ),
+        shared_specs=(
+            recipe.ActiveKeySpec(
+                canonical="source.log_flux_total",
+                address=recipe.ObsSubblockKeyAddress(base_key="source.log_flux_total", index=None),
+                kind="primitive",
+            ),
+        ),
+        n_frame=3,
+    )
+    state = recipe.ActiveState(
+        frame=np.array([[0.1, -0.1], [0.2, -0.2], [0.3, -0.3]], dtype=float),
+        shared=np.array([9.5], dtype=float),
+    )
+
+    theta = recipe._pack_active_state(layout, state)
+    restored = recipe._unpack_active_state(layout, theta)
+
+    assert theta.shape == (layout.theta_size,)
+    np.testing.assert_allclose(np.asarray(restored.frame), state.frame)
+    np.testing.assert_allclose(np.asarray(restored.shared), state.shared)
+
+
+def test_preconditioning_auto_selects_frame_block_for_frame_only_independent():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(),
+        n_frame=3,
+    )
+
+    method = recipe._select_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "independent"}},
+    )
+
+    assert method == "frame_block"
+
+
+def test_preconditioning_auto_selects_frame_shared_for_shared_independent():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(_active_spec(recipe, "source.log_flux_total"),),
+        n_frame=3,
+    )
+
+    method = recipe._select_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "independent"}},
+    )
+
+    assert method == "frame_shared_structured"
+
+
+def test_preconditioning_auto_selects_structured_residual_prior_for_temporal_model():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.y_position_as"),
+            _active_spec(recipe, "source.position_angle_deg"),
+        ),
+        shared_specs=(),
+        n_frame=20,
+        temporal_kind="linear_drift_residual_jitter_prior",
+        frame_times_s=tuple((np.arange(20, dtype=float) + 0.5) * 0.05),
+    )
+
+    plan = recipe._plan_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "linear_drift_residual_jitter_prior"}},
+    )
+
+    assert plan.effective_method == "structured_residual_prior_diag"
+    assert plan.dense_global_fim_materialized is False
+    assert plan.fallback_used is False
+
+
+def test_preconditioning_auto_unknown_temporal_uses_diagonal_hvp_fallback():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(),
+        n_frame=5,
+        temporal_kind="mystery_model",
+        frame_times_s=tuple(np.arange(5, dtype=float)),
+    )
+    plan = recipe._plan_preconditioning_method(
+        requested_method="auto",
+        layout=layout,
+        temporal_cfg={"frame_model": {"kind": "mystery_model"}},
+    )
+    assert plan.effective_method == "diagonal_hvp"
+    assert plan.fallback_used is True
+
+
+def test_dense_preconditioning_guard_blocks_large_campaign_dense_runs():
+    recipe = _load_recipe_module()
+    with pytest.raises(ValueError, match="Dense optimizer preconditioning was selected"):
+        recipe._validate_dense_preconditioning_guard(
+            effective_method="dense_full_theta",
+            theta_dim=60,
+            max_dense_dim=20,
+            allow_dense_image_hessian=False,
+        )
+    recipe._validate_dense_preconditioning_guard(
+        effective_method="dense_full_theta",
+        theta_dim=6,
+        max_dense_dim=20,
+        allow_dense_image_hessian=False,
+    )
+    recipe._validate_dense_preconditioning_guard(
+        effective_method="dense_full_theta",
+        theta_dim=60,
+        max_dense_dim=20,
+        allow_dense_image_hessian=True,
+    )
+
+
+def test_preconditioning_frame_block_rejects_shared_active_terms():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(_active_spec(recipe, "source.log_flux_total"),),
+        n_frame=3,
+    )
+
+    with pytest.raises(ValueError, match="requires no shared active parameters"):
+        recipe._select_preconditioning_method(
+            requested_method="frame_block",
+            layout=layout,
+            temporal_cfg={"frame_model": {"kind": "independent"}},
+        )
+
+
+def test_residual_prior_temporal_diagonal_scales_with_sigma_and_reduce():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.y_position_as"),
+            _active_spec(recipe, "source.position_angle_deg"),
+        ),
+        shared_specs=(),
+        n_frame=5,
+        temporal_kind="linear_drift_residual_jitter_prior",
+        frame_times_s=tuple((np.arange(5, dtype=float) + 0.5) * 0.1),
+    )
+    temporal_cfg_small = {
+        "frame_model": {
+            "kind": "linear_drift_residual_jitter_prior",
+            "residual_prior": {
+                "source.x_position_as": {"sigma": 0.01},
+                "source.y_position_as": {"sigma": 0.01},
+                "source.position_angle_deg": {"sigma": 1e-4},
+            },
+            "reduce": "sum",
+        }
+    }
+    temporal_cfg_large = {
+        "frame_model": {
+            "kind": "linear_drift_residual_jitter_prior",
+            "residual_prior": {
+                "source.x_position_as": {"sigma": 0.02},
+                "source.y_position_as": {"sigma": 0.02},
+                "source.position_angle_deg": {"sigma": 2e-4},
+            },
+            "reduce": "sum",
+        }
+    }
+    diag_small = recipe._temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg=temporal_cfg_small,
+        objective_cfg={"subblock_reduce": "sum"},
+    )
+    diag_large = recipe._temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg=temporal_cfg_large,
+        objective_cfg={"subblock_reduce": "sum"},
+    )
+    assert np.all(np.isfinite(diag_small))
+    assert np.all(diag_small >= 0.0)
+    np.testing.assert_allclose(diag_small, 4.0 * diag_large, rtol=1e-6, atol=1e-10)
+
+    diag_mean = recipe._temporal_prior_diagonal_for_residual_prior(
+        layout=layout,
+        temporal_cfg={
+            "frame_model": {
+                **temporal_cfg_small["frame_model"],
+                "reduce": "mean",
+            }
+        },
+        objective_cfg={"subblock_reduce": "sum"},
+    )
+    np.testing.assert_allclose(diag_mean, diag_small / float(layout.n_frame), rtol=1e-6, atol=1e-10)
+
+
+def test_build_structured_residual_prior_bundle_combines_data_and_temporal_diagonals():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(
+            _active_spec(recipe, "source.x_position_as"),
+            _active_spec(recipe, "source.y_position_as"),
+            _active_spec(recipe, "source.position_angle_deg"),
+        ),
+        shared_specs=(),
+        n_frame=3,
+        temporal_kind="linear_drift_residual_jitter_prior",
+        frame_times_s=tuple((np.arange(3, dtype=float) + 0.5) * 0.1),
+    )
+
+    def frame_data_term(frame_values, _shared_values, _frame_index):
+        return 0.5 * recipe.jnp.sum(frame_values**2)
+
+    def per_frame_terms(theta):
+        state = recipe._unpack_active_state(layout, theta)
+        return recipe.jnp.stack([frame_data_term(state.frame[i], state.shared, i) for i in range(layout.n_frame)])
+
+    def total_loss(theta):
+        return recipe.jnp.sum(per_frame_terms(theta))
+
+    objective_bundle = recipe.ObjectiveBundle(
+        total_loss_fn=total_loss,
+        objective_terms_fn=lambda theta: (total_loss(theta), recipe.jnp.array(0.0), recipe.jnp.array(0.0)),
+        predict_cube_fn=lambda theta: recipe.jnp.zeros((layout.n_frame, 1, 1)),
+        per_frame_data_terms_fn=per_frame_terms,
+        frame_data_term_fn=frame_data_term,
+    )
+    theta_ref = recipe.jnp.zeros(layout.theta_size)
+    bundle = recipe._build_structured_residual_prior_preconditioning_bundle(
+        layout=layout,
+        objective_bundle=objective_bundle,
+        theta_ref=theta_ref,
+        cfg={"method": "structured_residual_prior_diag", "reference": "initial"},
+        temporal_cfg={
+            "frame_model": {
+                "kind": "linear_drift_residual_jitter_prior",
+                "residual_prior": {
+                    "source.x_position_as": {"sigma": 0.01},
+                    "source.y_position_as": {"sigma": 0.01},
+                    "source.position_angle_deg": {"sigma": 1e-4},
+                },
+                "reduce": "sum",
+            }
+        },
+        objective_cfg={"subblock_reduce": "sum"},
+        subblock_reduce="sum",
+        reference_source="initial",
+    )
+    assert bundle.fim is None
+    assert bundle.config["method"] == "structured_residual_prior_diag"
+    assert bundle.config["dense_global_fim_materialized"] is False
+    assert bundle.fim_diag.shape == (layout.theta_size,)
+
+
+def test_frame_shared_structured_bundle_builds_arrowhead_without_dense_fim():
+    recipe = _load_recipe_module()
+    layout = recipe.ActiveStateLayout(
+        frame_specs=(_active_spec(recipe, "source.x_position_as"),),
+        shared_specs=(
+            _active_spec(recipe, "source.log_flux_total"),
+            _active_spec(recipe, "source.y_position_as"),
+        ),
+        n_frame=2,
+    )
+    local_curvatures = (
+        recipe.jnp.asarray(
+            [
+                [4.0, 0.5, -0.25],
+                [0.5, 3.0, 0.1],
+                [-0.25, 0.1, 2.0],
+            ]
+        ),
+        recipe.jnp.asarray(
+            [
+                [6.0, -0.75, 0.2],
+                [-0.75, 5.0, 0.3],
+                [0.2, 0.3, 7.0],
+            ]
+        ),
+    )
+
+    def frame_data_term(frame_values, shared_values, frame_index):
+        local = recipe.jnp.concatenate((frame_values, shared_values), axis=0)
+        curvature = local_curvatures[frame_index]
+        return 0.5 * local @ curvature @ local
+
+    def per_frame_terms(theta):
+        state = recipe._unpack_active_state(layout, theta)
+        return recipe.jnp.stack(
+            [
+                frame_data_term(state.frame[index], state.shared, index)
+                for index in range(layout.n_frame)
+            ]
+        )
+
+    def total_loss(theta):
+        return recipe.jnp.sum(per_frame_terms(theta))
+
+    objective_bundle = recipe.ObjectiveBundle(
+        total_loss_fn=total_loss,
+        objective_terms_fn=lambda theta: (
+            total_loss(theta),
+            recipe.jnp.array(0.0),
+            recipe.jnp.array(0.0),
+        ),
+        predict_cube_fn=lambda theta: recipe.jnp.zeros((layout.n_frame, 1, 1)),
+        per_frame_data_terms_fn=per_frame_terms,
+        frame_data_term_fn=frame_data_term,
+    )
+
+    bundle = recipe._build_structured_preconditioning_bundle(
+        layout=layout,
+        objective_bundle=objective_bundle,
+        theta_ref=recipe.jnp.zeros(layout.theta_size),
+        base_lr=0.1,
+        cfg={"method": "frame_shared_structured", "reference": "initial"},
+        method="frame_shared_structured",
+        subblock_reduce="sum",
+        reference_source="initial",
+    )
+
+    assert bundle.fim is None
+    assert bundle.structured_blocks is not None
+    assert bundle.config["method"] == "frame_shared_structured"
+    assert bundle.config["dense_global_fim_materialized"] is False
+    assert bundle.config["arrowhead_structure_built"] is True
+    assert bundle.structured_blocks.shared_dim == 2
+    assert bundle.structured_blocks.blocks[0].coupling_block.shape == (1, 2)
+    np.testing.assert_allclose(bundle.fim_diag, [4.0, 6.0, 8.0, 9.0])
+    np.testing.assert_allclose(
+        bundle.lr_vec,
+        1.0 / (np.asarray([4.0, 6.0, 8.0, 9.0]) + 1e-12),
+    )

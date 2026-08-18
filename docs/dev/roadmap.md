@@ -48,10 +48,23 @@ Priority levels are intentionally coarse:
 
 Roadmap priorities are intentionally coarse and mostly unchanged from the previous cycle, but current repository progress has moved several implementation details forward:
 
-- Optimization artifact/logging infrastructure is now broadly wired into gradient-descent flows and demos, reducing ad hoc run bookkeeping.
+- System/experiment config resolution is now the canonical entry (via `load_user_config` + `resolve_config`), with detector layer composition declared under `system.detector.layers`.
+- Binder ergonomics are in place: contract-driven access, runtime-leaf fallback, and readable binder/detector printing.
+- Optimization artifact/logging infrastructure is broadly wired into gradient-descent flows and demos, reducing ad hoc run bookkeeping.
 - Experiment orchestration has improved with promoted prescribed Monte Carlo recipe(s), maintained template assets, and clearer override semantics.
 - Experiment metadata capture has improved (experiment-level notes and per-run notes), which supports comparison and reporting workflows.
 - Remaining active gaps are mostly depth/completeness issues (e.g., broader regression matrices, fuller profiles/IO, and richer preconditioning options) rather than missing foundational architecture.
+
+## Progress Snapshot (2026-08)
+
+Observation-level information-rate work has produced a reviewed developer
+record rather than a new controller. The current evidence supports additive
+one-second Schur information products, prior-whitened canonical observability
+diagnostics, and information-only adaptive-cadence replay. The next long-horizon
+architecture direction is an acquire-then-accumulate observation workflow that
+combines information support with innovation/reference-stability tests before a
+fixed-reference precision-accumulation phase. See
+[Observation information-rate consolidation](observation_information_rate_consolidation.md).
 
 ---
 
@@ -85,6 +98,8 @@ Focus areas:
 - Consistent loss construction (Binder-based NLLs)
 - Eigenmode inference workflows
 - Fisher Information Matrix validation
+- Observation-level Schur information accumulation and information-rate
+  diagnostics, with formal uncertainty kept distinct from estimator accuracy
 - Agreement between eager vs JIT execution paths
 - Clear diagnostics when inference fails or stalls
 

@@ -13,7 +13,9 @@ Read-first recipes live under `examples/recipes/`. Execute-first runners live
 under `examples/runners/`.
 
 - **Canonical 3-plane runner + recipe** — Shera three-plane end-to-end workflow
-  (config → binder → simulate → loss/inference → plotting).
+  (config → resolve → binder → simulate → loss/inference → plotting). Uses the
+  native `system`/`experiment` config structure, detector layer composition, and
+  binder-first evaluation.
   - Recipe: `examples/recipes/canonical_astrometry.py`
   - Runner: `examples/runners/run_canonical_astrometry.py`
   - How to run:
@@ -23,7 +25,7 @@ under `examples/runners/`.
     python examples/runners/run_canonical_astrometry.py --fast
     ```
 - **2-plane runner + recipe** — Same workflow on the two-plane optical system
-  for a faster, simpler baseline.
+  for a faster, simpler baseline with the same config-resolution flow.
   - Recipe: `examples/recipes/twoplane_astrometry.py`
   - Runner: `examples/runners/run_twoplane_astrometry.py`
   - How to run:
@@ -32,6 +34,19 @@ under `examples/runners/`.
     python examples/runners/run_twoplane_astrometry.py
     python examples/runners/run_twoplane_astrometry.py --fast
     ```
+- **Observation sub-block trace + renderer + inference recipes** — Three-step
+  time-domain workflow for short frame stacks:
+  1) generate explicit per-frame trace CSV (`subblock_trace_generation.py`),
+  2) render a central-field sub-block cube (`observation_subblock.py`),
+  3) infer per-frame registration traces from the cube
+     (`observation_subblock_inference.py`).
+  - Trace recipe: `examples/recipes/subblock_trace_generation.py`
+  - Renderer recipe: `examples/recipes/observation_subblock.py`
+  - Inference recipe: `examples/recipes/observation_subblock_inference.py`
+  - Template directories:
+    - `examples/recipes/observation_subblock_trace_template/`
+    - `examples/recipes/observation_subblock_template/`
+    - `examples/recipes/observation_subblock_inference_template/`
 
 ## Notebooks
 
@@ -70,6 +85,123 @@ recipes/runners.
     ```bash
     python examples/scripts/analyze_checkpoint_gradients.py --help
     python examples/scripts/analyze_checkpoint_gradients.py Results/<run_dir>
+    ```
+- **visualize_obs_subblock.py** — Generate quick-look diagnostics for
+  observation sub-block renderer outputs (`*_cube.fits` plus optional trace CSV
+  and manifest).
+  - Writes `preview.gif`, `summary.png`, and `trace_summary.png` (when trace is
+    available).
+  - How to run:
+
+    ```bash
+    PYTHONPATH=src python examples/scripts/visualize_obs_subblock.py \
+      --cube Results/observation_subblock/<run>/obs_subblock_*_cube.fits \
+      --manifest Results/observation_subblock/<run>/manifest.json
+    ```
+- **sweep_obs_subblock_adam.py** — Run the focused Adam hyperparameter sweep
+  for the current three-frame registration-only observation sub-block inference
+  toy problem.
+  - Starts from one inference prescription, patches only the Adam/objective
+    fields needed for the staged grid, runs one inference job per grid point,
+    and writes `results.csv`, `ranked_summary.csv`, `manifest.json`, and
+    recommendation files.
+  - Ranking centers on final truth accuracy, quickness to 90 percent
+    improvement, tolerance settling time, residual ringing, tail stability, and
+    overshoot.
+  - How to run:
+
+    ```bash
+    PYTHONPATH=src python examples/scripts/sweep_obs_subblock_adam.py \
+      --config examples/recipes/observation_subblock_inference_template/subblock_inference_prescription.yaml \
+      --results-dir Results/obs_subblock_adam_sweeps \
+      --no-progress
+    ```
+
+  - See `examples/recipes/observation_subblock_inference_template/subblock_inference_README.md`
+    for the metric definitions and output layout.
+- **generate_binary_rois.py** — Generate a static two-circle binary-star ROI
+  mask as a detector `pixel_response` FITS map, plus a PNG quick-look preview.
+  - Uses geometry from a resolved `--system-preset` and supports optional
+    source overrides (`--separation-as`, `--position-angle-deg`,
+    `--x-position-as`, `--y-position-as`) for quick studies.
+  - Core controls include `--npix`, `--oversample`, and `--roi-diameter-as`;
+    output paths are set by `--outfile` and `--preview`.
+  - Binary clipping defaults to enabled (`--clip-to-binary`): output mask values
+    are forced to `{0,1}` at threshold `0.5`. Use `--no-clip-to-binary` to keep
+    anti-aliased soft edges.
+  - Valid ranges: `--npix > 0`, `--oversample > 0`, `--roi-diameter-as > 0`,
+    and `--separation-as >= 0` (if provided).
+  - Ensure the image field of view is large enough for your geometry and ROI
+    diameter; otherwise the generated mask can be all zeros.
+  - How to run:
+
+    ```bash
+    python examples/scripts/generate_binary_rois.py --help
+    python examples/scripts/generate_binary_rois.py
+    python examples/scripts/generate_binary_rois.py \
+      --system-preset SHERA_TESTBED_3P \
+      --npix 192 --oversample 8 --roi-diameter-as 6.0 \
+      --outfile Results/roi_mask_testbed.fits \
+      --preview Results/roi_mask_testbed.png
+    ```
+- **aggregate_detector_ke_sweep.py** — Aggregate multiple prescribed-MC detector
+  knowledge-error experiment directories (for example `ke_0`, `ke_1e-3`, ...)
+  into cross-experiment `sweep_runs.csv` and `sweep_summary.csv`.
+  - Use this when each sweep point is its own experiment directory and you want
+    one outer table for all runs plus grouped per-KE statistics.
+  - The aggregator reads configured detector KE settings from each
+    `prescription.*`, run outcomes from row-oriented `results.csv`, and
+    per-run realized detector KE metadata from `runs*/<run_id>/meta.json` when
+    available (older runs without meta KE fields are still supported).
+  - How to run:
+
+    ```bash
+    python examples/scripts/aggregate_detector_ke_sweep.py --help
+    python examples/scripts/aggregate_detector_ke_sweep.py \
+      --root Results/detector_ke_sweep
+    ```
+- **generate_prescribed_mc_sweep.py** — Scaffold multi-YAML prescribed-MC
+  sweeps from one base prescription by creating a timestamped root,
+  per-point subdirectories, per-point `prescription.yaml` files, and a
+  root-level `sweep_manifest.json`.
+  - Use `--mode detector_ke` for inference-side detector knowledge-error sweeps
+    (for example `pixel_offsets`/`pixel_response` `knowledge_error.scale`).
+  - Use `--mode scalar_field` for structural top-level scalar sweeps (for
+    example `system.optics.psf_npix`) when data and inference should share the
+    same top-level `system`.
+  - Detector-KE example:
+
+    ```bash
+    python examples/scripts/generate_prescribed_mc_sweep.py \
+      --base examples/recipes/prescribed_mc_template/prescription.yaml \
+      --mode detector_ke \
+      --scales 0 1e-4 3e-4 1e-3 3e-3 1e-2 \
+      --layer pixel_offsets \
+      --realization-policy per_run \
+      --results-orientation row
+    ```
+
+  - Scalar-field `psf_npix` crop example:
+
+    ```bash
+    python examples/scripts/generate_prescribed_mc_sweep.py \
+      --base Results/detector_crop_sweep_template.yaml \
+      --mode scalar_field \
+      --field-path system.optics.psf_npix \
+      --values 256 224 192 160 128 96 64 \
+      --sweep-name detector_crop_sweep \
+      --label-prefix psf_npix \
+      --results-orientation row
+    ```
+
+  - Then run generated sweep points with the same shell loop pattern:
+
+    ```bash
+    for d in Results/detector_crop_sweep_*/psf_npix_*; do
+      PYTHONPATH=src python examples/recipes/prescribed_monte_carlo.py \
+        --outdir "$d" \
+        --results-orientation row
+    done
     ```
 
 ## Artifact outputs (what to look for)

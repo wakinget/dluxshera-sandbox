@@ -1,10 +1,11 @@
 # Runtime plate scale semantics
 
-The forward model may declare `system.plate_scale_as_per_pix` as a derived
-quantity for truth/data generation, but inference specs are allowed to treat
-that same key as a primitive knob. When running inference, the model must
-respect the current store value of `system.plate_scale_as_per_pix` so that
-perturbing θ updates the PSF, loss, and gradients.
+The forward model declares `optics.plate_scale_as_per_pix` as a **derived**
+quantity (from `optics.focal_length_m` and `detector.pixel_pitch_m`). Inference
+flows are free to treat the same key as a primitive knob. When running
+inference, the model must respect the current store value of
+`optics.plate_scale_as_per_pix` so that perturbing θ updates the PSF, loss,
+and gradients.
 
 The failure mode to watch for: if the plate scale is cached as a structural
 quantity or recomputed unconditionally during evaluation, then the FIM diagonal

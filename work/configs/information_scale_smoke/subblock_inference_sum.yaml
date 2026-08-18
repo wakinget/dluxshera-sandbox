@@ -1,0 +1,67 @@
+system:
+  preset: SHERA_FLIGHT_3P
+  source:
+    target: ALPHA_CEN
+    exposure_time_s: 0.05
+experiment:
+  kind: subblock_inference
+  notes: Sub-block inference prescription template.
+  inference:
+    data:
+      cube: ../../../Results/obs_subblocks/obs_subblock_YYYYMMDD-HHMMSS_cube.fits
+      truth_trace: ../../../Results/obs_subblocks/obs_subblock_YYYYMMDD-HHMMSS_frame_truth.csv
+      manifest: ../../../Results/obs_subblocks/manifest.json
+    validate:
+      require_contiguous_frame_index: true
+      require_monotonic_time: true
+    active:
+      frame_keys:
+      - source.x_position_as
+      - source.y_position_as
+      - source.position_angle_deg
+      shared_keys: []
+    init:
+      frame:
+        mode: shared_guess
+        values:
+          source.x_position_as: 0.0
+          source.y_position_as: 0.0
+          source.position_angle_deg: 14.5
+      shared: {}
+    priors:
+      frame: {}
+      shared: {}
+    temporal:
+      frame_model:
+        kind: independent
+    objective:
+      kind: nll
+      frame_reduce: sum
+      subblock_reduce: sum
+      noise_model:
+        kind: gaussian
+        variance_model: data
+        variance_floor: 1.0
+    optimizer:
+      kind: sgd
+      base_lr: 0.9
+      n_iter: 100
+      preconditioning:
+        enabled: true
+        method: auto
+        reference: initial
+    diagnostics:
+      plots: true
+      compare_to_truth_when_available: true
+      first_step_report: false
+      save_first_step_json: false
+      save_fim_debug: false
+      finite_difference_check: false
+      plot_parameter_history_heatmap: false
+      plot_parameter_residual_history_heatmap: false
+      plot_parameter_history_lines: true
+      plot_parameter_residual_history_lines: true
+      top_k: 10
+  outputs:
+    outdir: Results/subblock_inference
+    file_prefix: subblock_inference

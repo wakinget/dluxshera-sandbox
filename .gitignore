@@ -23,6 +23,10 @@ devtools/context_snapshot_*/**
 !devtools/**/__init__.py
 !devtools/**/*.py
 
+# Ignore dev/notes
+docs/dev/notes
+docs/dev/notes/*
+
 # My own example files to ignore
 Examples/*
 # BUT do not ignore these specific examples folder
@@ -201,5 +205,37 @@ cython_debug/
 # Results folder
 Results/
 
+# Calibration map previews
+src/dluxshera/data/pixel_offsets/*.png
+src/dluxshera/data/pixel_response/*.png
+src/dluxshera/data/pupils/*.png
+src/dluxshera/data/airbus_data
+examples/notebooks/airbus*
+
 # Mac folder files
 *.DS_Store
+
+
+# ----------------------------------------------------------------------
+# Generated campaign materializations
+# ----------------------------------------------------------------------
+
+# HO-WFE field-dither family realizations.
+# Keep the compact README/family specification and regenerate concrete
+# configs, manifests, and shard launch artifacts as needed.
+examples/recipes/full_fidelity_howfe_field_dither_20260720/configs/
+examples/recipes/full_fidelity_howfe_field_dither_20260720/shards/
+examples/recipes/full_fidelity_howfe_field_dither_20260720/family_manifest.json
+
+# Generated target-registry campaign instances. Keep the generator itself.
+examples/recipes/full_fidelity_algorithm_campaign_template/target_registry_no_ke_hardloworder/*.yaml
+
+# Materialized HPC campaign/shard trees.
+work/full_fidelity_condition_draw_shards/
+work/full_fidelity_target_registry_*_shards/
+work/status_reviews_*/
+
+# Historical campaign batch. Retain the one base config still consumed by
+# the HO-WFE family generator; do not version the other campaign instances.
+examples/recipes/full_fidelity_next_campaigns_20260703/*.yaml
+!examples/recipes/full_fidelity_next_campaigns_20260703/full_fidelity_info_damped_hoke_0p1nm_loz0p01nm_n10_w10x30_projected_30min_v1.yaml

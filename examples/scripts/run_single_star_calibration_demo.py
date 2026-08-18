@@ -1,0 +1,2388 @@
+"""Run an image-backed single-star calibration observation demo.
+
+The demo observes a centered ``single_star`` calibration target, solves each
+short sub-block for frame-local registration only, and accumulates Schur-reduced
+information about slow calibration parameters.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
+from contextlib import contextmanager
+from statistics import mean, median
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    str(Path(tempfile.gettempdir()) / "dluxshera-matplotlib"),
+)
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    _HAVE_MATPLOTLIB = True
+except ModuleNotFoundError:
+    plt = None
+    _HAVE_MATPLOTLIB = False
+
+import jax
+import numpy as np
+
+from dluxshera.builders.source import build_single_star_source
+from dluxshera.config.io import load_config_file
+from dluxshera.config.resolver import resolve_config
+from dluxshera.inference.observation_belief import (
+    ObservationBeliefState,
+    ObservationThetaLayout,
+    ObservationUpdatePolicy,
+    SubblockSummary,
+    accumulate_summary_information,
+    build_observation_eigenbasis,
+    build_prior_whitened_information_gain_matrix,
+    build_system_observation_theta_layout,
+    update_observation_belief_with_policy,
+)
+from dluxshera.inference.observation_forecast import (
+    DEFAULT_SYSTEM_PRESET,
+    build_prior_mean_from_store,
+)
+from dluxshera.inference.observation_summary import (
+    SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER,
+    SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+    load_subblock_summary,
+    load_subblock_summary_artifact_payload,
+    validate_summary_information_scale,
+)
+from dluxshera.params.store import ParameterStore
+from dluxshera.params.transforms import ARCSEC_PER_RAD
+from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.seeding import derive_campaign_subblock_seeds
+from dluxshera.utils.campaigns import load_existing_campaign_plan
+from dluxshera.utils.campaign_model_split import (
+    build_campaign_model_split,
+    template_hash_row,
+    validate_campaign_model_split_artifacts,
+    write_campaign_model_split_templates,
+)
+from dluxshera.utils.campaign_trace_sources import (
+    PreparedTraceSourcePlan,
+    PreparedTraceSubblock,
+    prepare_campaign_trace_source,
+    trace_subblock_command_flags,
+    validate_stored_trace_source_artifacts,
+)
+from dluxshera.utils.campaign_truth import (
+    apply_truth_overrides_to_system_config,
+    realize_campaign_truth,
+)
+from dluxshera.utils.noise import make_subseed
+from dluxshera.utils.obs_subblock_io import now_iso_local_ms, timestamp_tag
+from dluxshera.utils.obs_subblock_cli import (
+    append_reference_optimizer_flags,
+    append_schur_frame_quality_flags,
+)
+from dluxshera.utils.obs_subblock_keys import parse_obs_subblock_key_address
+from dluxshera.utils.subprocess_diagnostics import (
+    require_resource_time_available,
+    run_subprocess_with_diagnostics,
+    stderr_tail,
+)
+from dluxshera.utils.single_star_calibration import (
+    ALPHA_CEN_A_PLACEHOLDER_NOTE,
+    prepare_alpha_cen_a_single_star_system_config,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SUBBLOCK_SCRIPT = REPO_ROOT / "examples" / "scripts" / "run_obs_subblock_study.py"
+DEFAULT_RESULTS_ROOT = REPO_ROOT / "Results" / "single_star_calibration_demo"
+SCHEMA_VERSION = "single_star_calibration_demo.v1"
+NEAR_ZERO_INJECTED_BIAS_ABS = 1.0e-6
+ACTIVE_FRAME_KEYS = (
+    "source.x_position_as",
+    "source.y_position_as",
+)
+SUPPORTED_SEED_POLICIES = (
+    "different_jitter_different_noise",
+    "same_jitter_different_noise",
+    "different_jitter_same_noise",
+)
+DEFAULT_SINGLE_STAR_SCHUR_METHOD = "structured_independent_frames"
+
+
+@dataclass(frozen=True)
+class CalibrationCase:
+    case_name: str
+    theta_reference_offsets: dict[str, float]
+    case_origin: str
+    prior_sigma_by_label: dict[str, float] | None = None
+
+
+@dataclass(frozen=True)
+class CalibrationPlan:
+    run_root: Path
+    layout: ObservationThetaLayout
+    layout_metadata: dict[str, Any]
+    truth_vector: np.ndarray
+    system_cfg: dict[str, Any]
+    config: dict[str, Any]
+    cases: tuple[CalibrationCase, ...]
+    summary_paths: dict[str, list[Path]]
+    subblock_commands: dict[str, list[list[str]]]
+    subblock_rows: list[dict[str, Any]]
+    prior_draw_rows: list[dict[str, Any]]
+    truth_realization: dict[str, Any]
+    truth_realization_rows: list[dict[str, Any]]
+    status_rows: list[dict[str, Any]]
+    trace_source_plan: PreparedTraceSourcePlan
+    case_scheduling: str = "grouped"
+
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    _ensure_dir(path.parent)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    _ensure_dir(path.parent)
+    rows = list(rows)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fields: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fields:
+                fields.append(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+@contextmanager
+def _jax_x64_context():
+    """Enable x64 for campaign scalar consistency without leaking global state."""
+
+    previous = bool(jax.config.jax_enable_x64)
+    if not previous:
+        jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        if not previous:
+            jax.config.update("jax_enable_x64", False)
+
+
+def _default_experiment_config() -> dict[str, Any]:
+    return {
+        "kind": "single_star_calibration_demo",
+        "seed": 42,
+        "run_name": "single_star_calibration_smoke",
+        "calibration_source": {
+            "mode": "alpha_cen_a_placeholder",
+            "source_kind": "single_star",
+            "x_position_as": 0.0,
+            "y_position_as": 0.0,
+            "position_angle_deg": 0.0,
+            "photometry_note": ALPHA_CEN_A_PLACEHOLDER_NOTE,
+        },
+        "subblocks": {
+            "n_subblocks": 3,
+            "n_frames": 20,
+            "noise": "enabled",
+            "phi_ref": "recovered",
+            "schur_curvature_method": "structured_independent_frames",
+            "max_dense_dim": 40,
+            "schur_damping": 1.0e-8,
+            "summary_information_scale": "summed_likelihood",
+            "use_render_variance": "auto",
+            "exposure_time_s": 0.05,
+            "reference_diagnostics_profile": "basic",
+            "reference_optimizer_kind": "sgd",
+            "reference_base_lr": 0.7,
+            "reference_n_iter": 80,
+            "reference_early_stopping_enabled": None,
+            "reference_early_stopping_min_iter": None,
+            "reference_early_stopping_patience": None,
+            "reference_early_stopping_loss_rtol": None,
+            "reference_early_stopping_loss_atol": None,
+            "reference_early_stopping_step_atol": None,
+            "reference_early_stopping_grad_norm_atol": None,
+            "reference_schedule_kind": "linear_warmup",
+            "reference_schedule_warmup_steps": 10,
+            "reference_schedule_start_factor": 0.125,
+            "trace_jitter": {
+                "x_sigma_as": 1.0e-3,
+                "y_sigma_as": 1.0e-3,
+                "pa_sigma_deg": 1.0e-4,
+                "pa_mode": "omitted",
+            },
+        },
+        "seeding": {
+            "seed_policy": "different_jitter_different_noise",
+            "base_seed": 42,
+        },
+        "local_eliminated_keys": list(ACTIVE_FRAME_KEYS),
+        "observation_theta": {
+            "source": {"log_flux_total": True},
+            "optics": {
+                "plate_scale_as_per_pix": True,
+                "primary_zernikes": {
+                    "enabled": True,
+                    "indices": "from_system",
+                    "include": None,
+                    "exclude": [],
+                },
+                "secondary_zernikes": {
+                    "enabled": True,
+                    "indices": "from_system",
+                    "include": None,
+                    "exclude": [],
+                },
+            },
+        },
+        "prior": {
+            "sigma": {
+                "source.log_flux_total": {
+                    "kind": "absolute",
+                    "sigma": 1.0e-5,
+                    "unit": "log_flux",
+                },
+                "optics.plate_scale_as_per_pix": {
+                    "kind": "fractional",
+                    "sigma": 1.0e-5,
+                },
+                "optics.primary.zernike_coeffs_nm[*]": {
+                    "kind": "absolute",
+                    "sigma": 1.0,
+                    "unit": "nm",
+                },
+                "optics.secondary.zernike_coeffs_nm[*]": {
+                    "kind": "absolute",
+                    "sigma": 1.0,
+                    "unit": "nm",
+                },
+            }
+        },
+        "case_generation": {
+            "mode": "prior_draw",
+            "n_cases": 1,
+            "seed": 123,
+            "draw_scale": 0.5,
+            "include_zero_bias_case": True,
+        },
+        "history_prefixes": [1, 2, 3, 5, 10, 30, 100, 300, 1000, 1800],
+        "update_policy": {
+            "update_mode": "physical_full",
+            "update_gain": 1.0,
+            "eigenbasis": {
+                "basis_source": "posterior_precision",
+                "gate_source": "accumulated_information",
+                "whiten": True,
+                "eig_floor_abs": 0.0,
+                "eig_floor_rel": 0.0,
+                "damping_mode": "none",
+                "damping_value": 1.0,
+                "damping_n_modes": 0,
+                "min_kept_modes": None,
+                "max_kept_modes": None,
+                "top_k_contributors": 8,
+            },
+        },
+        "eigenbasis": {
+            "enabled": True,
+            "sources": ["accumulated_information", "posterior_precision"],
+            "whiten": True,
+            "eig_floor_abs": 0.0,
+            "eig_floor_rel": 1.0e-12,
+            "top_k_contributors": 8,
+        },
+        "forecast": {
+            "enabled": True,
+            "modes": ["replicate", "fixed_information_score_noise"],
+            "n_subblocks_grid": [1, 3, 5, 10, 30, 100, 300, 1000, 1800],
+            "subblock_duration_s": 1.0,
+            "single_observation_n_subblocks": 1800,
+            "fixed_information_score_noise": {
+                "enabled": True,
+                "n_trials": 100,
+                "seed": 2026,
+                "score_noise_alpha": 1.0,
+                "score_noise_eig_floor_rel": 1.0e-12,
+                "truth_mode": "campaign_truth",
+            },
+            "plots": True,
+        },
+    }
+
+
+def _load_config(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {"experiment": _default_experiment_config()}
+    payload = load_config_file(path.resolve())
+    experiment = payload.get("experiment", payload)
+    if not isinstance(experiment, Mapping):
+        raise ValueError("Calibration config must contain a mapping experiment block.")
+    return {"experiment": dict(experiment)}
+
+
+def _deepcopy_json(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace | None) -> dict[str, Any]:
+    out = _deepcopy_json(cfg)
+    if args is None:
+        return out
+    if args.run_name is not None:
+        out["run_name"] = args.run_name
+    subblocks = dict(out.get("subblocks", {}) or {})
+    for attr, key in (
+        ("n_subblocks", "n_subblocks"),
+        ("n_frames", "n_frames"),
+        ("noise", "noise"),
+        ("phi_ref", "phi_ref"),
+        ("reference_diagnostics_profile", "reference_diagnostics_profile"),
+        ("schur_curvature_method", "schur_curvature_method"),
+        ("max_dense_dim", "max_dense_dim"),
+        ("summary_information_scale", "summary_information_scale"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            subblocks[key] = value
+    if getattr(args, "reference_init_mode", None) is not None:
+        subblocks["reference_init_mode"] = args.reference_init_mode
+    trace_source = dict(subblocks.get("trace_source", {}) or {})
+    if getattr(args, "trace_source_mode", None) is not None:
+        trace_source["mode"] = args.trace_source_mode
+    if getattr(args, "trajectory_csv", None) is not None:
+        source_cfg = dict(trace_source.get("source", {}) or {})
+        source_cfg["kind"] = "airbus_csv"
+        source_cfg["path"] = str(args.trajectory_csv)
+        trace_source["source"] = source_cfg
+    window_cfg = dict(trace_source.get("window", {}) or {})
+    if getattr(args, "trajectory_start_s", None) is not None:
+        window_cfg["start_s"] = float(args.trajectory_start_s)
+    if getattr(args, "trajectory_duration_s", None) is not None:
+        window_cfg["duration_s"] = float(args.trajectory_duration_s)
+        window_cfg.pop("n_subblocks", None)
+    if getattr(args, "trajectory_n_subblocks", None) is not None:
+        window_cfg["n_subblocks"] = int(args.trajectory_n_subblocks)
+    if window_cfg:
+        trace_source["window"] = window_cfg
+    sampling_cfg = dict(trace_source.get("sampling", {}) or {})
+    if getattr(args, "trajectory_frame_dt_s", None) is not None:
+        sampling_cfg["frame_dt_s"] = float(args.trajectory_frame_dt_s)
+    if sampling_cfg:
+        trace_source["sampling"] = sampling_cfg
+    if getattr(args, "trajectory_output_keys", None) is not None:
+        trace_source["output_keys"] = [
+            part.strip()
+            for part in str(args.trajectory_output_keys).split(",")
+            if part.strip()
+        ]
+    if getattr(args, "trajectory_plan", None) is not None:
+        trace_source["mode"] = "external_plan"
+        trace_source["campaign_plan"] = str(args.trajectory_plan)
+    if trace_source:
+        subblocks["trace_source"] = trace_source
+    if getattr(args, "case_scheduling", None) is not None:
+        out["case_scheduling"] = args.case_scheduling
+    out["subblocks"] = subblocks
+    theta = dict(out.get("observation_theta", {}) or {})
+    source = dict(theta.get("source", {}) or {})
+    optics = dict(theta.get("optics", {}) or {})
+    if args.include_log_flux is not None:
+        source["log_flux_total"] = bool(args.include_log_flux)
+    if args.include_plate_scale is not None:
+        optics["plate_scale_as_per_pix"] = bool(args.include_plate_scale)
+    if args.zernike_indices is not None:
+        indices = [int(part) for part in str(args.zernike_indices).split(",") if part.strip()]
+        for key in ("primary_zernikes", "secondary_zernikes"):
+            group = dict(optics.get(key, {}) or {})
+            group["enabled"] = bool(indices)
+            group["indices"] = indices
+            optics[key] = group
+    theta["source"] = source
+    theta["optics"] = optics
+    out["observation_theta"] = theta
+    return out
+
+
+def _schur_settings_for_single_star_config(
+    subblock_cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    requested = str(subblock_cfg.get("schur_curvature_method") or DEFAULT_SINGLE_STAR_SCHUR_METHOD)
+    requested_norm = requested.strip().lower()
+    route_source = "user_request" if subblock_cfg.get("schur_curvature_method") is not None else "single_star_default_structured"
+    effective = requested
+    if requested_norm == "auto":
+        effective = DEFAULT_SINGLE_STAR_SCHUR_METHOD
+        route_source = "auto_prefers_structured_independent_frames"
+    dense_like = requested_norm == "dense"
+    return {
+        "schur_curvature_method_requested": requested,
+        "schur_curvature_method_effective": effective,
+        "schur_route_source": route_source,
+        "max_dense_dim": int(subblock_cfg.get("max_dense_dim", 40)),
+        "structured_curvature_expected": str(effective).startswith("structured_"),
+        "validate_structured_against_dense": bool(subblock_cfg.get("validate_structured_against_dense", False)),
+        "dense_route_requested": dense_like,
+    }
+
+
+def _resolve_single_star_system(
+    *,
+    experiment_cfg: Mapping[str, Any],
+    system_preset: str | None,
+) -> tuple[ParameterStore, dict[str, Any], dict[str, Any]]:
+    preset = system_preset or str(experiment_cfg.get("system_preset", DEFAULT_SYSTEM_PRESET))
+    base_resolved = resolve_config({"system": {"preset": preset}})
+    base_system = base_resolved["system"]
+    subblocks = dict(experiment_cfg.get("subblocks", {}) or {})
+    system_cfg = prepare_alpha_cen_a_single_star_system_config(
+        base_system,
+        exposure_time_s=float(subblocks.get("exposure_time_s", 0.05)),
+        n_lambda=int(experiment_cfg.get("calibration_source", {}).get("n_lambda", 11)),
+    )
+    source_overrides = dict(experiment_cfg.get("calibration_source", {}) or {})
+    source_cfg = system_cfg["source"]
+    for key in ("x_position_as", "y_position_as", "position_angle_deg"):
+        if key in source_overrides:
+            source_cfg[key] = float(source_overrides[key])
+    spec = compose_forward_spec(system_cfg)
+    store = ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+    provenance = {
+        "system_preset": preset,
+        "source_kind": "single_star",
+        "calibration_source_mode": "alpha_cen_a_placeholder",
+        "photometry_source": "ALPHA_CEN component A placeholder",
+        "photometry_is_placeholder": True,
+        "calibration_star_registry_used": False,
+        "photometry_note": ALPHA_CEN_A_PLACEHOLDER_NOTE,
+    }
+    return store, system_cfg, provenance
+
+
+def _parameter_unit(label: str) -> str:
+    if label == "source.log_flux_total":
+        return "log flux"
+    if label == "optics.plate_scale_as_per_pix":
+        return "arcsec / pixel"
+    if "zernike_coeffs_nm" in label:
+        return "nm"
+    return "arb"
+
+
+def _parameter_group(label: str) -> str:
+    if label == "source.log_flux_total":
+        return "source.log_flux_total"
+    if label == "optics.plate_scale_as_per_pix":
+        return "optics.plate_scale"
+    if label.startswith("optics.primary.zernike_coeffs_nm"):
+        return "M1 Zernike"
+    if label.startswith("optics.secondary.zernike_coeffs_nm"):
+        return "M2 Zernike"
+    return "other"
+
+
+def _safe_fraction(num: float, den: float) -> float:
+    if not math.isfinite(den) or abs(den) <= 1.0e-30:
+        return float("nan")
+    return float(num / den)
+
+
+def _is_near_zero_injected_bias(value: float) -> bool:
+    return (not math.isfinite(value)) or abs(float(value)) < NEAR_ZERO_INJECTED_BIAS_ABS
+
+
+def _correction_fraction_or_nan(
+    *,
+    posterior_shift: float,
+    prior_error: float,
+) -> float:
+    if _is_near_zero_injected_bias(prior_error):
+        return float("nan")
+    return _safe_fraction(posterior_shift, -prior_error)
+
+
+def _residual_fraction_or_nan(
+    *,
+    posterior_error: float,
+    prior_error: float,
+) -> float:
+    if _is_near_zero_injected_bias(prior_error):
+        return float("nan")
+    return _safe_fraction(posterior_error, prior_error)
+
+
+def _moves_toward_truth_or_none(
+    *,
+    posterior_error: float,
+    prior_error: float,
+) -> bool | None:
+    if _is_near_zero_injected_bias(prior_error):
+        return None
+    return bool(abs(posterior_error) < abs(prior_error))
+
+
+def _single_star_use_render_variance(subblock_cfg: Mapping[str, Any]) -> bool:
+    """Return whether Schur summaries should use render variance artifacts."""
+
+    value = str(subblock_cfg.get("use_render_variance", "auto")).strip().lower()
+    if value == "auto":
+        return str(subblock_cfg.get("noise", "enabled")).strip().lower() == "enabled"
+    if value in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError("subblocks.use_render_variance must be true, false, or auto.")
+
+
+def select_active_truth_comparison_keys(
+    csv_columns: Sequence[str],
+    *,
+    active_frame_keys: Sequence[str] = ACTIVE_FRAME_KEYS,
+) -> list[str]:
+    """Return solved frame keys present in a truth-comparison CSV schema."""
+
+    columns = set(str(name) for name in csv_columns)
+    selected: list[str] = []
+    for key in active_frame_keys:
+        if (
+            f"{key}_truth" in columns
+            and f"{key}_recovered" in columns
+            and f"{key}_residual" in columns
+        ):
+            selected.append(str(key))
+    return selected
+
+
+def _match_rule(rule: str, label: str) -> bool:
+    if "[*]" not in rule:
+        return rule == label
+    prefix = rule.replace("[*]", "[")
+    return label.startswith(prefix) and label.endswith("]")
+
+
+def resolve_prior_sigmas(
+    labels: Sequence[str],
+    truth_by_label: Mapping[str, float],
+    sigma_cfg: Mapping[str, Any],
+) -> dict[str, float]:
+    """Resolve absolute/fractional prior sigma rules for calibration labels."""
+
+    out: dict[str, float] = {}
+    for raw_rule, raw_value in sigma_cfg.items():
+        if not isinstance(raw_value, Mapping):
+            raise ValueError(f"prior.sigma.{raw_rule} must be a mapping.")
+        kind = str(raw_value.get("kind", "absolute"))
+        configured = float(raw_value.get("sigma", 0.0))
+        if configured <= 0.0:
+            raise ValueError(f"prior sigma rule {raw_rule!r} must be positive.")
+        for label in labels:
+            if not _match_rule(str(raw_rule), label):
+                continue
+            if kind == "absolute":
+                sigma = configured
+            elif kind == "fractional":
+                sigma = abs(float(truth_by_label[label])) * configured
+            else:
+                raise ValueError(f"Unsupported prior sigma kind: {kind}")
+            if sigma <= 0.0 or not math.isfinite(sigma):
+                raise ValueError(f"Resolved prior sigma for {label!r} is invalid.")
+            out[label] = float(sigma)
+    missing = [label for label in labels if label not in out]
+    if missing:
+        raise ValueError("Missing prior sigma rules for: " + ", ".join(missing))
+    return out
+
+
+def generate_calibration_cases(
+    *,
+    experiment_cfg: Mapping[str, Any],
+    labels: Sequence[str],
+    truth_by_label: Mapping[str, float],
+) -> tuple[tuple[CalibrationCase, ...], list[dict[str, Any]]]:
+    """Generate zero-bias, explicit, or prior-draw calibration cases."""
+
+    prior_sigma = resolve_prior_sigmas(
+        labels,
+        truth_by_label,
+        dict(experiment_cfg.get("prior", {}).get("sigma", {}) or {}),
+    )
+    cfg = dict(experiment_cfg.get("case_generation", {}) or {})
+    mode = str(cfg.get("mode", "prior_draw"))
+    cases: list[CalibrationCase] = []
+    draw_rows: list[dict[str, Any]] = []
+    if bool(cfg.get("include_zero_bias_case", mode == "zero_bias")):
+        cases.append(
+            CalibrationCase(
+                "zero_bias_case",
+                {},
+                "zero_bias",
+                prior_sigma_by_label={label: prior_sigma[label] for label in labels},
+            )
+        )
+    if mode == "zero_bias":
+        return tuple(cases), draw_rows
+    if mode == "explicit":
+        for item in cfg.get("cases", []) or []:
+            name = str(item.get("case_name", "")).strip()
+            if not name:
+                raise ValueError("Explicit calibration cases require case_name.")
+            offsets = {}
+            for raw_label, raw_offset in (item.get("theta_reference_offsets", {}) or {}).items():
+                label = parse_obs_subblock_key_address(str(raw_label)).canonical
+                if label not in labels:
+                    raise ValueError(f"Explicit case references non-theta label {label!r}.")
+                offsets[label] = float(raw_offset)
+            cases.append(
+                CalibrationCase(
+                    name,
+                    offsets,
+                    "explicit",
+                    prior_sigma_by_label={label: prior_sigma[label] for label in labels},
+                )
+            )
+        return tuple(cases), draw_rows
+    if mode != "prior_draw":
+        raise ValueError("case_generation.mode must be prior_draw, explicit, or zero_bias.")
+    rng = np.random.default_rng(int(cfg.get("seed", 42)))
+    draw_scale = float(cfg.get("draw_scale", 1.0))
+    n_cases = int(cfg.get("n_cases", 1))
+    for draw_index in range(n_cases):
+        z = rng.normal(size=len(labels))
+        offsets = {
+            label: float(z[index] * prior_sigma[label] * draw_scale)
+            for index, label in enumerate(labels)
+        }
+        name = f"prior_draw_{draw_index:03d}"
+        cases.append(
+            CalibrationCase(
+                name,
+                offsets,
+                "prior_draw",
+                prior_sigma_by_label={label: prior_sigma[label] for label in labels},
+            )
+        )
+        for index, label in enumerate(labels):
+            draw_rows.append(
+                {
+                    "case_name": name,
+                    "theta_label": label,
+                    "truth_value": float(truth_by_label[label]),
+                    "prior_mean": float(truth_by_label[label] + offsets[label]),
+                    "reference_value": float(truth_by_label[label] + offsets[label]),
+                    "prior_sigma": float(prior_sigma[label]),
+                    "draw_z": float(z[index]),
+                    "draw_scale": draw_scale,
+                    "theta_reference_offset": float(offsets[label]),
+                    "unit": _parameter_unit(label),
+                    "draw_seed": int(cfg.get("seed", 42)),
+                    "draw_index": int(draw_index),
+                }
+            )
+    return tuple(cases), draw_rows
+
+
+def _derive_subblock_seeds(
+    *,
+    run_name: str,
+    case_name: str,
+    subblock_index: int,
+    seed_policy: str,
+    base_seed: int,
+) -> dict[str, int]:
+    derived = derive_campaign_subblock_seeds(
+        base_seed=int(base_seed),
+        seed_policy=str(seed_policy),
+        campaign_token=str(run_name),
+        case_token=str(case_name),
+        subblock_index=int(subblock_index),
+    )
+    return {"trace_seed": int(derived.trace_seed), "noise_seed": int(derived.noise_seed)}
+
+
+def _trace_key_policy(experiment_cfg: Mapping[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Resolve single-star trace policy for optional inert PA diagnostics."""
+
+    trace_cfg = dict(experiment_cfg.get("subblocks", {}).get("trace_jitter", {}) or {})
+    pa_mode = str(trace_cfg.get("pa_mode", "omitted")).strip().lower()
+    if pa_mode not in {"omitted", "inert_diagnostic"}:
+        raise ValueError("subblocks.trace_jitter.pa_mode must be 'omitted' or 'inert_diagnostic'.")
+    trace_keys = list(ACTIVE_FRAME_KEYS)
+    inactive_truth_keys: list[str] = []
+    if pa_mode == "inert_diagnostic":
+        trace_keys.append("source.position_angle_deg")
+        inactive_truth_keys.append("source.position_angle_deg")
+    pa_policy = {
+        "status": "inactive",
+        "mode": pa_mode,
+        "reason": (
+            "Single-star PA is not solved; DP PSF orientation is treated as fixed "
+            "instrument geometry in this calibration workflow."
+        ),
+    }
+    return trace_keys, inactive_truth_keys, pa_policy
+
+
+def _template_payloads(
+    system_cfg: Mapping[str, Any],
+    *,
+    experiment_cfg: Mapping[str, Any],
+    inference_system_cfg: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    inference_system_cfg = inference_system_cfg or system_cfg
+    trace_keys, _inactive_truth_keys, _pa_policy = _trace_key_policy(experiment_cfg)
+    trace_plan: dict[str, Any] = {
+        "source.x_position_as": {
+            "base": 0.0,
+            "effects": [{"kind": "iid_jitter", "center": 0.0, "sigma": 0.001}],
+        },
+        "source.y_position_as": {
+            "base": 0.0,
+            "effects": [{"kind": "iid_jitter", "center": 0.0, "sigma": 0.001}],
+        },
+    }
+    if "source.position_angle_deg" in trace_keys:
+        trace_plan["source.position_angle_deg"] = {
+            "base": 0.0,
+            "effects": [{"kind": "iid_jitter", "center": 0.0, "sigma": 0.0001}],
+        }
+    return {
+        "trace": {
+            "system": system_cfg,
+            "experiment": {
+                "kind": "subblock_trace_generation",
+                "seed": 42,
+                "trace": {
+                    "n_frames": 20,
+                    "dt_s": 0.05,
+                    "varying_keys": list(trace_keys),
+                    "plan": trace_plan,
+                },
+                "outputs": {"outdir": "trace", "file_prefix": "subblock_trace"},
+            },
+        },
+        "render": {
+            "system": system_cfg,
+            "experiment": {
+                "kind": "subblock_generation",
+                "seed": 42,
+                "subblock": {
+                    "varying_keys": list(trace_keys),
+                    "trace": {"format": "csv", "path": "frame_truth.csv"},
+                },
+                "noise": {"enabled": False, "photon_noise": True, "read_noise": False},
+                "outputs": {"outdir": "render", "file_prefix": "obs_subblock"},
+            },
+        },
+        "inference": {
+            "system": inference_system_cfg,
+            "experiment": {
+                "kind": "subblock_inference",
+                "inference": {
+                    "data": {
+                        "cube": "cube.fits",
+                        "truth_trace": "frame_truth.csv",
+                        "manifest": "manifest.json",
+                    },
+                    "active": {
+                        "frame_keys": list(ACTIVE_FRAME_KEYS),
+                        "shared_keys": [],
+                    },
+                    "init": {
+                        "frame": {
+                            "mode": "shared_guess",
+                            "values": {
+                                "source.x_position_as": 0.0,
+                                "source.y_position_as": 0.0,
+                            },
+                        },
+                        "shared": {},
+                    },
+                    "priors": {"frame": {}, "shared": {}},
+                    "temporal": {"frame_model": {"kind": "independent"}},
+                    "objective": {
+                        "kind": "nll",
+                        "frame_reduce": "sum",
+                        "subblock_reduce": "mean",
+                        "noise_model": {
+                            "kind": "gaussian",
+                            "variance_model": "data",
+                            "variance_floor": 1.0,
+                        },
+                    },
+                    "optimizer": {
+                        "kind": "sgd",
+                        "base_lr": 0.9,
+                        "n_iter": 100,
+                        "preconditioning": {"enabled": True, "method": "auto", "reference": "initial"},
+                    },
+                    "diagnostics": {"plots": True, "compare_to_truth_when_available": True},
+                }
+            },
+        },
+    }
+
+
+def write_single_star_templates(
+    run_root: Path,
+    system_cfg: Mapping[str, Any],
+    *,
+    experiment_cfg: Mapping[str, Any],
+    inference_system_cfg: Mapping[str, Any] | None = None,
+    model_split: Any | None = None,
+) -> dict[str, Path]:
+    """Write run-local JSON templates consumed by ``run_obs_subblock_study.py``."""
+
+    template_root = run_root / "templates"
+    payloads = _template_payloads(
+        system_cfg,
+        experiment_cfg=experiment_cfg,
+        inference_system_cfg=inference_system_cfg,
+    )
+    if model_split is not None:
+        return write_campaign_model_split_templates(
+            template_root=template_root,
+            trace_payload=payloads["trace"],
+            render_payload=payloads["render"],
+            inference_payload=payloads["inference"],
+            split=model_split,
+        )
+    paths: dict[str, Path] = {}
+    for name, payload in payloads.items():
+        path = template_root / f"{name}_template.json"
+        _write_json(path, payload)
+        paths[name] = path
+    return paths
+
+
+def _theta_scalar_keys(labels: Sequence[str]) -> list[str]:
+    return [
+        label
+        for label in labels
+        if not label.startswith("optics.primary.zernike_coeffs_nm")
+        and not label.startswith("optics.secondary.zernike_coeffs_nm")
+    ]
+
+
+def _zernike_indices_arg(layout_metadata: Mapping[str, Any]) -> str:
+    primary = set(int(v) for v in layout_metadata.get("primary_zernike_indices", []))
+    secondary = set(int(v) for v in layout_metadata.get("secondary_zernike_indices", []))
+    indices = sorted(primary | secondary)
+    return ",".join(str(value) for value in indices)
+
+
+def _single_star_observation_theta_config(raw_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    cfg = _deepcopy_json(dict(raw_cfg))
+    source_cfg = dict(cfg.get("source", {}) or {})
+    source_cfg["separation_as"] = False
+    source_cfg["contrast"] = False
+    source_cfg["log_flux_total"] = bool(source_cfg.get("log_flux_total", True))
+    cfg["source"] = source_cfg
+    return cfg
+
+
+def build_subblock_command(
+    *,
+    case_root_parent: Path,
+    case_subblock_name: str,
+    template_paths: Mapping[str, Path],
+    theta_labels: Sequence[str],
+    layout_metadata: Mapping[str, Any],
+    offsets: Mapping[str, float],
+    subblock_cfg: Mapping[str, Any],
+    trace_seed: int,
+    noise_seed: int,
+    trace_subblock: PreparedTraceSubblock | None = None,
+) -> list[str]:
+    """Build the image-backed Schur-summary command for one calibration block."""
+
+    command = [
+        sys.executable,
+        str(SUBBLOCK_SCRIPT),
+        "--results-root",
+        str(case_root_parent),
+        "--case-name",
+        case_subblock_name,
+        "--mode",
+        "schur_summary",
+        "--trace-template",
+        str(template_paths["trace"]),
+        "--render-template",
+        str(template_paths["render"]),
+        "--inference-template",
+        str(template_paths["inference"]),
+        "--n-frames",
+        str(int(subblock_cfg.get("n_frames", 20))),
+        "--noise",
+        str(subblock_cfg.get("noise", "enabled")),
+        "--theta-keys",
+        ",".join(_theta_scalar_keys(theta_labels)),
+        "--enable-zernikes",
+        "--zernike-indices",
+        _zernike_indices_arg(layout_metadata),
+        "--phi-ref",
+        str(subblock_cfg.get("phi_ref", "recovered")),
+        "--schur-curvature-method",
+        str(subblock_cfg.get("schur_curvature_method", DEFAULT_SINGLE_STAR_SCHUR_METHOD)),
+        "--max-dense-dim",
+        str(int(subblock_cfg.get("max_dense_dim", 40))),
+        "--schur-damping",
+        str(float(subblock_cfg.get("schur_damping", 1.0e-8))),
+        "--trace-seed",
+        str(int(trace_seed)),
+        "--render-seed",
+        str(int(noise_seed)),
+    ]
+    if subblock_cfg.get("exposure_time_s") is not None:
+        command.extend(["--exposure-time-s", str(float(subblock_cfg["exposure_time_s"]))])
+    if _single_star_use_render_variance(subblock_cfg):
+        command.append("--use-render-variance")
+    append_reference_optimizer_flags(command, subblock_cfg)
+    append_schur_frame_quality_flags(command, subblock_cfg)
+    for flag_key, flag in (
+        ("summary_information_scale", "--summary-information-scale"),
+    ):
+        if subblock_cfg.get(flag_key) is not None:
+            command.extend([flag, str(subblock_cfg[flag_key])])
+    jitter = dict(subblock_cfg.get("trace_jitter", {}) or {})
+    if jitter.get("x_sigma_as") is not None:
+        command.extend(["--trace-jitter-x-sigma-as", str(float(jitter["x_sigma_as"]))])
+    if jitter.get("y_sigma_as") is not None:
+        command.extend(["--trace-jitter-y-sigma-as", str(float(jitter["y_sigma_as"]))])
+    if (
+        str(jitter.get("pa_mode", "omitted")).strip().lower() == "inert_diagnostic"
+        and jitter.get("pa_sigma_deg") is not None
+    ):
+        command.extend(["--trace-jitter-pa-sigma-deg", str(float(jitter["pa_sigma_deg"]))])
+    for label, offset in sorted(offsets.items()):
+        command.extend(["--theta-reference-offset", f"{label}={float(offset)}"])
+    if bool(subblock_cfg.get("memory_diagnostics", False)):
+        command.append("--memory-diagnostics")
+    if trace_subblock is not None:
+        command.extend(trace_subblock_command_flags(trace_subblock))
+    return command
+
+
+def build_calibration_plan(
+    *,
+    config_path: Path | None,
+    results_root: Path,
+    run_name: str | None,
+    system_preset: str | None,
+    args: argparse.Namespace | None = None,
+) -> CalibrationPlan:
+    with _jax_x64_context():
+        return _build_calibration_plan_impl(
+            config_path=config_path,
+            results_root=results_root,
+            run_name=run_name,
+            system_preset=system_preset,
+            args=args,
+        )
+
+
+def _build_calibration_plan_impl(
+    *,
+    config_path: Path | None,
+    results_root: Path,
+    run_name: str | None,
+    system_preset: str | None,
+    args: argparse.Namespace | None = None,
+) -> CalibrationPlan:
+    config = _load_config(config_path)
+    experiment_cfg = _apply_cli_overrides(dict(config["experiment"]), args)
+    if run_name is not None:
+        experiment_cfg["run_name"] = run_name
+    resolved_run_name = str(experiment_cfg.get("run_name") or f"single_star_calibration_{timestamp_tag()}")
+    run_root = Path(results_root).resolve() / resolved_run_name
+    store, system_cfg, source_provenance = _resolve_single_star_system(
+        experiment_cfg=experiment_cfg,
+        system_preset=system_preset,
+    )
+    theta_cfg = _single_star_observation_theta_config(
+        experiment_cfg.get("observation_theta", {}) or {}
+    )
+    experiment_cfg["observation_theta"] = theta_cfg
+    layout, metadata = build_system_observation_theta_layout(
+        store,
+        config=theta_cfg,
+    )
+    forbidden = {"source.separation_as", "source.contrast", "source.position_angle_deg"}
+    if forbidden & set(layout.labels):
+        raise ValueError("Single-star calibration theta must not include separation or contrast.")
+    metadata["system"] = source_provenance
+    metadata["resolved_system"] = system_cfg
+    base_truth_vector = build_prior_mean_from_store(layout.labels, store=store)
+    base_truth_by_label = {
+        label: float(base_truth_vector[i]) for i, label in enumerate(layout.labels)
+    }
+    truth_realization = realize_campaign_truth(
+        experiment_cfg=experiment_cfg,
+        labels=layout.labels,
+        base_truth_by_label=base_truth_by_label,
+    )
+    truth_by_label = dict(base_truth_by_label)
+    truth_by_label.update(truth_realization.truth_overrides_by_label)
+    truth_vector = np.asarray([truth_by_label[label] for label in layout.labels], dtype=float)
+    if truth_realization.truth_overrides_by_label:
+        system_cfg = apply_truth_overrides_to_system_config(
+            system_cfg,
+            truth_realization.truth_overrides_by_label,
+        )
+        metadata["resolved_system"] = system_cfg
+    subblock_cfg = dict(experiment_cfg.get("subblocks", {}) or {})
+    reuse_existing_artifacts = bool(
+        args is not None
+        and (
+            getattr(args, "aggregate_only", False)
+            or (
+                getattr(args, "resume", False)
+                and (run_root / "campaign_plan.json").exists()
+            )
+        )
+    )
+    source_cfg = system_cfg.get("source", {}) if isinstance(system_cfg.get("source"), Mapping) else {}
+    smear_cfg = (
+        subblock_cfg.get("trajectory_processing", {}).get("smear", {})
+        if isinstance(subblock_cfg.get("trajectory_processing"), Mapping)
+        else {}
+    )
+    model_split = build_campaign_model_split(
+        base_system_cfg=system_cfg,
+        spectral_model_cfg=experiment_cfg.get("spectral_model"),
+        high_order_wfe_cfg=experiment_cfg.get("high_order_wfe"),
+        scalar_reference_offsets=truth_realization.truth_overrides_by_label,
+        detector_noise_metadata={
+            "enabled": str(subblock_cfg.get("noise", "disabled")) != "disabled",
+            "noise_mode": str(subblock_cfg.get("noise", "disabled")),
+        },
+        run_root=run_root,
+        artifact_root=run_root / "model_split",
+        seed_context={
+            "wrapper": "single_star_calibration_demo",
+            "run_name": resolved_run_name,
+            "base_seed": int(experiment_cfg.get("seed", 42)),
+        },
+        source_kind=str(source_cfg.get("kind", "single_star")),
+        target=source_cfg.get("target"),
+        write_artifacts=not reuse_existing_artifacts,
+        trajectory_smear_metadata=smear_cfg if isinstance(smear_cfg, Mapping) else None,
+    )
+    system_cfg = model_split.truth_system_cfg
+    reference_system_cfg = model_split.inference_system_cfg
+    metadata["resolved_system"] = system_cfg
+    metadata["reference_system"] = reference_system_cfg
+    metadata["model_split"] = model_split.to_dict()
+    metadata["high_order_wfe"] = model_split.provenance.get("high_order_wfe", {})
+    cases, prior_draw_rows = generate_calibration_cases(
+        experiment_cfg=experiment_cfg,
+        labels=layout.labels,
+        truth_by_label=truth_by_label,
+    )
+    template_paths = write_single_star_templates(
+        run_root,
+        system_cfg,
+        experiment_cfg=experiment_cfg,
+        inference_system_cfg=reference_system_cfg,
+        model_split=model_split,
+    )
+    template_hashes = template_hash_row(template_paths, model_split)
+    schur_settings = _schur_settings_for_single_star_config(subblock_cfg)
+    subblock_cfg["schur_curvature_method"] = schur_settings["schur_curvature_method_requested"]
+    if args is not None and bool(getattr(args, "memory_diagnostics", False)):
+        subblock_cfg["memory_diagnostics"] = True
+    seeding = dict(experiment_cfg.get("seeding", {}) or {})
+    seed_policy = str(seeding.get("seed_policy", "different_jitter_different_noise"))
+    if seed_policy not in SUPPORTED_SEED_POLICIES:
+        raise ValueError(f"Unsupported seed_policy: {seed_policy}")
+    base_seed = int(seeding.get("base_seed", experiment_cfg.get("seed", 42)))
+    n_subblocks = int(subblock_cfg.get("n_subblocks", 3))
+    subblock_root = run_root / "subblock_runs"
+    trace_source_plan = prepare_campaign_trace_source(
+        trace_source_cfg=subblock_cfg.get("trace_source"),
+        run_root=run_root,
+        artifact_root=run_root / "trajectory",
+        source_kind="single_star",
+        active_frame_keys=ACTIVE_FRAME_KEYS,
+        n_subblocks=n_subblocks,
+        n_frames_per_subblock=int(subblock_cfg.get("n_frames", 20)),
+        frame_dt_s=float(subblock_cfg.get("exposure_time_s", 0.05)),
+        subblock_duration_s=float(
+            experiment_cfg.get("forecast", {}).get("subblock_duration_s", 1.0)
+        ),
+        default_output_keys=ACTIVE_FRAME_KEYS,
+        reuse_existing=bool(
+            args is not None
+            and (
+                getattr(args, "aggregate_only", False)
+                or (
+                    getattr(args, "resume", False)
+                    and (run_root / "campaign_plan.json").exists()
+                )
+            )
+        ),
+        trajectory_processing_cfg=subblock_cfg.get("trajectory_processing"),
+        plate_scale_as_per_pix=_scalar_store_value(store, "optics.plate_scale_as_per_pix"),
+    )
+    commands: dict[str, list[list[str]]] = {}
+    summary_paths: dict[str, list[Path]] = {}
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        commands[case.case_name] = []
+        summary_paths[case.case_name] = []
+        for subblock_index in range(n_subblocks):
+            seeds = _derive_subblock_seeds(
+                run_name=resolved_run_name,
+                case_name=case.case_name,
+                subblock_index=subblock_index,
+                seed_policy=seed_policy,
+                base_seed=base_seed,
+            )
+            subblock_name = f"{case.case_name}/subblock_{subblock_index:06d}"
+            summary_path = (
+                subblock_root / subblock_name / "study" / "schur_summary" / "subblock_summary.json"
+            )
+            command = build_subblock_command(
+                case_root_parent=subblock_root,
+                case_subblock_name=subblock_name,
+                template_paths=template_paths,
+                theta_labels=layout.labels,
+                layout_metadata=metadata,
+                offsets=case.theta_reference_offsets,
+                subblock_cfg=subblock_cfg,
+                trace_seed=seeds["trace_seed"],
+                noise_seed=seeds["noise_seed"],
+                trace_subblock=trace_source_plan.subblocks[subblock_index],
+            )
+            commands[case.case_name].append(command)
+            summary_paths[case.case_name].append(summary_path)
+            trace_row = dict(trace_source_plan.rows[subblock_index])
+            rows.append(
+                {
+                    "case_name": case.case_name,
+                    "case_origin": case.case_origin,
+                    "subblock_index": int(subblock_index),
+                    "subblock_name": subblock_name,
+                    "summary_path": str(summary_path),
+                    "n_frames": int(subblock_cfg.get("n_frames", 20)),
+                    "noise": str(subblock_cfg.get("noise", "enabled")),
+                    "phi_ref": str(subblock_cfg.get("phi_ref", "recovered")),
+                    "schur_curvature_method_requested": schur_settings["schur_curvature_method_requested"],
+                    "schur_curvature_method_effective": schur_settings["schur_curvature_method_effective"],
+                    "schur_route_source": schur_settings["schur_route_source"],
+                    "max_dense_dim": schur_settings["max_dense_dim"],
+                    "structured_curvature_used": schur_settings["structured_curvature_expected"],
+                    "dense_global_hessian_materialized": "",
+                    "trace_seed": seeds["trace_seed"],
+                    "noise_seed": seeds["noise_seed"],
+                    "reference_early_stopping_enabled": subblock_cfg.get("reference_early_stopping_enabled"),
+                    "reference_early_stopping_min_iter": subblock_cfg.get("reference_early_stopping_min_iter"),
+                    "reference_early_stopping_patience": subblock_cfg.get("reference_early_stopping_patience"),
+                    "reference_early_stopping_loss_rtol": subblock_cfg.get("reference_early_stopping_loss_rtol"),
+                    "reference_early_stopping_loss_atol": subblock_cfg.get("reference_early_stopping_loss_atol"),
+                    "reference_early_stopping_step_atol": subblock_cfg.get("reference_early_stopping_step_atol"),
+                    "reference_early_stopping_grad_norm_atol": subblock_cfg.get("reference_early_stopping_grad_norm_atol"),
+                    "use_render_variance": _single_star_use_render_variance(subblock_cfg),
+                    "high_order_wfe_enabled": bool(model_split.enabled_components.get("high_order_wfe", {}).get("enabled", False)),
+                    "high_order_wfe_summary_json": model_split.artifact_paths.get("high_order_wfe_high_order_wfe_summary_json", ""),
+                    **template_hashes,
+                    "command": " ".join(command),
+                    "parent_diagnostics_json": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
+                    "subprocess_diagnostics_path": str((subblock_root / subblock_name / "study" / "subprocess_diagnostics.json")),
+                    "schur_diagnostics_path": str((subblock_root / subblock_name / "study" / "schur_summary" / "schur_diagnostics.json")),
+                    "schur_memory_audit_path": str((subblock_root / subblock_name / "study" / "schur_summary" / "schur_summary_memory_audit.json")),
+                    **trace_row,
+                }
+            )
+    resolved_config = {
+        "experiment": experiment_cfg,
+        "system": system_cfg,
+        "reference_system": reference_system_cfg,
+    }
+    resolved_config["experiment"]["truth_realization_summary"] = dict(
+        truth_realization.summary
+    )
+    resolved_config["experiment"]["high_order_wfe_summary"] = model_split.provenance.get("high_order_wfe", {})
+    resolved_config["experiment"]["model_split"] = model_split.to_dict()
+    resolved_config["experiment"]["template_hashes"] = [template_hashes]
+    return CalibrationPlan(
+        run_root=run_root,
+        layout=layout,
+        layout_metadata=metadata,
+        truth_vector=truth_vector,
+        system_cfg=system_cfg,
+        config=resolved_config,
+        cases=cases,
+        summary_paths=summary_paths,
+        subblock_commands=commands,
+        subblock_rows=rows,
+        prior_draw_rows=prior_draw_rows,
+        truth_realization=dict(truth_realization.summary),
+        truth_realization_rows=list(truth_realization.rows),
+        status_rows=[],
+        trace_source_plan=trace_source_plan,
+        case_scheduling=str(experiment_cfg.get("case_scheduling", "grouped")),
+    )
+
+
+def _plan_payload(plan: CalibrationPlan) -> dict[str, Any]:
+    forecast = dict(plan.config["experiment"].get("forecast", {}) or {})
+    trace_keys, inactive_truth_keys, pa_policy = _trace_key_policy(
+        plan.config["experiment"]
+    )
+    n_frames = int(plan.config["experiment"].get("subblocks", {}).get("n_frames", 20))
+    frame_phi_dim = len(ACTIVE_FRAME_KEYS)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": now_iso_local_ms(),
+        "run_root": str(plan.run_root),
+        "source_kind": "single_star",
+        "calibration_source_mode": "alpha_cen_a_placeholder",
+        "photometry_note": ALPHA_CEN_A_PLACEHOLDER_NOTE,
+        "local_eliminated_keys": list(ACTIVE_FRAME_KEYS),
+        "active_frame_keys": list(ACTIVE_FRAME_KEYS),
+        "trace_varying_keys": list(trace_keys),
+        "inactive_truth_keys": list(inactive_truth_keys),
+        "single_star_pa_policy": pa_policy,
+        "trace_source": dict(plan.trace_source_plan.summary),
+        "model_split": dict(
+            plan.config["experiment"].get("model_split", {})
+        ),
+        "template_hashes": list(
+            plan.config["experiment"].get("template_hashes", [])
+        ),
+        "high_order_wfe": dict(
+            plan.config["experiment"].get("high_order_wfe_summary", {})
+        ),
+        "observation_theta_labels": list(plan.layout.labels),
+        "theta_layout": plan.layout.to_dict(),
+        "layout_metadata": plan.layout_metadata,
+        "truth_realization": dict(plan.truth_realization),
+        "n_cases": len(plan.cases),
+        "case_scheduling": plan.case_scheduling,
+        "n_subblocks": int(plan.config["experiment"].get("subblocks", {}).get("n_subblocks", 3)),
+        "n_frames": n_frames,
+        "dimension_estimate": {
+            "frame_phi_dim": int(frame_phi_dim),
+            "n_phi": int(frame_phi_dim * n_frames),
+        },
+        "summary_paths": {
+            case: [str(path) for path in paths]
+            for case, paths in plan.summary_paths.items()
+        },
+        "intended_subblock_commands": {
+            case: [" ".join(cmd) for cmd in commands]
+            for case, commands in plan.subblock_commands.items()
+        },
+        "forecast_grid": list(forecast.get("n_subblocks_grid", [])),
+        "notes": [
+            "Calibration star photometry is an Alpha Cen A component placeholder.",
+            "Single-star frame solve uses X/Y only; PA is optional inert truth-trace diagnostics.",
+            "Trajectory mode writes frame_truth.csv for render truth and starting_guess_prediction.csv for optimizer initialization only.",
+            "Forecast-to-1800-subblocks is extrapolation, not a real image-backed 30-minute run.",
+        ],
+    }
+
+
+def _scalar_store_value(store: ParameterStore, key: str) -> float | None:
+    try:
+        return float(np.asarray(store.get(key)))
+    except Exception:
+        return None
+
+
+def _mapping_scalar_value(mapping: Mapping[str, Any], key: str) -> float | None:
+    current: Any = mapping
+    for part in key.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    try:
+        return float(current)
+    except Exception:
+        return None
+
+
+def _wavelength_summary_from_store(store: ParameterStore) -> dict[str, Any]:
+    center = _scalar_store_value(store, "source.wavelength_m")
+    bandwidth = _scalar_store_value(store, "source.bandwidth_m")
+    n_lambda = _scalar_store_value(store, "source.n_lambda")
+    if center is None or bandwidth is None or n_lambda is None:
+        return {"available": False}
+    count = int(n_lambda)
+    if count <= 0:
+        return {"available": False, "n_lambda": count}
+    grid = np.linspace(
+        center - 0.5 * bandwidth,
+        center + 0.5 * bandwidth,
+        count,
+        dtype=float,
+    )
+    return {
+        "available": True,
+        "n_lambda": count,
+        "min_m": float(np.min(grid)),
+        "max_m": float(np.max(grid)),
+        "center_m": float(center),
+        "bandwidth_m": float(bandwidth),
+    }
+
+
+def _refreshed_store_from_system_cfg(system_cfg: Mapping[str, Any]) -> ParameterStore:
+    with _jax_x64_context():
+        spec = compose_forward_spec(system_cfg)
+        return ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+
+
+def _single_star_consistency_diagnostics(
+    plan: CalibrationPlan,
+    *,
+    case_name: str | None = None,
+    truth: np.ndarray | None = None,
+    reference: np.ndarray | None = None,
+    summaries: Sequence[SubblockSummary] | None = None,
+    posterior_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return single-star scalar consistency diagnostics for auditability."""
+
+    store = _refreshed_store_from_system_cfg(plan.system_cfg)
+    labels = tuple(plan.layout.labels)
+    theta_ref_by_label: dict[str, float] = {}
+    if summaries:
+        theta_ref = np.asarray(summaries[0].theta_ref, dtype=float)
+        theta_ref_by_label = {
+            label: float(theta_ref[index])
+            for index, label in enumerate(labels)
+            if index < theta_ref.size
+        }
+
+    truth_by_label = (
+        {
+            label: float(np.asarray(truth, dtype=float)[index])
+            for index, label in enumerate(labels)
+        }
+        if truth is not None
+        else {
+            label: float(plan.truth_vector[index])
+            for index, label in enumerate(labels)
+        }
+    )
+    reference_by_label = (
+        {
+            label: float(np.asarray(reference, dtype=float)[index])
+            for index, label in enumerate(labels)
+        }
+        if reference is not None
+        else {}
+    )
+    posterior_table = {
+        str(row.get("theta_label")): {
+            "truth_value": row.get("truth_value"),
+            "prior_mean": row.get("prior_mean"),
+            "reference_value": row.get("reference_value"),
+            "injected_bias": row.get("injected_bias"),
+            "posterior_mean": row.get("posterior_mean"),
+            "posterior_error": row.get("posterior_error"),
+            "posterior_sigma": row.get("posterior_sigma"),
+        }
+        for row in (posterior_rows or [])
+        if row.get("theta_label") in {
+            "source.log_flux_total",
+            "optics.plate_scale_as_per_pix",
+        }
+    }
+
+    source_object_flux = None
+    spectral_weight_sum = None
+    try:
+        source = build_single_star_source(store, cfg=plan.system_cfg)
+        source_object_flux = float(np.asarray(getattr(source, "flux")))
+        spectral_weight_sum = float(np.sum(np.asarray(getattr(source, "weights"))))
+    except Exception:
+        pass
+
+    pixel_pitch = _scalar_store_value(store, "detector.pixel_pitch_m")
+    m1_f = _scalar_store_value(store, "optics.m1_focal_length_m")
+    m2_f = _scalar_store_value(store, "optics.m2_focal_length_m")
+    sep = _scalar_store_value(store, "optics.m1_m2_separation_m")
+    focal_length = None
+    expected_plate_scale = None
+    if None not in (pixel_pitch, m1_f, m2_f, sep):
+        focal_length = 1.0 / ((1.0 / m1_f) + (1.0 / m2_f) - sep / (m1_f * m2_f))
+        expected_plate_scale = pixel_pitch / focal_length * ARCSEC_PER_RAD
+
+    source_cfg = plan.system_cfg.get("source", {})
+    return {
+        "schema_version": "single_star_consistency_diagnostics.v1",
+        "case_name": case_name,
+        "source_kind": source_cfg.get("kind"),
+        "source_target": source_cfg.get("target"),
+        "calibration_source_mode": "alpha_cen_a_placeholder",
+        "photometry_is_placeholder": True,
+        "exposure_time_s": _scalar_store_value(store, "source.exposure_time_s"),
+        "wavelength_grid": _wavelength_summary_from_store(store),
+        "spectral_weight_sum": spectral_weight_sum,
+        "source.log_flux_total": {
+            "config": _mapping_scalar_value(plan.system_cfg, "source.log_flux_total"),
+            "refreshed_store": _scalar_store_value(store, "source.log_flux_total"),
+            "source_object_flux_field": source_object_flux,
+            "linear_total_flux_from_log10": (
+                None
+                if _scalar_store_value(store, "source.log_flux_total") is None
+                else float(10.0 ** _scalar_store_value(store, "source.log_flux_total"))
+            ),
+            "theta_ref": theta_ref_by_label.get("source.log_flux_total"),
+            "truth_value": truth_by_label.get("source.log_flux_total"),
+            "reference_value": reference_by_label.get("source.log_flux_total"),
+            "posterior_table": posterior_table.get("source.log_flux_total"),
+        },
+        "detector.pixel_pitch_m": pixel_pitch,
+        "optics.focal_length_m": focal_length,
+        "optics.plate_scale_as_per_pix": {
+            "config": _mapping_scalar_value(plan.system_cfg, "optics.plate_scale_as_per_pix"),
+            "expected_from_geometry": expected_plate_scale,
+            "refreshed_store": _scalar_store_value(store, "optics.plate_scale_as_per_pix"),
+            "theta_ref": theta_ref_by_label.get("optics.plate_scale_as_per_pix"),
+            "truth_value": truth_by_label.get("optics.plate_scale_as_per_pix"),
+            "reference_value": reference_by_label.get("optics.plate_scale_as_per_pix"),
+            "posterior_table": posterior_table.get("optics.plate_scale_as_per_pix"),
+        },
+        "theta_ref_values_exported_to_subblock_summary": theta_ref_by_label,
+        "posterior_table_values": posterior_table,
+        "policies": {
+            "use_render_variance": _single_star_use_render_variance(
+                plan.config["experiment"].get("subblocks", {}) or {}
+            ),
+            "near_zero_injected_bias_abs": NEAR_ZERO_INJECTED_BIAS_ABS,
+            "plate_scale_single_star_interpretation": (
+                "included when requested, but diagnostic/weak for centered "
+                "single-star data after X/Y registration"
+            ),
+        },
+    }
+
+
+def write_plan_artifacts(plan: CalibrationPlan) -> None:
+    _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
+    _write_json(plan.run_root / "model_split.json", plan.config["experiment"].get("model_split", {}))
+    _write_json(
+        plan.run_root / "model_split_summary.json",
+        {
+            "schema_version": "campaign_model_split.v1.run_root_summary",
+            "truth_config_hash": plan.config["experiment"].get("model_split", {}).get("truth_config_hash"),
+            "inference_config_hash": plan.config["experiment"].get("model_split", {}).get("inference_config_hash"),
+            "components": plan.config["experiment"].get("model_split", {}).get("components", {}),
+            "artifact_paths": plan.config["experiment"].get("model_split", {}).get("artifact_paths", {}),
+        },
+    )
+    _write_json(plan.run_root / "resolved_config.json", plan.config)
+    _write_json(
+        plan.run_root / "single_star_consistency_diagnostics.json",
+        _single_star_consistency_diagnostics(plan),
+    )
+    _write_json(plan.run_root / "truth_realization.json", plan.truth_realization)
+    _write_csv(plan.run_root / "truth_realization_by_label.csv", plan.truth_realization_rows)
+    _write_csv(plan.run_root / "subblock_plan.csv", plan.subblock_rows)
+    _write_csv(plan.run_root / "template_hashes.csv", plan.config["experiment"].get("template_hashes", []))
+    _write_csv(
+        plan.run_root / "calibration_cases.csv",
+        [
+            {
+                "case_name": case.case_name,
+                "case_origin": case.case_origin,
+                "n_theta_offsets": len(case.theta_reference_offsets),
+            }
+            for case in plan.cases
+        ],
+    )
+    _write_csv(plan.run_root / "prior_draws.csv", plan.prior_draw_rows)
+
+
+def _load_case_summaries(
+    paths: Sequence[Path],
+    *,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+) -> tuple[list[SubblockSummary], dict[str, Any]]:
+    missing = [path for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Missing subblock summaries: " + ", ".join(str(path) for path in missing))
+    summaries = [load_subblock_summary(path) for path in paths]
+    labels = tuple(summaries[0].theta_labels)
+    for summary in summaries[1:]:
+        if tuple(summary.theta_labels) != labels:
+            raise ValueError("Subblock summary theta labels differ within case.")
+    summary_scale_validation = validate_summary_information_scale(
+        [load_subblock_summary_artifact_payload(path) for path in paths],
+        policy=summary_scale_policy,
+        summary_paths=paths,
+    )
+    return summaries, summary_scale_validation
+
+
+def _prior_for_case(plan: CalibrationPlan, case: CalibrationCase, summaries: Sequence[SubblockSummary]) -> tuple[ObservationBeliefState, np.ndarray, np.ndarray, np.ndarray]:
+    labels = tuple(plan.layout.labels)
+    truth = np.asarray(plan.truth_vector, dtype=float)
+    offsets = np.asarray([float(case.theta_reference_offsets.get(label, 0.0)) for label in labels])
+    reference = truth + offsets
+    if summaries:
+        reference = np.asarray(summaries[0].theta_ref, dtype=float)
+    if case.prior_sigma_by_label is None:
+        sigma_cfg = dict(plan.config["experiment"].get("prior", {}).get("sigma", {}) or {})
+        sigma_by_label = resolve_prior_sigmas(
+            labels,
+            {label: float(truth[i]) for i, label in enumerate(labels)},
+            sigma_cfg,
+        )
+    else:
+        sigma_by_label = case.prior_sigma_by_label
+    sigma = np.asarray([sigma_by_label[label] for label in labels], dtype=float)
+    prior = ObservationBeliefState.from_diagonal_prior(
+        theta_labels=labels,
+        mean=reference,
+        sigma=sigma,
+        metadata={"prior_sigma_source": "calibration_config", "case_origin": case.case_origin},
+    )
+    return prior, truth, reference, sigma
+
+
+def _posterior_metric_rows(
+    *,
+    case_name: str,
+    labels: Sequence[str],
+    truth: np.ndarray,
+    reference: np.ndarray,
+    prior_sigma: np.ndarray,
+    posterior_mean: np.ndarray,
+    posterior_sigma: np.ndarray,
+    history_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    one_nm_cross: dict[str, tuple[int, float]] = {}
+    for row in history_rows:
+        label = str(row["theta_label"])
+        if "zernike_coeffs_nm" in label and float(row["posterior_sigma"]) <= 1.0 and label not in one_nm_cross:
+            one_nm_cross[label] = (int(row["n_subblocks"]), float(row["calibration_time_s"]))
+    for index, label in enumerate(labels):
+        truth_value = float(truth[index])
+        reference_value = float(reference[index])
+        posterior_value = float(posterior_mean[index])
+        prior_error = reference_value - truth_value
+        posterior_error = posterior_value - truth_value
+        posterior_shift = posterior_value - reference_value
+        is_zernike = "zernike_coeffs_nm" in label
+        crossed = one_nm_cross.get(label)
+        rows.append(
+            {
+                "case_name": case_name,
+                "theta_label": label,
+                "parameter_group": _parameter_group(label),
+                "unit": _parameter_unit(label),
+                "truth_value": truth_value,
+                "prior_mean": reference_value,
+                "reference_value": reference_value,
+                "injected_bias": prior_error,
+                "posterior_mean": posterior_value,
+                "posterior_shift": posterior_shift,
+                "posterior_error": posterior_error,
+                "prior_sigma": float(prior_sigma[index]),
+                "posterior_sigma": float(posterior_sigma[index]),
+                "posterior_error_over_sigma": _safe_fraction(posterior_error, float(posterior_sigma[index])),
+                "correction_fraction": _correction_fraction_or_nan(
+                    posterior_shift=posterior_shift,
+                    prior_error=prior_error,
+                ),
+                "residual_fraction": _residual_fraction_or_nan(
+                    posterior_error=posterior_error,
+                    prior_error=prior_error,
+                ),
+                "moves_toward_truth": _moves_toward_truth_or_none(
+                    posterior_error=posterior_error,
+                    prior_error=prior_error,
+                ),
+                "crosses_1nm_threshold": (None if not is_zernike else bool(crossed is not None)),
+                "time_to_1nm_s": (None if crossed is None else crossed[1]),
+                "n_subblocks_to_1nm": (None if crossed is None else crossed[0]),
+            }
+        )
+    return rows
+
+
+def _resolve_update_policy(experiment_cfg: Mapping[str, Any]) -> ObservationUpdatePolicy:
+    raw = dict(experiment_cfg.get("update_policy", {}) or {})
+    eigen = dict(raw.get("eigenbasis", {}) or {})
+    return ObservationUpdatePolicy(
+        update_mode=str(raw.get("update_mode", "physical_full")),
+        update_gain=float(raw.get("update_gain", 1.0)),
+        basis_source=str(eigen.get("basis_source", "posterior_precision")),
+        gate_source=eigen.get("gate_source", "accumulated_information"),
+        whiten=bool(eigen.get("whiten", True)),
+        eig_floor_abs=float(eigen.get("eig_floor_abs", 0.0)),
+        eig_floor_rel=float(eigen.get("eig_floor_rel", 0.0)),
+        damping_mode=str(eigen.get("damping_mode", "none")),
+        damping_value=float(eigen.get("damping_value", 1.0)),
+        damping_n_modes=eigen.get("damping_n_modes", 0),
+        min_kept_modes=(
+            None
+            if eigen.get("min_kept_modes") is None
+            else int(eigen["min_kept_modes"])
+        ),
+        max_kept_modes=(
+            None
+            if eigen.get("max_kept_modes") is None
+            else int(eigen["max_kept_modes"])
+        ),
+        top_k_contributors=int(eigen.get("top_k_contributors", 8)),
+    )
+
+
+def _history_rows(
+    *,
+    case_name: str,
+    plan: CalibrationPlan,
+    prior: ObservationBeliefState,
+    summaries: Sequence[SubblockSummary],
+    truth: np.ndarray,
+    reference: np.ndarray,
+) -> list[dict[str, Any]]:
+    prefixes = [
+        int(v)
+        for v in plan.config["experiment"].get("history_prefixes", [1, 2, 3, 5, 10, 30, 100, 300, 1000, 1800])
+        if int(v) <= len(summaries)
+    ]
+    if len(summaries) not in prefixes:
+        prefixes.append(len(summaries))
+    subblock_duration = float(plan.config["experiment"].get("forecast", {}).get("subblock_duration_s", 1.0))
+    rows: list[dict[str, Any]] = []
+    policy = _resolve_update_policy(plan.config["experiment"])
+    for count in sorted(set(prefixes)):
+        update = update_observation_belief_with_policy(
+            prior,
+            summaries[:count],
+            policy=policy,
+        )
+        sigma = update.posterior.sigma()
+        for index, label in enumerate(plan.layout.labels):
+            posterior_error = float(update.posterior.mean[index] - truth[index])
+            prior_error = float(reference[index] - truth[index])
+            rows.append(
+                {
+                    "case_name": case_name,
+                    "n_subblocks": int(count),
+                    "calibration_time_s": float(count * subblock_duration),
+                    "update_mode": policy.update_mode,
+                    "n_modes_kept": update.diagnostics.get("n_modes_kept"),
+                    "n_modes_total": update.diagnostics.get("n_modes_total"),
+                    "theta_label": label,
+                    "posterior_mean": float(update.posterior.mean[index]),
+                    "posterior_sigma": float(sigma[index]),
+                    "posterior_error": posterior_error,
+                    "posterior_error_over_sigma": _safe_fraction(posterior_error, float(sigma[index])),
+                    "correction_fraction": _correction_fraction_or_nan(
+                        posterior_shift=float(update.posterior.mean[index] - reference[index]),
+                        prior_error=prior_error,
+                    ),
+                    "residual_fraction": _residual_fraction_or_nan(
+                        posterior_error=posterior_error,
+                        prior_error=prior_error,
+                    ),
+                }
+            )
+    return rows
+
+
+def _write_eigenmodes(
+    *,
+    case_root: Path,
+    source_name: str,
+    labels: Sequence[str],
+    matrix: np.ndarray,
+    prior_sigma: np.ndarray,
+    eigen_cfg: Mapping[str, Any],
+) -> None:
+    if bool(eigen_cfg.get("whiten", True)):
+        source_matrix = build_prior_whitened_information_gain_matrix(matrix, prior_sigma)
+    else:
+        source_matrix = np.asarray(matrix, dtype=float)
+    basis = build_observation_eigenbasis(
+        source_matrix,
+        labels,
+        eig_floor_abs=float(eigen_cfg.get("eig_floor_abs", 0.0)),
+        eig_floor_rel=float(eigen_cfg.get("eig_floor_rel", 1.0e-12)),
+    )
+    top_k = int(eigen_cfg.get("top_k_contributors", 8))
+    rows: list[dict[str, Any]] = []
+    for mode_index, eigenvalue in enumerate(basis.eigenvalues):
+        contributors = basis.mode_contributors(mode_index, top_k=top_k)
+        rows.append(
+            {
+                "mode_index": int(mode_index),
+                "eigenvalue": float(eigenvalue),
+                "prior_whitened_eigenvalue": float(eigenvalue) if bool(eigen_cfg.get("whiten", True)) else None,
+                "dominant_labels": "; ".join(label for label, _ in contributors[:3]),
+                "dominant_components": "; ".join(f"{coeff:+.4f}" for _, coeff in contributors[:3]),
+                "participation": float(1.0 / np.sum(np.square(basis.eigenvectors[:, mode_index]) ** 2)),
+            }
+        )
+    _write_csv(case_root / f"eigenmodes_{source_name}.csv", rows)
+
+
+def _replicate_summaries(
+    summaries: Sequence[SubblockSummary],
+    count: int,
+) -> tuple[SubblockSummary, ...]:
+    if not summaries:
+        raise ValueError("Forecast requires at least one summary.")
+    return tuple(summaries[index % len(summaries)] for index in range(int(count)))
+
+
+def _sample_score_noise(
+    information: np.ndarray,
+    *,
+    rng: np.random.Generator,
+    alpha: float,
+    eig_floor_rel: float,
+) -> np.ndarray:
+    matrix = 0.5 * (np.asarray(information, dtype=float) + np.asarray(information, dtype=float).T)
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    scale = max(float(np.max(np.abs(eigenvalues))) if eigenvalues.size else 0.0, 1.0)
+    effective = np.clip(eigenvalues, float(eig_floor_rel) * scale, None)
+    return eigenvectors @ (np.sqrt(float(alpha) * effective) * rng.normal(size=effective.shape))
+
+
+def _write_forecast_outputs(
+    *,
+    case_root: Path,
+    case_name: str,
+    plan: CalibrationPlan,
+    prior: ObservationBeliefState,
+    summaries: Sequence[SubblockSummary],
+    truth: np.ndarray,
+    reference: np.ndarray,
+    prior_sigma: np.ndarray,
+) -> dict[str, Any]:
+    cfg = dict(plan.config["experiment"].get("forecast", {}) or {})
+    if not bool(cfg.get("enabled", False)):
+        summary = {"enabled": False}
+        _write_json(case_root / "forecast_summary.json", summary)
+        return summary
+    modes = tuple(str(mode) for mode in cfg.get("modes", ("replicate",)))
+    grid = sorted(
+        {
+            int(value)
+            for value in cfg.get("n_subblocks_grid", [1, 3, 5, 10, 30, 100, 300, 1000, 1800])
+            if int(value) >= 1
+        }
+        | {len(summaries)}
+    )
+    subblock_duration = float(cfg.get("subblock_duration_s", 1.0))
+    by_parameter: list[dict[str, Any]] = []
+    trial_rows: list[dict[str, Any]] = []
+    update_policy = _resolve_update_policy(plan.config["experiment"])
+
+    def append_rows(mode: str, count: int, update: Any, trial_index: int | None = None) -> None:
+        sigma = update.posterior.sigma()
+        for index, label in enumerate(plan.layout.labels):
+            posterior_error = float(update.posterior.mean[index] - truth[index])
+            prior_error = float(reference[index] - truth[index])
+            row = {
+                "case_name": case_name,
+                "forecast_mode": mode,
+                "update_mode": update_policy.update_mode,
+                "n_subblocks": int(count),
+                "calibration_time_s": float(count * subblock_duration),
+                "theta_label": label,
+                "parameter_group": _parameter_group(label),
+                "unit": _parameter_unit(label),
+                "posterior_mean": float(update.posterior.mean[index]),
+                "posterior_sigma": float(sigma[index]),
+                "posterior_sigma_over_prior_sigma": _safe_fraction(float(sigma[index]), float(prior_sigma[index])),
+                "posterior_error": posterior_error,
+                "posterior_error_over_sigma": _safe_fraction(posterior_error, float(sigma[index])),
+                "correction_fraction": _correction_fraction_or_nan(
+                    posterior_shift=float(update.posterior.mean[index] - reference[index]),
+                    prior_error=prior_error,
+                ),
+                "residual_fraction": _residual_fraction_or_nan(
+                    posterior_error=posterior_error,
+                    prior_error=prior_error,
+                ),
+            }
+            if trial_index is None:
+                by_parameter.append(row)
+            else:
+                row["trial_index"] = int(trial_index)
+                trial_rows.append(row)
+
+    if "replicate" in modes:
+        for count in grid:
+            update = update_observation_belief_with_policy(
+                prior,
+                _replicate_summaries(summaries, count),
+                policy=update_policy,
+            )
+            append_rows("replicate", count, update)
+
+    if "fixed_information_score_noise" in modes:
+        noise_cfg = dict(cfg.get("fixed_information_score_noise", {}) or {})
+        if bool(noise_cfg.get("enabled", True)):
+            n_trials = int(noise_cfg.get("n_trials", 100))
+            seed = int(noise_cfg.get("seed", 2026))
+            alpha = float(noise_cfg.get("score_noise_alpha", 1.0))
+            eig_floor_rel = float(noise_cfg.get("score_noise_eig_floor_rel", 1.0e-12))
+            max_count = max(grid)
+            for trial_index in range(n_trials):
+                rng = np.random.default_rng(make_subseed(seed, f"{case_name}.forecast.{trial_index}"))
+                synthetic: list[SubblockSummary] = []
+                for seq_index, template in enumerate(_replicate_summaries(summaries, max_count)):
+                    info = np.asarray(template.reduced_information, dtype=float)
+                    expected = info @ (np.asarray(template.theta_ref, dtype=float) - truth)
+                    score = expected + _sample_score_noise(
+                        info,
+                        rng=rng,
+                        alpha=alpha,
+                        eig_floor_rel=eig_floor_rel,
+                    )
+                    synthetic.append(
+                        SubblockSummary.from_reduced_form(
+                            subblock_id=f"forecast_{trial_index:03d}_{seq_index:06d}",
+                            theta_labels=template.theta_labels,
+                            theta_ref=template.theta_ref,
+                            reduced_information=info,
+                            reduced_score=score,
+                            summary_kind="fixed_information_score_noise_forecast",
+                        )
+                    )
+                for count in grid:
+                    update = update_observation_belief_with_policy(
+                        prior,
+                        synthetic[:count],
+                        policy=update_policy,
+                    )
+                    append_rows("fixed_information_score_noise", count, update, trial_index)
+
+    _write_csv(case_root / "forecast_by_parameter.csv", by_parameter)
+    _write_csv(case_root / "forecast_trials.csv", trial_rows)
+    summary = {
+        "enabled": True,
+        "modes": list(modes),
+        "forecast_grid": grid,
+        "subblock_duration_s": subblock_duration,
+        "limitations": {
+            "replicate": "Repeats available real summaries deterministically.",
+            "fixed_information_score_noise": "Keeps information fixed and samples score noise with covariance alpha * S.",
+        },
+    }
+    _write_json(case_root / "forecast_summary.json", summary)
+    return summary
+
+
+def _plot_case(case_root: Path, history: Sequence[Mapping[str, Any]], posterior_rows: Sequence[Mapping[str, Any]]) -> None:
+    if not _HAVE_MATPLOTLIB or plt is None:
+        return
+    plot_root = case_root / "plots"
+    _ensure_dir(plot_root)
+    z_rows = [row for row in history if "zernike_coeffs_nm" in str(row["theta_label"])]
+    if z_rows:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for label in sorted({str(row["theta_label"]) for row in z_rows}):
+            subset = [row for row in z_rows if row["theta_label"] == label]
+            ax.plot(
+                [float(row["calibration_time_s"]) for row in subset],
+                [float(row["posterior_sigma"]) for row in subset],
+                marker="o",
+                label=label.replace("optics.", ""),
+            )
+        ax.axhline(1.0, color="0.3", linestyle="--", linewidth=1)
+        ax.set_yscale("log")
+        ax.set_xlabel("Calibration Time (s)")
+        ax.set_ylabel("Posterior Sigma (nm)")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(plot_root / "posterior_sigma_nm_vs_time_zernikes.png", dpi=160)
+        plt.close(fig)
+    if posterior_rows:
+        fig, ax = plt.subplots(figsize=(9, 5))
+        labels = [str(row["theta_label"]) for row in posterior_rows]
+        values = [float(row["posterior_sigma"]) for row in posterior_rows]
+        ax.bar(range(len(labels)), values)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_ylabel("Posterior Sigma")
+        fig.tight_layout()
+        fig.savefig(plot_root / "final_posterior_sigma_by_parameter.png", dpi=160)
+        plt.close(fig)
+
+
+def aggregate_case(
+    plan: CalibrationPlan,
+    case: CalibrationCase,
+    *,
+    summary_scale_policy: str = SUMMARY_SCALE_POLICY_REQUIRE_SUMMED,
+) -> dict[str, Any]:
+    case_root = plan.run_root / "cases" / case.case_name
+    summaries, summary_scale_validation = _load_case_summaries(
+        plan.summary_paths[case.case_name],
+        summary_scale_policy=summary_scale_policy,
+    )
+    prior, truth, reference, prior_sigma = _prior_for_case(plan, case, summaries)
+    update_policy = _resolve_update_policy(plan.config["experiment"])
+    update = update_observation_belief_with_policy(
+        prior,
+        summaries,
+        policy=update_policy,
+    )
+    accumulated = accumulate_summary_information(plan.layout.labels, summaries)
+    history = _history_rows(
+        case_name=case.case_name,
+        plan=plan,
+        prior=prior,
+        summaries=summaries,
+        truth=truth,
+        reference=reference,
+    )
+    posterior_rows = _posterior_metric_rows(
+        case_name=case.case_name,
+        labels=plan.layout.labels,
+        truth=truth,
+        reference=reference,
+        prior_sigma=prior_sigma,
+        posterior_mean=update.posterior.mean,
+        posterior_sigma=update.posterior.sigma(),
+        history_rows=history,
+    )
+    _write_csv(case_root / "posterior_by_parameter.csv", posterior_rows)
+    _write_csv(case_root / "posterior_history.csv", history)
+    update_diagnostics = dict(update.diagnostics)
+    update_diagnostics["physical_update_full_by_label"] = {
+        label: float(update.physical_update_full[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+    update_diagnostics["physical_update_applied_by_label"] = {
+        label: float(update.physical_update_applied[index])
+        for index, label in enumerate(plan.layout.labels)
+    }
+    _write_json(case_root / "eigen_update_diagnostics.json", update_diagnostics)
+    _write_csv(case_root / "eigen_update_modes.csv", update.mode_rows)
+    _write_json(
+        case_root / "single_star_consistency_diagnostics.json",
+        _single_star_consistency_diagnostics(
+            plan,
+            case_name=case.case_name,
+            truth=truth,
+            reference=reference,
+            summaries=summaries,
+            posterior_rows=posterior_rows,
+        ),
+    )
+    _write_json(
+        case_root / "case_summary.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "case_name": case.case_name,
+            "n_summaries": len(summaries),
+            "posterior": update.posterior.to_dict(),
+            "posterior_full": update.posterior_full.to_dict(),
+            "update_policy": update_diagnostics,
+            "prior": prior.to_dict(),
+            "summary_paths": [str(path) for path in plan.summary_paths[case.case_name]],
+            "summary_scale_validation": summary_scale_validation,
+        },
+    )
+    eigen_cfg = dict(plan.config["experiment"].get("eigenbasis", {}) or {})
+    if bool(eigen_cfg.get("enabled", True)):
+        for source_name in eigen_cfg.get("sources", ["accumulated_information", "posterior_precision"]):
+            matrix = update.posterior.precision if source_name == "posterior_precision" else accumulated
+            _write_eigenmodes(
+                case_root=case_root,
+                source_name=str(source_name),
+                labels=plan.layout.labels,
+                matrix=matrix,
+                prior_sigma=prior_sigma,
+                eigen_cfg=eigen_cfg,
+            )
+    forecast_summary = _write_forecast_outputs(
+        case_root=case_root,
+        case_name=case.case_name,
+        plan=plan,
+        prior=prior,
+        summaries=summaries,
+        truth=truth,
+        reference=reference,
+        prior_sigma=prior_sigma,
+    )
+    _plot_case(case_root, history, posterior_rows)
+    return {
+        "case_name": case.case_name,
+        "case_root": str(case_root),
+        "n_summaries": len(summaries),
+        "summary_scale_validation": summary_scale_validation,
+        "posterior_by_parameter_csv": str(case_root / "posterior_by_parameter.csv"),
+        "forecast_summary": forecast_summary,
+    }
+
+
+def aggregate_campaign(
+    plan: CalibrationPlan,
+    *,
+    allow_optimizer_scale_summaries: bool = False,
+) -> dict[str, Any]:
+    summary_scale_policy = (
+        SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
+        if allow_optimizer_scale_summaries
+        else SUMMARY_SCALE_POLICY_REQUIRE_SUMMED
+    )
+    summaries = [
+        aggregate_case(plan, case, summary_scale_policy=summary_scale_policy)
+        for case in plan.cases
+    ]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "run_root": str(plan.run_root),
+        "cases": summaries,
+        "summary_scale_policy": summary_scale_policy,
+        "memory_failure_summary_csv": str(plan.run_root / "memory_failure_summary.csv"),
+    }
+    status_path = plan.run_root / "subblock_status.csv"
+    if status_path.exists():
+        rows = list(csv.DictReader(status_path.open("r", encoding="utf-8")))
+        _write_csv(
+            plan.run_root / "memory_failure_summary.csv",
+            [
+                {
+                    "case_name": row.get("case_name"),
+                    "summary_path": row.get("summary_path"),
+                    "diagnostics_json": row.get("diagnostics_json"),
+                    "failure_class": row.get("failure_class"),
+                    "peak_total_rss_mb": row.get("peak_total_rss_mb"),
+                }
+                for row in rows
+            ],
+        )
+    _write_json(plan.run_root / "campaign_summary.json", payload)
+    return payload
+
+
+def execute_subblocks(
+    plan: CalibrationPlan,
+    *,
+    resume: bool,
+    max_workers: int,
+    fail_fast: bool,
+    quiet: bool,
+    memory_diagnostics: bool,
+    resource_time: bool | str | None,
+) -> None:
+    env = os.environ.copy()
+    src_path = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+    by_case: dict[str, list[tuple[str, Path, list[str]]]] = {}
+    for case_name, commands in plan.subblock_commands.items():
+        by_case[case_name] = []
+        for command, summary_path in zip(commands, plan.summary_paths[case_name], strict=True):
+            if resume and summary_path.exists():
+                try:
+                    load_subblock_summary(summary_path)
+                    continue
+                except Exception:
+                    if not fail_fast:
+                        pass
+            by_case[case_name].append((case_name, summary_path, command))
+    jobs: list[tuple[str, Path, list[str]]] = []
+    if plan.case_scheduling == "round_robin":
+        max_len = max((len(v) for v in by_case.values()), default=0)
+        for i in range(max_len):
+            for case_name in by_case:
+                if i < len(by_case[case_name]):
+                    jobs.append(by_case[case_name][i])
+    else:
+        for case_name in by_case:
+            jobs.extend(by_case[case_name])
+    if not jobs:
+        return
+    require_resource_time_available(resource_time)
+
+    status_rows: list[dict[str, Any]] = []
+
+    def run_job(job: tuple[str, Path, list[str]]) -> tuple[str, Path, dict[str, Any]]:
+        case_name, summary_path, command = job
+        case_root = summary_path.parent.parent
+        diagnostics_json = case_root / "subprocess_diagnostics.json"
+        diag = run_subprocess_with_diagnostics(
+            command=command,
+            cwd=REPO_ROOT,
+            env=env,
+            stdout_log=case_root / "subprocess.stdout.log",
+            stderr_log=case_root / "subprocess.stderr.log",
+            diagnostics_json=diagnostics_json,
+            memory_diagnostics=memory_diagnostics,
+            resource_time=resource_time,
+        )
+        schur_diag_path = summary_path.parent / "schur_diagnostics.json"
+        schur_diag: dict[str, Any] = {}
+        if schur_diag_path.exists():
+            try:
+                schur_diag = json.loads(schur_diag_path.read_text(encoding="utf-8"))
+            except Exception:
+                schur_diag = {}
+        return case_name, summary_path, {
+            "status": "ok" if int(diag.return_code) == 0 else "failed",
+            "diagnostics_json": str(diagnostics_json),
+            "subprocess_diagnostics_path": str(diagnostics_json),
+            "stdout_log": str(diag.stdout_log),
+            "stderr_log": str(diag.stderr_log),
+            "last_stderr_line": diag.last_stderr_line,
+            "schur_diagnostics_path": str(schur_diag_path),
+            "schur_memory_audit_path": str(summary_path.parent / "schur_summary_memory_audit.json"),
+            "return_code": diag.return_code,
+            "elapsed_seconds": float(diag.elapsed_seconds),
+            "failure_class": diag.failure_class,
+            "failure_hint": diag.failure_hint,
+            "peak_total_rss_mb": diag.memory_sampler.get("peak_total_rss_mb"),
+            "resource_time_maximum_resident_set_mb": diag.resource_time.get("maximum_resident_set_mb"),
+            "resource_time_mode_effective": diag.resource_time.get(
+                "resource_time_mode_effective",
+                diag.resource_time.get("mode_effective"),
+            ),
+            "schur_curvature_method_requested": schur_diag.get("schur_curvature_method_requested"),
+            "schur_curvature_method_effective": schur_diag.get("schur_curvature_method_effective"),
+            "structured_curvature_used": schur_diag.get("structured_curvature_used"),
+            "structured_supported_layout": schur_diag.get("structured_supported_layout"),
+            "dense_global_hessian_materialized": schur_diag.get("dense_global_hessian_materialized"),
+            "dense_hessian_allowed": schur_diag.get("dense_hessian_allowed"),
+            "dense_hessian_skipped_reason": schur_diag.get("dense_hessian_skipped_reason"),
+            "dense_hessian_materialized_reason": schur_diag.get("dense_hessian_materialized_reason"),
+            "validate_structured_against_dense": schur_diag.get("validate_structured_against_dense"),
+            "max_dense_dim": schur_diag.get("max_dense_dim"),
+            "combined_dim": schur_diag.get("combined_dim"),
+            "n_theta": schur_diag.get("n_theta"),
+            "n_phi": schur_diag.get("n_phi"),
+            "n_frames": schur_diag.get("n_frames"),
+            "frame_keys": schur_diag.get("frame_keys"),
+            "theta_keys": schur_diag.get("theta_keys"),
+        }
+
+
+    run_started = now_iso_local_ms()
+    t0 = __import__("time").time()
+
+    def _write_progress(last_completed: dict[str, Any] | None = None) -> None:
+        _write_csv(plan.run_root / "subblock_status.csv", status_rows)
+        _write_csv(plan.run_root / "memory_failure_summary.csv", [{"case_name": r.get("case_name"), "summary_path": r.get("summary_path"), "status": r.get("status"), "return_code": r.get("return_code"), "failure_class": r.get("failure_class"), "failure_hint": r.get("failure_hint"), "subprocess_diagnostics_path": r.get("subprocess_diagnostics_path"), "stdout_log": r.get("stdout_log"), "stderr_log": r.get("stderr_log"), "last_stderr_line": r.get("last_stderr_line"), "resource_time_maximum_resident_set_mb": r.get("resource_time_maximum_resident_set_mb")} for r in status_rows])
+        total = len(jobs)
+        completed = len(status_rows)
+        failed = sum(1 for r in status_rows if r.get("return_code") not in (0, "0"))
+        running = max(0, min(max_workers, total - completed))
+        pending = max(0, total - completed - running)
+        durations = [float(r.get("elapsed_seconds",0.0)) for r in status_rows if r.get("elapsed_seconds") is not None]
+        cc = Counter(r.get("case_name") for r in status_rows)
+        progress = {"schema_version":"single_star_campaign_progress.v1","updated_at":now_iso_local_ms(),"run_started_at":run_started,"run_root":str(plan.run_root),"total_subblocks_planned":total,"completed_count":completed,"failed_count":failed,"running_count":running,"pending_count":pending,"completed_by_case":dict(cc),"elapsed_wall_seconds":__import__("time").time()-t0,"mean_completed_subblock_seconds":(mean(durations) if durations else None),"median_completed_subblock_seconds":(median(durations) if durations else None),"estimated_remaining_seconds_at_current_rate":((mean(durations)*pending) if durations else None),"max_resource_time_rss_mb":max([float(r.get("resource_time_maximum_resident_set_mb") or 0.0) for r in status_rows], default=0.0),"last_completed":last_completed}
+        _write_json(plan.run_root / "progress.json", progress)
+
+    if max_workers <= 1:
+        for job in jobs:
+            try:
+                case_name, summary_path, row = run_job(job)
+                status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
+                _write_progress(last_completed={"case_name":case_name,"summary_path":str(summary_path)})
+                if int(row["return_code"]) != 0:
+                    stderr_tail_text = "\n".join(stderr_tail(Path(str(row["stderr_log"]))))
+                    raise RuntimeError(
+                        f"Subprocess failed ({row['return_code']}) for {summary_path}: "
+                        f"{row['subprocess_diagnostics_path']}\nchild stderr tail:\n{stderr_tail_text}"
+                    )
+                if not quiet:
+                    print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
+            except Exception as exc:
+                if fail_fast:
+                    raise RuntimeError(str(exc)) from exc
+                print(str(exc), file=sys.stderr, flush=True)
+        _write_csv(plan.run_root / "subblock_status.csv", status_rows)
+        return
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_job = {pool.submit(run_job, job): job for job in jobs}
+        for future in as_completed(future_to_job):
+            try:
+                case_name, summary_path, row = future.result()
+                status_rows.append({"case_name": case_name, "summary_path": str(summary_path), **row})
+                _write_progress(last_completed={"case_name":case_name,"summary_path":str(summary_path)})
+                if int(row["return_code"]) != 0:
+                    stderr_tail_text = "\n".join(stderr_tail(Path(str(row["stderr_log"]))))
+                    raise RuntimeError(
+                        f"Subprocess failed ({row['return_code']}) for {summary_path}: "
+                        f"{row['subprocess_diagnostics_path']}\nchild stderr tail:\n{stderr_tail_text}"
+                    )
+                if not quiet:
+                    print(f"[single_star_calibration] completed {case_name}: {summary_path}", flush=True)
+            except Exception as exc:
+                if fail_fast:
+                    raise RuntimeError(str(exc)) from exc
+                print(str(exc), file=sys.stderr, flush=True)
+    _write_csv(plan.run_root / "subblock_status.csv", status_rows)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the single-star calibration observation demo.")
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
+    parser.add_argument("--run-name", default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--aggregate-only", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--max-workers", type=int, default=1)
+    parser.add_argument("--fail-fast", dest="fail_fast", action="store_true", default=True)
+    parser.add_argument("--no-fail-fast", dest="fail_fast", action="store_false")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--system-preset", default=None)
+    parser.add_argument("--n-subblocks", type=int, default=None)
+    parser.add_argument("--n-frames", type=int, default=None)
+    parser.add_argument("--trace-source-mode", choices=("iid_jitter", "trajectory", "external_plan"), default=None)
+    parser.add_argument("--trajectory-csv", type=Path, default=None)
+    parser.add_argument("--trajectory-start-s", type=float, default=None)
+    parser.add_argument("--trajectory-duration-s", type=float, default=None)
+    parser.add_argument("--trajectory-n-subblocks", type=int, default=None)
+    parser.add_argument("--trajectory-frame-dt-s", type=float, default=None)
+    parser.add_argument("--trajectory-output-keys", default=None)
+    parser.add_argument("--trajectory-plan", type=Path, default=None)
+    parser.add_argument("--noise", choices=("enabled", "disabled", "inherit"), default=None)
+    parser.add_argument("--phi-ref", choices=("recovered", "truth_when_available", "init"), default=None)
+    parser.add_argument("--reference-init-mode", choices=("initial", "truth_when_available"), default=None)
+    parser.add_argument("--case-scheduling", choices=("grouped", "round_robin"), default="grouped")
+    parser.add_argument("--zernike-indices", default=None)
+    parser.add_argument("--include-plate-scale", dest="include_plate_scale", action="store_true", default=None)
+    parser.add_argument("--no-include-plate-scale", dest="include_plate_scale", action="store_false")
+    parser.add_argument("--include-log-flux", dest="include_log_flux", action="store_true", default=None)
+    parser.add_argument("--no-include-log-flux", dest="include_log_flux", action="store_false")
+    parser.add_argument(
+        "--reference-diagnostics-profile",
+        choices=("none", "basic", "review", "full"),
+        default=None,
+    )
+    parser.add_argument("--memory-diagnostics", action="store_true")
+    parser.add_argument("--schur-curvature-method", default=None)
+    parser.add_argument("--max-dense-dim", type=int, default=None)
+    parser.add_argument(
+        "--summary-information-scale",
+        choices=("summed_likelihood", "optimizer"),
+        default=None,
+    )
+    parser.add_argument(
+        "--allow-optimizer-scale-summaries",
+        action="store_true",
+        help="Allow legacy/debug optimizer-scale or unclassified real summaries.",
+    )
+    parser.add_argument("--memory-progress-tail-lines", type=int, default=3)
+    parser.add_argument("--resource-time", dest="resource_time", action="store_true", default=None)
+    parser.add_argument("--no-resource-time", dest="resource_time", action="store_false")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> dict[str, Any]:
+    args = _build_parser().parse_args(argv)
+    plan = build_calibration_plan(
+        config_path=args.config,
+        results_root=args.results_root,
+        run_name=args.run_name,
+        system_preset=args.system_preset,
+        args=args,
+    )
+    skip_plan_rewrite = False
+    if args.aggregate_only:
+        stored_plan = load_existing_campaign_plan(plan.run_root / "campaign_plan.json")
+        if stored_plan is not None:
+            validate_stored_trace_source_artifacts(stored_plan)
+            validate_campaign_model_split_artifacts(stored_plan)
+            skip_plan_rewrite = True
+            stored_paths = stored_plan.get("summary_paths")
+            if isinstance(stored_paths, Mapping):
+                expected_cases = set(plan.summary_paths.keys())
+                stored_cases = set(str(k) for k in stored_paths.keys())
+                if expected_cases != stored_cases:
+                    raise ValueError(
+                        "Aggregate-only found an existing campaign_plan.json with a different case set. "
+                        "Use the same run shape (or regenerate the run root) before aggregating."
+                    )
+                stored_wfe = stored_plan.get("high_order_wfe", {})
+                current_wfe = plan.config["experiment"].get("high_order_wfe_summary", {})
+                stored_split = stored_plan.get("model_split", {})
+                current_split = plan.config["experiment"].get("model_split", {})
+                if isinstance(stored_split, Mapping) and isinstance(current_split, Mapping):
+                    mismatches = []
+                    for key in ("truth_config_hash", "inference_config_hash", "components"):
+                        if current_split.get(key) != stored_split.get(key):
+                            mismatches.append(key)
+                    if mismatches:
+                        raise ValueError(
+                            "Aggregate-only found an existing campaign_plan.json with "
+                            "different model-split provenance. Use the original "
+                            f"config/run root or regenerate the run. Mismatches: {mismatches}"
+                        )
+                if isinstance(stored_wfe, Mapping) and isinstance(current_wfe, Mapping):
+                    if (
+                        bool(current_wfe.get("provenance", {}).get("enabled", False))
+                        != bool(stored_wfe.get("provenance", {}).get("enabled", False))
+                        or current_wfe.get("provenance", {}).get("truth_seed")
+                        != stored_wfe.get("provenance", {}).get("truth_seed")
+                    ):
+                        raise ValueError(
+                            "Aggregate-only found an existing campaign_plan.json with "
+                            "different high-order WFE provenance. Use the original "
+                            "config/run root or regenerate the run."
+                        )
+                plan = replace(
+                    plan,
+                    summary_paths={
+                        str(case): [Path(str(path)) for path in paths]
+                        for case, paths in stored_paths.items()
+                        if isinstance(paths, list)
+                    },
+                )
+    if not skip_plan_rewrite:
+        write_plan_artifacts(plan)
+    if args.dry_run:
+        if not args.quiet:
+            print(f"Dry-run plan written to {plan.run_root}")
+        return _plan_payload(plan)
+    if not args.aggregate_only:
+        execute_subblocks(
+            plan,
+            resume=bool(args.resume),
+            max_workers=max(1, int(args.max_workers)),
+            fail_fast=bool(args.fail_fast),
+            quiet=bool(args.quiet),
+            memory_diagnostics=bool(args.memory_diagnostics),
+            resource_time="auto" if args.resource_time is None else ("enabled" if args.resource_time else "disabled"),
+        )
+    summary = aggregate_campaign(
+        plan,
+        allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
+    )
+    if not args.quiet:
+        print(f"Calibration summary written to {plan.run_root / 'campaign_summary.json'}")
+    return summary
+
+
+if __name__ == "__main__":
+    main()

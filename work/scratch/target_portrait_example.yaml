@@ -1,0 +1,6 @@
+system:
+  preset: SHERA_FLIGHT_3P
+  optics:
+    psf_npix: 256
+  detector:
+    layers: []

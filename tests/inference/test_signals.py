@@ -5,15 +5,15 @@ from dluxshera.params.store import ParameterStore
 from dluxshera.params.transform_registry import TRANSFORMS
 
 
-def test_binary_raw_flux_transform_matches_alpha_cen_formula():
+def test_source_raw_flux_transform_matches_alpha_cen_formula():
     store = ParameterStore.from_dict(
         {
-            "binary.log_flux_total": 8.0,
-            "binary.contrast": 3.37,
+            "source.log_flux_total": 8.0,
+            "source.contrast": 3.37,
         }
     )
 
-    fluxes = TRANSFORMS.compute("binary.raw_fluxes", store)
+    fluxes = TRANSFORMS.compute("source.raw_fluxes", store)
 
     total_flux = 10 ** 8.0
     expected_b = total_flux / (1 + 3.37)
@@ -29,34 +29,36 @@ def test_build_intro_signals_scaling_and_shapes():
     trace = {"theta": theta, "loss": np.linspace(0.0, 1.0, T)}
 
     truth = {
-        "binary.x_position_as": np.zeros(T),
-        "binary.y_position_as": np.zeros(T),
-        "binary.separation_as": np.ones(T),
-        "binary.position_angle_deg": np.zeros(T),
-        "system.plate_scale_as_per_pix": np.full(T, 0.1),
-        "primary.zernike_coeffs_nm": np.array([0.05, 0.1, 0.15]),
-        "binary.raw_fluxes": np.array([10.0, 5.0]),
+        "source.x_position_as": np.zeros(T),
+        "source.y_position_as": np.zeros(T),
+        "source.separation_as": np.ones(T),
+        "source.position_angle_deg": np.zeros(T),
+        "optics.plate_scale_as_per_pix": np.full(T, 0.1),
+        "optics.primary.zernike_coeffs_nm": np.array([0.05, 0.1, 0.15]),
+        "source.log_flux_total": np.log10(15.0),
+        "source.contrast": 2.0,
     }
 
     def decoder(theta_row: np.ndarray):
         return {
-            "binary.x_position_as": theta_row[0],
-            "binary.y_position_as": -theta_row[0],
-            "binary.separation_as": 1.0 + theta_row[1],
-            "binary.position_angle_deg": 0.0,
-            "system.plate_scale_as_per_pix": 0.1 + 0.01 * theta_row[2],
-            "primary.zernike_coeffs_nm": theta_row + 0.1,
-            "binary.raw_fluxes": np.array([10.0, 5.0]) + theta_row[0],
+            "source.x_position_as": theta_row[0],
+            "source.y_position_as": -theta_row[0],
+            "source.separation_as": 1.0 + theta_row[1],
+            "source.position_angle_deg": 0.0,
+            "optics.plate_scale_as_per_pix": 0.1 + 0.01 * theta_row[2],
+            "optics.primary.zernike_coeffs_nm": theta_row + 0.1,
+            "source.log_flux_total": np.log10(15.0 + 2.0 * theta_row[0]),
+            "source.contrast": (10.0 + theta_row[0]) / (5.0 + theta_row[0]),
         }
 
     signals = build_signals(trace, meta={}, decoder=decoder, truth=truth)
 
-    assert signals["binary.x_error_uas"].shape == (T,)
-    assert signals["binary.y_error_uas"].shape == (T,)
-    assert signals["binary.separation_error_uas"].shape == (T,)
-    assert signals["system.plate_scale_error_ppm"].shape == (T,)
-    assert signals["binary.raw_flux_error_ppm"].shape == (T, 2)
-    assert signals["primary.zernike_error_nm"].shape == (T, 3)
+    assert signals["source.x_error_uas"].shape == (T,)
+    assert signals["source.y_error_uas"].shape == (T,)
+    assert signals["source.separation_error_uas"].shape == (T,)
+    assert signals["optics.plate_scale_error_ppm"].shape == (T,)
+    assert signals["source.raw_flux_error_ppm"].shape == (T, 2)
+    assert signals["optics.primary.zernike_error_nm"].shape == (T, 3)
     assert signals["primary.zernike_rms_nm"].shape == (T,)
 
     expected_x_error = theta[:, 0] * 1e6
@@ -64,17 +66,17 @@ def test_build_intro_signals_scaling_and_shapes():
     expected_sep_error = theta[:, 1] * 1e6
     expected_plate_scale_error = 1e6 * (0.01 * theta[:, 2]) / 0.1
     expected_flux_error = 1e6 * (theta[:, 0][:, None] / np.array([10.0, 5.0]))
-    expected_zern_error = (theta + 0.1) - truth["primary.zernike_coeffs_nm"]
+    expected_zern_error = (theta + 0.1) - truth["optics.primary.zernike_coeffs_nm"]
     expected_zern_rms = np.sqrt(np.mean(expected_zern_error**2, axis=-1))
 
-    np.testing.assert_allclose(signals["binary.x_error_uas"], expected_x_error)
-    np.testing.assert_allclose(signals["binary.y_error_uas"], expected_y_error)
-    np.testing.assert_allclose(signals["binary.separation_error_uas"], expected_sep_error)
+    np.testing.assert_allclose(signals["source.x_error_uas"], expected_x_error)
+    np.testing.assert_allclose(signals["source.y_error_uas"], expected_y_error)
+    np.testing.assert_allclose(signals["source.separation_error_uas"], expected_sep_error)
     np.testing.assert_allclose(
-        signals["system.plate_scale_error_ppm"], expected_plate_scale_error
+        signals["optics.plate_scale_error_ppm"], expected_plate_scale_error
     )
-    np.testing.assert_allclose(signals["binary.raw_flux_error_ppm"], expected_flux_error)
-    np.testing.assert_allclose(signals["primary.zernike_error_nm"], expected_zern_error)
+    np.testing.assert_allclose(signals["source.raw_flux_error_ppm"], expected_flux_error)
+    np.testing.assert_allclose(signals["optics.primary.zernike_error_nm"], expected_zern_error)
     np.testing.assert_allclose(signals["primary.zernike_rms_nm"], expected_zern_rms)
 
 
@@ -84,17 +86,76 @@ def test_build_signals_handles_missing_truth_with_nans():
 
     def decoder(_theta):
         return {
-            "binary.x_position_as": 0.0,
-            "binary.y_position_as": 0.0,
-            "binary.separation_as": 1.0,
-            "binary.position_angle_deg": 0.0,
-            "system.plate_scale_as_per_pix": 0.1,
-            "primary.zernike_coeffs_nm": np.zeros(2),
-            "binary.raw_fluxes": np.ones(2),
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
+            "source.separation_as": 1.0,
+            "source.position_angle_deg": 0.0,
+            "optics.plate_scale_as_per_pix": 0.1,
+            "optics.primary.zernike_coeffs_nm": np.zeros(2),
+            "source.log_flux_total": 0.0,
+            "source.contrast": 1.0,
         }
 
     signals = build_signals(trace, meta={}, decoder=decoder, truth=None)
 
-    assert np.isnan(signals["binary.x_error_uas"]).all()
-    assert np.isnan(signals["binary.raw_flux_error_ppm"]).all()
+    assert np.isnan(signals["source.x_error_uas"]).all()
+    assert np.isnan(signals["source.raw_flux_error_ppm"]).all()
     assert np.isnan(signals["primary.zernike_rms_nm"]).all()
+
+
+def test_build_signals_computes_flux_from_store_without_refresh_derived():
+    theta = np.array([[0.0], [0.1], [0.2]])
+    trace = {"theta": theta, "loss": np.zeros(theta.shape[0])}
+
+    truth = {
+        "source.log_flux_total": np.log10(15.0),
+        "source.contrast": 2.0,
+    }
+
+    def decoder(theta_row: np.ndarray):
+        return ParameterStore.from_dict(
+            {
+                "source.x_position_as": 0.0,
+                "source.y_position_as": 0.0,
+                "source.separation_as": 1.0,
+                "source.position_angle_deg": 0.0,
+                "optics.plate_scale_as_per_pix": 0.1,
+                "optics.primary.zernike_coeffs_nm": np.zeros(1),
+                "source.log_flux_total": np.log10(15.0 + 2.0 * theta_row[0]),
+                "source.contrast": (10.0 + theta_row[0]) / (5.0 + theta_row[0]),
+            }
+        )
+
+    signals = build_signals(trace, meta={}, decoder=decoder, truth=truth)
+
+    expected_flux_error = 1e6 * (theta[:, 0][:, None] / np.array([10.0, 5.0]))
+    np.testing.assert_allclose(signals["source.raw_flux_error_ppm"], expected_flux_error)
+
+
+def test_build_signals_single_star_does_not_require_binary_flux_keys():
+    theta = np.array([[0.0], [1.0]])
+    trace = {"theta": theta, "loss": np.zeros(theta.shape[0])}
+
+    def decoder(theta_row: np.ndarray):
+        return {
+            "source.x_position_as": theta_row[0],
+            "source.y_position_as": 0.0,
+            "source.position_angle_deg": 0.0,
+            "optics.plate_scale_as_per_pix": 0.1,
+            "optics.primary.zernike_coeffs_nm": np.zeros(1),
+            "source.log_flux_total": 6.0 + theta_row[0],
+        }
+
+    signals = build_signals(
+        trace,
+        meta={"source_kind": "single_star"},
+        decoder=decoder,
+        truth={"source.log_flux_total": 6.0},
+    )
+
+    assert signals["source.raw_flux_error_ppm"].shape == (2, 1)
+    assert np.isnan(signals["source.separation_error_uas"]).all()
+    np.testing.assert_allclose(
+        signals["source.raw_flux_error_ppm"][:, 0],
+        np.array([0.0, 9.0e6]),
+    )

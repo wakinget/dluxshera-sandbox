@@ -1,0 +1,23 @@
+experiment:
+  kind: inference
+  seed: 42
+  add_noise: true
+  init:
+    mode: prior_sample
+  optimizer:
+    kind: gd
+    n_iter: 40
+    n_iter_fast: 30
+    base_lr: 0.5
+  infer_keys:
+    - source.separation_as
+    - source.position_angle_deg
+    - source.x_position_as
+    - source.y_position_as
+    - source.log_flux_total
+    - source.contrast
+    - optics.plate_scale_as_per_pix
+    - optics.primary.zernike_coeffs_nm
+    - optics.secondary.zernike_coeffs_nm
+  outputs:
+    save_plots: true

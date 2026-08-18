@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from dluxshera.systems.three_plane import SheraThreePlaneBinder
-from dluxshera.systems.two_plane import SheraTwoPlaneBinder
+from dluxshera.systems import SheraBinder
 from dluxshera.builders import optics as builder
 from dataclasses import replace
 
@@ -22,26 +21,26 @@ def test_plate_scale_updates_psf(shera_smoke_cfg, shera_smoke_updates):
     forward_spec, forward_store = make_forward_store(
         shera_smoke_cfg, updates=shera_smoke_updates
     )
-    binder = SheraThreePlaneBinder(
+    binder = SheraBinder(
         shera_smoke_cfg,
         forward_spec,
         forward_store,
     )
 
     inference_spec = build_inference_spec_basic()
-    sub_spec = inference_spec.subset(["system.plate_scale_as_per_pix"])
+    sub_spec = inference_spec.subset(["optics.plate_scale_as_per_pix"])
     theta = store_pack_params(sub_spec, forward_store)
 
     delta = jnp.array([1e-3])
     store0 = store_unpack_params(sub_spec, theta, forward_store)
     store1 = store_unpack_params(sub_spec, theta + delta, forward_store)
 
-    assert store0.get("system.plate_scale_as_per_pix") != store1.get(
-        "system.plate_scale_as_per_pix"
+    assert store0.get("optics.plate_scale_as_per_pix") != store1.get(
+        "optics.plate_scale_as_per_pix"
     )
 
-    delta0 = subset_store(store0, ["system.plate_scale_as_per_pix"])
-    delta1 = subset_store(store1, ["system.plate_scale_as_per_pix"])
+    delta0 = subset_store(store0, ["optics.plate_scale_as_per_pix"])
+    delta1 = subset_store(store1, ["optics.plate_scale_as_per_pix"])
 
     psf0 = binder.model(delta0)
     psf1 = binder.model(delta1)
@@ -60,21 +59,21 @@ def test_twoplane_plate_scale_updates_without_cache_rebuild():
         n_lambda=1,
     )
     forward_spec, forward_store = make_forward_store(cfg)
-    binder = SheraTwoPlaneBinder(
+    binder = SheraBinder(
         cfg,
         forward_spec,
         forward_store,
     )
 
     store_a = forward_store.replace(
-        {"system.plate_scale_as_per_pix": cfg.plate_scale_as_per_pix}
+        {"optics.plate_scale_as_per_pix": cfg.plate_scale_as_per_pix}
     )
     store_b = forward_store.replace(
-        {"system.plate_scale_as_per_pix": cfg.plate_scale_as_per_pix + 1e-3}
+        {"optics.plate_scale_as_per_pix": cfg.plate_scale_as_per_pix + 1e-3}
     )
 
-    delta_a = subset_store(store_a, ["system.plate_scale_as_per_pix"])
-    delta_b = subset_store(store_b, ["system.plate_scale_as_per_pix"])
+    delta_a = subset_store(store_a, ["optics.plate_scale_as_per_pix"])
+    delta_b = subset_store(store_b, ["optics.plate_scale_as_per_pix"])
 
     psf_a = binder.model(delta_a)
     assert len(builder._TWOPLANE_CACHE) == 1
@@ -106,20 +105,20 @@ def test_runtime_bindings_update_cached_optics():
     coeffs_b = jnp.ones(n_m1)
     sec_coeffs_a = jnp.zeros(n_m2)
     sec_coeffs_b = jnp.ones(n_m2)
-    plate_scale = forward_store.get("system.plate_scale_as_per_pix")
+    plate_scale = forward_store.get("optics.plate_scale_as_per_pix")
 
     store_a = forward_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_a,
-            "secondary.zernike_coeffs_nm": sec_coeffs_a,
-            "system.plate_scale_as_per_pix": plate_scale,
+            "optics.primary.zernike_coeffs_nm": coeffs_a,
+            "optics.secondary.zernike_coeffs_nm": sec_coeffs_a,
+            "optics.plate_scale_as_per_pix": plate_scale,
         }
     )
     store_b = forward_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_b,
-            "secondary.zernike_coeffs_nm": sec_coeffs_b,
-            "system.plate_scale_as_per_pix": plate_scale + 1e-3,
+            "optics.primary.zernike_coeffs_nm": coeffs_b,
+            "optics.secondary.zernike_coeffs_nm": sec_coeffs_b,
+            "optics.plate_scale_as_per_pix": plate_scale + 1e-3,
         }
     )
 
@@ -148,14 +147,14 @@ def test_runtime_bindings_update_cached_optics():
     twoplane_spec, twoplane_store = make_forward_store(twoplane_cfg)
     twoplane_store_a = twoplane_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_a,
-            "system.plate_scale_as_per_pix": twoplane_cfg.plate_scale_as_per_pix,
+            "optics.primary.zernike_coeffs_nm": coeffs_a,
+            "optics.plate_scale_as_per_pix": twoplane_cfg.plate_scale_as_per_pix,
         }
     )
     twoplane_store_b = twoplane_store.replace(
         {
-            "primary.zernike_coeffs_nm": coeffs_b,
-            "system.plate_scale_as_per_pix": twoplane_cfg.plate_scale_as_per_pix
+            "optics.primary.zernike_coeffs_nm": coeffs_b,
+            "optics.plate_scale_as_per_pix": twoplane_cfg.plate_scale_as_per_pix
             + 1e-3,
         }
     )

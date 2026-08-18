@@ -1,0 +1,109 @@
+experiment:
+  kind: observation_bias_campaign
+  seed: 42
+  run_name: binary_iterative_smoke
+
+  system:
+    preset: SHERA_FLIGHT_3P
+    source:
+      kind: binary
+
+  subblocks:
+    n_subblocks: 1
+    n_frames: 3
+    noise: disabled
+    phi_ref: truth_when_available
+    schur_curvature_method: auto
+    max_dense_dim: 80
+    schur_damping: 1.0e-8
+    summary_information_scale: summed_likelihood
+    reference_diagnostics_profile: none
+    variance_floor: 1.0
+    trace_source:
+      mode: iid_jitter
+    trace_jitter:
+      x_sigma_as: 1.0e-3
+      y_sigma_as: 1.0e-3
+      pa_sigma_deg: 1.0e-4
+
+  iterative:
+    enabled: true
+    windows_per_draw: 2
+    subblocks_per_window: 1
+    update_gain: 1.0
+    update_mode: physical_full
+    carry_prior_mean_with_reference: true
+    eigenbasis:
+      basis_source: posterior_precision
+      gate_source: accumulated_information
+      whiten: true
+      eig_floor_abs: 0.0
+      eig_floor_rel: 1.0e-10
+      damping_mode: none
+      damping_value: 1.0
+      min_kept_modes: 1
+      max_kept_modes: null
+      top_k_contributors: 8
+
+  seeding:
+    seed_policy: different_jitter_different_noise
+    base_seed: 42
+
+  observation_theta:
+    source:
+      separation_as: true
+      log_flux_total: true
+      contrast: true
+    optics:
+      plate_scale_as_per_pix: true
+      primary_zernikes:
+        enabled: true
+        indices: [0, 1, 2]
+      secondary_zernikes:
+        enabled: true
+        indices: [0, 1, 2]
+
+  bias_cases: []
+  case_generation:
+    include_implicit_zero_bias: false
+
+  prior_draws:
+    enabled: true
+    n_cases: 1
+    center: truth
+    distribution: normal
+    draw_seed: 12345
+    case_name_template: binary_iter_draw_{draw_index:03d}
+    sigmas:
+      source.separation_as:
+        kind: absolute
+        sigma: 2.0e-6
+        unit: arcsec
+      source.log_flux_total:
+        kind: absolute
+        sigma: 1.0e-5
+        unit: log_flux
+      source.contrast:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.plate_scale_as_per_pix:
+        kind: fractional
+        sigma: 1.0e-5
+      optics.primary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.1
+        unit: nm
+      optics.secondary.zernike_coeffs_nm[*]:
+        kind: absolute
+        sigma: 0.1
+        unit: nm
+
+  truth_realization:
+    enabled: false
+
+  eigenbasis:
+    enabled: false
+
+  forecast:
+    enabled: false
+    plots: false

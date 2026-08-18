@@ -3,9 +3,9 @@
 dLuxShera provides a Fresnel-based optical model and inference stack for Shera/TOLIMAN-style astrometric imaging. The primary use case is recovering close-binary parameters (and associated instrument terms) from diffraction-limited images using differentiable optics and gradient-based optimisation. The current stack keeps parameter definitions, derived quantities, and execution order explicit so that optical modeling and inference stay transparent.
 
 ## Pipeline at a glance
-- **Configuration ➜ forward ParamSpec:** start from a configuration object (e.g., Shera three-plane defaults) and build a forward-facing `ParamSpec` that defines primitives and derived fields.
+- **Configuration ➜ forward ParamSpec:** start from a resolved config (`load_user_config` → `resolve_config`) with `system`/`experiment` blocks, then build a forward-facing `ParamSpec` that defines primitives and derived fields.
 - **Forward ParameterStore:** instantiate a primitives-only `ParameterStore`, then `refresh_derived` to populate derived quantities via pure transforms.
-- **Binder-only evaluation:** wrap the optics in a `Binder`, exposing a clean "give me a parameter delta ➜ I will produce PSFs/images" interface.
+- **Binder-only evaluation:** wrap the system in a `Binder`, exposing a clean "give me a parameter delta ➜ I will produce PSFs/images" interface.
 - **Update/delta workflow:** use `binder.model(store_delta)` for per-call overlays; if you truly need a new baseline (or a structural change), create a new binder via `binder.update_store(...)`.
 - **Image synthesis:** evaluate the binder to generate polychromatic PSFs or detector images.
 - **Losses and optimisation:** construct image NLL/loss functions that pack/unpack θ-vectors to/from stores, and run optimisation loops in θ-space or in eigenmode space via `EigenThetaMap`.

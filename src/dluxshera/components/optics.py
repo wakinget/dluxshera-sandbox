@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
+from typing import Any
+
 import jax.numpy as np
 from jax import Array, vmap
 
@@ -9,6 +13,7 @@ import dLux.utils as dlu
 import dLuxToliman
 
 from ..utils.utils import scale_array
+from ..params.spec import ParamField, ParamSpec
 
 MixedAlphaCen = lambda: dLuxToliman.sources.MixedAlphaCen
 
@@ -20,7 +25,6 @@ __all__ = [
 OpticalLayer = lambda: dLux.optical_layers.OpticalLayer
 AngularOpticalSystem = lambda: dLux.optical_systems.AngularOpticalSystem
 ThreePlaneOpticalSystem = lambda: dLux.optical_systems.ThreePlaneOpticalSystem
-
 
 
 class SheraTwoPlaneOptics(AngularOpticalSystem()):
@@ -43,6 +47,166 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
     follow functional replacements on layers rather than in-place mutation.
     """
 
+    @staticmethod
+    def contract(optics_cfg: Mapping[str, Any]) -> ParamSpec:
+        """Return the two-plane optics parameter contract."""
+
+        if is_dataclass(optics_cfg):
+            optics_cfg = asdict(optics_cfg)
+
+        if isinstance(optics_cfg, Mapping) and "optics" in optics_cfg:
+            optics_cfg = optics_cfg["optics"]
+
+        if not isinstance(optics_cfg, Mapping):
+            raise ValueError(
+                "SheraTwoPlaneOptics.contract expected an optics mapping or a "
+                "system mapping containing an 'optics' key."
+            )
+
+        pupil_npix = optics_cfg["pupil_npix"]
+        psf_npix = optics_cfg["psf_npix"]
+        oversample = optics_cfg["oversample"]
+        m1_diameter_m = optics_cfg["m1_diameter_m"]
+        m2_diameter_m = optics_cfg["m2_diameter_m"]
+        n_struts = optics_cfg["n_struts"]
+        strut_width_m = optics_cfg["strut_width_m"]
+        strut_rotation_deg = optics_cfg["strut_rotation_deg"]
+        throughput = optics_cfg["throughput"]
+        primary_noll_indices = optics_cfg["primary_noll_indices"]
+        diffractive_pupil_path = optics_cfg.get(
+            "diffractive_pupil_path", optics_cfg.get("dp_path")
+        )
+        dp_design_wavelength_m = optics_cfg["dp_design_wavelength_m"]
+        plate_scale_as_per_pix = optics_cfg["plate_scale_as_per_pix"]
+
+        fields = [
+            ParamField(
+                "optics.pupil_npix",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=pupil_npix,
+                structural=True,
+                binding="wf_npixels",
+            ),
+            ParamField(
+                "optics.psf_npix",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=psf_npix,
+                structural=True,
+                binding="psf_npixels",
+            ),
+            ParamField(
+                "optics.oversample",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=oversample,
+                structural=True,
+            ),
+            ParamField(
+                "optics.m1_diameter_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m1_diameter_m,
+                structural=True,
+                binding="diameter",
+            ),
+            ParamField(
+                "optics.m2_diameter_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m2_diameter_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.n_struts",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=n_struts,
+                structural=True,
+            ),
+            ParamField(
+                "optics.strut_width_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=strut_width_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.strut_rotation_deg",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=strut_rotation_deg,
+                structural=True,
+            ),
+            ParamField(
+                "optics.primary_noll_indices",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                shape=(len(primary_noll_indices),),
+                default=tuple(int(i) for i in primary_noll_indices),
+                structural=True,
+            ),
+            ParamField(
+                "optics.dp_path",
+                group="optics",
+                kind="primitive",
+                dtype=str,
+                default=diffractive_pupil_path,
+                structural=True,
+            ),
+            ParamField(
+                "optics.dp_design_wavelength_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=dp_design_wavelength_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.throughput",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=throughput,
+                structural=False,
+            ),
+            ParamField(
+                "optics.plate_scale_as_per_pix",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=plate_scale_as_per_pix,
+                structural=False,
+                binding="psf_pixel_scale",
+            ),
+        ]
+
+        if primary_noll_indices:
+            fields.append(
+                ParamField(
+                    "optics.primary.zernike_coeffs_nm",
+                    group="optics",
+                    kind="primitive",
+                    dtype=float,
+                    shape=(len(primary_noll_indices),),
+                    default=tuple(0.0 for _ in primary_noll_indices),
+                    structural=False,
+                    binding="layers.aperture.coefficients",
+                )
+            )
+
+        return ParamSpec(fields)
+
     def __init__(
         self,
         wf_npixels: int = 256,
@@ -59,6 +223,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         strut_width: float = 0.002,
         strut_rotation_deg: float = -90.0,
         dp_design_wavel: float = 550e-9,
+        high_order_wfe_opd_m: Array | None = None,
     ):
         """Construct a Shera two-plane optical system.
 
@@ -170,7 +335,11 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
 
         mask = dll.AberratedLayer(dp_opd)
 
-        layers = [("aperture", aperture), ("pupil", mask)]
+        if high_order_wfe_opd_m is None:
+            high_order_wfe_opd_m = np.zeros((wf_npixels, wf_npixels))
+        high_order_wfe_layer = dll.AberratedLayer(np.array(high_order_wfe_opd_m))
+
+        layers = [("aperture", aperture), ("pupil", mask), ("high_order_wfe", high_order_wfe_layer)]
 
         # Propagator Properties
         psf_npixels = int(psf_npixels)
@@ -192,6 +361,7 @@ class SheraTwoPlaneOptics(AngularOpticalSystem()):
         wf *= self.aperture
         wf = wf.normalise()
         wf += self.pupil
+        wf += self.high_order_wfe
         return wf
 
 
@@ -213,6 +383,223 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
     This object is intended to be treated as immutable. Update patterns should
     follow functional replacements on layers rather than in-place mutation.
     """
+
+    @staticmethod
+    def contract(optics_cfg: Mapping[str, Any]) -> ParamSpec:
+        """Return the three-plane optics parameter contract."""
+
+        if is_dataclass(optics_cfg):
+            optics_cfg = asdict(optics_cfg)
+
+        if isinstance(optics_cfg, Mapping) and "optics" in optics_cfg:
+            optics_cfg = optics_cfg["optics"]
+
+        if not isinstance(optics_cfg, Mapping):
+            raise ValueError(
+                "SheraThreePlaneOptics.contract expected an optics mapping or a "
+                "system mapping containing an 'optics' key."
+            )
+
+        pupil_npix = optics_cfg["pupil_npix"]
+        psf_npix = optics_cfg["psf_npix"]
+        oversample = optics_cfg["oversample"]
+        m1_diameter_m = optics_cfg["m1_diameter_m"]
+        m2_diameter_m = optics_cfg["m2_diameter_m"]
+        m1_focal_length_m = optics_cfg["m1_focal_length_m"]
+        m2_focal_length_m = optics_cfg["m2_focal_length_m"]
+        m1_m2_separation_m = optics_cfg["m1_m2_separation_m"]
+        n_struts = optics_cfg["n_struts"]
+        strut_width_m = optics_cfg["strut_width_m"]
+        strut_rotation_deg = optics_cfg["strut_rotation_deg"]
+        throughput = optics_cfg["throughput"]
+        primary_noll_indices = optics_cfg["primary_noll_indices"]
+        secondary_noll_indices = optics_cfg["secondary_noll_indices"]
+        diffractive_pupil_path = optics_cfg.get(
+            "diffractive_pupil_path", optics_cfg.get("dp_path")
+        )
+        dp_design_wavelength_m = optics_cfg["dp_design_wavelength_m"]
+
+        fields = [
+            ParamField(
+                "optics.pupil_npix",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=pupil_npix,
+                structural=True,
+                binding="wf_npixels",
+            ),
+            ParamField(
+                "optics.psf_npix",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=psf_npix,
+                structural=True,
+                binding="psf_npixels",
+            ),
+            ParamField(
+                "optics.oversample",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=oversample,
+                structural=True,
+            ),
+            ParamField(
+                "optics.m1_diameter_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m1_diameter_m,
+                structural=True,
+                binding="p1_diameter",
+            ),
+            ParamField(
+                "optics.m2_diameter_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m2_diameter_m,
+                structural=True,
+                binding="p2_diameter",
+            ),
+            ParamField(
+                "optics.m1_focal_length_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m1_focal_length_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.m2_focal_length_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m2_focal_length_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.m1_m2_separation_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=m1_m2_separation_m,
+                structural=True,
+                binding="plane_separation",
+            ),
+            ParamField(
+                "optics.n_struts",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                default=n_struts,
+                structural=True,
+            ),
+            ParamField(
+                "optics.strut_width_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=strut_width_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.strut_rotation_deg",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=strut_rotation_deg,
+                structural=True,
+            ),
+            ParamField(
+                "optics.primary_noll_indices",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                shape=(len(primary_noll_indices),),
+                default=tuple(int(i) for i in primary_noll_indices),
+                structural=True,
+                binding="m1_noll_ind",
+            ),
+            ParamField(
+                "optics.secondary_noll_indices",
+                group="optics",
+                kind="primitive",
+                dtype=int,
+                shape=(len(secondary_noll_indices),),
+                default=tuple(int(i) for i in secondary_noll_indices),
+                structural=True,
+                binding="m2_noll_ind",
+            ),
+            ParamField(
+                "optics.dp_path",
+                group="optics",
+                kind="primitive",
+                dtype=str,
+                default=diffractive_pupil_path,
+                structural=True,
+            ),
+            ParamField(
+                "optics.dp_design_wavelength_m",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=dp_design_wavelength_m,
+                structural=True,
+            ),
+            ParamField(
+                "optics.throughput",
+                group="optics",
+                kind="primitive",
+                dtype=float,
+                default=throughput,
+                structural=False,
+            ),
+            ParamField(
+                "optics.plate_scale_as_per_pix",
+                group="optics",
+                kind="derived",
+                dtype=float,
+                depends_on=(
+                    "optics.focal_length_m",
+                    "detector.pixel_pitch_m",
+                ),
+                structural=False,
+                binding="psf_pixel_scale",
+            ),
+        ]
+
+        if primary_noll_indices:
+            fields.append(
+                ParamField(
+                    "optics.primary.zernike_coeffs_nm",
+                    group="optics",
+                    kind="primitive",
+                    dtype=float,
+                    shape=(len(primary_noll_indices),),
+                    default=tuple(0.0 for _ in primary_noll_indices),
+                    structural=False,
+                    binding="p1_layers.m1_aperture.coefficients",
+                )
+            )
+
+        if secondary_noll_indices:
+            fields.append(
+                ParamField(
+                    "optics.secondary.zernike_coeffs_nm",
+                    group="optics",
+                    kind="primitive",
+                    dtype=float,
+                    shape=(len(secondary_noll_indices),),
+                    default=tuple(0.0 for _ in secondary_noll_indices),
+                    structural=False,
+                    binding="p2_layers.m2_aperture.coefficients",
+                )
+            )
+
+        return ParamSpec(fields)
 
     m1_noll_ind: Array = None
     m2_noll_ind: Array = None
@@ -237,6 +624,8 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         strut_width: float = 0.002,
         strut_rotation_deg: float = 45.0,
         dp_design_wavel: float | None = 550e-9,
+        m1_high_order_wfe_opd_m: Array | None = None,
+        m2_high_order_wfe_opd_m: Array | None = None,
     ):
         """Construct a Shera three-plane optical system.
 
@@ -390,8 +779,13 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
 
         dp_layer = dll.AberratedLayer(dp_opd)
 
-        p1_layers = [("m1_aperture", m1_aperture), ("dp", dp_layer)]
-        p2_layers = [("m2_aperture", m2_aperture)]
+        if m1_high_order_wfe_opd_m is None:
+            m1_high_order_wfe_opd_m = np.zeros((wf_npixels, wf_npixels))
+        if m2_high_order_wfe_opd_m is None:
+            m2_high_order_wfe_opd_m = np.zeros((wf_npixels, wf_npixels))
+
+        p1_layers = [("m1_aperture", m1_aperture), ("dp", dp_layer), ("high_order_wfe", dll.AberratedLayer(np.array(m1_high_order_wfe_opd_m)))]
+        p2_layers = [("m2_aperture", m2_aperture), ("high_order_wfe", dll.AberratedLayer(np.array(m2_high_order_wfe_opd_m)))]
         super().__init__(
             wf_npixels=wf_npixels,
             p1_diameter=p1_diameter,
@@ -411,6 +805,7 @@ class SheraThreePlaneOptics(ThreePlaneOpticalSystem()):
         wf *= self.m1_aperture
         wf = wf.normalise()
         wf += self.dp
+        wf += self.high_order_wfe
         return wf
 
 # class SheraMultiPlaneSystem(MultiPlaneOpticalSystem()):

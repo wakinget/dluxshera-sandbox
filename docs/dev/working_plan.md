@@ -17,9 +17,25 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 ## Progress refresh (2026-02)
 
 - Roadmap priorities are largely stable this cycle; no major theme reprioritization is needed.
-- Experiment workflows have advanced: prescribed Monte Carlo now has a maintained recipe entry point plus templates in `examples/recipes/prescription_templates/`.
+- Experiment workflows have advanced: prescribed Monte Carlo now has a maintained recipe entry point plus a template in `examples/recipes/prescribed_mc_template/`.
 - Experiment metadata tracking improved: experiment-level notes and per-run notes now propagate into manifest/aggregate outputs.
 - Near-term focus remains optimizer robustness, regression depth, and doc/tutorial cleanup rather than major architecture rewrites.
+
+## Progress refresh (2026-06-23)
+
+- Added projected iterative observation forecasting for full-fidelity campaigns. The campaign can run the first K actual info-damped update windows and project to a 60-window / 1800-subblock / 30-minute observation endpoint, producing final separation residual and uncertainty summaries without rendering every subblock in the full observation. This is intended for deadline-sensitive production-ish campaigns where the first several windows are used to characterize update behavior and accumulated information.
+
+## Progress refresh (2026-08-10)
+
+- Consolidated the reviewed observation-level information-rate findings in
+  [Observation information-rate consolidation](observation_information_rate_consolidation.md).
+  The note is
+  now the authoritative dev-facing record for the current iterative workflow,
+  additive one-second Schur information products, prior-whitened canonical
+  modes, adaptive-cadence replay interpretation, the M2 knowledge-error
+  information-versus-bias result, and the proposed future
+  acquire-then-accumulate architecture. This is documentation only; no new
+  controller has been implemented.
 
 ---
 
@@ -137,6 +153,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
   - Tutorials: `docs/tutorials/canonical_astrometry_demo.md`
   - Dev-facing: this plan (`docs/dev/working_plan.md`)
   - Dev-facing: `docs/dev/style_guide.md` (Style guide)
+  - Dev-facing: [Observation information-rate consolidation](observation_information_rate_consolidation.md) (reviewed observation-level information-rate findings and future implementation notes)
 
 ---
 
@@ -175,7 +192,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 - **Baseline test status:** Running `pytest` requires adding `src/` to `PYTHONPATH` (or installing the package) so Binder-related tests (`tests/test_binder_smoke.py`, `tests/test_binder_shared_behaviour.py`, and Binder-backed loss/optimization tests) import `dluxshera` correctly.
 - **Binder mutability/shape:** `SheraThreePlaneBinder` instances are `dataclasses` with `frozen=False` and `slots=False`; they do not present as `equinox.Module` or `zodiax.Base`, so mutation is guarded only by convention rather than framework-level immutability.
 - **Store surface area:** `binder.base_forward_store` is a `ParameterStore` exposing `get/keys/items/values/as_dict/replace/validate_against` and similar mapping semantics.
-- **Derived placement:** With the default forward spec + refreshed forward store (via `tests.helpers.make_forward_store`), derived values such as `system.plate_scale_as_per_pix` are present directly in the base forward store prior to any evaluation.
+- **Derived placement:** With the default forward spec + refreshed forward store (via `tests.helpers.make_forward_store`), derived values such as `optics.plate_scale_as_per_pix` are present directly in the base forward store prior to any evaluation.
 
 - `SheraThreePlane_Model` remains the public entry point; new plumbing should remain internal to avoid churn in existing scripts.
 - Legacy optics helpers still carry pre-refactor pathways; the refactor must avoid breaking current examples until replacements land.
@@ -191,8 +208,7 @@ Loss wiring, Binder NLL helpers, and canonical demo usage are summarized in `doc
 
 ## 15) Binder namespace ergonomics (Task 1A–1E status)
 
-- Task 1A–1E: Completed (binder.get, StoreNamespace proxy, Binder.ns explicit access, cfg-field attribute raising, store-prefix attribute raising).
-- Supported access patterns so far: `binder.get(...)`, `binder.ns("prefix")`, cfg forwarding such as `binder.psf_npix`, and store prefix raising such as `binder.system.plate_scale_as_per_pix` / `binder.binary.x_position_as`.
+- Status: binder read ergonomics are now Binder-first and contract-driven. Supported access patterns include `binder.get(...)`, `binder.ns("prefix")`, contract-driven semantic leaves (runtime-first, store fallback), runtime component access (`binder.source/optics/detector`), and runtime-leaf fallback for unique component leaves. `binder.cfg` remains explicit provenance, not part of the fallback chain. Pretty-printing now foregrounds source/optics/detector.
 
 ---
 
@@ -540,8 +556,8 @@ This should be noted whenever new tests are added or test behavior changes durin
 ## 18) ParamSpec + ParameterStore policy (plate_scale/log_flux) — analysis & options
 
 **Current behavior (“split personality”)**
-- `build_inference_spec_basic()` marks `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **primitive knobs** for optimisation.【F:src/dluxshera/params/spec.py†L95-L167】【F:src/dluxshera/params/spec.py†L207-L245】
-- `build_forward_spec_from_config()` (in the system modules) mirrors geometry/throughput primitives from `SheraThreePlaneConfig` and declares `system.plate_scale_as_per_pix` and `binary.log_flux_total` as **derived** with registered transforms (geometric plate scale and collecting-area × band × throughput flux).【F:src/dluxshera/systems/three_plane.py†L456-L656】
+- `build_inference_spec_basic()` marks `optics.plate_scale_as_per_pix` and `binary.log_flux_total` as **primitive knobs** for optimisation.【F:src/dluxshera/params/spec.py†L95-L167】【F:src/dluxshera/params/spec.py†L207-L245】
+- `build_forward_spec_from_config()` (in the system modules) mirrors geometry/throughput primitives from `SheraThreePlaneConfig` and declares `optics.plate_scale_as_per_pix` and `binary.log_flux_total` as **derived** with registered transforms (geometric plate scale and collecting-area × band × throughput flux).【F:src/dluxshera/systems/three_plane.py†L456-L656】
 - The transform registry is **store-wins**: if a key is present in the `ParameterStore`, the transform is skipped; otherwise dependencies are resolved recursively.【F:src/dluxshera/params/transform_registry.py†L1-L200】 Tests exercise this by computing plate scale/log flux from a forward-model store seeded with primitives only.【F:tests/optics/test_shera_threeplane_transforms.py†L1-L120】
 - `ParameterStore.from_spec_defaults()` skips derived fields, so a forward-model store built from defaults contains only primitives unless the caller injects derived values. Validation now rejects derived keys by default (unless `allow_derived=True`) and provides `refresh_derived`/`strip_derived` helpers for deterministic recomputation.【F:src/dluxshera/params/store.py†L72-L167】【F:src/dluxshera/params/store.py†L202-L251】
 
@@ -600,7 +616,7 @@ For a concise mapping of legacy APIs to the current architecture, see `docs/arch
 
 **Mapping plan to refactor-era concepts**
 - *Optics naming and placement*: Rename the two-plane optics class to `SheraTwoPlaneOptics` and the three-plane class to `SheraThreePlaneOptics` (both in `optics/optical_systems.py`) to align with Shera family naming.
-- *Config + forward spec*: Introduce `SheraTwoPlaneConfig` alongside the three-plane config, sharing binary vocabulary, wavelength/bandwidth sampling, and primary Zernike basis fields. Two-plane-specific primitives: `psf_pixel_scale` (primitive, arcsec/pix), primary aperture geometry (p1/p2 diameters, strut geometry, diffractive pupil design wavelength), sampling (`pupil_npix`, `psf_npix`, `oversample`). Exclude three-plane-only fields (focal lengths, plane separation, detector pixel size, secondary basis/1/f). Forward spec should mirror the binary vocabulary used by the three-plane builder (unit-aware `binary.x_position_as`, `binary.y_position_as`, `binary.separation_as`, `binary.position_angle_deg`, `binary.contrast`), include `primary.zernike_coeffs_nm` when a basis is configured (default zeros), omit any secondary terms, treat `psf_pixel_scale` as primitive (no transform), and derive `binary.log_flux_total` via the same transform family as the three-plane system.
+- *Config + forward spec*: Introduce `SheraTwoPlaneConfig` alongside the three-plane config, sharing binary vocabulary, wavelength/bandwidth sampling, and primary Zernike basis fields. Two-plane-specific primitives: `psf_pixel_scale` (primitive, arcsec/pix), primary aperture geometry (p1/p2 diameters, strut geometry, diffractive pupil design wavelength), sampling (`pupil_npix`, `psf_npix`, `oversample`). Exclude three-plane-only fields (focal lengths, plane separation, detector pixel size, secondary basis/1/f). Forward spec should mirror the binary vocabulary used by the three-plane builder (unit-aware `binary.x_position_as`, `binary.y_position_as`, `binary.separation_as`, `binary.position_angle_deg`, `binary.contrast`), include `optics.primary.zernike_coeffs_nm` when a basis is configured (default zeros), omit any secondary terms, treat `psf_pixel_scale` as primitive (no transform), and derive `binary.log_flux_total` via the same transform family as the three-plane system.
 - *Inference spec sharing*: Provide a shared “Shera astrometry inference spec” builder that covers the common binary vocabulary, primary Zernike coefficients, and plate scale as a primitive knob. Secondary-specific keys (secondary Zernikes) should be included only for three-plane runs; callers can drop them via `ParamSpec.without(...)` for two-plane cases. From inference’s perspective, both systems remain `dl.Telescope`-like forward models differing mainly by the presence of secondary aberration knobs.
 - *Feature parity scope (v1 two-plane refactor)*: Match the three-plane binary vocabulary; support a primary Zernike basis; exclude secondary mirror and secondary Zernikes; defer 1/f WFE to parity with the current three-plane refactor scope; reuse the three-plane log_flux transform semantics.
 
@@ -723,6 +739,8 @@ Status: docs housekeeping (dev-facing)
 - Concept/architecture sources of truth: `docs/architecture/{binder_and_graph.md,eigenmodes.md,inference_and_loss.md,optimization_artifacts_and_plotting.md,params_and_store.md}`. Use these for detailed design rather than duplicating content here.
 - Tutorials and modeling overview: `docs/tutorials/modeling_overview.md` and `docs/tutorials/canonical_astrometry_demo.md` (plus `examples/README.md`, `examples/recipes/canonical_astrometry.py`, `examples/recipes/twoplane_astrometry.py`, `examples/runners/run_canonical_astrometry.py`, and `examples/runners/run_twoplane_astrometry.py` for runnable flows).
 - Dev-facing planning: this file (`docs/dev/working_plan.md`) and any future dev notes under `docs/dev/`. Keep cross-links back to the architecture docs for specifics.
+- Time-domain design contract (Phase 1): `docs/dev/obs_subblock_generator_design.md` captures the observation sub-block generator interface and artifact layout before implementation.
+- Observation sub-block helper separation (Phase 3): explicit trace generation now has a separate recipe (`examples/recipes/subblock_trace_generation.py`) and builder utility (`src/dluxshera/utils/obs_subblock_trace_builders.py`), while rendering remains in `examples/recipes/observation_subblock.py`.
 - Navigation helpers: `devtools/generate_context_snapshot.py` and `devtools/print_tree.py` remain the authoritative way to browse the live tree and ParamSpec/transform snapshots.
 
 Near-term doc housekeeping:
@@ -894,3 +912,84 @@ Use this section as a quick in-doc ledger for active issues that are worth track
 - **Source parameters are treated as structural.** The `wavelength_m`, `bandwidth_m`, and `n_lambda` source settings are currently carried in the config object and are treated as structural in the structural parameter set. Because the AlphaCen source is built at model evaluation time and is not cached, the `forward_store` can carry these instead, which simplifies the call signature to `build_alpha_cen_source()`. If we eventually move to a more complicated source model, we may end up caching the source object and then re-defining a structural subset anyway, in which case we might end up where we started. Until then, though, I think it makes sense to consolidate these source settings into the forward_store with the other source settings ("binary.x_position_as", "binary.y_position_as", etc.) to reduce some mental overhead.
 - **`imaging.throughput` might not be modelled** We set a value in the store, but it's unclear if anything in the model actually applies the throughput.
 - **Profiles/IO consistency across workflows is incomplete.** Prescription/override flows are strong for experiment runners, but a unified YAML/JSON profile experience across all entry points is still pending.
+
+## Binary Iterative Observation Campaign Note
+
+`examples/scripts/run_observation_bias_campaign.py` now has an optional `experiment.iterative` mode for small binary-science validation campaigns. The first validation decision question is whether repeated observation-level updates move binary separation and the slow-state reference toward truth across windows.
+
+Implemented update mode: `physical_full` only, using the physical-label update
+`theta_ref_next = theta_ref_current + update_gain * (posterior_mean - theta_ref_current)`. Schema placeholders exist for future eigenbasis-aware modes, but damped/truncated eigen updates are not implemented.
+
+Output contract:
+
+- `campaign_plan.json`, `resolved_config.json`, `iterative_plan.csv`, and `expected_outputs.csv` store the resolved per-case/window/subblock contract.
+- Window outputs live under `cases/<case>/windows/window_XXX/`.
+- Aggregate-only reads stored run-root contracts and writes `analysis/output_inventory.csv`, `analysis/missing_outputs.csv`, `analysis/aggregate_status.json`, and `analysis/iterative_window_diagnostics.csv`.
+- The targeted validation trace source is `iid_jitter`; trajectory/external trace-source schemas remain available but need separate iterative validation.
+
+Smoke dry run:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/run_observation_bias_campaign.py \
+  --config examples/recipes/observation_bias_campaign_template/binary_iterative_smoke.yaml \
+  --results-root /tmp/dluxshera_binary_iterative_smoke \
+  --run-name binary_iterative_smoke \
+  --dry-run
+```
+
+### Binary Iterative Cluster Validation Readiness
+
+The hardened binary iterative path distinguishes two update vectors:
+
+- posterior update: `posterior_offsets - current_offsets`
+- applied update: `next_offsets - current_offsets`
+
+For `update_gain=1` these match. For damped physical updates they differ, so
+`analysis/iterative_window_diagnostics.csv` records both `posterior_*` and
+`applied_*` vector fields plus separation-specific microarcsecond fields.
+
+Aggregate-only treats stored run-root artifacts as authoritative when
+`campaign_plan.json` exists. It validates the current CLI/config shape against
+stored labels, cases, iterative shape, trace-source mode, summary scale, and
+expected-output counts, then writes
+`analysis/aggregate_only_plan_validation.json`. Output completeness is reported
+from `expected_outputs.csv` through `analysis/output_inventory.csv`,
+`analysis/missing_outputs.csv`, and `analysis/aggregate_status.json`.
+
+The first bounded cluster validation recipe is:
+
+```text
+examples/recipes/observation_bias_campaign_template/binary_iterative_cluster_validation.yaml
+```
+
+It uses IID jitter, `phi_ref: recovered`, 20 frames, two prior draws, three
+windows per draw, two subblocks per window, low-order M1/M2 Zernikes,
+`summed_likelihood` summaries, `physical_full` updates, and forecast disabled.
+The corresponding Gattaca2 submission helper is:
+
+```text
+examples/slurm/binary_iterative_cluster_validation.sbatch
+```
+
+Success criteria for the first validation are not full optical recovery. The
+primary pass/fail signal is whether separation and slow-state reference norms
+move toward truth across repeated windows without missing summaries, failed
+subblocks, or aggregate-only plan mismatches. Eigenbasis-aware update modes are
+reserved for a later update-control patch and intentionally raise
+`NotImplementedError` when enabled.
+
+### Full-fidelity detector KE readiness update
+
+Detector calibration-map knowledge errors are now wired into the full-fidelity
+campaign path. The campaign config can perturb inference-side pixel-offset and
+pixel-response calibration maps while truth/render maps remain nominal by
+default. Nominal validation values are `0.001` detector pixels RMS for
+`pixel_offsets.dx_map`/`dy_map` and `0.001` fractional RMS for
+`pixel_response.pixel_response`.
+
+The next full-fidelity binary iterative campaign should enable this detector
+calibration KE block for the inference model, use `eigen_info_damped` as the
+default iterative update policy, and prefer larger update windows such as 10 or
+20 subblocks per window if runtime allows. A larger prior separation stress
+test, roughly 100-300 microarcseconds RMS, should remain a later follow-up
+after detector KE dry-run/smoke artifacts are validated.

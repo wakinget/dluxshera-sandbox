@@ -1,22 +1,19 @@
 """
 Canonical astrometry Monte Carlo (multi-start) recipe.
 
-This script mirrors ``examples/recipes/canonical_astrometry.py`` but runs a
-multi-start Monte Carlo experiment: the synthetic data and priors are fixed
-once, and each run draws a new random initialization from the same priors.
-
-The primary goal is to demonstrate reproducible artifact layouts across many
-runs (``runs/<run_id>/...``) while keeping the canonical forward-modeling steps
-explicit and easy to follow.
+This script mirrors ``canonical_astrometry.py`` but runs a Monte Carlo sweep:
+synthetic data and priors are fixed once, and each run draws a fresh
+initialization from those priors.
 """
 from __future__ import annotations
 
-import dataclasses
+import argparse
 import datetime
 import json
 import os
 import subprocess
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,6 +23,8 @@ import jax.random as jr
 import matplotlib.pyplot as plt
 import numpy as np
 
+from dluxshera.config.io import load_user_config
+from dluxshera.config.resolver import resolve_config
 from dluxshera.inference.optimization import (
     EigenThetaMap,
     fim_theta,
@@ -47,75 +46,70 @@ from dluxshera.params.packing import (
     pack_params,
     unpack_params as store_unpack_params,
 )
-from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
-from dluxshera.params.store import ParameterStore, strip_structural
-from dluxshera.plot.plotting import (
-    apply_plot_defaults,
-    get_default_cmaps,
-    plot_fim,
-)
-from dluxshera.systems.three_plane import (
-    SheraThreePlaneConfig,
-    SHERA_TESTBED_CONFIG,
-    SHERA_FLIGHT_CONFIG,
-    SheraThreePlaneBinder,
-    build_forward_spec_from_config,
-)
+from dluxshera.params.store import ParameterStore
+from dluxshera.plot.plotting import apply_plot_defaults, get_default_cmaps, plot_fim
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.dtype_diagnostics import print_dtype_audit
 
-# ----------------------------
-# User-facing toggles (edit me)
-# ----------------------------
+##############################
+# MAIN SIMULATION PARAMETERS #
+##############################
+
 JAX_ENABLE_X64 = True
-RNG_SEED = 42
 FAST_MODE = False
 ADD_NOISE = False
 SAVE_PLOTS = False
 
 # Monte Carlo settings
 N_RUNS = 5
-N_ITER = 60
-FAST_ITER = 30
-BASE_LR = 0.5
 RUN_ID_PREFIX = "mc"
 
-# Telescope Config Selection (9cm testbed vs 22cm flight design)
-# Options: None, SHERA_TESTBED_CONFIG / SHERA_FLIGHT_CONFIG
-CONFIG = SHERA_TESTBED_CONFIG
+DEFAULT_SEED = 42
+DEFAULT_N_ITER = 60
+DEFAULT_FAST_ITER = 30
+DEFAULT_BASE_LR = 0.5
 
 # Eigenmode settings
-USE_EIGEN = True           # Enables re-parameterization
-WHITEN_BASIS = True        # If True, scales each eigenvector by 1/sqrt(lambda)
-TRUNCATE_K = None          # int or None; keep top-k eigenmodes when set
-TRUNCATE_BY_EIGVAL = None  # float or None; only used when TRUNCATE_K is None
+USE_EIGEN = True
+WHITEN_BASIS = True
+TRUNCATE_K = None
+TRUNCATE_BY_EIGVAL = None
 
-INFER_KEYS = (
-    "binary.separation_as",
-    "binary.position_angle_deg",
-    "binary.x_position_as",
-    "binary.y_position_as",
-    "binary.log_flux_total",
-    "binary.contrast",
-    "system.plate_scale_as_per_pix",
-    "primary.zernike_coeffs_nm",
-    "secondary.zernike_coeffs_nm",  # Optionally comment this one out
+# Inference keys (may be overridden by experiment config)
+DEFAULT_INFER_KEYS = (
+    "source.separation_as",
+    "source.position_angle_deg",
+    "source.x_position_as",
+    "source.y_position_as",
+    "source.log_flux_total",
+    "source.contrast",
+    "optics.plate_scale_as_per_pix",
+    "optics.primary.zernike_coeffs_nm",
+    "optics.secondary.zernike_coeffs_nm",
 )
 
+# Presets
+DEFAULT_SYSTEM_PRESET = "SHERA_TESTBED_3P"
+DEFAULT_EXPERIMENT_PRESET = "CANONICAL_ASTROMETRY"
+
+# Directories
+TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RESULTS_DIR = Path(REPO_ROOT / f"Results/canonical_monte_carlo" / TIMESTAMP)
+
+# Plotting defaults
+_ = get_default_cmaps()
+apply_plot_defaults()
+plt.rcParams["image.cmap"] = "inferno_nan"
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
-def _timestamp_tag() -> str:
-    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-
-
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _coerce_jsonable(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(k): _coerce_jsonable(v) for k, v in value.items()}
@@ -124,15 +118,9 @@ def _coerce_jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, np.ndarray):
-        return {
-            "shape": list(value.shape),
-            "dtype": str(value.dtype),
-        }
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
     if isinstance(value, jnp.ndarray):
-        return {
-            "shape": list(value.shape),
-            "dtype": str(value.dtype),
-        }
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
     if isinstance(value, (np.float32, np.float64)):
         return float(value)
     if isinstance(value, (np.int32, np.int64)):
@@ -140,12 +128,10 @@ def _coerce_jsonable(value: Any) -> Any:
     return value
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _mc_run_id(index: int, prefix: str = RUN_ID_PREFIX) -> str:
     return f"{prefix}_{index:04d}"
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _repo_relative_path(path: str | Path | None) -> str | None:
     if path is None:
         return None
@@ -156,14 +142,11 @@ def _repo_relative_path(path: str | Path | None) -> str | None:
         return Path(os.path.relpath(resolved, REPO_ROOT)).as_posix()
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _summarize_prior_info(prior_info: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for key, entry in prior_info.items():
         sigma = entry.get("sigma") if isinstance(entry, Mapping) else None
-        if isinstance(sigma, np.ndarray):
-            sigma_summary = {"shape": list(sigma.shape), "dtype": str(sigma.dtype)}
-        elif isinstance(sigma, jnp.ndarray):
+        if isinstance(sigma, (np.ndarray, jnp.ndarray)):
             sigma_summary = {"shape": list(sigma.shape), "dtype": str(sigma.dtype)}
         else:
             sigma_summary = sigma
@@ -171,18 +154,13 @@ def _summarize_prior_info(prior_info: Mapping[str, Mapping[str, Any]]) -> dict[s
     return summary
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
     required = ["meta.json", "summary.json", "trace.npz"]
     missing = [name for name in required if not (run_dir / name).exists()]
     if missing:
-        print(
-            f"WARNING: run artifacts missing in {run_dir}: {', '.join(missing)}"
-        )
+        print(f"WARNING: run artifacts missing in {run_dir}: {', '.join(missing)}")
 
 
-# NOTE: Local helper (candidate for future migration to dluxshera.inference.*)
 def _git_info() -> dict[str, str | None]:
     commit = None
     status = None
@@ -199,37 +177,60 @@ def _git_info() -> dict[str, str | None]:
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
-    return {
-        "commit": commit,
-        "status": status,
-    }
+    return {"commit": commit, "status": status}
 
 
 def main(
     *,
-    config: SheraThreePlaneConfig | None = CONFIG,
+    config_path: Path | None = None,
+    system_preset: str = DEFAULT_SYSTEM_PRESET,
+    experiment_preset: str = DEFAULT_EXPERIMENT_PRESET,
     fast: bool = FAST_MODE,
-    save_plots: bool = SAVE_PLOTS,
-    add_noise: bool = ADD_NOISE,
     results_dir: Path | None = None,
-    n_runs: int = N_RUNS,
-    rng_seed: int = RNG_SEED,
     use_eigen: bool = USE_EIGEN,
     whiten_basis: bool = WHITEN_BASIS,
     truncate_k: int | None = TRUNCATE_K,
     truncate_by_eigval: float | None = TRUNCATE_BY_EIGVAL,
+    n_runs: int | None = None,
+    run_id_prefix: str | None = None,
+    add_noise: bool | None = None,
+    save_plots: bool | None = None,
 ) -> None:
     """Run the canonical Monte Carlo astrometry recipe."""
     jax.config.update("jax_enable_x64", JAX_ENABLE_X64)
 
-    rng_key = jr.PRNGKey(rng_seed)
-
-    results_dir = results_dir or (
-        REPO_ROOT
-        / "Results"
-        / "canonical_monte_carlo"
-        / _timestamp_tag()
+    user_cfg = load_user_config(
+        config_path=config_path,
+        system_preset=system_preset,
+        experiment_preset=experiment_preset,
     )
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    experiment_cfg = resolved_cfg.get("experiment")
+
+    if system_cfg is None:
+        raise ValueError("canonical_monte_carlo requires a 'system' block in the config.")
+    if experiment_cfg is None:
+        raise ValueError("canonical_monte_carlo requires an 'experiment' block in the config.")
+
+    experiment = _validate_experiment(experiment_cfg)
+    if n_runs is not None:
+        experiment["n_runs"] = int(n_runs)
+    if run_id_prefix is not None:
+        experiment["run_id_prefix"] = str(run_id_prefix)
+    if add_noise is not None:
+        experiment["add_noise"] = bool(add_noise)
+    if save_plots is not None:
+        experiment["save_plots"] = bool(save_plots)
+
+    infer_keys = tuple(experiment["infer_keys"])
+    rng_key = jr.PRNGKey(int(experiment["seed"]))
+    save_plots = bool(experiment["save_plots"])
+    add_noise = bool(experiment["add_noise"])
+    n_runs = int(experiment["n_runs"])
+    run_id_prefix = str(experiment["run_id_prefix"])
+
+    results_dir = results_dir or DEFAULT_RESULTS_DIR
     runs_dir = results_dir / "runs"
     results_dir.mkdir(parents=True, exist_ok=True)
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -244,134 +245,113 @@ def main(
 
     t0_script = time.time()
 
-    cfg = config or SHERA_TESTBED_CONFIG
-    cfg = cfg.replace(
-        primary_noll_indices=tuple(range(4, 12)),
-        secondary_noll_indices=tuple(range(4, 12)),
-    )
+    system_cfg = deepcopy(system_cfg)
     if fast:
-        cfg = cfg.replace(
-            n_lambda=1,
-            primary_noll_indices=tuple(range(4, 9)),
-            secondary_noll_indices=tuple(range(4, 9)),
-        )
+        print("FAST_MODE enabled: reducing wavelengths and Zernike indices.")
+        source_cfg = system_cfg.get("source", {})
+        if isinstance(source_cfg, Mapping):
+            source_cfg["n_lambda"] = 1
+            system_cfg["source"] = source_cfg
+        optics_cfg = system_cfg.get("optics", {})
+        if isinstance(optics_cfg, Mapping):
+            optics_cfg["primary_noll_indices"] = list(range(4, 9))
+            optics_cfg["secondary_noll_indices"] = list(range(4, 9))
+            system_cfg["optics"] = optics_cfg
 
-    forward_spec = build_forward_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic(cfg)
-
+    forward_spec = compose_forward_spec(system_cfg)
     truth_store = ParameterStore.from_spec_defaults(forward_spec)
     truth_store = truth_store.replace(
         {
-            "binary.separation_as": 10.0,
-            "binary.position_angle_deg": 90.0,
-            "binary.x_position_as": 0.0,
-            "binary.y_position_as": 0.0,
-            "imaging.exposure_time_s": 1800.0,
+            "source.separation_as": 10.0,
+            "source.position_angle_deg": 90.0,
+            "source.x_position_as": 0.0,
+            "source.y_position_as": 0.0,
+            "source.exposure_time_s": 1800.0,
         }
     )
     truth_store = truth_store.refresh_derived(forward_spec)
 
-    binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+    binder = SheraBinder(system_cfg, forward_spec, truth_store)
 
     print("Generating synthetic data...")
     data_psf = binder.model()
 
-    # Optionally add noise to the data
     if add_noise:
         rng_key, split_key = jr.split(rng_key)
         if np.min(data_psf) > 100:
-            # Use gaussian approximation to shot noise if image is bright enough
             data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
         else:
-            # Otherwise use poisson statistics
             data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
-            # Casting back to float is important for the optimization
-    else: # No noise
+    else:
         data = data_psf
 
-    # Define data variance = data_psf -> Shot noise dominated
-    # Add a minimum variance floor to avoid any division by zero
     data_var = jnp.maximum(data_psf, 1.0)
 
-    # Save the data to an npz file for later use
-    np.savez(results_dir / "data.npz", noise=add_noise,
-             data_psf=np.asarray(data_psf), data=np.asarray(data), data_var=np.asarray(data_var))
-
-    print("Configuring Inference...")
-    inference_subspec = make_inference_subspec(
-        base_spec=inference_spec,
-        infer_keys=INFER_KEYS,
-        cfg=cfg,
+    np.savez(
+        results_dir / "data.npz",
+        noise=add_noise,
+        data_psf=np.asarray(data_psf),
+        data=np.asarray(data),
+        data_var=np.asarray(data_var),
     )
 
+    print("Configuring Inference...")
+    inference_subspec = forward_spec.subset(infer_keys)
+
     prior_info = {
-        "binary.separation_as": {"sigma": 1e-3, "dist": "Normal"},
-        "binary.position_angle_deg": {"sigma": 1.67e-2, "dist": "Uniform"},
-        "binary.x_position_as": {"sigma": 1e-2, "dist": "Normal"},
-        "binary.y_position_as": {"sigma": 1e-2, "dist": "Normal"},
-        "binary.log_flux_total": {"sigma": 4.3e-3, "dist": "Normal"},
-        "binary.contrast": {"sigma": 6e-3, "dist": "LogNormal"},
-        "system.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"},
-        "primary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("primary.zernike_coeffs_nm"), 2),
+        "source.separation_as": {"sigma": 1e-3, "dist": "Normal"},
+        "source.position_angle_deg": {"sigma": 1.67e-2, "dist": "Uniform"},
+        "source.x_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "source.y_position_as": {"sigma": 1e-2, "dist": "Normal"},
+        "source.log_flux_total": {"sigma": 4.3e-3, "dist": "Normal"},
+        "source.contrast": {"sigma": 6e-3, "dist": "LogNormal"},
+        "optics.plate_scale_as_per_pix": {"sigma": 4.3e-3, "dist": "LogNormal"},
+        "optics.primary.zernike_coeffs_nm": {
+            "sigma": np.full_like(truth_store.get("optics.primary.zernike_coeffs_nm"), 2),
             "dist": "Normal",
         },
-        "secondary.zernike_coeffs_nm": {
-            "sigma": np.full_like(truth_store.get("secondary.zernike_coeffs_nm"), 2),
+        "optics.secondary.zernike_coeffs_nm": {
+            "sigma": np.full_like(truth_store.get("optics.secondary.zernike_coeffs_nm"), 2),
             "dist": "Normal",
         },
     }
     prior_spec = PriorSpec.from_info(truth_store, prior_info)
 
     experiment_created_at = _now_iso_local_ms()
-    config_payload = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else cfg
-    if isinstance(config_payload, dict) and "diffractive_pupil_path" in config_payload:
-        config_payload = {
-            **config_payload,
-            "diffractive_pupil_path": _repo_relative_path(
-                config_payload.get("diffractive_pupil_path")
-            ),
-        }
-
     manifest = {
         "script": "canonical_monte_carlo.py",
         "git": _git_info(),
         "created_at": experiment_created_at,
         "n_runs": n_runs,
-        "rng_seed": rng_seed,
+        "rng_seed": int(experiment["seed"]),
         "fast": fast,
         "add_noise": add_noise,
         "use_eigen": use_eigen,
         "whiten_basis": whiten_basis,
         "truncate_k": truncate_k,
         "truncate_by_eigval": truncate_by_eigval,
-        "infer_keys": list(INFER_KEYS),
+        "infer_keys": list(infer_keys),
         "prior_info": _summarize_prior_info(prior_info),
-        "diffractive_pupil_path": _repo_relative_path(cfg.diffractive_pupil_path),
-        "config": config_payload,
+        "dp_path": _repo_relative_path(system_cfg.get("optics", {}).get("dp_path")),
+        "config": resolved_cfg,
+        "experiment": experiment,
     }
     _write_json(results_dir / "manifest.json", _coerce_jsonable(manifest))
-
-    _ = get_default_cmaps()
-    apply_plot_defaults()
-    plt.rcParams["image.cmap"] = "inferno_nan"
 
     print("Building the loss function...")
     nll_loss_fn, _ = make_binder_nll_fn(
         binder=binder,
-        infer_keys=INFER_KEYS,
+        infer_keys=infer_keys,
         data=data,
         var=data_var,
         noise_model="gaussian",
         reduce="sum",
         theta0_store=truth_store,
     )
-    fim_labels = generate_fim_labels(INFER_KEYS, cfg=cfg, store=truth_store)
-
-    loss_fn = nll_loss_fn
+    fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=truth_store)
 
     theta_true = pack_params(inference_subspec, truth_store)
-    loss_true = float(loss_fn(theta_true))
+    loss_true = float(nll_loss_fn(theta_true))
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
@@ -387,6 +367,18 @@ def main(
         )
 
     fim_diag = jnp.diag(F)
+    print_dtype_audit(
+        "canonical_monte_carlo shared_inputs",
+        {
+            "data_psf": data_psf,
+            "data": data,
+            "data_var": data_var,
+            "theta_true": theta_true,
+            "loss_true": loss_true,
+            "F": F,
+            "fim_diag": fim_diag,
+        },
+    )
 
     if use_eigen:
         theta_space = "eigen"
@@ -397,7 +389,6 @@ def main(
             "truncate_by_eigval": truncate_by_eigval,
         }
     else:
-        eigen_map = None
         theta_space = "primitive"
         precond_meta_base = {"method": "fim_diag"}
 
@@ -408,7 +399,13 @@ def main(
         )
     )
 
-    n_iter = FAST_ITER if fast else N_ITER
+    optimizer_cfg = experiment["optimizer"]
+    if optimizer_cfg["kind"] != "gd":
+        raise ValueError(
+            f"Unsupported experiment.optimizer.kind={optimizer_cfg['kind']!r}. Only 'gd' is implemented."
+        )
+    n_iter = int(optimizer_cfg["n_iter_fast"] if fast else optimizer_cfg["n_iter"])
+    base_lr = float(optimizer_cfg["base_lr"])
 
     print(f"\nRunning {n_runs} Monte Carlo optimizations...")
 
@@ -417,17 +414,24 @@ def main(
 
     for run_index in range(n_runs):
         rng_key, split_key = jr.split(rng_key)
-        run_id = _mc_run_id(run_index)
+        run_id = _mc_run_id(run_index, prefix=run_id_prefix)
         print(f"\n--- Run {run_index + 1}/{n_runs} ({run_id}) ---")
 
-        init_store = prior_spec.sample(rng_key=split_key, keys=INFER_KEYS)
-        init_psf = binder.model(
-            strip_structural(init_store, structural_keys=binder.structural_store_keys())
-        )
+        init_mode = experiment["init_mode"]
+        if init_mode == "prior_sample":
+            prior_sample = prior_spec.sample(rng_key=split_key, keys=infer_keys)
+            init_store = truth_store.replace(prior_sample.as_dict())
+        elif init_mode == "truth":
+            init_store = truth_store
+        else:
+            raise ValueError(
+                f"Unsupported experiment.init.mode={init_mode!r}. Supported: 'prior_sample', 'truth'."
+            )
+        init_psf = binder.model(binder.strip_structural(init_store))
 
         _, theta0 = make_binder_nll_fn(
             binder=binder,
-            infer_keys=INFER_KEYS,
+            infer_keys=infer_keys,
             data=data,
             var=data_var,
             noise_model="gaussian",
@@ -435,25 +439,21 @@ def main(
             theta0_store=init_store,
         )
 
+        eigen_map = None
+        curvature_vec = fim_diag
+        lr_vec = None
+        theta0_opt = theta0
+        loss_opt = nll_loss_fn
+        index_map = None
+
         if use_eigen:
             if truncate_k is not None and truncate_by_eigval is not None:
                 print(
-                    "truncate_k is set; ignoring truncate_by_eigval="
-                    f"{truncate_by_eigval}."
+                    f"truncate_k is set; ignoring truncate_by_eigval={truncate_by_eigval}."
                 )
 
-            # NOTE: theta_ref is the origin for the eigen coefficients (z).
-            # Truncation zeroes discarded components *relative to theta_ref*.
-            # If we set theta_ref to the truth, truncation snaps discarded
-            # directions back to truth and makes severe truncation look
-            # unrealistically powerful. Using the initial guess freezes
-            # discarded directions at their initial offsets.
             theta_ref = theta0
-            eigen_map_full = EigenThetaMap.from_fim(
-                F,
-                theta_ref,
-                whiten=whiten_basis,
-            )
+            eigen_map_full = EigenThetaMap.from_fim(F, theta_ref, whiten=whiten_basis)
             eigvals_full = (
                 np.asarray(eigen_map_full.eigvals)
                 if eigen_map_full.eigvals is not None
@@ -482,10 +482,10 @@ def main(
 
             eigvals_kept = (
                 np.asarray(eigen_map.eigvals)
-                if eigen_map.eigvals is not None
+                if eigen_map is not None and eigen_map.eigvals is not None
                 else np.array([])
             )
-            k_kept = eigen_map.dim_eigen
+            k_kept = eigen_map.dim_eigen if eigen_map is not None else 0
             if eigvals_kept.size > 0:
                 min_eval = float(np.min(eigvals_kept))
                 max_eval = float(np.max(eigvals_kept))
@@ -494,57 +494,53 @@ def main(
                 max_eval = float("nan")
 
             print("\nEigenThetaMap summary:")
-            print(f"  N total dims: {eigen_map.dim_theta}")
+            print(f"  N total dims: {eigen_map.dim_theta if eigen_map else 0}")
             print(f"  k kept dims : {k_kept}")
             print(f"  eigenvalues : min={min_eval:.3e}, max={max_eval:.3e}")
             print(f"  whiten_basis: {whiten_basis}")
-        else:
-            eigen_map = None
 
-        if use_eigen and eigen_map is not None:
-            z0 = eigen_map.z_from_theta(theta0)
-            eigvals_kept = (
-                np.asarray(eigen_map.eigvals)
-                if eigen_map.eigvals is not None
-                else np.array([])
-            )
-            if whiten_basis:
-                lr_vec = np.ones_like(z0)
-                curvature_vec = np.ones_like(z0)
-            else:
-                lr_vec = 1.0 / (eigvals_kept + 1e-12)
-                curvature_vec = eigvals_kept
+            if eigen_map is not None:
+                z0 = eigen_map.z_from_theta(theta0)
+                if whiten_basis:
+                    lr_vec = np.ones_like(z0)
+                    curvature_vec = np.ones_like(z0)
+                else:
+                    lr_vec = 1.0 / (eigvals_kept + 1e-12)
+                    curvature_vec = eigvals_kept
 
-            index_map = build_eigen_index_map(eigen_map)
-            loss_opt = lambda z: loss_fn(eigen_map.theta_from_z(z))
-            theta0_opt = z0
-            metric_payload = {
-                "theta_ref": np.asarray(theta0_opt),
-                "metric_diag": np.asarray(curvature_vec),
-                "lr_scale": np.asarray(lr_vec),
-            }
-            precond_meta = {
-                **precond_meta_base,
-                "lr_vec": np.asarray(lr_vec),
-            }
+                index_map = build_eigen_index_map(eigen_map)
+                loss_opt = lambda z: nll_loss_fn(eigen_map.theta_from_z(z))
+                theta0_opt = z0
         else:
             index_map = build_index_map(inference_subspec, init_store, theta=theta0)
             lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
             curvature_vec = fim_diag
-            loss_opt = loss_fn
+            loss_opt = nll_loss_fn
             theta0_opt = theta0
-            metric_payload = {
-                "theta_ref": np.asarray(theta0_opt),
-                "metric_diag": np.asarray(curvature_vec),
-                "lr_scale": np.asarray(lr_vec),
-            }
-            precond_meta = {
-                **precond_meta_base,
-                "lr_vec": np.asarray(lr_vec),
-            }
+
+        loss_init = float(nll_loss_fn(theta0))
+        lr_vec = np.asarray(lr_vec) if lr_vec is not None else None
+        if run_index == 0:
+            print_dtype_audit(
+                "canonical_monte_carlo first_run_optimizer",
+                {
+                    "init_psf": init_psf,
+                    "theta0": theta0,
+                    "theta0_opt": theta0_opt,
+                    "loss_init": loss_init,
+                    "curvature_vec": curvature_vec,
+                    "lr_vec": lr_vec,
+                },
+            )
+        metric_payload = {
+            "theta_ref": np.asarray(theta0_opt),
+            "metric_diag": np.asarray(curvature_vec),
+            "lr_scale": np.asarray(lr_vec) if lr_vec is not None else None,
+        }
+        precond_meta = {**precond_meta_base, "lr_vec": metric_payload["lr_scale"]}
 
         labels_by_key = map_labels_to_keys(
-            INFER_KEYS,
+            infer_keys,
             fim_labels,
             store=init_store if use_eigen else None,
             index_map=None if use_eigen else index_map,
@@ -555,7 +551,7 @@ def main(
             loss_fn=loss_opt,
             theta0=theta0_opt,
             index_map=index_map,
-            learning_rate=BASE_LR,
+            learning_rate=base_lr,
             lr_vec=lr_vec,
             num_steps=n_iter,
             runs_dir=runs_dir,
@@ -568,7 +564,7 @@ def main(
                 "theta": {"labels_by_key": labels_by_key},
                 "mc": {
                     "index": run_index,
-                    "seed": int(rng_seed),
+                    "seed": int(experiment["seed"]),
                     "run_id": run_id,
                     "fast": fast,
                     "add_noise": add_noise,
@@ -583,20 +579,17 @@ def main(
             theta_final = theta_final_opt
 
         final_store = store_unpack_params(inference_subspec, theta_final, init_store)
-        final_psf = binder.model(
-            strip_structural(final_store, structural_keys=binder.structural_store_keys())
-        )
+        final_psf = binder.model(binder.strip_structural(final_store))
 
-        loss_init = float(loss_fn(theta0))
-        loss_final = float(loss_fn(theta_final))
+        loss_final = float(nll_loss_fn(theta_final))
         improvement_ratio = loss_init / loss_final if loss_final != 0 else float("nan")
 
         if artifacts is not None:
             run_dir = Path(artifacts["run_dir"]) if artifacts.get("run_dir") else None
             if run_dir is not None:
-                truth_dict = {key: truth_store.get(key) for key in INFER_KEYS}
-                init_dict = {key: init_store.get(key) for key in INFER_KEYS}
-                final_dict = {key: final_store.get(key) for key in INFER_KEYS}
+                truth_dict = {key: truth_store.get(key) for key in infer_keys}
+                init_dict = {key: init_store.get(key) for key in infer_keys}
+                final_dict = {key: final_store.get(key) for key in infer_keys}
                 param_summary = build_param_summary(init_dict, final_dict, truth=truth_dict)
                 patch_summary(
                     run_dir,
@@ -652,5 +645,59 @@ def main(
     print("Script finished in %.3f sec" % (t1_script - t0_script))
 
 
+def _validate_experiment(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    optimizer_cfg = experiment_cfg.get("optimizer", {})
+    outputs_cfg = experiment_cfg.get("outputs", {})
+    mc_cfg = experiment_cfg.get("monte_carlo", {})
+
+    return {
+        "seed": int(experiment_cfg.get("seed", DEFAULT_SEED)),
+        "infer_keys": tuple(experiment_cfg.get("infer_keys", DEFAULT_INFER_KEYS)),
+        "add_noise": bool(experiment_cfg.get("add_noise", ADD_NOISE)),
+        "save_plots": bool(outputs_cfg.get("save_plots", SAVE_PLOTS)),
+        "optimizer": {
+            "kind": optimizer_cfg.get("kind", "gd"),
+            "n_iter": int(optimizer_cfg.get("n_iter", DEFAULT_N_ITER)),
+            "n_iter_fast": int(optimizer_cfg.get("n_iter_fast", DEFAULT_FAST_ITER)),
+            "base_lr": float(optimizer_cfg.get("base_lr", DEFAULT_BASE_LR)),
+        },
+        "init_mode": experiment_cfg.get("init", {}).get("mode", "prior_sample"),
+        "n_runs": int(mc_cfg.get("n_runs", N_RUNS)),
+        "run_id_prefix": str(mc_cfg.get("run_id_prefix", RUN_ID_PREFIX)),
+    }
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Canonical Monte Carlo astrometry recipe")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to YAML/JSON config file (must include strict top-level system/experiment blocks).",
+    )
+    parser.add_argument("--system-preset", type=str, default=DEFAULT_SYSTEM_PRESET)
+    parser.add_argument("--experiment-preset", type=str, default=DEFAULT_EXPERIMENT_PRESET)
+    parser.add_argument("--results-dir", type=Path, default=None)
+    parser.add_argument("--fast", action="store_true", help="Use reduced optimization iterations.")
+    parser.add_argument("--no-eigen", action="store_true", help="Disable eigenmode optimization.")
+    parser.add_argument("--n-runs", type=int, default=None, help="Override number of Monte Carlo runs.")
+    parser.add_argument("--run-id-prefix", type=str, default=None, help="Prefix for run IDs.")
+    parser.add_argument("--add-noise", action="store_true", help="Force noise injection (overrides config).")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plot saving (overrides config).")
+    return parser
+
+
 if __name__ == "__main__":
-    main()
+    args = _build_parser().parse_args()
+    main(
+        config_path=args.config,
+        system_preset=args.system_preset,
+        experiment_preset=args.experiment_preset,
+        fast=bool(args.fast),
+        results_dir=args.results_dir,
+        use_eigen=not bool(args.no_eigen),
+        n_runs=args.n_runs,
+        run_id_prefix=args.run_id_prefix,
+        add_noise=bool(args.add_noise) if args.add_noise else None,
+        save_plots=False if args.no_plots else None,
+    )

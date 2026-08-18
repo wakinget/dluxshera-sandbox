@@ -2,14 +2,184 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass, replace as dataclass_replace
-from typing import Optional, Sequence, Self
+from collections.abc import Mapping
+from dataclasses import asdict, replace as dataclass_replace
+from typing import Callable, Optional, Sequence, Self
 
 import jax.numpy as jnp
 import dLux as dl
 
-from ..params.spec import ParamSpec
+from ..params.spec import ParamField, ParamSpec
 from ..params.store import ParameterStore, StoreNamespace
+
+
+def compose_forward_spec(system_cfg) -> ParamSpec:
+    """Compose a forward spec from source, optics, and detector contracts.
+
+    The composition order is deterministic:
+      1) source contract
+      2) optics contract (dispatched by ``system.optics.kind``)
+      3) detector contract
+
+    Key collisions across contracts raise ``ValueError`` with clear component
+    names to avoid silently shadowing fields.
+    """
+
+    from ..components.optics import SheraThreePlaneOptics, SheraTwoPlaneOptics
+    from ..components.sources import (
+        build_alpha_cen_contract,
+        build_binary_contract,
+        build_binary_target_contract,
+        build_single_star_contract,
+    )
+    from ..builders.detector import build_detector_contract
+
+    system_block = system_cfg.get("system") if isinstance(system_cfg, Mapping) else None
+    if system_block is None:
+        system_block = system_cfg
+
+    if not isinstance(system_block, Mapping):
+        raise ValueError("compose_forward_spec expects a mapping containing 'system' configuration.")
+
+    try:
+        source_cfg = system_block["source"]
+        optics_cfg = system_block["optics"]
+        detector_cfg = system_block["detector"]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "compose_forward_spec expects `system` to contain 'source', 'optics', and 'detector' keys."
+        ) from exc
+
+    if not isinstance(source_cfg, Mapping):
+        raise ValueError("system.source must be a mapping/dict.")
+    if not isinstance(optics_cfg, Mapping):
+        raise ValueError("system.optics must be a mapping/dict.")
+    if not isinstance(detector_cfg, Mapping):
+        raise ValueError("system.detector must be a mapping/dict.")
+
+    try:
+        source_kind = str(source_cfg["kind"]).lower()
+    except KeyError as exc:
+        raise ValueError("system.source.kind is required for forward spec composition.") from exc
+
+    try:
+        optics_kind = str(optics_cfg["kind"]).lower()
+    except KeyError as exc:
+        raise ValueError("system.optics.kind is required for forward spec composition.") from exc
+
+    source_contract_builders: dict[str, Callable[..., ParamSpec]] = {
+        "alpha_cen": build_alpha_cen_contract,
+        "binary": build_binary_contract,
+        "binary_target": build_binary_target_contract,
+        "single_star": build_single_star_contract,
+    }
+    optics_contract_builders: dict[str, Callable[..., ParamSpec]] = {
+        "two_plane": SheraTwoPlaneOptics.contract,
+        "three_plane": SheraThreePlaneOptics.contract,
+    }
+
+    source_builder = source_contract_builders.get(source_kind)
+    if source_builder is None:
+        supported = ", ".join(sorted(source_contract_builders))
+        raise ValueError(
+            f"Unknown source kind {source_kind!r} when composing forward spec. "
+            f"Supported source kinds: {supported}."
+        )
+    optics_builder = optics_contract_builders.get(optics_kind)
+    if optics_builder is None:
+        supported = ", ".join(sorted(optics_contract_builders))
+        raise ValueError(
+            f"Unknown optics kind {optics_kind!r} when composing forward spec. "
+            f"Supported optics kinds: {supported}."
+        )
+
+    source_contract = source_builder(source_cfg)
+    optics_contract = optics_builder(optics_cfg)
+
+    detector_contract = build_detector_contract(detector_cfg)
+
+    contracts = (
+        ("source", source_contract),
+        ("optics", optics_contract),
+        ("detector", detector_contract),
+    )
+
+    merged_fields = []
+    seen_keys: dict[str, str] = {}
+    for contract_name, contract in contracts:
+        for field in contract.values():
+            owner = seen_keys.get(field.key)
+            if owner is not None:
+                raise ValueError(
+                    "Forward spec contract key collision on "
+                    f"{field.key!r}: present in both {owner!r} and {contract_name!r}."
+                )
+            seen_keys[field.key] = contract_name
+            merged_fields.append(field)
+
+    system_id = (
+        "shera_threeplane"
+        if optics_kind == "three_plane"
+        else "shera_twoplane"
+    )
+    return ParamSpec(merged_fields, system_id=system_id)
+
+
+def _cfg_get(root, path: str, default=None):
+    """Read a dotted path from mapping- or attribute-based configs."""
+
+    parts = path.split(".")
+
+    def _walk(obj, keys):
+        cur = obj
+        for key in keys:
+            if cur is None:
+                return default
+            if isinstance(cur, Mapping):
+                cur = cur.get(key, None)
+            else:
+                cur = getattr(cur, key, None)
+        return default if cur is None else cur
+
+    # Primary attempt: walk as given
+    value = _walk(root, parts)
+    if value is not default:
+        return value
+
+    # Fallback: if first key is "system" but root is already a system mapping
+    if parts and parts[0] == "system" and isinstance(root, Mapping) and "system" not in root:
+        return _walk(root, parts[1:])
+
+    return value
+
+
+def _detect_optics_kind_from_cfg(cfg) -> str:
+    """Return optics kind from config with compatibility fallbacks."""
+
+    # Try direct system mapping first
+    kind = _cfg_get(cfg, "optics.kind", default=None)
+    if kind is not None:
+        return str(kind)
+
+    # Nested system mapping fallback
+    kind = _cfg_get(cfg, "system.optics.kind", default=None)
+    if kind is not None:
+        return str(kind)
+
+    cfg_name = type(cfg).__name__.lower()
+    if "threeplane" in cfg_name:
+        return "three_plane"
+    if "twoplane" in cfg_name:
+        return "two_plane"
+
+    kind = _cfg_get(cfg, "optics_kind", default=None)
+    if kind is not None:
+        return str(kind)
+
+    raise ValueError(
+        "Unable to resolve optics kind from config. Expected "
+        "`system.optics.kind` (e.g. 'two_plane' or 'three_plane')."
+    )
 
 
 class BaseConfig:
@@ -26,6 +196,9 @@ class BaseConfig:
         return dataclass_replace(self, **kwargs)
 
 
+_RUNTIME_MISSING = object()
+
+
 BINDER_RESERVED_NAMES = {
     "cfg",
     "forward_spec",
@@ -37,7 +210,7 @@ BINDER_RESERVED_NAMES = {
 }
 
 
-class BaseSheraBinder:
+class SheraBinder:
     """Shared backbone for Shera binder implementations.
 
     Encapsulates the common binder behaviour: storing config/spec/base-store,
@@ -51,7 +224,7 @@ class BaseSheraBinder:
     call.
     """
 
-    cfg: "SheraThreePlaneConfig | SheraTwoPlaneConfig"
+    cfg: object
     forward_spec: ParamSpec
     base_forward_store: ParameterStore
     structural_hash: Optional[str]
@@ -110,10 +283,10 @@ class BaseSheraBinder:
     def __dir__(self) -> list[str]:
         """List attribute names available on the binder.
 
-        This augments the default ``dir()`` output with configuration fields,
-        store namespace prefixes, and unique leaf keys (when unambiguous).
-        Use this for discovery in interactive sessions; it does not mutate the
-        binder and only reflects the current base store/config.
+        This augments the default ``dir()`` output with store namespace
+        prefixes and unique ParamField leaf names. Use this for discovery in
+        interactive sessions; it does not mutate the binder and only reflects
+        the current base store/spec.
 
         Returns
         -------
@@ -132,12 +305,8 @@ class BaseSheraBinder:
             ):
                 entries.add(name)
 
-        if is_dataclass(self.cfg):
-            for field in fields(self.cfg):
-                _maybe_add(field.name)
-
         prefixes = set()
-        for key in self.base_forward_store.keys():
+        for key in self.forward_spec.keys():
             if "." not in key:
                 continue
             prefix, _ = key.split(".", 1)
@@ -153,65 +322,77 @@ class BaseSheraBinder:
         return sorted(entries)
 
     def __getattr__(self, name: str) -> object:
-        """Resolve dynamic attributes from the config or base store.
-
-        Resolution order:
-        1) Configuration attributes (e.g., ``binder.oversample``).
-        2) Namespace proxies for store prefixes (``binder.ns("prefix")``).
-        3) Unique leaf names in the store (unambiguous suffixes).
-
-        Use this for ergonomic access to configuration fields and store values.
-        For ambiguous leaf names, prefer ``binder.<prefix>.<leaf>`` or
-        ``binder.get("full.key")``.
-
-        Parameters
-        ----------
-        name : str
-            Attribute name being requested.
-
-        Returns
-        -------
-        Any
-            Configuration attribute value, store namespace proxy, or store
-            value.
-
-        Raises
-        ------
-        AttributeError
-            If ``name`` is reserved, missing, or refers to an ambiguous leaf
-            name in the store.
-        """
+        """Resolve dynamic attributes via ParamField bindings (runtime-first)."""
         if name in BINDER_RESERVED_NAMES:
             raise AttributeError(name)
-
-        if hasattr(self.cfg, name):
-            return getattr(self.cfg, name)
-
-        has_prefix = name.isidentifier() and any(
-            key.startswith(f"{name}.") for key in self.base_forward_store.keys()
-        )
-        if has_prefix:
-            return self.ns(name)
 
         leaf_index = self._leaf_index()
         if name in leaf_index:
             candidates = leaf_index[name]
-            if len(candidates) == 1:
-                return self.base_forward_store.get(candidates[0])
-
-            candidate_list = ", ".join(sorted(candidates))
-            raise AttributeError(
-                "Ambiguous leaf name {leaf!r} found in store keys: {candidates}. "
-                "Use binder.<prefix>.{leaf} or binder.get(\"<full.key>\")".format(
-                    leaf=name, candidates=candidate_list
+            if len(candidates) > 1:
+                candidate_list = ", ".join(sorted(candidates))
+                raise AttributeError(
+                    "Ambiguous leaf name {leaf!r} found in ParamSpec keys: {candidates}. "
+                    "Use binder.get(\"<full.key>\") for an explicit lookup.".format(
+                        leaf=name, candidates=candidate_list
+                    )
                 )
-            )
+
+            field_key = candidates[0]
+            field = self.forward_spec.get(field_key)
+            found, value = self._read_runtime_value(field)
+            if found:
+                return value
+
+            try:
+                return self.base_forward_store.get(field.key)
+            except KeyError as exc:
+                raise AttributeError(
+                    f"Unable to resolve {name!r}: runtime binding "
+                    f"{self._binding_path_for_field(field)!r} missing on "
+                    f"{self._component_for_field(field)!r} and "
+                    "base_forward_store has no value."
+                ) from exc
+
+        found_runtime, runtime_value = self._runtime_leaf_fallback(name)
+        if found_runtime:
+            return runtime_value
+
+        if name.isidentifier() and any(
+            key.startswith(f"{name}.") for key in self.base_forward_store.keys()
+        ):
+            return self.ns(name)
 
         raise AttributeError(name)
 
     # ------------------------------------------------------------------
     # Hooks for subclasses
     # ------------------------------------------------------------------
+
+    def _cfg_get(self, path: str, default=None):
+        """Read a dotted path from mapping- or attribute-based configs."""
+        return _cfg_get(self.cfg, path, default=default)
+
+    def _detect_optics_kind(self) -> str:
+        """Return the configured optics kind with backward-compatible fallback."""
+        return _detect_optics_kind_from_cfg(self.cfg)
+
+    def _detect_source_kind(self) -> str:
+        """Return the configured source kind with backward-compatible fallback."""
+
+        kind = self._cfg_get("source.kind", default=None)
+        if kind is not None:
+            return str(kind).lower()
+
+        kind = self._cfg_get("system.source.kind", default=None)
+        if kind is not None:
+            return str(kind).lower()
+
+        kind = self._cfg_get("source_kind", default=None)
+        if kind is not None:
+            return str(kind).lower()
+
+        return "binary"
 
     def _build_detector(self) -> dl.LayeredDetector:
         """Construct the detector instance for the binder.
@@ -234,9 +415,10 @@ class BaseSheraBinder:
         """
         from ..builders.detector import build_detector
 
-        return build_detector(self.cfg)
+        detector, _detector_contract = build_detector(self.cfg)
+        return detector
 
-    def _build_optics(self, store: ParameterStore):  # pragma: no cover - abstract hook
+    def _build_optics(self, store: ParameterStore):
         """Build the optics model for the given store.
 
         Called when constructing a telescope (either at initialization or via
@@ -257,11 +439,27 @@ class BaseSheraBinder:
         -----
         Subclasses should treat structural changes in ``store`` as requiring a
         rebuild. Non-structural keys that can be updated at runtime should be
-        surfaced via :meth:`_optics_runtime_bindings`.
+        surfaced via runtime binding pairs on the optics component.
         """
-        raise NotImplementedError
+        from ..builders.optics import build_shera_threeplane_optics, build_shera_twoplane_optics
 
-    def _build_source(self, store: ParameterStore):  # pragma: no cover - abstract hook
+        optics_builders: dict[str, Callable[..., object]] = {
+            "two_plane": build_shera_twoplane_optics,
+            "three_plane": build_shera_threeplane_optics,
+        }
+
+        optics_kind = self._detect_optics_kind()
+        try:
+            builder = optics_builders[optics_kind]
+        except KeyError as exc:
+            supported = ", ".join(sorted(optics_builders))
+            raise ValueError(
+                f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
+            ) from exc
+
+        return builder(self.cfg, store=store, spec=self.forward_spec)
+
+    def _build_source(self, store: ParameterStore):
         """Build the source model for the given store.
 
         Called when constructing a telescope or applying runtime updates that
@@ -285,7 +483,30 @@ class BaseSheraBinder:
         Source construction is typically lightweight; it is rebuilt for
         runtime updates even when optics are updated via bindings.
         """
-        raise NotImplementedError
+        from ..builders.source import (
+            build_alpha_cen_source,
+            build_binary_source,
+            build_binary_target_source,
+            build_single_star_source,
+        )
+
+        source_builders: dict[str, Callable[..., object]] = {
+            "binary": build_binary_source,
+            "binary_target": build_binary_target_source,
+            "alpha_cen": build_alpha_cen_source,
+            "single_star": build_single_star_source,
+        }
+
+        source_kind = self._detect_source_kind()
+        try:
+            builder = source_builders[source_kind]
+        except KeyError as exc:
+            supported = ", ".join(sorted(source_builders))
+            raise ValueError(
+                f"Unknown source kind {source_kind!r}. Supported source kinds: {supported}."
+            ) from exc
+
+        return builder(store, cfg=self.cfg)
 
     def _build_telescope(
         self,
@@ -322,52 +543,35 @@ class BaseSheraBinder:
             detector=detector,
         )
 
-    def _direct_model(self, eff_store: ParameterStore) -> jnp.ndarray:  # pragma: no cover - abstract hook
-        """Evaluate the model using a fully merged effective store.
+    def _group_names_for_component(self, component: str) -> tuple[str, ...]:
+        """Return ParamField groups associated with a binder component."""
 
-        Called by :meth:`model` after merging a non-structural store delta with
-        the base store. Subclasses should implement this as a direct modeling
-        path (usually by building a telescope and calling ``model()``).
+        group_aliases = {
+            "optics": ("optics", "system", "band", "primary", "secondary"),
+            "source": ("source",),
+            "detector": ("detector", "imaging"),
+        }
+        try:
+            return group_aliases[component]
+        except KeyError as exc:
+            raise ValueError(f"Unknown binder component: {component!r}") from exc
 
-        Parameters
-        ----------
-        eff_store : ParameterStore
-            Fully validated store that includes all values needed for a model
-            evaluation.
-
-        Returns
-        -------
-        jax.numpy.ndarray
-            The evaluated PSF model output.
-
-        Notes
-        -----
-        This method should not mutate the binder; use runtime bindings or
-        rebuild logic for structural changes instead of modifying state here.
+    def _runtime_binding_pairs(self, component: str) -> tuple[tuple[str, str], ...]:
         """
-        raise NotImplementedError
+        Return runtime binding pairs (store_key, runtime_path) for a component.
 
-    def _optics_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural optics keys.
-
-        Runtime bindings map store keys to optics attributes (or paths) that
-        can be updated without rebuilding the full optics model. Subclasses
-        should override this to list the non-structural optics keys eligible
-        for fast-path updates.
+        This is used by the runtime update/patch path and remains limited to
+        fields that explicitly declare ``binding`` metadata in the forward spec.
         """
-        return ()
-
-    def _source_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural source keys."""
-        from ..builders.source import SOURCE_RUNTIME_BINDINGS
-
-        return SOURCE_RUNTIME_BINDINGS
-
-    def _detector_runtime_bindings(self) -> tuple[tuple[str, str], ...]:
-        """Return runtime binding pairs for non-structural detector keys."""
-        from ..builders.detector import DETECTOR_RUNTIME_BINDINGS
-
-        return DETECTOR_RUNTIME_BINDINGS
+        groups = set(self._group_names_for_component(component))
+        pairs: list[tuple[str, str]] = []
+        for field in self.forward_spec.values():
+            if field.binding is None:
+                continue
+            if field.group not in groups:
+                continue
+            pairs.append((field.key, field.binding))
+        return tuple(pairs)
 
     def _compute_structural_hash(self) -> Optional[str]:
         """Compute a structural hash for the current configuration.
@@ -387,28 +591,26 @@ class BaseSheraBinder:
         The structural hash is compared against the stored value to determine
         if runtime bindings are safe or if a rebuild is required.
         """
-        return None
+        from ..builders.optics import structural_hash_for_twoplane, structural_hash_from_config
 
-    def _optics_structural_keys(self) -> set[str]:
-        """Return store keys treated as structural for the optics component."""
-
-        structural_keys = {
-            key
-            for key in self.forward_spec.keys()
-            if key.startswith(("system.", "band."))
+        optics_kind = self._detect_optics_kind()
+        hash_fns: dict[str, Callable[..., str]] = {
+            "three_plane": structural_hash_from_config,
+            "two_plane": structural_hash_for_twoplane,
         }
-        runtime_keys = {store_key for store_key, _ in self._optics_runtime_bindings()}
-        return structural_keys - runtime_keys
+        cfg_for_hash = (
+            self.cfg["system"]
+            if isinstance(self.cfg, Mapping) and "system" in self.cfg
+            else self.cfg
+        )
+        if optics_kind not in hash_fns:
+            supported = ", ".join(sorted(hash_fns))
+            raise ValueError(
+                f"Unknown optics kind {optics_kind!r}. Supported optics kinds: {supported}."
+            )
+        struct_hash = hash_fns[optics_kind](cfg_for_hash)
 
-    def _source_structural_keys(self) -> set[str]:
-        """Return store keys treated as structural for the source component."""
-
-        return set()
-
-    def _detector_structural_keys(self) -> set[str]:
-        """Return store keys treated as structural for the detector component."""
-
-        return set()
+        return f"optics_kind={optics_kind}:{struct_hash}"
 
     def _apply_runtime_updates(self, store: ParameterStore) -> dl.Telescope:
         """Apply runtime bindings to update cached telescope components."""
@@ -420,18 +622,18 @@ class BaseSheraBinder:
         optics = optics_builder.apply_runtime_bindings(
             self.telescope.optics,
             store,
-            self._optics_runtime_bindings(),
+            self._runtime_binding_pairs("optics"),
         )
         source = source_builder.apply_runtime_bindings(
             self.telescope.source,
             store,
             cfg=self.cfg,
-            bindings=self._source_runtime_bindings(),
+            bindings=self._runtime_binding_pairs("source"),
         )
         detector = detector_builder.apply_runtime_bindings(
             self.telescope.detector,
             store,
-            self._detector_runtime_bindings(),
+            self._runtime_binding_pairs("detector"),
         )
         return dl.Telescope(source=source, optics=optics, detector=detector)
 
@@ -453,7 +655,7 @@ class BaseSheraBinder:
             optics = optics_builder.apply_runtime_bindings(
                 self.telescope.optics,
                 store,
-                self._optics_runtime_bindings(),
+                self._runtime_binding_pairs("optics"),
             )
 
         if "source" in structural_components:
@@ -463,7 +665,7 @@ class BaseSheraBinder:
                 self.telescope.source,
                 store,
                 cfg=self.cfg,
-                bindings=self._source_runtime_bindings(),
+                bindings=self._runtime_binding_pairs("source"),
             )
 
         if "detector" in structural_components:
@@ -474,7 +676,7 @@ class BaseSheraBinder:
         detector = detector_builder.apply_runtime_bindings(
             detector,
             store,
-            self._detector_runtime_bindings(),
+            self._runtime_binding_pairs("detector"),
         )
 
         return dl.Telescope(source=source, optics=optics, detector=detector)
@@ -519,12 +721,89 @@ class BaseSheraBinder:
         )
         return self.base_forward_store.replace(store_delta.as_dict())
 
+    # ------------------------------------------------------------------
+    # Contract-driven runtime access helpers
+    # ------------------------------------------------------------------
+
+    def _binding_path_for_field(self, field: ParamField) -> str:
+        """Return the runtime path for a ParamField (defaults to leaf name)."""
+        return field.binding or field.key.split(".")[-1]
+
+    def _component_for_field(self, field: ParamField) -> str:
+        """Return the binder component that owns a ParamField."""
+        for component in ("optics", "source", "detector"):
+            if field.group in self._group_names_for_component(component):
+                return component
+        raise AttributeError(f"Unknown component for field {field.key!r}")
+
+    def _resolve_runtime_path(self, obj: object, path: str) -> object:
+        """Traverse a dotted path on a runtime object, returning a sentinel on miss."""
+        current = obj
+        for segment in path.split("."):
+            if current is None:
+                return _RUNTIME_MISSING
+            try:
+                current = getattr(current, segment)
+                continue
+            except AttributeError:
+                pass
+
+            if isinstance(current, Mapping) and segment in current:
+                current = current[segment]
+                continue
+
+            if isinstance(current, (list, tuple)) and segment.isdigit():
+                idx = int(segment)
+                if 0 <= idx < len(current):
+                    current = current[idx]
+                    continue
+
+            return _RUNTIME_MISSING
+
+        return current
+
+    def _read_runtime_value(self, field: ParamField) -> tuple[bool, object]:
+        """Return (found, value) using runtime component binding for a field."""
+        component = self._component_for_field(field)
+        component_obj = getattr(self, component)
+        runtime_path = self._binding_path_for_field(field)
+
+        try:
+            value = self._resolve_runtime_path(component_obj, runtime_path)
+        except Exception:
+            return False, _RUNTIME_MISSING
+
+        if value is _RUNTIME_MISSING:
+            return False, _RUNTIME_MISSING
+        return True, value
+
+    def _runtime_leaf_fallback(self, name: str) -> tuple[bool, object]:
+        """Return (found, value) for a runtime leaf on source/optics/detector."""
+        candidates: list[tuple[str, object]] = []
+        for component_name in ("source", "optics", "detector"):
+            component = getattr(self, component_name)
+            value = self._resolve_runtime_path(component, name)
+            if value is _RUNTIME_MISSING:
+                continue
+            candidates.append((component_name, value))
+
+        if not candidates:
+            return False, _RUNTIME_MISSING
+        if len(candidates) == 1:
+            return True, candidates[0][1]
+
+        component_list = ", ".join(comp for comp, _ in candidates)
+        raise AttributeError(
+            f"Ambiguous runtime leaf {name!r} present on components: {component_list}. "
+            "Access the desired component explicitly (e.g., binder.source.{name} or binder.optics.{name})."
+        )
+
     def _leaf_index(self) -> dict[str, list[str]]:
         """Build an index mapping leaf names to full store paths.
 
         Called by ``__dir__`` and ``__getattr__`` to allow ergonomic access to
-        store values by leaf name (suffix). This is a read-only helper that
-        scans the base store keys.
+        ParamField leaf names (suffixes). This is a read-only helper that
+        scans the forward spec keys.
 
         Returns
         -------
@@ -539,7 +818,8 @@ class BaseSheraBinder:
 
         leaf_index: dict[str, list[str]] = {}
 
-        for key in self.base_forward_store.keys():
+        for field in self.forward_spec.values():
+            key = field.key
             if "." not in key:
                 continue
 
@@ -557,18 +837,22 @@ class BaseSheraBinder:
         paths: str | Sequence[str],
         default: object | None = None,
     ) -> object | list[object]:
-        """Retrieve values from the configuration or base store.
+        """Retrieve values from the configuration, base store, or runtime objects.
 
         This method is a convenience accessor that reads configuration fields
-        (by attribute name) or store values (by key). Use it when you need a
-        uniform accessor that works for both config fields and store entries.
-        When ``paths`` is a sequence, a list of resolved values is returned.
+        (by attribute name), store values (by key), or explicit component
+        runtime paths such as ``detector.layers.pixel_offsets.dx_map``. Use it
+        when you need a uniform accessor that works across config, store, and
+        binder-owned runtime objects. When ``paths`` is a sequence, a list of
+        resolved values is returned.
 
         Parameters
         ----------
         paths : str | Sequence[str]
             A single config attribute name or store key, or a sequence of them.
-            Store keys containing ``"."`` are treated as fully-qualified keys.
+            Dotted paths are first resolved against the base store and then,
+            when absent there, against ``source``, ``optics``, or ``detector``
+            runtime objects.
         default : Any, optional
             Default to return if the store key is missing. When ``None``, a
             missing key raises the underlying store error.
@@ -591,9 +875,20 @@ class BaseSheraBinder:
 
         path = paths
         if isinstance(path, str) and "." in path:
+            value = self.base_forward_store.get(path, _RUNTIME_MISSING)
+            if value is not _RUNTIME_MISSING:
+                return value
+
+            component_name, _, runtime_path = path.partition(".")
+            if runtime_path and component_name in {"source", "optics", "detector"}:
+                component = getattr(self, component_name)
+                runtime_value = self._resolve_runtime_path(component, runtime_path)
+                if runtime_value is not _RUNTIME_MISSING:
+                    return runtime_value
+
             if default is None:
                 return self.base_forward_store.get(path)
-            return self.base_forward_store.get(path, default)
+            return default
 
         if hasattr(self.cfg, path):
             return getattr(self.cfg, path)
@@ -641,21 +936,22 @@ class BaseSheraBinder:
         return StoreNamespace(self.base_forward_store, prefix)
 
     def _structural_keys_by_component(self) -> dict[str, set[str]]:
-        """Return structural keys grouped by component."""
+        """Return structural keys grouped by binder component."""
 
+        structural_by_group = self.forward_spec.structural_keys_by_group()
         return {
-            "optics": self._optics_structural_keys(),
-            "source": self._source_structural_keys(),
-            "detector": self._detector_structural_keys(),
+            component: {
+                key
+                for group in self._group_names_for_component(component)
+                for key in structural_by_group.get(group, set())
+            }
+            for component in ("optics", "source", "detector")
         }
 
     def _structural_keys(self) -> set[str]:
         """Return the union of structural keys across all components."""
 
-        structural_keys: set[str] = set()
-        for keys in self._structural_keys_by_component().values():
-            structural_keys |= set(keys)
-        return structural_keys
+        return self.forward_spec.structural_keys()
 
     def _structural_keys_in_store(self, store: ParameterStore) -> list[str]:
         """Return the structural keys present in ``store``."""
@@ -666,6 +962,9 @@ class BaseSheraBinder:
     @staticmethod
     def _values_equal(current_value: object, incoming_value: object) -> bool:
         """Return whether two values are equivalent for structural checks."""
+
+        if current_value is None and incoming_value is None:
+            return True
 
         try:
             return bool(
@@ -703,6 +1002,26 @@ class BaseSheraBinder:
         """
 
         return self._structural_keys()
+
+    def strip_structural(self, store: ParameterStore) -> ParameterStore:
+        """
+        Return a new store with structural keys removed according to this binder's
+        forward spec (contract-driven).
+
+        Parameters
+        ----------
+        store:
+            Store to remove structural keys from.
+
+        Returns
+        -------
+        ParameterStore
+            Store with any keys in `self.structural_store_keys()` removed.
+        """
+
+        structural = self.structural_store_keys()
+        filtered = {key: value for key, value in store.items() if key not in structural}
+        return ParameterStore.from_dict(filtered)
 
     def model(
         self,
@@ -779,11 +1098,28 @@ class BaseSheraBinder:
     def detector(self) -> dl.LayeredDetector:
         return self.telescope.detector
 
+    def __repr__(self) -> str:  # pragma: no cover - formatting covered in tests
+        def _indent_block(text: str, indent: int = 2) -> str:
+            pad = " " * indent
+            return "\n".join(f"{pad}{line}" for line in text.splitlines())
+
+        lines = ["SheraBinder("]
+        lines.append("  source=")
+        lines.append(_indent_block(repr(self.source), indent=4))
+        lines.append("  optics=")
+        lines.append(_indent_block(repr(self.optics), indent=4))
+        lines.append("  detector=")
+        lines.append(_indent_block(repr(self.detector), indent=4))
+        lines.append(")")
+        return "\n".join(lines)
+
+    __str__ = __repr__
+
     # ------------------------------------------------------------------
     # Mostly immutable helpers
     # ------------------------------------------------------------------
 
-    def with_store(self, new_base_store: ParameterStore) -> "BaseSheraBinder":
+    def with_store(self, new_base_store: ParameterStore) -> "SheraBinder":
         """Return a new binder that uses a different base store.
 
         This is an immutable-style helper: it constructs a new binder instance
@@ -798,7 +1134,7 @@ class BaseSheraBinder:
 
         Returns
         -------
-        BaseSheraBinder
+        SheraBinder
             New binder instance with the updated base store.
 
         Raises
@@ -818,7 +1154,7 @@ class BaseSheraBinder:
         store: ParameterStore,
         *,
         allow_rebuild: bool = False,
-    ) -> "BaseSheraBinder":
+    ) -> "SheraBinder":
         """Return a new binder with an updated base store.
 
         This immutable-style helper validates the incoming store and applies
@@ -884,6 +1220,6 @@ class BaseSheraBinder:
 
 __all__ = [
     "BaseConfig",
-    "BaseSheraBinder",
+    "SheraBinder",
     "BINDER_RESERVED_NAMES",
 ]

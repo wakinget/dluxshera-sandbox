@@ -1,14 +1,18 @@
 """Prescribed Monte Carlo experiment.
 
-Purpose: provide a robust way to define and run monte carlo experiments
+Purpose: provide a robust way to define and run monte carlo experiments.
 Local helpers are defined here for now and document whether they are reusable.
 
 Execution flow
 --------------
-- Load the prescription JSON and optional per-run overrides CSV.
-- Resolve run specs and seeds, plus experiment-wide config/store overrides.
-- Build truth/init stores for each run, then generate synthetic observations with
-  optional noise.
+- Load the prescription YAML/JSON (native system/experiment config) and optional
+  run plan CSV specified inside the experiment config. Plan paths are resolved
+  relative to the config file when relative. If no plan is specified, defaults
+  are derived solely from the experiment config.
+- Resolve run specs from experiment-level controls (seed, optimizer, eigenmodes,
+  infer_keys, noise, outputs, init, priors) and experiment.monte_carlo settings.
+- Build data and inference systems (optionally distinct via experiment.inference_system),
+  generate synthetic observations with optional noise, and run inference.
 - Run optimization in eigen space (FIM-based) or primitive parameter space.
 - Write run artifacts under runs/<run_id>/..., including summaries and logs.
 - Aggregate manifest.json and results.csv across runs at the experiment root.
@@ -20,18 +24,21 @@ Notes behavior
 - Experiment-level note: set `experiment.notes` in the prescription (aliases:
   `experiment.note`, `experiment.comment`, `experiment.comments`). This value
   is written once to top-level `manifest.json["notes"]`.
-- Per-run note: set `note`/`notes`/`comment`/`comments` in overrides rows.
-  The resolved value is stored as `run_note` in run summaries and aggregate
-  outputs.
+- Per-run note: set `note`/`notes`/`comment`/`comments` in run plan rows. The
+  resolved value is stored as `run_note` in run summaries and aggregate outputs.
+- Detector knowledge-error realization policy: detector-layer
+  `knowledge_error.realization_policy` supports `fixed_per_experiment` (default)
+  and `per_run`. Explicit `knowledge_error.seed` remains authoritative. The
+  inference-side base config is kept unseeded outside the run loop so `per_run`
+  layers are realized fresh from each resolved run seed.
 
 CLI arguments (mirrors `main`)
 ------------------------------
-- --prescription: JSON experiment recipe (defaults to template when omitted).
-- --overrides: optional CSV of per-run overrides (defaults to template when omitted).
-- --outdir: root output directory for the experiment (experiment root). If
-  omitted, the output directory is derived from `--run-name` or a timestamp.
+- --prescription: YAML/JSON experiment config (defaults to template when omitted).
+- --outdir: explicit experiment root directory. When provided, this overrides
+  `experiment.outputs.outdir`.
 - --run-name: optional name segment used to build Results/<run-name> when
-  `--outdir` is not provided. If both are omitted, a timestamp tag is used.
+  neither `--outdir` nor `experiment.outputs.outdir` is set.
   This remains as a convenience for quick naming when you do not want to type
   a full `--outdir` path, rather than being deprecated.
 - --dry-run: resolve and preview run specs without executing optimization.
@@ -59,6 +66,9 @@ import jax.random as jr
 import numpy as np
 import matplotlib.pyplot as plt
 
+from dluxshera.config.io import load_user_config, load_config_file
+from dluxshera.config.numeric import coerce_numeric_value, normalize_optimizer_kwargs
+from dluxshera.config.resolver import resolve_config, resolve_system_config
 from dluxshera.inference.optimization import (
     EigenThetaMap,
     fim_theta,
@@ -66,6 +76,7 @@ from dluxshera.inference.optimization import (
     make_binder_nll_fn,
     map_labels_to_keys,
     run_shera_gd,
+    diagnose_first_step,
 )
 from dluxshera.inference.prior import PriorSpec
 from dluxshera.inference.run_artifacts import (
@@ -80,29 +91,36 @@ from dluxshera.params.packing import (
     pack_params,
     unpack_params as store_unpack_params,
 )
-from dluxshera.params.spec import build_inference_spec_basic, make_inference_subspec
-from dluxshera.params.store import ParameterStore, strip_structural
+from dluxshera.params.store import ParameterStore
 from dluxshera.plot.plotting import (
     apply_plot_defaults,
     get_default_cmaps,
     plot_eigenvalue_spectrum,
     plot_fim,
     plot_parameter_history,
+    plot_pixel_response_maps,
     plot_psf_comparison,
     plot_signals_grid,
+    plot_pixel_offset_maps,
 )
-from dluxshera.systems.three_plane import (
-    SHERA_FLIGHT_CONFIG,
-    SHERA_TESTBED_CONFIG,
-    SheraThreePlaneConfig,
-    SheraThreePlaneBinder,
-    build_forward_spec_from_config,
+from dluxshera.systems import SheraBinder
+from dluxshera.systems.base import compose_forward_spec
+from dluxshera.utils.noise import (
+    apply_observation_noise,
+    make_subseed,
+)
+from dluxshera.utils.detector_knowledge_error import (
+    detector_ke_has_per_run_realization,
+    normalize_realization_policy,
+    seed_detector_layer_knowledge_errors,
+)
+from dluxshera.utils.chi2_diagnostics import (
+    reduced_chi2_between_images as _reduced_chi2_between_images,
 )
 
 DEFAULT_PRESCRIPTION_PATH = Path(
-    "examples/recipes/prescription_templates/prescription.json"
+    "examples/recipes/prescribed_mc_template/prescription.yaml"
 )
-DEFAULT_OVERRIDES_PATH = Path("examples/recipes/prescription_templates/overrides.csv")
 PLAN_FREE_TEXT_COLUMNS = frozenset({"note", "notes", "comment", "comments"})
 EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 
@@ -110,6 +128,192 @@ EXPERIMENT_NOTE_KEYS = ("notes", "note", "comment", "comments")
 _ = get_default_cmaps()
 apply_plot_defaults()
 plt.rcParams["image.cmap"] = "inferno_nan"
+
+LEGACY_KEY_MAP = {
+    "binary.separation_as": "source.separation_as",
+    "binary.position_angle_deg": "source.position_angle_deg",
+    "binary.x_position_as": "source.x_position_as",
+    "binary.y_position_as": "source.y_position_as",
+    "binary.log_flux_total": "source.log_flux_total",
+    "binary.contrast": "source.contrast",
+    "system.plate_scale_as_per_pix": "optics.plate_scale_as_per_pix",
+    "primary.zernike_coeffs_nm": "optics.primary.zernike_coeffs_nm",
+    "secondary.zernike_coeffs_nm": "optics.secondary.zernike_coeffs_nm",
+    "imaging.exposure_time_s": "source.exposure_time_s",
+}
+
+
+def _get_pixel_offset_maps(binder: SheraBinder):
+    """Return (dx_map, dy_map) from the binder if pixel_offsets layer exists."""
+    layer = binder.detector.layers.get("pixel_offsets") if hasattr(binder, "detector") else None
+    if layer is None or not hasattr(layer, "dx_map") or not hasattr(layer, "dy_map"):
+        return None
+    return np.asarray(layer.dx_map), np.asarray(layer.dy_map)
+
+
+def _get_pixel_response_map(binder: SheraBinder):
+    """Return pixel_response map from the binder if the layer exists."""
+    layer = binder.detector.layers.get("pixel_response") if hasattr(binder, "detector") else None
+    if layer is None or not hasattr(layer, "pixel_response"):
+        return None
+    return np.asarray(layer.pixel_response)
+
+
+def _refresh_preserving_derived_infer_keys(store, *, infer_keys: tuple[str, ...], spec):
+    """Refresh derived values while preserving sampled values for derived infer keys."""
+    sampled_derived: dict[str, Any] = {}
+    for key in infer_keys:
+        if key not in spec:
+            continue
+        if spec.get(key).kind != "derived":
+            continue
+        try:
+            sampled_derived[key] = store.get(key)
+        except KeyError:
+            continue
+
+    refreshed = store.refresh_derived(spec)
+    if sampled_derived:
+        refreshed = refreshed.replace(sampled_derived)
+    return refreshed
+
+
+def _trace_with_initial_point(
+    trace: dict[str, Any],
+    *,
+    theta0: np.ndarray,
+    loss0: float | None = None,
+) -> dict[str, Any]:
+    """Return a trace copy with iteration-0 (sampled init) prepended."""
+    theta_hist = np.asarray(trace["theta"])
+    theta0_arr = np.asarray(theta0)
+
+    prepend_theta0 = True
+    if theta_hist.shape[0] > 0 and np.allclose(theta_hist[0], theta0_arr, rtol=0.0, atol=0.0):
+        prepend_theta0 = False
+
+    trace_with_init = dict(trace)
+    if prepend_theta0:
+        trace_with_init["theta"] = np.concatenate((theta0_arr[None, ...], theta_hist), axis=0)
+
+        if "loss" in trace:
+            loss_hist = np.asarray(trace["loss"])
+            loss0_value = np.nan if loss0 is None else float(loss0)
+            trace_with_init["loss"] = np.concatenate(
+                (np.asarray([loss0_value], dtype=loss_hist.dtype), loss_hist),
+                axis=0,
+            )
+    else:
+        trace_with_init["theta"] = theta_hist
+
+    return trace_with_init
+
+
+def _require_experiment_seed(experiment_cfg: dict[str, Any]) -> int:
+    seed = experiment_cfg.get("seed")
+    if seed is None:
+        raise ValueError("experiment.seed is required for prescribed Monte Carlo.")
+    return int(seed)
+
+
+def _eigen_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    eigen_block = experiment_cfg.get("eigenmodes") or experiment_cfg.get("eigen") or {}
+    return {
+        "use_eigen": bool(eigen_block.get("enable", eigen_block.get("use_eigen", False))),
+        "whiten_basis": bool(eigen_block.get("whiten", eigen_block.get("whiten_basis", False))),
+        "truncate_k": eigen_block.get("truncate_k"),
+        "truncate_by_eigval": eigen_block.get("truncate_by_eigval"),
+        "reuse_fim": eigen_block.get("reuse_fim"),
+    }
+
+
+def _init_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    init_block = copy.deepcopy(experiment_cfg.get("init", {}) or {})
+    sampling = init_block.pop("sampling", None)
+    if sampling and "mode" not in init_block:
+        init_block["mode"] = "prior" if sampling == "prior" else "explicit"
+    return init_block
+
+
+def _noise_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    noise_block = copy.deepcopy(experiment_cfg.get("noise", {}) or {})
+    if "enabled" in noise_block and "add_noise" not in noise_block:
+        noise_block["add_noise"] = noise_block["enabled"]
+    return noise_block
+
+
+def _apply_variance_floor(
+    variance: Any,
+    *,
+    variance_floor: Any,
+    path: str = "noise.variance_floor",
+):
+    """Return variance with an optional nonnegative scalar floor applied."""
+    if variance_floor is None:
+        return variance
+    floor = float(
+        coerce_numeric_value(
+            variance_floor,
+            path=path,
+            must_be_nonnegative=True,
+        )
+    )
+    return jnp.maximum(variance, floor)
+
+
+def _deterministic_noiseless_variance(
+    image: Any,
+    *,
+    noise_cfg: dict[str, Any],
+    path: str = "noise.variance_floor",
+):
+    """Return canonical deterministic variance for disabled-noise images."""
+    return _apply_variance_floor(
+        image,
+        variance_floor=noise_cfg.get("variance_floor", 1.0),
+        path=path,
+    )
+
+
+def _outputs_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(experiment_cfg.get("outputs", {}) or {})
+
+
+def _optimizer_defaults(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(experiment_cfg.get("optimizer", {}) or {})
+
+
+def _mc_defaults_from_experiment(
+    experiment_cfg: dict[str, Any],
+    mc_cfg: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build effective MC defaults using new experiment-level schema."""
+    defaults_block = mc_cfg.get("defaults", {}) if isinstance(mc_cfg.get("defaults", {}), dict) else {}
+    defaults = copy.deepcopy(defaults_block)
+    defaults["seed"] = _require_experiment_seed(experiment_cfg)
+
+    defaults.setdefault("truth", {})
+    defaults.setdefault("optimizer", {})
+    defaults.setdefault("eigen", {})
+    defaults.setdefault("fim", {})
+    defaults.setdefault("noise", {})
+    defaults.setdefault("outputs", {})
+    defaults.setdefault("init", {})
+
+    _deep_update(defaults["optimizer"], _optimizer_defaults(experiment_cfg))
+    _deep_update(defaults["eigen"], _eigen_defaults(experiment_cfg))
+    if mc_cfg.get("reuse_fim") is not None and defaults["fim"].get("reuse_fim") is None:
+        defaults["fim"]["reuse_fim"] = mc_cfg.get("reuse_fim")
+    eigen_defaults = _eigen_defaults(experiment_cfg)
+    if eigen_defaults.get("reuse_fim") is not None and defaults["fim"].get("reuse_fim") is None:
+        defaults["fim"]["reuse_fim"] = eigen_defaults["reuse_fim"]
+    _deep_update(defaults["noise"], _noise_defaults(experiment_cfg))
+    _deep_update(defaults["outputs"], _outputs_defaults(experiment_cfg))
+    _deep_update(defaults["init"], _init_defaults(experiment_cfg))
+
+    mc_effective = dict(mc_cfg)
+    mc_effective["defaults"] = defaults
+    return mc_effective, defaults
 
 def _timestamp_tag() -> str:
     """Return a sortable timestamp string for labeling output directories.
@@ -122,17 +326,15 @@ def _timestamp_tag() -> str:
 
 
 def _load_prescription(path: Path) -> dict[str, Any]:
-    """Load a prescription JSON file from disk.
+    """Load a prescription config (YAML or JSON) from disk.
 
-    Called early in `main` to materialize the experiment recipe that drives run
-    spec resolution and defaults. Keys that start with `_` are treated as
-    private annotations/disabled fields and are recursively stripped from the
-    loaded object before any downstream parsing/validation runs. This is
-    generally reusable for JSON config loading, but kept local because it
-    assumes the specific prescription schema expected by this script.
+    Keys that start with `_` are treated as private/disabled template fields and
+    are recursively stripped from the loaded mapping. The resulting mapping is
+    used downstream to detect legacy vs. native schema and then fed into the
+    canonical `resolve_config` path.
     """
-    with path.open("r", encoding="utf-8") as handle:
-        return _strip_private_keys(json.load(handle))
+    loaded = load_config_file(path)
+    return _strip_private_keys(loaded)
 
 
 def _strip_private_keys(obj: Any) -> Any:
@@ -153,6 +355,74 @@ def _strip_private_keys(obj: Any) -> Any:
         return tuple(_strip_private_keys(item) for item in obj)
     return obj
 
+
+def _is_legacy_prescription(presc: dict[str, Any]) -> bool:
+    """Detect legacy prescription schema (no top-level system block)."""
+    return "system" not in presc and "model" in presc
+
+
+def _migrate_param_key(key: str) -> str:
+    """Translate legacy parameter keys to migrated schema."""
+    return LEGACY_KEY_MAP.get(key, key)
+
+
+def _migrate_key_mapping(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a mapping with legacy param keys migrated."""
+    return {_migrate_param_key(k): v for k, v in payload.items()}
+
+
+def _upgrade_legacy_prescription(
+    legacy: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Translate legacy prescription schema into native config mapping.
+
+    Returns a tuple of (user_cfg, compatibility_meta) where ``user_cfg`` is a
+    canonical config mapping containing ``system`` and ``experiment`` blocks
+    ready for ``resolve_config``, and ``compatibility_meta`` carries any legacy
+    override payloads that still need special handling (e.g., structural
+    config overrides applied post-resolution).
+    """
+    experiment_block = legacy.get("experiment", {}) or {}
+    legacy_overrides = legacy.get("overrides", {}) or {}
+    config_overrides = _migrate_key_mapping(legacy_overrides.get("config", {}) or {})
+    store_overrides = _migrate_key_mapping(legacy_overrides.get("store", {}) or {})
+
+    # Legacy infer_keys/priors live at the top level.
+    infer_keys = tuple(_migrate_param_key(key) for key in legacy.get("infer_keys", []) or [])
+    priors = _migrate_key_mapping(legacy.get("priors", {}) or {})
+
+    mc_defaults = copy.deepcopy(legacy.get("defaults", {}) or {})
+    if store_overrides:
+        mc_defaults.setdefault("truth", {})
+        _deep_update(mc_defaults["truth"], store_overrides)
+
+    mc_block = {
+        "n_runs": experiment_block.get("n_runs"),
+        "run_id_prefix": experiment_block.get("run_id_prefix"),
+        "results_filename": (
+            experiment_block.get("results_filename")
+            or experiment_block.get("results_table_name")
+        ),
+        "results_orientation": experiment_block.get("results_orientation"),
+        "defaults": mc_defaults,
+    }
+
+    notes = _first_present_string(experiment_block, EXPERIMENT_NOTE_KEYS)
+    experiment_cfg = {
+        "notes": notes,
+        "infer_keys": infer_keys,
+        "priors": priors,
+        "prescribed_mc": mc_block,
+    }
+
+    model_cfg = legacy.get("model", {}) or {}
+    system_preset = _resolve_config_id(model_cfg.get("config_id"))
+    user_cfg = {
+        "system": {"preset": system_preset},
+        "experiment": experiment_cfg,
+    }
+
+    return user_cfg, {"config_overrides": config_overrides, "legacy_schema": True}
 
 def _parse_cell(value: str | None) -> Any:
     """Parse a CSV cell value into a typed Python value.
@@ -307,12 +577,13 @@ def _apply_experiment_n_runs(
     plan_rows: list[dict[str, Any]],
     n_runs: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, int | None]]:
-    """Apply experiment.n_runs precedence to the plan-defined run rows.
+    """Apply monte_carlo.n_runs precedence to the plan-defined run rows.
 
-    When experiment.n_runs is set, it becomes authoritative: the plan is padded
-    with default-only rows or truncated as needed so downstream previews and run
-    execution operate on the resolved run count. When experiment.n_runs is not
-    set, the plan length defines the run count and an empty plan is rejected.
+    When experiment.monte_carlo.n_runs is set, it becomes authoritative: the
+    plan is padded with default-only rows or truncated as needed so downstream
+    previews and run execution operate on the resolved run count. When
+    experiment.monte_carlo.n_runs is not set, the plan length defines the run
+    count and an empty plan is rejected.
     """
     plan_rows_copy = [row.copy() for row in plan_rows]
     plan_runs = len(plan_rows_copy)
@@ -320,8 +591,8 @@ def _apply_experiment_n_runs(
     if n_runs is None:
         if plan_runs == 0:
             raise ValueError(
-                "Unable to resolve run count: experiment.n_runs is not set and "
-                "overrides.csv defines 0 runs."
+                "Unable to resolve run count: experiment.monte_carlo.n_runs is not set and "
+                "run_plan.csv defines 0 runs."
             )
         return (
             plan_rows_copy,
@@ -337,10 +608,10 @@ def _apply_experiment_n_runs(
     try:
         resolved_n_runs = int(n_runs)
     except (TypeError, ValueError) as exc:
-        raise ValueError("experiment.n_runs must be an integer.") from exc
+        raise ValueError("experiment.monte_carlo.n_runs must be an integer.") from exc
 
     if resolved_n_runs <= 0:
-        raise ValueError("experiment.n_runs must be a positive integer.")
+        raise ValueError("experiment.monte_carlo.n_runs must be a positive integer.")
 
     padded = 0
     truncated = 0
@@ -363,118 +634,176 @@ def _apply_experiment_n_runs(
     )
 
 
-def _detect_prescription_overrides_candidates(
-    outdir: Path,
-    *,
-    detect_prescription: bool = True,
-    detect_overrides: bool = True,
-) -> tuple[Path | None, Path | None]:
-    """Scan an output directory for candidate prescription/overrides files.
+def _detect_prescription_candidate(outdir: Path) -> Path | None:
+    """Scan an output directory for a candidate prescription file.
 
-    This is a best-effort helper for `main` when `--prescription` or `--overrides` is
-    omitted but an output directory is provided. Detection rules are intentionally
-    conservative; update this helper when additional filename conventions are
-    introduced in prescribed Monte Carlo workflows.
+    This helper is used when --prescription is omitted but an outdir is
+    provided. Detection rules are intentionally conservative; update this helper
+    when additional filename conventions are introduced in prescribed Monte
+    Carlo workflows.
     """
     if not outdir.exists():
-        return None, None
+        return None
 
-    prescription_candidates = []
-    overrides_candidates = []
+    prescription_candidates = sorted(
+        candidate
+        for candidate in outdir.rglob("*")
+        if candidate.suffix.lower() in {".json", ".yaml", ".yml"}
+        if "prescription" in candidate.name.lower()
+    )
 
-    if detect_prescription:
-        prescription_candidates = sorted(
-            candidate
-            for candidate in outdir.rglob("*.json")
-            if "prescription" in candidate.name.lower()
-        )
-
-    if detect_overrides:
-        overrides_candidates = sorted(
-            (candidate for candidate in outdir.rglob("*.csv") if "overrides" in candidate.name.lower()),
-            key=lambda candidate: (
-                candidate.name.lower() != "overrides.csv",
-                candidate.name.lower() == "overrides_wide.csv",
-                str(candidate),
-            ),
-        )
-
-    if detect_prescription and len(prescription_candidates) > 1:
+    if len(prescription_candidates) > 1:
         joined = "\n".join(f"- {candidate}" for candidate in prescription_candidates)
         raise ValueError(
             "Multiple prescription candidates found in "
             f"{outdir}. Provide --prescription to disambiguate:\n{joined}"
         )
-    if detect_overrides and len(overrides_candidates) > 1:
-        joined = "\n".join(f"- {candidate}" for candidate in overrides_candidates)
-        raise ValueError(
-            "Multiple overrides candidates found in "
-            f"{outdir}. Provide --overrides to disambiguate:\n{joined}"
-        )
 
-    prescription_path = prescription_candidates[0] if prescription_candidates else None
-    overrides_path = overrides_candidates[0] if overrides_candidates else None
-
-    return prescription_path, overrides_path
+    return prescription_candidates[0] if prescription_candidates else None
 
 
-def _resolve_prescription_and_overrides(
-    args: argparse.Namespace, outdir: Path | None
-) -> tuple[Path, Path | None]:
-    """Resolve prescription/overrides paths from CLI args and optional outdir scan."""
+def _resolve_prescription(args: argparse.Namespace, outdir: Path | None) -> Path:
+    """Resolve prescription path from CLI args and optional outdir scan."""
     prescription_path = args.prescription
-    overrides_path = args.overrides
-    explicit_prescription = prescription_path is not None
-
-    # Only scan for prescription when none was provided.
-    detected_prescription = None
-    detected_overrides = None
-    if outdir is not None:
-        if prescription_path is None and overrides_path is None:
-            detected_prescription, detected_overrides = _detect_prescription_overrides_candidates(
-                outdir
-            )
-        elif prescription_path is None:
-            detected_prescription, _ = _detect_prescription_overrides_candidates(
-                outdir, detect_overrides=False
-            )
-        elif overrides_path is None:
-            _, detected_overrides = _detect_prescription_overrides_candidates(
-                outdir, detect_prescription=False
-            )
-
-    if prescription_path is None and detected_prescription is not None:
-        prescription_path = detected_prescription
-        explicit_prescription = True
-
-    if overrides_path is None and detected_overrides is not None:
-        overrides_path = detected_overrides
-
-    if overrides_path is not None and prescription_path is None:
-        overrides_label = overrides_path if overrides_path is not None else "unknown"
-        outdir_label = f"{outdir}" if outdir is not None else "no outdir provided"
-        raise ValueError(
-            "Overrides path was provided or detected "
-            f"({overrides_label}, outdir scan: {outdir_label}) but no prescription was "
-            "provided or detected. Pass --prescription explicitly."
-        )
+    if prescription_path is None and outdir is not None:
+        prescription_path = _detect_prescription_candidate(outdir)
 
     if prescription_path is None:
         outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
         print(
-            "WARNING: No prescription path provided/detected (no prescription JSON "
+            "WARNING: No prescription path provided/detected (no prescription config "
             f"{outdir_label}); falling back to template at {DEFAULT_PRESCRIPTION_PATH}"
         )
         prescription_path = DEFAULT_PRESCRIPTION_PATH
-    if overrides_path is None and not explicit_prescription:
-        outdir_label = f"found in {outdir}" if outdir is not None else "outdir not provided"
-        print(
-            "WARNING: No overrides path provided/detected (no overrides CSV "
-            f"{outdir_label}); falling back to template at {DEFAULT_OVERRIDES_PATH}"
-        )
-        overrides_path = DEFAULT_OVERRIDES_PATH
 
-    return Path(prescription_path), Path(overrides_path) if overrides_path is not None else None
+    return Path(prescription_path)
+
+
+def _resolve_path_relative_to_prescription(
+    value: str | Path | None,
+    *,
+    prescription_path: Path,
+    field_name: str,
+) -> Path | None:
+    """Resolve optional paths relative to the prescription file when relative."""
+    if value is None:
+        return None
+
+    if isinstance(value, Path):
+        path_value = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        path_value = Path(stripped)
+    else:
+        raise ValueError(f"{field_name} must be a path string or null.")
+
+    if path_value.is_absolute():
+        return path_value
+    return (prescription_path.parent / path_value).resolve()
+
+
+def _resolve_plan_csv_path(plan_csv: str | Path | None, *, prescription_path: Path) -> Path | None:
+    """Resolve plan CSV path relative to the prescription file when relative."""
+    return _resolve_path_relative_to_prescription(
+        plan_csv,
+        prescription_path=prescription_path,
+        field_name="experiment.monte_carlo.run_plan",
+    )
+
+
+def _stable_hash_payload(payload: Any) -> str:
+    """Return a stable SHA256 hash for JSON-serializable payloads."""
+    if dataclasses.is_dataclass(payload):
+        payload = dataclasses.asdict(payload)
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _hash_array_bytes(value: Any) -> str:
+    """Return a SHA256 hash of an array's raw bytes."""
+    array = np.asarray(value)
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _normalize_ke_realization_policy(value: Any) -> str:
+    """Normalize detector knowledge-error realization policy strings."""
+    return normalize_realization_policy(value)
+
+
+def _seed_detector_knowledge_errors_with_policy(
+    system_cfg: dict[str, Any],
+    *,
+    experiment_seed: int,
+    token_prefix: str,
+    run_seed: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Attach detector knowledge-error seeds, honoring realization policies.
+
+    Rules per detector layer with a ``knowledge_error`` mapping:
+    - Explicit ``knowledge_error.seed`` is preserved as-is.
+    - ``realization_policy`` defaults to ``fixed_per_experiment`` when omitted.
+    - ``fixed_per_experiment`` derives seed from ``experiment_seed``.
+    - ``per_run`` derives seed from ``run_seed`` when provided, otherwise falls
+      back to ``experiment_seed``.
+
+    Callers that want fresh ``per_run`` realizations must pass an unseeded base
+    config each time. Once a concrete seed is attached to a layer, it is treated
+    as explicit and preserved on subsequent calls.
+    """
+    return seed_detector_layer_knowledge_errors(
+        system_cfg,
+        experiment_seed=experiment_seed,
+        token_prefix=token_prefix,
+        run_seed=run_seed,
+    )
+
+
+def _detector_ke_has_per_run_realization(system_cfg: dict[str, Any]) -> bool:
+    """Return whether any detector layer requests ``realization_policy=per_run``.
+
+    This is intentionally read-only so callers can inspect the configured
+    policy without materializing detector knowledge-error seeds.
+    """
+    return detector_ke_has_per_run_realization(system_cfg)
+
+
+def _seed_detector_knowledge_errors(
+    system_cfg: dict[str, Any],
+    *,
+    base_seed: int,
+    token_prefix: str,
+    run_seed: int | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible wrapper around policy-aware detector KE seeding."""
+    cfg, _ = _seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=base_seed,
+        token_prefix=token_prefix,
+        run_seed=run_seed,
+    )
+    return cfg
+
+
+def _build_fim_cache_key_payload(
+    *,
+    infer_keys: tuple[str, ...],
+    system_label: str,
+    cfg_hash: str,
+    forward_spec_hash: str,
+    theta_true_hash: str,
+    loss_kind: str,
+) -> dict[str, Any]:
+    """Build a structured FIM-cache payload to hash into a cache key."""
+    return {
+        "infer_keys": infer_keys,
+        "model_config_id": system_label,
+        "cfg_hash": cfg_hash,
+        "forward_spec_hash": forward_spec_hash,
+        "theta_true_hash": theta_true_hash,
+        "loss_kind": loss_kind,
+    }
 
 
 def _set_nested(target: dict[str, Any], keys: list[str], value: Any) -> None:
@@ -633,18 +962,18 @@ def _apply_prior_overrides(
     return merged, applied
 
 
-def _resolve_run_spec(presc: dict[str, Any], row: dict[str, Any], index: int) -> dict[str, Any]:
+def _resolve_run_spec(mc_cfg: dict[str, Any], row: dict[str, Any], index: int) -> dict[str, Any]:
     """Resolve a run spec from a plan row using default run indexing.
 
     This is a compatibility wrapper used for older call sites; in this script
     `_resolve_run_spec_with_id` is used directly to accommodate disabled rows.
     It is reusable only for the prescription schema defined here.
     """
-    return _resolve_run_spec_with_id(presc, row, index=index, run_id_index=index)
+    return _resolve_run_spec_with_id(mc_cfg, row, index=index, run_id_index=index)
 
 
 def _resolve_run_spec_with_id(
-    presc: dict[str, Any],
+    mc_cfg: dict[str, Any],
     row: dict[str, Any],
     *,
     index: int,
@@ -657,11 +986,10 @@ def _resolve_run_spec_with_id(
     is tightly coupled to the prescription schema and run ID conventions in
     this script, so it is not intended as a general utility.
     """
-    defaults = copy.deepcopy(presc.get("defaults", {}))
+    defaults = copy.deepcopy(mc_cfg.get("defaults", {}))
     resolved = copy.deepcopy(defaults)
 
-    experiment = presc.get("experiment", {})
-    run_id_prefix = experiment.get("run_id_prefix", "run")
+    run_id_prefix = mc_cfg.get("run_id_prefix", "run")
 
     row = dict(row)
     row.pop("_plan_label", None)
@@ -679,17 +1007,14 @@ def _resolve_run_spec_with_id(
 
     _deep_update(resolved, structured_row)
 
-    resolved["model"] = copy.deepcopy(presc.get("model", {}))
-
     resolved.setdefault("init", {})
     resolved.setdefault("noise", {})
     resolved.setdefault("eigen", {})
     resolved.setdefault("truth", {})
     resolved.setdefault("optimizer", {})
     resolved.setdefault("outputs", {})
-    resolved.setdefault("model", {})
 
-    base_seed = presc.get("defaults", {}).get("seed")
+    base_seed = mc_cfg.get("defaults", {}).get("seed")
     if base_seed is None:
         raise ValueError("Prescription defaults must include a base seed.")
     if seed_override is None:
@@ -705,6 +1030,11 @@ def _resolve_run_spec_with_id(
 
     if prior_overrides:
         resolved["prior_overrides"] = prior_overrides
+
+    resolved["optimizer"] = _normalize_optimizer_cfg(
+        resolved["optimizer"],
+        path=f"run_spec[{index}].optimizer",
+    )
 
     return resolved
 
@@ -733,6 +1063,76 @@ def _first_present_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str
             if text:
                 return text
     return None
+
+
+def _get_prescribed_mc_cfg(experiment_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Fetch and validate the prescribed_mc/monte_carlo block."""
+    mc_cfg = experiment_cfg.get("prescribed_mc") or experiment_cfg.get("monte_carlo")
+    if mc_cfg is None:
+        raise ValueError(
+            "Experiment config must include an 'experiment.monte_carlo' (or legacy experiment.prescribed_mc) block."
+        )
+    if not isinstance(mc_cfg, dict):
+        raise ValueError("experiment.monte_carlo must be a mapping/dict.")
+    return mc_cfg
+
+
+def _resolve_loss_kind(run_spec: dict[str, Any], mc_defaults: dict[str, Any]) -> str:
+    """Resolve optimizer.loss with run-spec override and experiment default."""
+    loss_kind = (
+        _get_nested(run_spec, ["optimizer", "loss"])
+        or _get_nested(mc_defaults, ["optimizer", "loss"])
+        or "nll"
+    )
+    if loss_kind not in {"nll", "map"}:
+        raise ValueError(
+            f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
+        )
+    return loss_kind
+
+
+def _normalize_optimizer_cfg(
+    optimizer_cfg: dict[str, Any],
+    *,
+    path: str,
+) -> dict[str, Any]:
+    """Normalize known optimizer fields without touching unrelated config text."""
+
+    if not isinstance(optimizer_cfg, dict):
+        raise ValueError(f"{path} must be a mapping/dict.")
+    normalized = copy.deepcopy(optimizer_cfg)
+
+    optimizer_kind = str(normalized.get("kind", "sgd")).strip().lower()
+    if optimizer_kind not in {"sgd", "adam"}:
+        raise ValueError(f"{path}.kind must be 'sgd' or 'adam'.")
+    normalized["kind"] = optimizer_kind
+
+    if "base_lr" in normalized:
+        normalized["base_lr"] = float(
+            coerce_numeric_value(
+                normalized["base_lr"],
+                path=f"{path}.base_lr",
+                must_be_positive=True,
+            )
+        )
+    if "n_iter" in normalized:
+        n_iter_value = normalized["n_iter"]
+        if isinstance(n_iter_value, bool):
+            raise ValueError(f"{path}.n_iter must be an integer.")
+        try:
+            n_iter = int(n_iter_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path}.n_iter must be an integer.") from exc
+        if n_iter <= 0:
+            raise ValueError(f"{path}.n_iter must be > 0.")
+        normalized["n_iter"] = n_iter
+
+    normalized["kwargs"] = normalize_optimizer_kwargs(
+        optimizer_kind,
+        normalized.get("kwargs", {}),
+        path=f"{path}.kwargs",
+    )
+    return normalized
 
 
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:
@@ -817,20 +1217,41 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         print(" | ".join(value.ljust(width) for value, width in zip(row, widths)))
 
 
-def _resolve_outdir(outdir: str | None, run_name: str | None) -> Path:
-    """Resolve the experiment output directory based on CLI inputs.
+def _resolve_outdir(
+    *,
+    cli_outdir: str | None,
+    run_name: str | None,
+    experiment_cfg: dict[str, Any],
+    prescription_path: Path,
+) -> tuple[Path, str]:
+    """Resolve the experiment output directory with CLI/config precedence.
 
-    Called in `main` to determine where runs and aggregate outputs are written,
-    falling back to a timestamped Results directory via `_timestamp_tag` when
-    neither an explicit outdir nor run name is supplied. This is a reusable
-    pattern for experiment output naming, but naming conventions are specific
-    to this script.
+    Precedence:
+    1) --outdir
+    2) experiment.outputs.outdir (relative to prescription file when relative)
+    3) --run-name
+    4) Results/prescribed_mc_<timestamp>
     """
-    if outdir:
-        return Path(outdir)
+    if cli_outdir and cli_outdir.strip():
+        return Path(cli_outdir), "CLI --outdir"
+
+    outputs_cfg = experiment_cfg.get("outputs", {})
+    if outputs_cfg is None:
+        outputs_cfg = {}
+    if not isinstance(outputs_cfg, dict):
+        raise ValueError("experiment.outputs must be a mapping/dict when provided.")
+
+    cfg_outdir = _resolve_path_relative_to_prescription(
+        outputs_cfg.get("outdir"),
+        prescription_path=prescription_path,
+        field_name="experiment.outputs.outdir",
+    )
+    if cfg_outdir is not None:
+        return cfg_outdir, "experiment.outputs.outdir"
+
     if run_name:
-        return Path("Results") / run_name
-    return Path("Results") / f"prescribed_mc_{_timestamp_tag()}"
+        return Path("Results") / run_name, "CLI --run-name"
+    return Path("Results") / f"prescribed_mc_{_timestamp_tag()}", "auto timestamp"
 
 
 def _row_enabled(row: dict[str, Any]) -> bool:
@@ -871,7 +1292,7 @@ def _flatten_store_overrides(payload: dict[str, Any]) -> dict[str, Any]:
                 joined = f"{prefix}.{key}" if prefix else key
                 _walk(joined, entry)
         else:
-            flattened[prefix] = value
+            flattened[_migrate_param_key(prefix)] = value
 
     _walk("", payload)
     return flattened
@@ -901,20 +1322,15 @@ def _partition_overrides_by_kind(
     return primitive_overrides, derived_overrides, unknown_overrides
 
 
-def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
-    """Resolve a config ID string into a concrete SheraThreePlaneConfig.
-
-    Called in `main` to translate the prescription's `model.config_id` into an
-    actual config object. This is tightly coupled to Shera configs and should
-    remain local to this script or a Shera-specific utility module.
-    """
+def _resolve_config_id(config_id: str | None) -> str:
+    """Map a legacy config_id to a system preset name (legacy compatibility)."""
     if not config_id:
         raise ValueError("Prescription must include model.config_id.")
     mapping = {
-        "SHERA_TESTBED_CONFIG": SHERA_TESTBED_CONFIG,
-        "SHERA_FLIGHT_CONFIG": SHERA_FLIGHT_CONFIG,
-        "shera_testbed": SHERA_TESTBED_CONFIG,
-        "shera_flight": SHERA_FLIGHT_CONFIG,
+        "SHERA_TESTBED_CONFIG": "SHERA_TESTBED_3P",
+        "SHERA_FLIGHT_CONFIG": "SHERA_FLIGHT_3P",
+        "shera_testbed": "SHERA_TESTBED_3P",
+        "shera_flight": "SHERA_FLIGHT_3P",
     }
     if config_id in mapping:
         return mapping[config_id]
@@ -922,28 +1338,49 @@ def _resolve_config_id(config_id: str | None) -> SheraThreePlaneConfig:
 
 
 def _apply_config_overrides(
-    cfg: SheraThreePlaneConfig,
+    system_cfg: dict[str, Any],
     overrides: dict[str, Any],
-) -> SheraThreePlaneConfig:
-    """Apply validated overrides to a SheraThreePlaneConfig.
-
-    Used in `main` after resolving the base config to enforce override keys and
-    normalize list fields. This is Shera-specific and not generally reusable
-    outside this experiment workflow.
-    """
+) -> dict[str, Any]:
+    """Apply basic overrides onto a resolved system config mapping."""
     if not overrides:
-        return cfg
-    field_names = {field.name for field in dataclasses.fields(cfg)}
-    unknown = [key for key in overrides if key not in field_names]
-    if unknown:
-        raise ValueError(
-            "Unknown config override(s): " + ", ".join(sorted(unknown))
-        )
-    normalized = dict(overrides)
-    for key in ("primary_noll_indices", "secondary_noll_indices"):
-        if key in normalized and isinstance(normalized[key], list):
-            normalized[key] = tuple(normalized[key])
-    return cfg.replace(**normalized)
+        return system_cfg
+
+    translated: dict[str, Any] = {}
+    for key, value in overrides.items():
+        migrated = _migrate_param_key(key)
+        # Map common structural fields onto optics/source blocks.
+        if migrated in {
+            "optics.pupil_npix",
+            "optics.psf_npix",
+            "optics.oversample",
+            "optics.primary_noll_indices",
+            "optics.secondary_noll_indices",
+            "optics.dp_path",
+            "optics.dp_design_wavelength_m",
+            "optics.pixel_pitch_m",
+            "optics.m1_diameter_m",
+            "optics.m2_diameter_m",
+        }:
+            translated.setdefault("optics", {})[migrated.split(".", 1)[1]] = value
+        elif migrated in {
+            "source.wavelength_m",
+            "source.bandwidth_m",
+            "source.n_lambda",
+        }:
+            translated.setdefault("source", {})[migrated.split(".", 1)[1]] = value
+        else:
+            translated.setdefault("system", {})[migrated] = value
+
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        out = copy.deepcopy(base)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = copy.deepcopy(v)
+        return out
+
+    return _deep_merge(system_cfg, translated)
 
 
 def _repo_relative_path(path: str | Path | None, *, repo_root: Path) -> str | None:
@@ -962,49 +1399,19 @@ def _repo_relative_path(path: str | Path | None, *, repo_root: Path) -> str | No
         return Path(os.path.relpath(resolved, repo_root)).as_posix()
 
 
-def _config_payload(cfg: SheraThreePlaneConfig, *, repo_root: Path) -> dict[str, Any]:
-    """Serialize a SheraThreePlaneConfig and normalize path fields.
-
-    Called in `main` when recording run metadata for the optimizer artifacts.
-    It is tightly coupled to the Shera config schema and is not generic.
-    """
-    payload = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else dict(cfg)
-    if isinstance(payload, dict) and "diffractive_pupil_path" in payload:
-        payload = {
-            **payload,
-            "diffractive_pupil_path": _repo_relative_path(
-                payload.get("diffractive_pupil_path"), repo_root=repo_root
-            ),
-        }
+def _config_payload(cfg: dict[str, Any], *, repo_root: Path) -> dict[str, Any]:
+    """Serialize a resolved system config mapping and normalize path fields."""
+    payload = copy.deepcopy(cfg)
+    dp_path = None
+    if isinstance(payload, dict):
+        dp_path = (
+            payload.get("optics", {}).get("dp_path")
+            or payload.get("optics", {}).get("diffractive_pupil_path")
+        )
+    if dp_path is not None:
+        payload.setdefault("optics", {})
+        payload["optics"]["dp_path"] = _repo_relative_path(dp_path, repo_root=repo_root)
     return payload
-
-
-def _reduced_chi2_between_images(
-    data_image: Any,
-    model_image: Any,
-    *,
-    variance_image: Any,
-) -> float:
-    """Compute reduced chi-squared between data and model PSF images.
-
-    Used in `main` to report image-space fit quality for the seeded initial
-    model and optimized final model in each run summary. The computation mirrors
-    `plot_psf_comparison` by building a z-score image from residuals and
-    variance, then averaging squared z values by image degrees of freedom.
-
-    This helper is a good candidate for migration into a shared utility module
-    if additional experiment scripts need the same image-comparison metric.
-    """
-    data_arr = np.asarray(data_image, dtype=float)
-    model_arr = np.asarray(model_image, dtype=float)
-    var_arr = np.asarray(variance_image, dtype=float)
-
-    safe_var = np.where(var_arr > 0.0, var_arr, np.nan)
-    z_score = (data_arr - model_arr) / np.sqrt(safe_var)
-    dof = data_arr.size
-    if dof <= 0:
-        return float("nan")
-    return float(np.nansum(z_score**2) / dof)
 
 
 def _maybe_warn_missing_artifacts(run_dir: Path) -> None:
@@ -1489,13 +1896,17 @@ def _build_manifest_runs(run_entries: list[dict[str, Any]]) -> list[dict[str, An
 def _write_experiment_outputs(
     *,
     outdir: Path,
-    prescription: dict[str, Any],
+    experiment_cfg: dict[str, Any],
+    mc_cfg: dict[str, Any],
     prescription_path: Path,
     plan_path: Path | None,
     run_entries: list[dict[str, Any]],
     infer_keys: tuple[str, ...],
     repo_root: Path,
     results_orientation: str,
+    system_label: str | None,
+    config_override_keys: list[str],
+    truth_default_keys: list[str],
 ) -> None:
     """Write aggregated outputs (results.csv and manifest.json) for the run set.
 
@@ -1505,12 +1916,7 @@ def _write_experiment_outputs(
     in column orientation (`key` + `run_id` columns; preferred default) or row
     orientation (`run_id` as a field; compatibility mode).
     """
-    experiment = prescription.get("experiment", {})
-    results_filename = (
-        experiment.get("results_filename")
-        or experiment.get("results_table_name")
-        or "results.csv"
-    )
+    results_filename = mc_cfg.get("results_filename") or "results.csv"
     results_path = outdir / results_filename
     _write_results_csv(
         results_path,
@@ -1520,11 +1926,8 @@ def _write_experiment_outputs(
     )
 
     manifest_path = outdir / "manifest.json"
-    overrides = prescription.get("overrides", {})
-    config_keys = sorted((overrides.get("config") or {}).keys())
-    store_keys = sorted((overrides.get("store") or {}).keys())
     manifest_runs = _build_manifest_runs(run_entries)
-    experiment_notes = _first_present_string(experiment, EXPERIMENT_NOTE_KEYS)
+    experiment_notes = _first_present_string(experiment_cfg, EXPERIMENT_NOTE_KEYS)
 
     _write_manifest(
         manifest_path,
@@ -1533,10 +1936,10 @@ def _write_experiment_outputs(
         or "examples/recipes/prescribed_monte_carlo.py",
         prescription_path=_repo_relative_path(prescription_path, repo_root=repo_root),
         plan_path=_repo_relative_path(plan_path, repo_root=repo_root),
-        config_id=_get_nested(prescription, ["model", "config_id"]),
+        config_id=system_label,
         notes=experiment_notes,
-        overrides_config_keys=config_keys,
-        overrides_store_keys=store_keys,
+        overrides_config_keys=config_override_keys,
+        overrides_store_keys=truth_default_keys,
         runs=manifest_runs,
         artifacts=[
             {"path": "manifest.json"},
@@ -1549,23 +1952,16 @@ def main() -> None:
     """Run the prescribed Monte Carlo experiment pipeline.
 
     Args:
-        --prescription: Path to the JSON experiment recipe. This file sets the
-            experiment defaults, model config, and per-run seed rules, and may
-            include an experiment-level note (`experiment.notes`; aliases
-            `experiment.note`/`experiment.comment`/`experiment.comments`) that
-            is persisted once in top-level manifest.json `notes`.
-        --overrides: Optional CSV of per-run overrides. Rows
-            cannot override model or overrides.* settings; they only mutate
-            run-level fields. Per-run notes come from
-            note/notes/comment/comments fields and are persisted as `run_note`.
+        --prescription: Path to the YAML/JSON experiment config. The file must
+            contain native `system` and `experiment` blocks (with
+            `experiment.monte_carlo` for Monte Carlo settings; legacy
+            `experiment.prescribed_mc` is still accepted). Experiment notes live
+            in `experiment.notes` (aliases note/comment/comments).
         --outdir: Root output directory for the experiment. When supplied, this
-            is treated as the experiment root, and all run artifacts
-            (runs/<run_id>/...), manifest.json, and results.csv are written
-            underneath this directory.
+            overrides `experiment.outputs.outdir`.
         --run-name: Optional name segment used to construct Results/<run-name>
-            when --outdir is omitted. If both are omitted, a timestamp-based
-            directory name is used. Supplying both uses --outdir verbatim and
-            ignores --run-name.
+            when neither --outdir nor experiment.outputs.outdir is set. If all
+            of those are omitted, a timestamp-based directory name is used.
         --dry-run: Resolve run specs and print previews without executing the
             optimization runs or writing run artifacts.
         --aggregate-only: Skip execution and only aggregate manifest.json and
@@ -1581,25 +1977,19 @@ def main() -> None:
         "--prescription",
         type=Path,
         default=None,
-        help="Path to prescription JSON (defaults to template if omitted)",
-    )
-    parser.add_argument(
-        "--overrides",
-        type=Path,
-        default=None,
-        help="Path to per-run overrides CSV (defaults to template if omitted)",
+        help="Path to prescription YAML/JSON (defaults to template if omitted)",
     )
     parser.add_argument(
         "--outdir",
         type=str,
         default=None,
-        help="Experiment root directory (no auto-suffix when provided).",
+        help="Experiment root directory; overrides experiment.outputs.outdir.",
     )
     parser.add_argument(
         "--run-name",
         type=str,
         default=None,
-        help="Convenience name for Results/<run-name> when --outdir is omitted.",
+        help="Convenience name for Results/<run-name> when outdir is not otherwise set.",
     )
     parser.add_argument("--dry-run", action="store_true", default=False)
     parser.add_argument(
@@ -1615,7 +2005,7 @@ def main() -> None:
         help=(
             "results.csv schema: 'col' writes key + run_id columns (default), "
             "'row' writes one row per run for compatibility. CLI overrides "
-            "prescription experiment.results_orientation when provided."
+            "prescription experiment.monte_carlo.results_orientation when provided."
         ),
     )
     parser.add_argument("--num-preview", type=int, default=None)
@@ -1627,36 +2017,66 @@ def main() -> None:
     output_metric = False
 
     outdir_hint = Path(args.outdir) if args.outdir else None
-    prescription_path, overrides_path = _resolve_prescription_and_overrides(args, outdir_hint)
+    prescription_path = _resolve_prescription(args, outdir_hint)
     resolved_prescription = _repo_relative_path(prescription_path, repo_root=repo_root)
-    resolved_overrides = _repo_relative_path(overrides_path, repo_root=repo_root)
     print(f"Resolved prescription path: {resolved_prescription or prescription_path}")
-    if overrides_path is None:
-        print("Resolved overrides path: None (per-run overrides disabled)")
-    else:
-        print(f"Resolved overrides path: {resolved_overrides or overrides_path}")
 
-    # Plan/prescription parsing and run spec resolution: load the JSON recipe
-    # and the optional overrides CSV that mutates per-run settings.
-    prescription = _load_prescription(prescription_path)
+    raw_prescription = _load_prescription(prescription_path)
+    if _is_legacy_prescription(raw_prescription):
+        user_cfg, compat_meta = _upgrade_legacy_prescription(raw_prescription)
+    else:
+        user_cfg = _strip_private_keys(
+            load_user_config(
+                config_path=prescription_path,
+                system_preset=None,
+                experiment_preset=None,
+            )
+        )
+        compat_meta = {"config_overrides": {}, "legacy_schema": False}
+
+    resolved_cfg = resolve_config(user_cfg)
+    system_cfg = resolved_cfg.get("system")
+    experiment_cfg = resolved_cfg.get("experiment")
+
+    if system_cfg is None:
+        raise ValueError("Prescribed Monte Carlo requires a top-level 'system' block.")
+    if experiment_cfg is None:
+        raise ValueError("Prescribed Monte Carlo requires a top-level 'experiment' block.")
+
+    mc_cfg_raw = _get_prescribed_mc_cfg(experiment_cfg)
+    mc_cfg, mc_defaults = _mc_defaults_from_experiment(experiment_cfg, mc_cfg_raw)
+    if not isinstance(mc_defaults, dict):
+        raise ValueError("experiment.monte_carlo.defaults must be a mapping/dict.")
+
     def _normalize_orientation(value: str | None) -> str:
         if value is None:
             return "col"
         if value not in {"col", "row"}:
-            raise ValueError("experiment.results_orientation must be 'col' or 'row'")
+            raise ValueError("experiment.monte_carlo.results_orientation must be 'col' or 'row'")
         return value
 
-    presc_orientation = _normalize_orientation(
-        _get_nested(prescription, ["experiment", "results_orientation"])
-    )
+    presc_orientation = _normalize_orientation(mc_cfg.get("results_orientation"))
     results_orientation = _normalize_orientation(
         args.results_orientation if args.results_orientation is not None else presc_orientation
     )
-    if overrides_path is None:
+
+    # Resolve plan CSV: prescription config controls plan usage; explicit null/omission disables plans.
+    plan_cfg_provided = "run_plan" in mc_cfg or "plan_csv" in mc_cfg
+    plan_csv_cfg = mc_cfg.get("run_plan")
+    if plan_csv_cfg is None:
+        plan_csv_cfg = mc_cfg.get("plan_csv")
+    plan_path = _resolve_plan_csv_path(plan_csv_cfg, prescription_path=prescription_path)
+
+    if plan_csv_cfg is None:
         plan_rows = []
+        reason = "explicitly disabled in prescription" if plan_cfg_provided else "no run plan specified"
+        print(f"Resolved run plan path: None ({reason})")
     else:
-        plan_rows = _load_plan_csv(overrides_path)
-    n_runs = _get_nested(prescription, ["experiment", "n_runs"])
+        resolved_plan = _repo_relative_path(plan_path, repo_root=repo_root) if plan_path else None
+        print(f"Resolved run plan path: {resolved_plan or plan_path}")
+        plan_rows = _load_plan_csv(plan_path) if plan_path is not None else []
+
+    n_runs = mc_cfg.get("n_runs")
     # experiment.n_runs is authoritative: it pads or truncates the plan so
     # previews and run execution operate on the resolved run count.
     plan_rows, run_policy = _apply_experiment_n_runs(plan_rows, n_runs)
@@ -1664,23 +2084,23 @@ def main() -> None:
     disabled_count = len(plan_rows) - enabled_count
     if run_policy["n_runs"] is None:
         print(
-            "Run count policy: experiment.n_runs not set; "
+            "Run count policy: experiment.monte_carlo.n_runs not set; "
             f"plan defines {run_policy['plan_runs']} run(s)."
         )
     else:
         print(
-            "Run count policy: experiment.n_runs="
+            "Run count policy: experiment.monte_carlo.n_runs="
             f"{run_policy['n_runs']} (plan defines {run_policy['plan_runs']}) "
             f"-> resolved {run_policy['resolved_runs']} run(s)."
         )
         if run_policy["padded_runs"]:
             print(
                 "  Added "
-                f"{run_policy['padded_runs']} default-only run(s) to match experiment.n_runs."
+                f"{run_policy['padded_runs']} default-only run(s) to match experiment.monte_carlo.n_runs."
             )
         if run_policy["truncated_runs"]:
             print(
-                "WARNING: experiment.n_runs is authoritative; truncated "
+                "WARNING: experiment.monte_carlo.n_runs is authoritative; truncated "
                 f"{run_policy['truncated_runs']} plan-defined run(s)."
             )
     print(
@@ -1699,26 +2119,23 @@ def main() -> None:
             key
             for key in row
             if not key.startswith("_")
-            if key == "model"
-            or key.startswith("model.")
-            or key == "overrides"
-            or key.startswith("overrides.")
+            if key == "system"
+            or key.startswith("system.")
+            or key == "experiment"
+            or key.startswith("experiment.")
         ]
         if forbidden:
             raise ValueError(
-                "Plan rows cannot override model settings; remove: "
+                "Plan rows cannot override system/experiment settings; remove: "
                 + ", ".join(sorted(forbidden))
             )
 
-    model_config_id = _get_nested(prescription, ["model", "config_id"])
-    config_overrides = _get_nested(prescription, ["overrides", "config"]) or {}
-    store_overrides = _get_nested(prescription, ["overrides", "store"]) or {}
+    config_overrides = compat_meta.get("config_overrides", {}) or {}
     config_override_keys = (
         ", ".join(sorted(config_overrides.keys())) if config_overrides else "none"
     )
-    store_override_keys = (
-        ", ".join(sorted(store_overrides.keys())) if store_overrides else "none"
-    )
+    truth_defaults = mc_defaults.get("truth", {}) or {}
+    truth_default_keys = sorted(_flatten_store_overrides(truth_defaults).keys())
 
     plan_labels = [row.get("_plan_label") for row in plan_rows]
     run_specs: list[dict[str, Any]] = []
@@ -1730,7 +2147,7 @@ def main() -> None:
             # Resolve each run spec by merging defaults + row overrides and
             # assigning an indexed run_id for enabled rows.
             resolved = _resolve_run_spec_with_id(
-                prescription,
+                mc_cfg,
                 row,
                 index=index + 1,
                 run_id_index=run_id_index,
@@ -1738,18 +2155,25 @@ def main() -> None:
         else:
             # Disabled rows keep the resolved fields but do not receive a run_id.
             resolved = _resolve_run_spec_with_id(
-                prescription,
+                mc_cfg,
                 row,
                 index=index + 1,
                 run_id_index=None,
             )
         run_specs.append(resolved)
 
-    outdir = _resolve_outdir(args.outdir, args.run_name)
-    print(f"Resolved outdir: {outdir}")
-    print(f"Model config_id: {model_config_id}")
-    print(f"Config overrides: {config_override_keys}")
-    print(f"Store overrides: {store_override_keys}")
+    outdir, outdir_source = _resolve_outdir(
+        cli_outdir=args.outdir,
+        run_name=args.run_name,
+        experiment_cfg=experiment_cfg,
+        prescription_path=prescription_path,
+    )
+    print(f"Resolved outdir: {outdir} ({outdir_source})")
+    system_label = _get_nested(user_cfg, ["system", "preset"]) or "custom"
+    print(f"System preset: {system_label}")
+    print(f"Structural config overrides: {config_override_keys}")
+    if truth_default_keys:
+        print("Truth defaults provided for keys: " + ", ".join(truth_default_keys))
     if any(label is not None for label in plan_labels):
         print("Plan column labels -> run_id mapping:")
         for label, spec in zip(plan_labels, run_specs):
@@ -1786,48 +2210,63 @@ def main() -> None:
 
     jax.config.update("jax_enable_x64", True)
 
-    cfg = _resolve_config_id(model_config_id)
-    cfg = _apply_config_overrides(cfg, config_overrides)
+    base_seed = _require_experiment_seed(experiment_cfg)
 
-    forward_spec = build_forward_spec_from_config(cfg)
-    inference_spec = build_inference_spec_basic(cfg)
+    system_cfg = _apply_config_overrides(system_cfg, config_overrides)
 
-    infer_keys = tuple(prescription.get("infer_keys", []))
+    inference_system_cfg_base = experiment_cfg.get("inference_system")
+    if inference_system_cfg_base is not None:
+        inference_system_cfg_base = resolve_system_config(inference_system_cfg_base)
+    else:
+        inference_system_cfg_base = copy.deepcopy(system_cfg)
+
+    system_cfg, data_detector_ke_meta = _seed_detector_knowledge_errors_with_policy(
+        system_cfg,
+        experiment_seed=base_seed,
+        token_prefix="data.detector",
+    )
+    if _detector_ke_has_per_run_realization(inference_system_cfg_base):
+        print(
+            "Inference detector knowledge_error includes realization_policy=per_run; "
+            "inference-side detector realization will be resampled per run seed."
+        )
+
+    forward_spec_data = compose_forward_spec(system_cfg)
+    forward_spec_infer = compose_forward_spec(inference_system_cfg_base)
+
+    infer_keys_raw = tuple(experiment_cfg.get("infer_keys", []))
+    infer_keys = tuple(_migrate_param_key(key) for key in infer_keys_raw)
     if not infer_keys:
         raise ValueError("Prescription must include non-empty infer_keys.")
-    inference_subspec = make_inference_subspec(
-        base_spec=inference_spec,
-        infer_keys=infer_keys,
-        cfg=cfg,
-    )
-
+    missing_infer_keys = [key for key in infer_keys if key not in forward_spec_infer]
+    if missing_infer_keys:
+        print(
+            "WARNING: dropping infer_keys not present in forward_spec: "
+            + ", ".join(missing_infer_keys)
+        )
+    infer_keys = tuple(key for key in infer_keys if key in forward_spec_infer)
+    if not infer_keys:
+        raise ValueError("No valid infer_keys remain after migration/filtering.")
     # Store overrides and derived refresh steps: apply nested overrides via
     # dotted keys, then recompute any derived parameters to keep the store
     # self-consistent for forward/inference use.
-    base_store = ParameterStore.from_spec_defaults(forward_spec)
-    if store_overrides:
-        base_store = base_store.replace(_flatten_store_overrides(store_overrides))
-    base_store = base_store.refresh_derived(forward_spec)
+    base_store_data = ParameterStore.from_spec_defaults(forward_spec_data)
+    if truth_defaults:
+        base_store_data = base_store_data.replace(_flatten_store_overrides(truth_defaults))
+    base_store_data = base_store_data.refresh_derived(forward_spec_data)
 
-    prior_info = prescription.get("priors", {})
-    prior_spec = PriorSpec.from_info(base_store, prior_info)
+    base_store_infer = ParameterStore.from_spec_defaults(forward_spec_infer)
+    if truth_defaults:
+        base_store_infer = base_store_infer.replace(_flatten_store_overrides(truth_defaults))
+    base_store_infer = base_store_infer.refresh_derived(forward_spec_infer)
+
+    prior_info_raw = experiment_cfg.get("priors", {})
+    prior_info = _migrate_key_mapping(prior_info_raw)
+    prior_spec = PriorSpec.from_info(base_store_infer, prior_info)
     prior_spec_cache: dict[str, PriorSpec] = {}
 
     fim_cache: dict[str, dict[str, Any]] = {}
     fim_cache_last: dict[str, Any] | None = None
-
-    def _stable_hash(payload: Any) -> str:
-        if dataclasses.is_dataclass(payload):
-            payload = dataclasses.asdict(payload)
-        serialized = json.dumps(payload, sort_keys=True, default=str)
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    def _hash_array(value: Any) -> str:
-        array = np.asarray(value)
-        return hashlib.sha256(array.tobytes()).hexdigest()
-
-    cfg_hash = _stable_hash(cfg)
-    forward_spec_hash = _stable_hash(forward_spec)
 
     if args.aggregate_only:
         if not outdir.exists():
@@ -1843,20 +2282,24 @@ def main() -> None:
         runs_dir = outdir / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
 
-    run_id_prefix = _get_nested(prescription, ["experiment", "run_id_prefix"]) or "run"
+    run_id_prefix = mc_cfg.get("run_id_prefix") or "run"
     run_counter = 0
 
     if args.aggregate_only:
         run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
         _write_experiment_outputs(
             outdir=outdir,
-            prescription=prescription,
+            experiment_cfg=experiment_cfg,
+            mc_cfg=mc_cfg,
             prescription_path=prescription_path,
-            plan_path=overrides_path,
+            plan_path=plan_path,
             run_entries=run_entries,
             infer_keys=infer_keys,
             repo_root=repo_root,
-            results_orientation=args.results_orientation,
+            results_orientation=results_orientation,
+            system_label=system_label,
+            config_override_keys=sorted(config_overrides.keys()),
+            truth_default_keys=truth_default_keys,
         )
         print(f"Wrote experiment manifest/results to: {outdir}")
         return
@@ -1882,57 +2325,100 @@ def main() -> None:
         rng_key, init_key = jr.split(rng_key)
         rng_key, noise_key = jr.split(rng_key)
 
+        inference_system_cfg_run, inference_detector_ke_meta = _seed_detector_knowledge_errors_with_policy(
+            inference_system_cfg_base,
+            experiment_seed=base_seed,
+            token_prefix="inference.detector",
+            run_seed=seed,
+        )
+        forward_spec_infer_run = compose_forward_spec(inference_system_cfg_run)
+        if tuple(forward_spec_infer_run.keys()) != tuple(forward_spec_infer.keys()):
+            raise ValueError(
+                "Run-specific inference forward spec keys differ from experiment-level keys. "
+                "Per-run detector knowledge-error realization currently requires invariant model structure."
+            )
+        inference_subspec = forward_spec_infer_run.subset(infer_keys)
+        cfg_hash = _stable_hash_payload(inference_system_cfg_run)
+        forward_spec_hash = _stable_hash_payload(forward_spec_infer_run)
+
         print(f"Generating synthetic data...")
         # Synthetic data generation + noise handling: build the "truth" store,
         # refresh derived values, then forward-model data and inject noise.
         truth_overrides = _flatten_store_overrides(run_spec.get("truth", {}))
-        truth_store = base_store.replace(truth_overrides)
-        truth_store = truth_store.refresh_derived(forward_spec)
+        truth_store_data = base_store_data.replace(truth_overrides)
+        truth_store_data = truth_store_data.refresh_derived(forward_spec_data)
 
-        binder = SheraThreePlaneBinder(cfg, forward_spec, truth_store)
+        truth_store_infer = base_store_infer.replace(truth_overrides)
+        aligned_truth = {}
+        for key in forward_spec_infer_run.keys():
+            try:
+                aligned_truth[key] = truth_store_data.get(key)
+            except KeyError:
+                continue
+        if aligned_truth:
+            truth_store_infer = truth_store_infer.replace(aligned_truth)
+        truth_store_infer = truth_store_infer.refresh_derived(forward_spec_infer_run)
+
+        binder_data = SheraBinder(system_cfg, forward_spec_data, truth_store_data)
+        binder_infer = SheraBinder(inference_system_cfg_run, forward_spec_infer_run, truth_store_infer)
 
         # Generate the synthetic data
-        data_psf = binder.model()
+        data_psf = binder_data.model()
 
-        # Optionally add noise to the data
-        add_noise_value = _get_nested(run_spec, ["noise", "add_noise"])
-        if add_noise_value is None:
-            add_noise_value = _get_nested(prescription, ["defaults", "noise", "add_noise"])
-        add_noise = bool(add_noise_value)
-        outputs_cfg = run_spec.get("outputs", {})
-        if outputs_cfg is None:
-            outputs_cfg = {}
+        # Resolve noise configuration and apply through shared helper
+        noise_cfg_run = copy.deepcopy(mc_defaults.get("noise", {}))
+        noise_cfg_run = _deep_update(noise_cfg_run, run_spec.get("noise", {}) or {})
+        add_noise_value = noise_cfg_run.get("enabled", noise_cfg_run.get("add_noise"))
+        add_noise = bool(add_noise_value) if add_noise_value is not None else False
+        outputs_cfg = run_spec.get("outputs", {}) or {}
         plots_flag = outputs_cfg.get("plots")
         if plots_flag is None:
-            plots_flag = _get_nested(prescription, ["defaults", "outputs", "plots"])
+            plots_flag = _get_nested(mc_defaults, ["outputs", "plots"])
         save_plots = bool(plots_flag) if plots_flag is not None else False
-        if add_noise:
-            rng_key, split_key = jr.split(rng_key)
-            if np.min(data_psf) > 100:
-                # Use gaussian approximation to shot noise if image is bright enough
-                data = np.sqrt(data_psf) * jr.normal(split_key, data_psf.shape) + data_psf
-            else:
-                # Otherwise use poisson statistics
-                data = jr.poisson(split_key, data_psf).astype(data_psf.dtype)
-                # Casting back to float is important for the optimization
-        else:  # No noise
-            data = data_psf
 
-        # Define data variance = data_psf -> Shot noise dominated
-        # Add a minimum variance floor to avoid any division by zero
-        data_var = jnp.maximum(data_psf, 1.0)
+        data, data_var = apply_observation_noise(
+            data_psf,
+            noise_cfg=noise_cfg_run,
+            rng_key=noise_key,
+            detector_spec=getattr(binder_data.detector, "spec", None),
+            exposure_time_s=truth_store_data.get("source.exposure_time_s", default=None),
+        )
+        if not add_noise:
+            data_var = _deterministic_noiseless_variance(
+                data_psf,
+                noise_cfg=noise_cfg_run,
+                path=f"run {run_id} noise.variance_floor",
+            )
+        else:
+            data_var = _apply_variance_floor(
+                data_var,
+                variance_floor=noise_cfg_run.get("variance_floor"),
+                path=f"run {run_id} noise.variance_floor",
+            )
 
         noise_model = "gaussian"
         reduce = "sum"
         nll_loss_fn, _ = make_binder_nll_fn(
-            binder=binder,
+            binder=binder_infer,
             infer_keys=infer_keys,
             data=data,
             var=data_var,
             noise_model=noise_model,
             reduce=reduce,
-            theta0_store=truth_store,
+            theta0_store=truth_store_infer,
         )
+        fim_labels = generate_fim_labels(
+            infer_keys,
+            cfg=inference_system_cfg_run,
+            store=truth_store_infer,
+        )
+        loss_fn = nll_loss_fn
+
+        # FIM computation and eigen preconditioning flow: pack_params converts
+        # a structured ParameterStore into a flat vector for optimization/FIM.
+        theta_true = pack_params(inference_subspec, truth_store_infer)
+        loss_true = float(loss_fn(theta_true))
+
         fim_cfg = run_spec.get("fim", {})
         reuse_fim_value = fim_cfg.get("reuse_fim")
         if reuse_fim_value is None:
@@ -1942,18 +2428,18 @@ def main() -> None:
         if reuse_fim_value is None:
             reuse_fim_value = run_spec.get("reuse_fim")
         if reuse_fim_value is None:
-            reuse_fim_value = _get_nested(prescription, ["defaults", "fim", "reuse_fim"])
+            reuse_fim_value = _get_nested(mc_defaults, ["fim", "reuse_fim"])
         reuse_fim = bool(reuse_fim_value) if reuse_fim_value is not None else False
 
         eigen_cfg = run_spec.get("eigen", {})
         use_eigen_value = eigen_cfg.get("use_eigen")
         if use_eigen_value is None:
-            use_eigen_value = _get_nested(prescription, ["defaults", "eigen", "use_eigen"])
+            use_eigen_value = _get_nested(mc_defaults, ["eigen", "use_eigen"])
         use_eigen = bool(use_eigen_value)
         whiten_basis_value = eigen_cfg.get("whiten_basis")
         if whiten_basis_value is None:
             whiten_basis_value = _get_nested(
-                prescription, ["defaults", "eigen", "whiten_basis"]
+                mc_defaults, ["eigen", "whiten_basis"]
             )
         whiten_basis = bool(whiten_basis_value)
         truncate_k = eigen_cfg.get("truncate_k")
@@ -1976,13 +2462,13 @@ def main() -> None:
 
         init_cfg = run_spec.get("init", {})
         init_mode = init_cfg.get("mode") or _get_nested(
-            prescription, ["defaults", "init", "mode"]
+            mc_defaults, ["init", "mode"]
         )
         init_overrides = {
             key: value for key, value in init_cfg.items() if key != "mode"
         }
         init_overrides_flat = _flatten_store_overrides(init_overrides)
-        prior_overrides = run_spec.get("prior_overrides") or {}
+        prior_overrides = _migrate_key_mapping(run_spec.get("prior_overrides") or {})
 
         if init_mode == "prior":
             # Per-run prior overrides only affect prior sampling and do not
@@ -1993,13 +2479,13 @@ def main() -> None:
                     prior_info,
                     prior_overrides,
                     infer_keys=infer_keys,
-                    base_store=base_store,
+                    base_store=base_store_infer,
                 )
                 if applied_keys:
-                    cache_key = _stable_hash(run_prior_info)
+                    cache_key = _stable_hash_payload(run_prior_info)
                     run_prior_spec = prior_spec_cache.get(cache_key)
                     if run_prior_spec is None:
-                        run_prior_spec = PriorSpec.from_info(base_store, run_prior_info)
+                        run_prior_spec = PriorSpec.from_info(base_store_infer, run_prior_info)
                         prior_spec_cache[cache_key] = run_prior_spec
                     applied_entries = []
                     for infer_key in applied_keys:
@@ -2021,7 +2507,7 @@ def main() -> None:
                         "using base priors."
                     )
             init_store = run_prior_spec.sample_near(
-                center_store=truth_store,
+                center_store=truth_store_infer,
                 rng_key=init_key,
                 keys=infer_keys,
             )
@@ -2034,13 +2520,13 @@ def main() -> None:
             # 2) `binary.log_flux_total` only -> explicit value is used.
             # 3) both provided -> explicit `binary.log_flux_total` wins because
             #    derived keys are re-applied after `refresh_derived`.
-            init_store = truth_store
+            init_store = truth_store_infer
             if init_overrides_flat:
                 (
                     init_primitive_overrides,
                     init_derived_overrides,
                     init_unknown_overrides,
-                ) = _partition_overrides_by_kind(init_overrides_flat, forward_spec)
+                ) = _partition_overrides_by_kind(init_overrides_flat, forward_spec_infer_run)
                 if init_unknown_overrides:
                     print(
                         "WARNING: explicit init overrides include keys that are not "
@@ -2051,7 +2537,7 @@ def main() -> None:
 
                 if init_primitive_overrides:
                     init_store = init_store.replace(init_primitive_overrides)
-                init_store = init_store.refresh_derived(forward_spec)
+                    init_store = init_store.refresh_derived(forward_spec_infer_run)
 
                 if init_derived_overrides:
                     infer_derived_keys = [
@@ -2079,7 +2565,7 @@ def main() -> None:
                 if init_unknown_overrides:
                     init_store = init_store.replace(init_unknown_overrides)
             else:
-                init_store = init_store.refresh_derived(forward_spec)
+                init_store = init_store.refresh_derived(forward_spec_infer_run)
             if prior_overrides:
                 print(
                     f"Note: prior overrides provided for run_id={run_id} but "
@@ -2088,10 +2574,14 @@ def main() -> None:
         else:
             raise ValueError(f"Unknown init.mode '{init_mode}'")
         if init_mode == "prior":
-            init_store = init_store.refresh_derived(forward_spec)
+            init_store = _refresh_preserving_derived_infer_keys(
+                init_store,
+                infer_keys=infer_keys,
+                spec=forward_spec_infer_run,
+            )
 
         _, theta0 = make_binder_nll_fn(
-            binder=binder,
+            binder=binder_infer,
             infer_keys=infer_keys,
             data=data,
             var=data_var,
@@ -2105,40 +2595,32 @@ def main() -> None:
             nll_loss = nll_loss_fn(theta)
             prior_gaussian_loss = run_prior_spec.quadratic_penalty(
                 store_theta,
-                center_store=truth_store, # TODO: truth_store or init_store?
+                center_store=init_store, # TODO: truth_store or init_store?
                 keys=infer_keys,
             )
             return nll_loss + prior_gaussian_loss
 
-        loss_kind = (
-            _get_nested(run_spec, ["optimizer", "loss"])
-            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
-            or "nll"
-        )
+        loss_kind = _resolve_loss_kind(run_spec, mc_defaults)
         if loss_kind == "map":
             loss_fn = map_loss_fn
         elif loss_kind == "nll":
             loss_fn = nll_loss_fn
-        else:
-            raise ValueError(
-                f"Unsupported optimizer.loss={loss_kind!r}; expected 'nll' or 'map'."
-            )
 
         # Pack truth store for FIM/diagnostics and evaluate baseline loss.
-        theta_true = pack_params(inference_subspec, truth_store)
+        theta_true = pack_params(inference_subspec, truth_store_infer)
         loss_true = float(loss_fn(theta_true))
 
         fim_point = theta_true
         # FIM cache key includes loss_kind so MAP and NLL cache separately.
-        cache_key_payload = {
-            "infer_keys": infer_keys,
-            "model_config_id": model_config_id,
-            "cfg_hash": cfg_hash,
-            "forward_spec_hash": forward_spec_hash,
-            "theta_true_hash": _hash_array(theta_true),
-            "loss_kind": loss_kind,
-        }
-        fim_cache_key = _stable_hash(cache_key_payload)[:12]
+        cache_key_payload = _build_fim_cache_key_payload(
+            infer_keys=infer_keys,
+            system_label=system_label,
+            cfg_hash=cfg_hash,
+            forward_spec_hash=forward_spec_hash,
+            theta_true_hash=_hash_array_bytes(theta_true),
+            loss_kind=loss_kind,
+        )
+        fim_cache_key = _stable_hash_payload(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
         cache_entry = fim_cache.get(cache_key)
         if cache_entry is not None:
@@ -2217,8 +2699,8 @@ def main() -> None:
                 lr_vec = np.ones_like(z0)
                 curvature_vec = np.ones_like(z0)
             else:
-                lr_vec = 1.0 / (eigvals_kept + 1e-12)
-                curvature_vec = eigvals_kept
+                curvature_vec = np.maximum(eigvals_kept, 1e-8)
+                lr_vec = 1.0 / (curvature_vec + 1e-12)
 
             index_map = build_eigen_index_map(eigen_map)
             # loss_opt maps optimizer z -> physical theta so the loss stays
@@ -2240,8 +2722,8 @@ def main() -> None:
             # Primitive theta_space keeps parameters untransformed and applies
             # a diagonal preconditioner from the FIM.
             index_map = build_index_map(inference_subspec, init_store, theta=theta0)
-            lr_vec = 1.0 / (np.asarray(fim_diag) + 1e-12)
-            curvature_vec = fim_diag
+            curvature_vec = np.maximum(np.asarray(fim_diag), 1e-8)
+            lr_vec = 1.0 / (curvature_vec + 1e-12)
             loss_opt = loss_fn
             theta0_opt = theta0
             metric_payload = None
@@ -2255,14 +2737,6 @@ def main() -> None:
                 **precond_meta_base,
                 "lr_vec": np.asarray(lr_vec),
             }
-
-        labels_by_key = map_labels_to_keys(
-            infer_keys,
-            generate_fim_labels(infer_keys, cfg=cfg, store=init_store if use_eigen else truth_store),
-            store=init_store if use_eigen else None,
-            index_map=None if use_eigen else index_map,
-        )
-
         optimizer_cfg = run_spec.get("optimizer", {})
         n_iter_value = optimizer_cfg.get("n_iter")
         if n_iter_value is None:
@@ -2274,15 +2748,55 @@ def main() -> None:
         optimizer_kwargs = optimizer_cfg.get("kwargs", {})
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
-        loss_kind = (
-            optimizer_cfg.get("loss")
-            or _get_nested(prescription, ["defaults", "optimizer", "loss"])
-            or "nll"
+
+        run_diagnosis = False
+        if run_diagnosis:
+            diag = diagnose_first_step(
+                loss_fn=loss_opt,
+                theta0=theta0_opt,
+                learning_rate=base_lr,
+                lr_vec=lr_vec if use_eigen else None,
+                optimizer_kind=opt_kind,
+                index_map=index_map if not use_eigen else None,
+                verbose=True,
+            )
+            print("First-step diagnostic:")
+            print(
+                f"  loss0={diag['loss0']:.6g} finite={diag['loss0_finite']} | "
+                f"grad_finite={diag['grad0_finite']} | theta1_finite={diag['theta1_finite']} | "
+                f"loss1={diag['loss1']:.6g} finite={diag['loss1_finite']}"
+            )
+            print(
+                f"  grad0 min/max={diag['grad0_min']:.3e}/{diag['grad0_max']:.3e} | "
+                f"delta min/max={diag['delta_min']:.3e}/{diag['delta_max']:.3e}"
+            )
+            if lr_vec is not None:
+                print(
+                    f"  lr_vec min/max={diag['lr_vec_min']:.3e}/{diag['lr_vec_max']:.3e}"
+                )
+            if diag.get("top_grad"):
+                topg = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_grad"])
+                print(f"  top |grad|: {topg}")
+            if diag.get("top_delta"):
+                topl = ", ".join(f"{i}:{v:.2e}" for i, v in diag["top_delta"])
+                print(f"  top |delta|: {topl}")
+
+        labels_by_key = map_labels_to_keys(
+            infer_keys,
+            generate_fim_labels(
+                infer_keys,
+                cfg=inference_system_cfg_run,
+                store=init_store if use_eigen else truth_store_infer,
+            ),
+            store=init_store if use_eigen else None,
+            index_map=None if use_eigen else index_map,
         )
+
+        loss_kind = _resolve_loss_kind(run_spec, mc_defaults)
 
         # Loss function setup and optimization execution: run_shera_gd consumes
         # the chosen theta_space, preconditioner, and metadata for artifacts.
-        config_payload = _config_payload(cfg, repo_root=repo_root)
+        config_payload = _config_payload(system_cfg, repo_root=repo_root)
         theta_final_opt, trace, artifacts = run_shera_gd(
             loss_fn=loss_opt,
             theta0=theta0_opt,
@@ -2306,7 +2820,7 @@ def main() -> None:
                 },
                 "theta": {"labels_by_key": labels_by_key},
                 "model": {
-                    "config_id": model_config_id,
+                    "config_id": system_label,
                     "config": config_payload,
                 },
                 "prescribed": {
@@ -2319,6 +2833,17 @@ def main() -> None:
                     "reuse_fim": reuse_fim,
                     "fim_cache_key": fim_cache_key,
                     "fim_cache_hit": fim_cache_hit,
+                    "inference_cfg_hash": cfg_hash,
+                    "inference_forward_spec_hash": forward_spec_hash,
+                    "detector_ke_realization_mode": (
+                        "per_run"
+                        if inference_detector_ke_meta.get("has_per_run_realization")
+                        else "fixed_per_experiment"
+                    ),
+                },
+                "detector_knowledge_error": {
+                    "data": data_detector_ke_meta,
+                    "inference": inference_detector_ke_meta,
                 },
             },
         )
@@ -2332,11 +2857,11 @@ def main() -> None:
         # Rehydrate structured parameters after optimization: unpack_params
         # restores the ParameterStore layout for reporting and artifacts.
         final_store = store_unpack_params(inference_subspec, theta_final, init_store)
-        init_psf = binder.model(
-            strip_structural(init_store, structural_keys=binder.structural_store_keys())
+        init_psf = binder_infer.model(
+            binder_infer.strip_structural(init_store)
         )
-        final_psf = binder.model(
-            strip_structural(final_store, structural_keys=binder.structural_store_keys())
+        final_psf = binder_infer.model(
+            binder_infer.strip_structural(final_store)
         )
 
         loss_init = float(loss_fn(theta0))
@@ -2356,7 +2881,7 @@ def main() -> None:
         if artifacts is not None:
             run_dir = Path(artifacts["run_dir"]) if artifacts.get("run_dir") else None
             if run_dir is not None:
-                truth_dict = {key: truth_store.get(key) for key in infer_keys}
+                truth_dict = {key: truth_store_data.get(key) for key in infer_keys}
                 init_dict = {key: init_store.get(key) for key in infer_keys}
                 final_dict = {key: final_store.get(key) for key in infer_keys}
                 param_summary = build_param_summary(
@@ -2383,8 +2908,8 @@ def main() -> None:
 
                     fim_labels = generate_fim_labels(
                         infer_keys,
-                        cfg=cfg,
-                        store=init_store if use_eigen else truth_store,
+                        cfg=inference_system_cfg_run,
+                        store=init_store if use_eigen else truth_store_infer,
                     )
                     plot_fim(
                         F,
@@ -2418,9 +2943,7 @@ def main() -> None:
                         )
 
                     psf_extent_as = (
-                        binder.cfg.psf_npix
-                        * binder.base_forward_store.get("system.plate_scale_as_per_pix")
-                        / 2
+                        binder_data.optics.psf_npixels * binder_data.optics.psf_pixel_scale / 2
                         * np.array([-1, 1, -1, 1])
                     )
 
@@ -2444,7 +2967,49 @@ def main() -> None:
                         show=False,
                     )
 
-                    losses = np.asarray(trace["loss"])
+                    pixel_offsets_data = _get_pixel_offset_maps(binder_data)
+                    pixel_offsets_infer = _get_pixel_offset_maps(binder_infer)
+                    if pixel_offsets_data is not None and pixel_offsets_infer is not None:
+                        data_dx, data_dy = pixel_offsets_data
+                        infer_dx, infer_dy = pixel_offsets_infer
+                        if data_dx.shape == infer_dx.shape and data_dy.shape == infer_dy.shape:
+                            plot_pixel_offset_maps(
+                                data_dx,
+                                data_dy,
+                                infer_dx,
+                                infer_dy,
+                                cmap="viridis_nan",
+                                save_path=plots_dir / "pixel_offset_maps.png",
+                                show=False,
+                            )
+                        else:
+                            print("Skipping pixel_offset_maps.png: data/inference map shapes differ.")
+                    else:
+                        print("Skipping pixel_offset_maps.png: pixel_offsets layer missing.")
+
+                    prf_data = _get_pixel_response_map(binder_data)
+                    prf_infer = _get_pixel_response_map(binder_infer)
+                    if prf_data is not None and prf_infer is not None:
+                        if prf_data.shape == prf_infer.shape:
+                            plot_pixel_response_maps(
+                                prf_data,
+                                prf_infer,
+                                cmap="viridis_nan",
+                                save_path=plots_dir / "pixel_response_maps.png",
+                                show=False,
+                            )
+                        else:
+                            print("Skipping pixel_response_maps.png: data/inference prf shapes differ.")
+                    else:
+                        print("Skipping pixel_response_maps.png: pixel_response layer missing.")
+
+                    trace_for_signals = _trace_with_initial_point(
+                        trace,
+                        theta0=theta0_opt,
+                        loss0=loss_init,
+                    )
+                    losses = np.asarray(trace_for_signals["loss"])
+                    iterations = np.arange(losses.shape[0])
                     fig, axes = plt.subplots(1, 2, figsize=(9, 4))
                     axes = axes.flatten()
                     plot_parameter_history(
@@ -2456,8 +3021,9 @@ def main() -> None:
                         show=False,
                         close=False,
                     )
-                    window = min(10, n_iter)
-                    axes[1].plot(np.arange(n_iter - window, n_iter) + 1, losses[-window:])
+                    window = min(10, losses.shape[0])
+                    start = losses.shape[0] - window
+                    axes[1].plot(iterations[start:], losses[start:])
                     axes[1].set_title(f"Last {window} Iterations, Final= {losses[-1]:.3f}")
                     axes[1].set_xlabel("Iteration")
                     axes[1].set_ylabel("Loss")
@@ -2470,29 +3036,38 @@ def main() -> None:
                     plt.close(fig)
 
                     if use_eigen and eigen_map is not None:
-                        decoder = lambda z: store_unpack_params(
-                            inference_subspec,
-                            eigen_map.theta_from_z(z),
-                            init_store,
-                        ).refresh_derived(forward_spec)
+                        decoder = lambda z: _refresh_preserving_derived_infer_keys(
+                            store_unpack_params(
+                                inference_subspec,
+                                eigen_map.theta_from_z(z),
+                                init_store,
+                            ),
+                            infer_keys=infer_keys,
+                            spec=forward_spec_infer_run,
+                        )
                     else:
-                        decoder = lambda theta: store_unpack_params(
-                            inference_subspec,
-                            theta,
-                            init_store,
-                        ).refresh_derived(forward_spec)
+                        decoder = lambda theta: _refresh_preserving_derived_infer_keys(
+                            store_unpack_params(
+                                inference_subspec,
+                                theta,
+                                init_store,
+                            ),
+                            infer_keys=infer_keys,
+                            spec=forward_spec_infer_run,
+                        )
 
                     signals = build_signals(
-                        trace,
+                        trace_for_signals,
                         meta={},
                         decoder=decoder,
-                        truth=truth_store,
+                        truth=truth_store_data,
                         signal_set="intro",
                     )
                     plot_signals_grid(
                         signals,
                         plots_dir,
                         include_zernike_rms=False,
+                        show_final_values=True,
                         figsize=(15, 10),
                         show=False,
                     )
@@ -2515,13 +3090,17 @@ def main() -> None:
     run_entries = _collect_run_entries(runs_dir, plan_rows, run_specs, plan_labels)
     _write_experiment_outputs(
         outdir=outdir,
-        prescription=prescription,
+        experiment_cfg=experiment_cfg,
+        mc_cfg=mc_cfg,
         prescription_path=prescription_path,
-        plan_path=overrides_path,
+        plan_path=plan_path,
         run_entries=run_entries,
         infer_keys=infer_keys,
         repo_root=repo_root,
         results_orientation=results_orientation,
+        system_label=system_label,
+        config_override_keys=sorted(config_overrides.keys()),
+        truth_default_keys=truth_default_keys,
     )
     t1_experiment = time.time()
     print(
