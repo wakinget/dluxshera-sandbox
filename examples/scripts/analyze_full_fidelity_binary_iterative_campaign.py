@@ -135,6 +135,13 @@ CUMULATIVE_VARIANTS = (
     ("all_windows", 0),
     ("exclude_first_window", 1),
     ("exclude_first_two_windows", 2),
+    ("tail_7_windows", 3),
+    ("tail_6_windows", 4),
+    ("information_accumulation", 5),
+    ("tail_4_windows", 6),
+    ("tail_3_windows", 7),
+    ("tail_2_windows", 8),
+    ("tail_1_window", 9),
 )
 ADAPTIVE_CADENCE_MODE_SETS = (
     "astrometric_core",
