@@ -119,6 +119,25 @@ configs.
    condition, KE amplitude, and detector calibration term unless a row is
    explicitly labeled as pooled.
 
+10. Choose rendered-FITS retention deliberately.
+
+   Existing configs that omit the setting keep rendered cube/variance FITS.
+   Future long iterative runs can opt in to pruning completed windows:
+
+   ```yaml
+   experiment:
+     subblocks:
+       render_retention: delete_after_window
+   ```
+
+   The runner preserves all rendered FITS while a window is incomplete. After a
+   window has valid subblock summaries, a valid `posterior_by_label.csv`,
+   `science_summary.csv`, `iterative_window_diagnostics.csv`, and a successful
+   `iterative_reference_update.json`, it may delete only `*_cube.fits` and
+   `*_variance.fits` from that window's subblock `render/` directories. Schur
+   summaries/matrices, manifests, frame truth, configs, diagnostics, logs,
+   posterior products, status/progress files, and analysis outputs remain.
+
 ## Edge Launch Checklist
 
 Use this checklist before launching full-fidelity shards on Gattaca2 Edge:
@@ -198,6 +217,62 @@ Do not use this with the shard helper:
 
 The helper and sbatch wrapper add `observation_bias_campaign` themselves.
 Passing the nested path produces doubled run roots.
+
+## Resume And Render-Retention Validation
+
+Production campaign roots under `/projects/shera_hpc/...` must be audited on
+Gattaca2 before broad relaunch. Do not infer compatibility only from expected
+paths; check the actual representative root.
+
+Repository-side checks before copying/launching:
+
+```bash
+git rev-parse HEAD
+git status --short
+PYTHONPATH=src python examples/scripts/audit_campaign_config_schema.py \
+  --config path/to/full_fidelity.yaml
+```
+
+For one representative partial M1 root, run non-destructive inventory commands
+that count current-contract artifacts by window:
+
+```bash
+ROOT=/projects/.../dLuxShera-Results/observation_bias_campaign/<run_name>
+
+find "$ROOT/cases" -path '*/windows/window_*/posterior_by_label.csv' -type f | sort
+find "$ROOT/cases" -path '*/windows/window_*/iterative_reference_update.json' -type f | sort
+find "$ROOT/subblock_runs" -path '*/window_*/subblock_*/study/schur_summary/subblock_summary.json' -type f | sort | wc -l
+find "$ROOT/subblock_runs" -path '*/window_*/subblock_*/render/*_cube.fits' -type f | sort | wc -l
+find "$ROOT/subblock_runs" -path '*/window_*/subblock_*/render/*_variance.fits' -type f | sort | wc -l
+```
+
+To identify the partial window, compare per-window counts of canonical
+subblock summaries with the configured `iterative.subblocks_per_window`, and
+compare completed-window posterior/reference-update files with the current
+runner contract. A completed already-pruned window should have the posterior and
+reference-update artifacts even when render FITS count is zero.
+
+If using `--dry-run`, treat it as a compute-node preflight, not a login-node
+schema audit: it can build plans and write model/template artifacts. There is
+no separate fake dry-run resume planner for render cleanup.
+
+For the first real-root smoke resume with `render_retention: delete_after_window`,
+watch for these behaviors before broad relaunch:
+
+- already completed windows are reused and any residual completed-window render
+  FITS are pruned;
+- the current partial window keeps existing render FITS until missing subblocks
+  finish and the window aggregates;
+- completed subblocks inside the partial window are reused;
+- missing subblocks execute normally;
+- once the partial window writes posterior/reference-update artifacts, only its
+  `*_cube.fits` and `*_variance.fits` are removed;
+- the next untouched window starts normally.
+
+Post-smoke, check `campaign_summary.json`,
+`analysis/aggregate_status.json`, `subblock_status_iterative.csv`, per-window
+`render_retention/cleanup_latest.json`, and FITS counts by window before
+launching a larger wave.
 
 ## HO-WFE Field-Dither Family
 

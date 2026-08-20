@@ -125,6 +125,7 @@ experiment:
       write_variance: true
       seed_policy: from_subblock_noise_seed
     use_render_variance: auto
+    render_retention: delete_after_window
     phi_ref: truth_when_available
     schur_curvature_method: auto
     max_dense_dim: 40

@@ -194,6 +194,12 @@ SUPPORTED_ITERATIVE_UPDATE_MODES = (
     "eigen_damped",
     "eigen_truncated",
 )
+SUPPORTED_RENDER_RETENTION_POLICIES = (
+    "keep",
+    "delete_after_window",
+)
+RENDER_RETENTION_DEFAULT = "keep"
+RENDER_RETENTION_ALLOWED_SUFFIXES = ("_cube.fits", "_variance.fits")
 SUBBLOCK_OPTION_FLAG_MAP = {
     "summary_information_scale": "--summary-information-scale",
     "exposure_time_s": "--exposure-time-s",
@@ -245,6 +251,12 @@ def _write_json(path: Path, payload: Any) -> None:
     _ensure_dir(path.parent)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
+    _ensure_dir(path.parent)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(json_ready(dict(payload)), sort_keys=True) + "\n")
 
 
 def _write_csv_rows(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -1126,6 +1138,7 @@ def _apply_cli_overrides(experiment_cfg: dict[str, Any], args: argparse.Namespac
         ("max_dense_dim", "max_dense_dim"),
         ("schur_curvature_method", "schur_curvature_method"),
         ("summary_information_scale", "summary_information_scale"),
+        ("render_retention", "render_retention"),
         ("profile_runtime_detail", "profile_runtime_detail"),
     ):
         value = getattr(args, arg_name, None)
@@ -1359,6 +1372,22 @@ def _resolve_iterative_config(experiment_cfg: Mapping[str, Any]) -> dict[str, An
         },
         "future_update_modes": [],
     }
+
+
+def _resolve_render_retention_policy(experiment_cfg: Mapping[str, Any]) -> str:
+    """Return the explicit rendered-FITS retention policy for subblocks."""
+
+    subblocks = experiment_cfg.get("subblocks", {}) or {}
+    if not isinstance(subblocks, Mapping):
+        raise ValueError("experiment.subblocks must be a mapping when provided.")
+    policy = str(subblocks.get("render_retention", RENDER_RETENTION_DEFAULT))
+    if policy not in SUPPORTED_RENDER_RETENTION_POLICIES:
+        raise ValueError(
+            "experiment.subblocks.render_retention must be one of "
+            + ", ".join(SUPPORTED_RENDER_RETENTION_POLICIES)
+            + "."
+        )
+    return policy
 
 
 def _resolve_iterative_forecast_config(experiment_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -2143,6 +2172,9 @@ def build_campaign_plan(
     if normalized_noise.variance_floor is not None and normalized_noise.variance_floor != "auto":
         effective_subblock_cfg["variance_floor"] = normalized_noise.variance_floor
     effective_subblock_cfg["use_render_variance"] = normalized_noise.use_render_variance_resolved
+    effective_subblock_cfg["render_retention"] = _resolve_render_retention_policy(
+        experiment_cfg
+    )
     effective_subblock_cfg["noise_model"] = {
         **dict(effective_subblock_cfg.get("noise_model", {}) or {}),
         "normalized_subblock_noise": normalized_noise.to_dict(),
@@ -2150,6 +2182,7 @@ def build_campaign_plan(
     }
     subblock_command_options = resolve_subblock_command_options(effective_subblock_cfg)
     iterative_cfg = _resolve_iterative_config(experiment_cfg)
+    iterative_cfg["render_retention"] = str(effective_subblock_cfg["render_retention"])
     iterative_forecast_cfg = _resolve_iterative_forecast_config(experiment_cfg)
     if bool(iterative_forecast_cfg.get("enabled", False)):
         if not bool(iterative_cfg.get("enabled", False)):
@@ -4891,6 +4924,256 @@ def _posterior_truth_by_label(
     return truth
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def _render_retention_provenance_paths(window_root: Path) -> dict[str, Path]:
+    root = window_root / "render_retention"
+    return {
+        "latest_json": root / "cleanup_latest.json",
+        "history_jsonl": root / "cleanup_history.jsonl",
+    }
+
+
+def _subblock_root_from_summary_path(summary_path: Path) -> Path:
+    return summary_path.parent.parent.parent
+
+
+def _iterative_window_render_candidates(
+    *,
+    summary_paths: Sequence[Path],
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    candidates: dict[Path, Path] = {}
+    skipped: list[dict[str, Any]] = []
+    for summary_path in summary_paths:
+        subblock_root = _subblock_root_from_summary_path(Path(summary_path))
+        subblock_window_root = subblock_root.parent
+        render_root = subblock_root / "render"
+        if subblock_window_root.is_symlink() or subblock_root.is_symlink():
+            skipped.append(
+                {
+                    "path": str(subblock_root),
+                    "reason": "subblock_root_or_window_root_symlink",
+                }
+            )
+            continue
+        if not _path_is_within(render_root, subblock_root):
+            skipped.append(
+                {
+                    "path": str(render_root),
+                    "reason": "render_root_outside_subblock_root",
+                }
+            )
+            continue
+        if render_root.is_symlink():
+            skipped.append({"path": str(render_root), "reason": "render_root_symlink"})
+            continue
+        if not render_root.is_dir():
+            continue
+        for suffix in RENDER_RETENTION_ALLOWED_SUFFIXES:
+            for candidate in render_root.glob(f"*{suffix}"):
+                if not candidate.is_file() or candidate.is_symlink():
+                    skipped.append(
+                        {
+                            "path": str(candidate),
+                            "reason": "not_regular_file_or_symlink",
+                        }
+                    )
+                    continue
+                if not _path_is_within(candidate, subblock_window_root):
+                    skipped.append(
+                        {
+                            "path": str(candidate),
+                            "reason": "candidate_outside_window_root",
+                        }
+                    )
+                    continue
+                if not candidate.name.endswith(RENDER_RETENTION_ALLOWED_SUFFIXES):
+                    skipped.append(
+                        {
+                            "path": str(candidate),
+                            "reason": "basename_not_allowed",
+                        }
+                    )
+                    continue
+                candidates[candidate.resolve(strict=False)] = candidate
+    return sorted(candidates.values(), key=lambda path: str(path)), skipped
+
+
+def _iterative_window_completion_guard(
+    *,
+    plan: CampaignPlan,
+    window_case: BiasCase,
+    window_index: int,
+    posterior_path: Path,
+    summary_paths: Sequence[Path],
+) -> tuple[bool, dict[str, Any]]:
+    window_root = plan.run_root / "cases" / window_case.case_name
+    reference_update_path = window_root / "iterative_reference_update.json"
+    window_summary_path = window_root / "science_summary.csv"
+    diagnostics_path = window_root / "iterative_window_diagnostics.csv"
+    summary_checks: list[dict[str, Any]] = []
+    for summary_path in summary_paths:
+        check = {"path": str(summary_path), "exists": summary_path.exists(), "readable": False}
+        if summary_path.exists():
+            try:
+                load_subblock_summary_artifact_payload(summary_path)
+                check["readable"] = True
+            except Exception as exc:
+                check["error"] = str(exc)
+        summary_checks.append(check)
+    posterior_rows: Mapping[str, Mapping[str, Any]] = {}
+    posterior_error = ""
+    if posterior_path.exists():
+        try:
+            posterior_rows = posterior_rows_by_label(posterior_path)
+        except Exception as exc:
+            posterior_error = str(exc)
+    reference_payload: dict[str, Any] = {}
+    reference_error = ""
+    if reference_update_path.exists():
+        try:
+            raw_reference = json.loads(reference_update_path.read_text(encoding="utf-8"))
+            reference_payload = dict(raw_reference) if isinstance(raw_reference, Mapping) else {}
+        except Exception as exc:
+            reference_error = str(exc)
+    guard = {
+        "canonical_completed_window_artifacts": {
+            "posterior_by_label_csv": str(posterior_path),
+            "iterative_reference_update_json": str(reference_update_path),
+            "science_summary_csv": str(window_summary_path),
+            "iterative_window_diagnostics_csv": str(diagnostics_path),
+        },
+        "window_index": int(window_index),
+        "window_case_name": window_case.case_name,
+        "posterior_exists": posterior_path.exists(),
+        "posterior_readable": bool(posterior_rows),
+        "posterior_row_count": int(len(posterior_rows)),
+        "posterior_error": posterior_error,
+        "reference_update_exists": reference_update_path.exists(),
+        "reference_update_status": str(reference_payload.get("status", "")),
+        "reference_update_readable": bool(reference_payload),
+        "reference_update_error": reference_error,
+        "reference_update_posterior_table_path": str(
+            reference_payload.get("posterior_table_path", "")
+        ),
+        "reference_update_posterior_table_matches": bool(
+            str(reference_payload.get("posterior_table_path", ""))
+            == str(posterior_path)
+        ),
+        "window_summary_exists": window_summary_path.exists(),
+        "window_diagnostics_exists": diagnostics_path.exists(),
+        "summary_checks": summary_checks,
+        "summary_count": int(len(summary_checks)),
+        "summary_readable_count": int(
+            sum(bool(row.get("readable")) for row in summary_checks)
+        ),
+    }
+    ok = (
+        bool(posterior_rows)
+        and bool(reference_payload)
+        and str(reference_payload.get("status", "")) == "ok"
+        and str(reference_payload.get("posterior_table_path", "")) == str(posterior_path)
+        and bool(window_summary_path.exists())
+        and bool(diagnostics_path.exists())
+        and all(bool(row.get("readable")) for row in summary_checks)
+    )
+    guard["status"] = "ok" if ok else "failed"
+    return ok, guard
+
+
+def _cleanup_completed_iterative_window_renders(
+    *,
+    plan: CampaignPlan,
+    window_case: BiasCase,
+    window_index: int,
+    posterior_path: Path,
+    summary_paths: Sequence[Path],
+) -> dict[str, Any]:
+    policy = str(plan.iterative.get("render_retention", RENDER_RETENTION_DEFAULT))
+    window_root = plan.run_root / "cases" / window_case.case_name
+    provenance_paths = _render_retention_provenance_paths(window_root)
+    payload: dict[str, Any] = {
+        "schema_version": "observation_bias_render_retention_cleanup.v1",
+        "created_at": now_iso_local_ms(),
+        "retention_policy": policy,
+        "run_root": str(plan.run_root),
+        "case_name": window_case.case_name,
+        "window_index": int(window_index),
+        "window_root": str(window_root),
+        "allowed_filename_suffixes": list(RENDER_RETENTION_ALLOWED_SUFFIXES),
+        "files_deleted": [],
+        "files_deleted_count": 0,
+        "logical_bytes_deleted": 0,
+        "candidate_count": 0,
+        "skipped": [],
+        "errors": [],
+    }
+    if policy == "keep":
+        payload["cleanup_status"] = "skipped_policy_keep"
+        return payload
+    if policy != "delete_after_window":
+        payload["cleanup_status"] = "failed"
+        payload["errors"].append({"reason": f"unsupported_policy:{policy}"})
+        _write_json(provenance_paths["latest_json"], json_ready(payload))
+        _append_jsonl(provenance_paths["history_jsonl"], payload)
+        return payload
+    summary_paths = [Path(path) for path in summary_paths]
+    guard_ok, guard = _iterative_window_completion_guard(
+        plan=plan,
+        window_case=window_case,
+        window_index=window_index,
+        posterior_path=posterior_path,
+        summary_paths=summary_paths,
+    )
+    payload["completion_guard"] = guard
+    if not guard_ok:
+        payload["cleanup_status"] = "guard_failed"
+        _write_json(provenance_paths["latest_json"], json_ready(payload))
+        _append_jsonl(provenance_paths["history_jsonl"], payload)
+        return payload
+    candidates, skipped = _iterative_window_render_candidates(
+        summary_paths=summary_paths,
+    )
+    payload["candidate_count"] = int(len(candidates))
+    payload["skipped"] = skipped
+    for candidate in candidates:
+        try:
+            size_bytes = int(candidate.stat().st_size)
+        except Exception as exc:
+            payload["errors"].append(
+                {
+                    "path": str(candidate),
+                    "size_bytes": 0,
+                    "error": str(exc),
+                }
+            )
+            continue
+        try:
+            candidate.unlink()
+        except Exception as exc:
+            payload["errors"].append(
+                {
+                    "path": str(candidate),
+                    "size_bytes": size_bytes,
+                    "error": str(exc),
+                }
+            )
+            continue
+        payload["files_deleted"].append({"path": str(candidate), "size_bytes": size_bytes})
+        payload["logical_bytes_deleted"] = int(payload["logical_bytes_deleted"]) + size_bytes
+    payload["cleanup_status"] = "failed" if payload["errors"] else "ok"
+    payload["files_deleted_count"] = int(len(payload["files_deleted"]))
+    _write_json(provenance_paths["latest_json"], json_ready(payload))
+    _append_jsonl(provenance_paths["history_jsonl"], payload)
+    return payload
+
+
 def execute_iterative_campaign(
     plan: CampaignPlan,
     *,
@@ -5064,6 +5347,21 @@ def execute_iterative_campaign(
                     "not_scientific_if_synthetic_inputs": False,
                 },
             )
+            cleanup_result = _cleanup_completed_iterative_window_renders(
+                plan=plan,
+                window_case=window_case,
+                window_index=window_index,
+                posterior_path=expected_posterior,
+                summary_paths=window_plan_obj.summary_paths[window_case.case_name],
+            )
+            if str(cleanup_result.get("cleanup_status", "")) == "failed":
+                print(
+                    "[observation_bias_campaign] render-retention cleanup failed "
+                    f"for {window_case.case_name}: "
+                    f"{cleanup_result.get('errors')}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             current_offsets_by_case[case.case_name] = next_offsets
     analysis_root = plan.run_root / "analysis"
     _write_csv_rows(analysis_root / "iterative_window_diagnostics.csv", diagnostics)
@@ -5963,6 +6261,7 @@ def run_observation_bias_campaign(
             max_dense_dim=None,
             schur_curvature_method=None,
             summary_information_scale=None,
+            render_retention=None,
             seed_policy=None,
             base_seed=None,
         )
@@ -6179,6 +6478,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--summary-information-scale",
         choices=("summed_likelihood", "optimizer"),
         default=None,
+    )
+    parser.add_argument(
+        "--render-retention",
+        choices=SUPPORTED_RENDER_RETENTION_POLICIES,
+        default=None,
+        help="Rendered FITS retention policy for iterative window campaigns.",
     )
     parser.add_argument(
         "--allow-optimizer-scale-summaries",

@@ -179,6 +179,17 @@ CONFIG_FIELD_REGISTRY: dict[str, dict[str, Any]] = {
     "experiment.subblocks.noise.write_variance": _entry(default=True, consumed_by="render audit/provenance", runtime_effect="variance artifact request", provenance_effect="render provenance", notes="Audit warns if requested but no variance artifact/map is produced."),
     "experiment.subblocks.noise.seed_policy": _entry(valid_values=_values(("from_subblock_noise_seed", "implemented", "Use derived subblock noise seed.")), consumed_by="wrapper translation"),
     "experiment.subblocks.use_render_variance": _entry(valid_values=_values(("auto", "implemented", "Report template/default behavior and use rendered variance when the runner can prove one exists."), ("true", "implemented", "Require rendered variance cube for provided_cube inference model."), ("false", "implemented", "Use data/floor inference variance model.")), default="auto", consumed_by="inference template/audit", runtime_effect="likelihood variance source", provenance_effect="inference provenance", notes="Kept separate from render/data noise controls."),
+    "experiment.subblocks.render_retention": _entry(
+        valid_values=_values(
+            ("keep", "implemented", "Retain rendered cube/variance FITS after window completion."),
+            ("delete_after_window", "implemented", "Prune rendered cube/variance FITS only after a full iterative window is canonically complete."),
+        ),
+        default="keep",
+        consumed_by="observation_bias iterative runner",
+        runtime_effect="controls post-window rendered-FITS archival cleanup",
+        provenance_effect="writes per-window render-retention cleanup provenance when pruning is active",
+        notes="Cleanup boundary is the completed iterative window, not an individual completed subblock.",
+    ),
     "experiment.subblocks.phi_ref": _entry(valid_values=_values(("truth_when_available", "implemented", "Use truth fast-state reference where available."), ("recovered", "implemented", "Use recovered-reference inference."), ("init", "future_placeholder", "Initialization reference where supported.")), consumed_by="subblock runner"),
     "experiment.subblocks.schur_curvature_method": _entry(valid_values=_values(("auto", "implemented", "Select available curvature path."), ("dense", "implemented", "Dense curvature path where dimensions allow."), ("structured", "implemented", "Structured curvature path.")), consumed_by="subblock runner"),
     "experiment.subblocks.reference_diagnostics_profile": _entry(valid_values=_values(("none", "implemented", "Disable extra diagnostics."), ("basic", "implemented", "Basic diagnostics."), ("review", "implemented", "Review diagnostics and plots."), ("full", "implemented", "Full expensive diagnostics.")), consumed_by="subblock runner"),

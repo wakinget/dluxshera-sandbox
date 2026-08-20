@@ -106,6 +106,19 @@ def test_config_translation_preserves_iterative_eigenbasis_policy() -> None:
     assert iterative["eigenbasis"]["damping_value"] == 0.1
 
 
+def test_config_translation_preserves_render_retention_policy() -> None:
+    module = load_module()
+    raw = module.load_config_file(CONFIG_PATH)
+    raw["experiment"]["subblocks"]["render_retention"] = "delete_after_window"
+
+    translated = module._full_fidelity_to_observation_bias(raw, run_name="unit")
+
+    assert (
+        translated["experiment"]["subblocks"]["render_retention"]
+        == "delete_after_window"
+    )
+
+
 @pytest.mark.parametrize(
     ("windows_per_draw", "subblocks_per_window", "total_subblocks"),
     [(10, 30, 300), (5, 60, 300), (3, 100, 300)],

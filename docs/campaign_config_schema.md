@@ -143,6 +143,44 @@ the existing trajectory filter artifacts. These files record requested offsets,
 application stage, and pre/post mean, standard deviation, min, max, and
 peak-to-peak statistics.
 
+## Render Retention
+
+Rendered subblock cube and variance FITS are transient inputs to the
+image-backed Schur-summary export. Iterative full-fidelity campaigns may opt in
+to post-window cleanup with:
+
+```yaml
+experiment:
+  subblocks:
+    render_retention: delete_after_window
+```
+
+Supported values are:
+
+- `keep`: default when omitted; preserve rendered FITS exactly as previous
+  campaign runs did.
+- `delete_after_window`: after a full iterative window has aggregated and the
+  runner has written valid completed-window artifacts, delete only
+  `*_cube.fits` and `*_variance.fits` under that window's subblock `render/`
+  directories.
+
+The safety boundary is the iterative window, not an individual subblock.
+Incomplete windows retain all rendered FITS, including FITS for subblocks that
+already have `study/schur_summary/subblock_summary.json`. Persistent Schur
+summaries, Schur matrix products, render manifests, frame-truth metadata,
+configs, diagnostics, logs, status/progress files, posterior tables, reference
+updates, campaign/window summaries, and analysis products are not pruned.
+
+Per-window cleanup provenance is written under:
+
+```text
+cases/<case>/windows/window_###/render_retention/
+```
+
+when pruning is active. The latest JSON and JSONL history record the policy,
+window index, completion guard artifacts, deleted file count, deleted logical
+bytes, allowed suffixes, skipped candidates, and unlink errors.
+
 ## High-Order WFE
 
 `experiment.high_order_wfe` remains backward-compatible with the original scalar

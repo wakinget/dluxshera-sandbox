@@ -463,6 +463,7 @@ def run_full_fidelity_binary_iterative_campaign(
     profile_runtime: bool = False,
     profile_runtime_detail: str = "basic",
     memory_diagnostics: bool = False,
+    render_retention: str | None = None,
 ) -> dict[str, Any]:
     raw = load_config_file(config_path)
     validate_full_fidelity_smoke_config(raw, emit_warnings=True)
@@ -497,6 +498,7 @@ def run_full_fidelity_binary_iterative_campaign(
             max_dense_dim=None,
             schur_curvature_method=None,
             summary_information_scale=None,
+            render_retention=render_retention,
             profile_runtime=profile_runtime,
             profile_runtime_detail=profile_runtime_detail,
             memory_diagnostics=memory_diagnostics,
@@ -537,6 +539,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-runtime", action="store_true", default=False)
     parser.add_argument("--profile-runtime-detail", choices=("basic", "full"), default="basic")
     parser.add_argument("--memory-diagnostics", action="store_true", default=False)
+    parser.add_argument(
+        "--render-retention",
+        choices=("keep", "delete_after_window"),
+        default=None,
+        help="Override experiment.subblocks.render_retention.",
+    )
     return parser
 
 
@@ -556,6 +564,7 @@ def main(argv: list[str] | None = None) -> None:
         profile_runtime=bool(args.profile_runtime),
         profile_runtime_detail=str(args.profile_runtime_detail),
         memory_diagnostics=bool(args.memory_diagnostics),
+        render_retention=args.render_retention,
     )
 
 
