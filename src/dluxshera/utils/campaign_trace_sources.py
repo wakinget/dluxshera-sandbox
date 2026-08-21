@@ -366,10 +366,22 @@ def _trajectory_plan(
                     },
                 )
         elif smear_cfg.enabled:
+            provenance_path = (outdir / "smear_provenance.json").resolve()
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            representative_kernel = provenance.get("representative_kernel")
+            if not isinstance(representative_kernel, Mapping) or not representative_kernel:
+                raise ValueError(
+                    "Stored trajectory smear provenance is missing a valid "
+                    f"representative_kernel for subblock {block.subblock_index}."
+                )
             smear_artifacts = {
                 "smear_truth_csv": (outdir / "frame_smear_truth.csv").resolve(),
                 "smear_model_csv": (outdir / "frame_smear_model.csv").resolve(),
-                "smear_provenance_json": (outdir / "smear_provenance.json").resolve(),
+                "smear_provenance_json": provenance_path,
+                "representative_kernel": dict(representative_kernel),
+                "provenance": provenance,
+                **dict(provenance.get("truth_summary", {}) or {}),
+                **dict(provenance.get("model_summary", {}) or {}),
             }
         diagnostics: dict[str, Any] = {}
         row: dict[str, Any] = {

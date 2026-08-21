@@ -287,3 +287,108 @@ def test_external_plan_reuses_existing_paths_and_fails_when_missing(tmp_path):
             subblock_duration_s=0.1,
             default_output_keys=("source.x_position_as", "source.y_position_as"),
         )
+
+
+def test_trajectory_smear_resume_rehydrates_representative_kernel(tmp_path):
+    airbus_path = _write_airbus_fixture(tmp_path / "airbus.csv")
+    run_root = tmp_path / "campaign"
+
+    trace_source_cfg = {
+        "mode": "trajectory",
+        "source": {
+            "kind": "airbus_csv",
+            "path": str(airbus_path),
+        },
+        "window": {
+            "start_s": 0.0,
+            "n_subblocks": 1,
+        },
+        "sampling": {
+            "frame_dt_s": 0.05,
+            "subblock_duration_s": 0.1,
+            "n_frames_per_subblock": 2,
+        },
+        "output_keys": [
+            "source.x_position_as",
+            "source.y_position_as",
+        ],
+    }
+
+    processing_cfg = {
+        "smear": {
+            "enabled": True,
+            "edge_policy": "symmetric_linear_extrapolate",
+            "max_extrapolation_s": "auto",
+            "exposure": {
+                "time_s": 0.05,
+            },
+            "inference": {
+                "mode": "matched_subblock_constant",
+            },
+            "render": {
+                "mode": "subblock_constant_layer",
+            },
+        }
+    }
+
+    initial = prepare_campaign_trace_source(
+        trace_source_cfg=trace_source_cfg,
+        run_root=run_root,
+        source_kind="single_star",
+        active_frame_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+        ),
+        n_subblocks=1,
+        n_frames_per_subblock=2,
+        frame_dt_s=0.05,
+        subblock_duration_s=0.1,
+        default_output_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+        ),
+        trajectory_processing_cfg=processing_cfg,
+        plate_scale_as_per_pix=0.1,
+    )
+
+    initial_row = initial.rows[0]
+    initial_kernel = json.loads(
+        initial_row["smear_representative_kernel_json"]
+    )
+    assert initial_kernel["kind"] == "line"
+
+    resumed = prepare_campaign_trace_source(
+        trace_source_cfg=trace_source_cfg,
+        run_root=run_root,
+        source_kind="single_star",
+        active_frame_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+        ),
+        n_subblocks=1,
+        n_frames_per_subblock=2,
+        frame_dt_s=0.05,
+        subblock_duration_s=0.1,
+        default_output_keys=(
+            "source.x_position_as",
+            "source.y_position_as",
+        ),
+        reuse_existing=True,
+        trajectory_processing_cfg=processing_cfg,
+        plate_scale_as_per_pix=0.1,
+    )
+
+    resumed_row = resumed.rows[0]
+    resumed_kernel = json.loads(
+        resumed_row["smear_representative_kernel_json"]
+    )
+
+    assert resumed_kernel == initial_kernel
+    assert (
+        resumed_row["smear_truth_length_pix_median"]
+        == initial_row["smear_truth_length_pix_median"]
+    )
+    assert (
+        resumed_row["smear_model_length_pix_median"]
+        == initial_row["smear_model_length_pix_median"]
+    )
