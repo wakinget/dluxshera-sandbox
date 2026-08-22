@@ -1,0 +1,224 @@
+# Canonical Smear Sensitivity 202608
+
+This recipe prepares controlled, single-image prescribed-Monte-Carlo campaigns
+for line-smear sensitivity in the canonical 23-scalar binary astrometry
+estimator.
+
+The campaigns are a canonical sensitivity study only. They are not a validated
+replacement for the full-fidelity iterative ADORA estimator.
+
+## Audit Summary
+
+Native line smear uses the detector `ApplyConvolution` layer with
+`kernel.kind: line`.
+
+- Schema: `kind: line`, `length`, `sigma_perp`, `theta_deg`, `kernel_size`,
+  `units`.
+- Length: total finite line-segment length.
+- Units: `detector_pix` or `psf_pix`; this campaign uses `detector_pix`.
+- Angle: degrees counter-clockwise from detector +X toward detector +Y.
+- Centering: the generated kernel grid is centered at
+  `(kernel_size - 1) / 2`, and the finite segment is symmetric about zero
+  along the rotated line coordinate.
+- Normalization: kernels are divided by `sum(kernel)`.
+- Support: `kernel_size` must be a positive odd integer. Even supports are
+  rejected.
+- Zero smear: requested `L_truth_pix=0.0` is genuine no-smear execution. The
+  named `smear` detector layer is removed from both truth and inference systems.
+- Trajectory conversion: `trajectory_smear.py` computes displacement from
+  exposure endpoints, divides by plate scale for detector-pixel length, and
+  uses `atan2(dy, dx)` for `theta_deg`.
+
+The prescribed-MC runner already supports separate truth/data and inference
+systems via `experiment.inference_system`. Generic plan rows currently forbid
+`system.*` and `experiment.*` overrides, so this campaign writes one compact
+prescription per condition. Each prescription starts from the resolved
+`SHERA_FLIGHT_3P_CONV` system preset, preserves the preset detector stack, sets
+the source exposure to `0.05 s`, removes the named `jitter` layer, and then
+updates or removes only the named `smear` layer for the condition.
+
+Detector behavior owned by the preset and detector builder is not duplicated in
+this recipe. In particular, `pixel_mtf`, diffusion, pixel offsets, pixel
+response, and native pixel-MTF / `optics.oversample` behavior remain inherited
+from the preset path.
+
+Derivative support uses the existing `fim_theta` machinery. Audit finding:
+`fim_theta()` is currently a direct `jax.hessian(loss_fn)(theta_ref)` wrapper,
+not a separate Gauss-Newton construction. The campaign keeps the existing `F`
+sidecar name for compatibility, but the optional `--hessian` comparison is
+therefore redundant unless `fim_theta()` is changed in a future inference-library
+patch. The first Gattaca2 smoke should run without `--hessian`.
+
+## Campaign Families
+
+Family A is matched smear/information loss:
+
+- `L_truth_pix = [0.0, 0.1, 0.2, 0.5, 0.7, 1.0, 2.0]`
+- orientations: parallel and perpendicular
+- truth and model kernels match exactly
+- count: 14 rows; the zero-smear duplicate orientations are retained
+  as duplicated no-smear optical systems with distinct condition metadata
+
+Family B is smear-length knowledge error:
+
+- `L_truth_pix = [0.5, 1.0]`
+- orientations: parallel and perpendicular
+- `epsilon_L_percent = [-20, -10, -5, -2, -1, 0, 1, 2, 5, 10, 20]`
+- `L_model = L_truth * (1 + epsilon_L_percent / 100)`
+- `theta_model = theta_truth`
+- count: 44 rows
+
+Family C is smear-direction knowledge error:
+
+- `L_truth_pix = [0.5, 1.0]`
+- orientations: parallel and perpendicular
+- `delta_theta_deg = [-20, -10, -5, -2, -1, 0, 1, 2, 5, 10, 20]`
+- `L_model = L_truth`
+- `theta_model = theta_truth + delta_theta_deg`
+- count: 44 rows
+
+Parallel and perpendicular are relative to the resolved canonical binary PA.
+The generator records `phi_truth_deg`, `theta_truth_deg`, and
+`theta_model_deg` for every condition.
+
+## Objective and Parameters
+
+The generated prescriptions force:
+
+- one deterministic image per condition;
+- exposure time `0.05 s`;
+- observation noise disabled;
+- deterministic variance `max(model_image, 1.0)`, matching the canonical
+  disabled-noise convention;
+- optimizer loss `nll`;
+- no MAP prior penalty;
+- primitive/full physical 23-scalar fit, not Schur-reduced optimization.
+
+Truth/inference mismatch isolation is audited in each condition manifest:
+
+- Family A: truth and inference systems match exactly after the common
+  preset-derived no-jitter construction.
+- Family B: truth and inference systems differ only in
+  `detector.layers.smear.kernel.length`, except the zero-error rows which match.
+- Family C: truth and inference systems differ only in
+  `detector.layers.smear.kernel.theta_deg`, except the zero-error rows which
+  match.
+
+The parameter layout is resolved from the current config and written into the
+derivative sidecars. Expected scalar count is 23:
+
+- `source.separation_as`
+- `source.position_angle_deg`
+- `source.x_position_as`
+- `source.y_position_as`
+- `source.log_flux_total`
+- `source.contrast`
+- `optics.plate_scale_as_per_pix`
+- `optics.primary.zernike_coeffs_nm[0:8]`
+- `optics.secondary.zernike_coeffs_nm[0:8]`
+
+## Commands
+
+Generate the full A-C campaign scaffold:
+
+```bash
+python3 examples/recipes/canonical_smear_sensitivity_202608/canonical_smear_campaign.py generate \
+  --campaign-root Results/canonical_smear_sensitivity_202608 \
+  --families A B C
+```
+
+Generate a small smoke scaffold:
+
+```bash
+python3 examples/recipes/canonical_smear_sensitivity_202608/canonical_smear_campaign.py generate \
+  --campaign-root Results/canonical_smear_sensitivity_202608_smoke \
+  --families A B C \
+  --smoke
+```
+
+Dry-run without writing files:
+
+```bash
+python3 examples/recipes/canonical_smear_sensitivity_202608/canonical_smear_campaign.py generate \
+  --dry-run \
+  --families A B C
+```
+
+Run one indexed condition locally:
+
+```bash
+python3 examples/recipes/canonical_smear_sensitivity_202608/canonical_smear_campaign.py run-index \
+  --campaign-root Results/canonical_smear_sensitivity_202608_smoke \
+  --index 0
+```
+
+Aggregate and plot:
+
+```bash
+python3 examples/recipes/canonical_smear_sensitivity_202608/canonical_smear_campaign.py aggregate \
+  --campaign-root Results/canonical_smear_sensitivity_202608_smoke
+
+python3 examples/recipes/canonical_smear_sensitivity_202608/canonical_smear_campaign.py plot \
+  --campaign-root Results/canonical_smear_sensitivity_202608_smoke
+```
+
+Add `--hessian` to `aggregate` only after a benchmark confirms Hessian cost is
+acceptable.
+
+## Gattaca2 Sequence
+
+The generated `submit_array.sbatch` follows the repository Gattaca2 convention:
+it initializes shared Miniforge, activates
+`/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311` by explicit
+prefix, exports `PYTHONPATH="${PYTHONPATH:-src}"`, and prints Python/JAX/import
+diagnostics before running science. It does not hard-code `sbatch -M edge`;
+submit with `sbatch -M edge <file>` externally if Edge execution is desired.
+
+Generation creates `<campaign_root>/slurm/` before submission so Slurm can open
+the declared output/error paths.
+
+1. Generate the smoke scaffold.
+2. Run `status.sh` to confirm prescriptions exist. `status.sh` is lightweight
+   and login-node safe.
+3. Submit the generated `submit_array.sbatch` for the smoke root.
+4. Run aggregation and plotting on a compute allocation, preferably with the
+   generated `aggregate.sbatch` on Gattaca2. `aggregate` reconstructs models and
+   computes JAX derivatives; production aggregation over 102 conditions should
+   not run directly on a login node. The 3-condition smoke aggregation should
+   also preferably run on a compute node.
+5. Generate the full A-C scaffold.
+6. Submit the full generated `submit_array.sbatch`.
+7. Re-run `status.sh` and compute-node aggregation/plotting until all rows have
+   run summaries and derivative sidecars.
+
+Do not submit production jobs before the smoke aggregation verifies:
+
+- matched cases have near-zero NLL gradient at truth;
+- matched optimization bias is near zero;
+- `optimizer.loss` is `nll`;
+- parameter label count is 23;
+- matrix shapes are 23 x 23.
+
+## Outputs
+
+The generator writes:
+
+- `campaign_manifest.json`
+- `parameter_labels.json`
+- `plan_all.csv`
+- `plan_family_A.csv`
+- `plan_family_B.csv`
+- `plan_family_C.csv`
+- one `prescription.yaml` and `condition_manifest.json` per condition
+- `submit_array.sbatch`
+- `aggregate.sbatch`
+- `status.sh`
+- `aggregate_and_plot.sh`
+
+Aggregation writes:
+
+- `summary.csv`
+- per-condition `derivative_diagnostics.json`
+- per-condition `derivative_diagnostics.npz`
+
+Review plots are written under `plots/`.
