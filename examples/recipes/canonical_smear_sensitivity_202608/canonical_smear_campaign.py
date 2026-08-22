@@ -66,7 +66,13 @@ NLL_PSEUDOINVERSE_RTOL = 1.0e-10
 PARAMETER_COUNT = 23
 PRESCRIBED_MC_SEED = 20260821
 PRODUCTION_N_ITER = 200
-PRODUCTION_BASE_LR = 0.2
+PRODUCTION_OPTIMIZER_KIND = "sgd"
+PRODUCTION_BASE_LR = 0.7
+PRODUCTION_SCHEDULE = {
+    "kind": "linear_warmup",
+    "warmup_steps": 10,
+    "start_factor": 0.125,
+}
 PRODUCTION_EARLY_STOPPING = {
     "enabled": True,
     "min_iter": 40,
@@ -511,11 +517,12 @@ def prescription_for_condition(
                 "reuse_fim": False,
             },
             "optimizer": {
-                "kind": "adam",
+                "kind": PRODUCTION_OPTIMIZER_KIND,
                 "kwargs": {},
                 "n_iter": int(n_iter),
                 "base_lr": float(base_lr),
                 "loss": "nll",
+                "schedule": copy.deepcopy(PRODUCTION_SCHEDULE),
                 "early_stopping": copy.deepcopy(PRODUCTION_EARLY_STOPPING),
             },
             "eigenmodes": {
@@ -591,9 +598,10 @@ def condition_manifest(condition: SmearCondition) -> dict[str, Any]:
     payload["objective_provenance"] = {
         "optimizer_loss": "nll",
         "map_prior_penalty": "disabled",
-        "optimizer_kind": "adam",
+        "optimizer_kind": PRODUCTION_OPTIMIZER_KIND,
         "optimizer_max_iterations": PRODUCTION_N_ITER,
         "optimizer_base_lr": PRODUCTION_BASE_LR,
+        "optimizer_schedule": copy.deepcopy(PRODUCTION_SCHEDULE),
         "optimizer_early_stopping": copy.deepcopy(PRODUCTION_EARLY_STOPPING),
         "eigenmodes": {
             "enable": True,
@@ -732,10 +740,11 @@ def generate_artifacts(
         "jitter_policy": "remove named jitter detector layer from truth and inference",
         "zero_smear_policy": "retained duplicate orientation controls with the named smear detector layer absent",
         "production_optimizer": {
-            "kind": "adam",
+            "kind": PRODUCTION_OPTIMIZER_KIND,
             "loss": "nll",
             "n_iter": PRODUCTION_N_ITER,
             "base_lr": PRODUCTION_BASE_LR,
+            "schedule": copy.deepcopy(PRODUCTION_SCHEDULE),
             "early_stopping": copy.deepcopy(PRODUCTION_EARLY_STOPPING),
         },
         "production_eigenmodes": {

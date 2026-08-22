@@ -5,6 +5,7 @@ import inspect
 from pathlib import Path
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 
@@ -153,11 +154,94 @@ def test_optimizer_normalization_rejects_bad_early_stopping_config():
         )
 
 
+def test_optimizer_normalization_accepts_schedule_config():
+    m = _load_module()
+
+    normalized = m._normalize_optimizer_cfg(
+        {
+            "kind": "sgd",
+            "n_iter": "200",
+            "base_lr": "0.7",
+            "kwargs": {},
+            "schedule": {
+                "kind": "linear_warmup",
+                "warmup_steps": "10",
+                "start_factor": "0.125",
+            },
+        },
+        path="test.optimizer",
+    )
+
+    assert normalized["schedule"] == {
+        "kind": "linear_warmup",
+        "warmup_steps": 10,
+        "start_factor": pytest.approx(0.125),
+    }
+
+
+def test_optimizer_schedule_histories_use_shared_schedule_helpers():
+    m = _load_module()
+
+    factors, scalar_lrs, meta = m._build_optimizer_schedule_histories(
+        {
+            "kind": "sgd",
+            "n_iter": 12,
+            "base_lr": 0.7,
+            "kwargs": {},
+            "schedule": {
+                "kind": "linear_warmup",
+                "warmup_steps": 10,
+                "start_factor": 0.125,
+            },
+        },
+        path="test.optimizer",
+    )
+
+    assert factors is not None
+    assert scalar_lrs is not None
+    assert meta is not None
+    assert factors.shape == (12,)
+    assert factors[0] == pytest.approx(0.125)
+    assert factors[10] == pytest.approx(1.0)
+    np.testing.assert_allclose(scalar_lrs, 0.7 * factors)
+    assert meta["kind"] == "linear_warmup"
+    assert meta["first_scalar_lr"] == pytest.approx(0.0875)
+    assert meta["last_scalar_lr"] == pytest.approx(0.7)
+
+
+def test_optimizer_schedule_absent_preserves_old_behavior():
+    m = _load_module()
+
+    normalized = m._normalize_optimizer_cfg(
+        {"kind": "sgd", "n_iter": 5, "base_lr": 0.1, "kwargs": {}},
+        path="test.optimizer",
+    )
+    factors, scalar_lrs, meta = m._build_optimizer_schedule_histories(
+        normalized,
+        path="test.optimizer",
+    )
+
+    assert "schedule" not in normalized
+    assert factors is None
+    assert scalar_lrs is None
+    assert meta is None
+
+
 def test_prescribed_mc_passes_early_stopping_to_run_shera_gd():
     m = _load_module()
     source = inspect.getsource(m.main)
 
     assert "early_stopping=early_stopping_cfg" in source
+
+
+def test_prescribed_mc_passes_schedule_to_run_shera_gd():
+    m = _load_module()
+    source = inspect.getsource(m.main)
+
+    assert "_build_optimizer_schedule_histories" in source
+    assert "scalar_lr_history=scalar_lr_history" in source
+    assert "schedule_factor_history=schedule_factor_history" in source
+    assert "schedule_meta=schedule_meta" in source
 
 
 def test_detector_ke_policy_default_matches_fixed_per_experiment():

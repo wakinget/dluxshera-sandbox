@@ -1224,9 +1224,38 @@ def run_gd_with_artifacts(
 
     early_stopping_result = dict(full_trace.get("early_stopping", {}))
     actual_steps = int(early_stopping_result.get("actual_n_iter", full_trace["theta"].shape[0] - 1))
+    full_loss = full_trace["loss"]
+    full_theta = full_trace["theta"]
+    initial_loss = float(full_loss[0]) if full_loss.shape[0] else None
+    returned_loss = float(loss_fn(theta))
+    loss_history = full_loss[1 : actual_steps + 1]
+    theta_history = full_theta[1 : actual_steps + 1]
+    if loss_history.shape[0] and bool(stop_cfg.restore_best):
+        loss_history = loss_history.at[-1].set(returned_loss)
+        theta_history = theta_history.at[-1].set(theta)
+    elif actual_steps == 0:
+        returned_loss_array = onp.asarray([returned_loss], dtype=onp.asarray(full_loss).dtype)
+        loss_history = np.asarray(returned_loss_array[:0])
+        theta_history = full_theta[1:1]
+
+    early_stopping_result.update(
+        {
+            "restore_best": bool(stop_cfg.restore_best),
+            "returned_final_loss": returned_loss,
+            "final_loss": returned_loss,
+        }
+    )
+    if bool(stop_cfg.restore_best):
+        best_iteration = early_stopping_result.get("best_iteration")
+        early_stopping_result["restored_best"] = best_iteration is not None
+        early_stopping_result["returned_iteration"] = best_iteration
+    else:
+        early_stopping_result["restored_best"] = False
+        early_stopping_result["returned_iteration"] = actual_steps
+
     history = {
-        "loss": full_trace["loss"][:actual_steps],
-        "theta": full_trace["theta"][1 : actual_steps + 1],
+        "loss": loss_history,
+        "theta": theta_history,
     }
 
     trace: Dict[str, np.ndarray] = {
@@ -1238,7 +1267,7 @@ def run_gd_with_artifacts(
     if "step_norm" in full_trace:
         trace["step_norm"] = full_trace["step_norm"][:actual_steps]
     if "early_stopping" in full_trace:
-        history["early_stopping"] = full_trace["early_stopping"]
+        history["early_stopping"] = early_stopping_result
     trace["base_lr"] = np.full((history["loss"].shape[0],), learning_rate)
     if scalar_lr_history is not None:
         scalar_lr_trace = _completed_step_history(
@@ -1300,10 +1329,16 @@ def run_gd_with_artifacts(
                 base_meta[key] = value
 
     loss_array = onp.asarray(trace["loss"])
-    loss_init = float(loss_array[0]) if loss_array.size else None
-    loss_final = float(loss_array[-1]) if loss_array.size else None
-    best_idx = int(onp.nanargmin(loss_array)) if loss_array.size else None
-    loss_best = float(loss_array[best_idx]) if best_idx is not None else None
+    full_state_loss = onp.asarray(full_loss[: actual_steps + 1], dtype=float)
+    full_state_theta = onp.asarray(full_theta[: actual_steps + 1])
+    loss_init = initial_loss
+    loss_final = returned_loss
+    best_state_idx = (
+        int(onp.nanargmin(full_state_loss)) if full_state_loss.size else None
+    )
+    loss_best = (
+        float(full_state_loss[best_state_idx]) if best_state_idx is not None else None
+    )
 
     base_summary: Dict[str, Any] = {
         "status": "ok",
@@ -1319,16 +1354,19 @@ def run_gd_with_artifacts(
         base_summary.update(extra_summary)
 
     checkpoints = None
-    if save_checkpoints and best_idx is not None:
+    if save_checkpoints and best_state_idx is not None:
         checkpoints = {
             "best": {
-                "theta_best": trace["theta"][best_idx],
-                "best_step": best_idx,
+                "theta_best": full_state_theta[best_state_idx],
+                "best_step": best_state_idx,
                 "best_loss": loss_best,
             },
             "final": {
-                "theta_final": trace["theta"][-1],
-                "final_step": int(loss_array.size - 1),
+                "theta_final": theta,
+                "final_step": int(
+                    early_stopping_result.get("returned_iteration", actual_steps)
+                    or 0
+                ),
                 "final_loss": loss_final,
             },
         }

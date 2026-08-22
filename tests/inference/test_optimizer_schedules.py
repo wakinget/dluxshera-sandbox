@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from dluxshera.inference.optimization import run_shera_gd
-from dluxshera.inference.run_artifacts import load_meta, load_trace
+from dluxshera.inference.run_artifacts import load_meta, load_summary, load_trace
 from dluxshera.inference.schedules import (
     build_scalar_lr_schedule,
     build_schedule_factor_history,
@@ -286,6 +286,79 @@ def test_run_shera_gd_writes_lr_history_artifacts_when_schedule_is_configured(tm
     np.testing.assert_allclose(trace["scalar_lr"], scalar_lr_history)
     np.testing.assert_allclose(trace["schedule_factor"], schedule_factor_history)
     assert meta["optimizer"]["schedule"]["kind"] == "piecewise_constant"
+
+
+def test_run_shera_gd_summary_final_loss_matches_returned_theta(tmp_path):
+    theta0 = np.array([1.0], dtype=float)
+    run_dir = tmp_path / "final_loss_alignment"
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum(theta**2)
+
+    theta_final, history = run_shera_gd(
+        loss_fn=loss_fn,
+        theta0=theta0,
+        learning_rate=0.1,
+        num_steps=2,
+        optimizer_kind="sgd",
+        run_dir=run_dir,
+        return_artifacts=False,
+        show_progress=False,
+    )
+
+    expected_final_loss = float(loss_fn(theta_final))
+    trace = load_trace(run_dir)
+    summary = load_summary(run_dir)
+    meta = load_meta(run_dir)
+
+    assert summary["loss_init"] == pytest.approx(float(loss_fn(theta0)))
+    assert summary["loss_final"] == pytest.approx(expected_final_loss)
+    assert meta["optimizer"]["early_stopping"]["final_loss"] == pytest.approx(
+        expected_final_loss
+    )
+    assert float(history["loss"][-1]) == pytest.approx(expected_final_loss)
+    assert float(trace["loss"][-1]) == pytest.approx(expected_final_loss)
+    np.testing.assert_allclose(trace["theta"][-1], theta_final)
+
+
+def test_run_shera_gd_restore_best_final_loss_matches_returned_theta(tmp_path):
+    theta0 = np.array([1.0], dtype=float)
+    run_dir = tmp_path / "restore_best_final_loss_alignment"
+
+    def loss_fn(theta):
+        return jnp.sum(theta**2)
+
+    theta_final, history = run_shera_gd(
+        loss_fn=loss_fn,
+        theta0=theta0,
+        learning_rate=2.0,
+        num_steps=4,
+        optimizer_kind="sgd",
+        run_dir=run_dir,
+        return_artifacts=False,
+        show_progress=False,
+        early_stopping={
+            "enabled": True,
+            "patience": 1,
+            "step_atol": 100.0,
+            "restore_best": True,
+        },
+    )
+
+    expected_final_loss = float(loss_fn(theta_final))
+    trace = load_trace(run_dir)
+    summary = load_summary(run_dir)
+    meta = load_meta(run_dir)
+
+    np.testing.assert_allclose(theta_final, theta0)
+    assert history["early_stopping"]["stopped_early"] is True
+    assert history["early_stopping"]["restored_best"] is True
+    assert summary["loss_final"] == pytest.approx(expected_final_loss)
+    assert meta["optimizer"]["early_stopping"]["final_loss"] == pytest.approx(
+        expected_final_loss
+    )
+    assert float(trace["loss"][-1]) == pytest.approx(expected_final_loss)
+    np.testing.assert_allclose(trace["theta"][-1], theta_final)
 
 
 def test_run_shera_gd_truncates_scheduled_histories_after_early_stopping():

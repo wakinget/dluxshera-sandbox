@@ -93,7 +93,8 @@ The generated prescriptions force:
 - optimizer loss `nll`;
 - no MAP prior penalty;
 - full physical 23-scalar fit, not Schur-reduced optimization;
-- Adam with a maximum of 200 optimizer updates;
+- SGD with `base_lr=0.7`, a 10-step linear warmup from factor `0.125`,
+  and a maximum of 200 optimizer updates;
 - existing early stopping enabled after at least 40 updates, with patience 10
   and `loss_rtol=1.0e-8`;
 - full whitened FIM eigenbasis optimization with no `truncate_k` or eigenvalue
@@ -238,8 +239,9 @@ Post-patch production preflight:
 
 1. Generate a fresh 3-condition smoke scaffold using the patched code.
 2. Confirm the resolved prescribed-MC preview reports `init.mode=prior`,
-   `eigen.use_eigen=True`, `eigen.whiten_basis=True`, no truncation, Adam/NLL,
-   `n_iter=200`, early stopping enabled with `min_iter=40`, and plots enabled.
+   `eigen.use_eigen=True`, `eigen.whiten_basis=True`, no truncation, SGD/NLL,
+   `base_lr=0.7`, a 10-step linear warmup from factor `0.125`, `n_iter=200`,
+   early stopping enabled with `min_iter=40`, and plots enabled.
 3. Run the three representative smoke conditions on a compute node.
 4. Inspect initial/final PSF comparison plots, loss history, signal history,
    FIM, and eigenvalue spectrum.

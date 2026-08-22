@@ -262,6 +262,8 @@ def test_generated_sbatch_initializes_gattaca2_environment(tmp_path: Path) -> No
     )
 
     text = (root / "submit_array.sbatch").read_text(encoding="utf-8")
+    assert "PYTHONPAT:" not in text
+    assert "DLUXSHERA_CONDA_EN_PREFIX" not in text
     for expected in (
         "source /cm/shared/apps/miniforge/etc/profile.d/conda.sh",
         'DLUXSHERA_CONDA_ENV_PREFIX="${DLUXSHERA_CONDA_ENV_PREFIX:-/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311}"',
@@ -287,6 +289,10 @@ def test_generated_sbatch_initializes_gattaca2_environment(tmp_path: Path) -> No
     assert "sbatch -M edge" not in text
 
     aggregate = (root / "aggregate.sbatch").read_text(encoding="utf-8")
+    assert "PYTHONPAT:" not in aggregate
+    assert "DLUXSHERA_CONDA_EN_PREFIX" not in aggregate
+    assert 'DLUXSHERA_CONDA_ENV_PREFIX="${DLUXSHERA_CONDA_ENV_PREFIX:-/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311}"' in aggregate
+    assert 'conda activate "$DLUXSHERA_CONDA_ENV_PREFIX"' in aggregate
     assert "#SBATCH --time=03:00:00" in aggregate
     assert "#SBATCH --mem=24G" in aggregate
     assert f'export PYTHONPATH="{module.REPO_ROOT}/src${{PYTHONPATH:+:${{PYTHONPATH}}}}"' in aggregate
@@ -303,10 +309,15 @@ def test_prescription_for_condition_uses_production_optimizer_and_init_settings(
     prescription = module.prescription_for_condition(condition)
     experiment = prescription["experiment"]
 
-    assert experiment["optimizer"]["kind"] == "adam"
+    assert experiment["optimizer"]["kind"] == "sgd"
     assert experiment["optimizer"]["loss"] == "nll"
     assert experiment["optimizer"]["n_iter"] == 200
-    assert experiment["optimizer"]["base_lr"] == pytest.approx(module.PRODUCTION_BASE_LR)
+    assert experiment["optimizer"]["base_lr"] == pytest.approx(0.7)
+    assert experiment["optimizer"]["kwargs"] == {}
+    schedule = experiment["optimizer"]["schedule"]
+    assert schedule["kind"] == "linear_warmup"
+    assert schedule["warmup_steps"] == 10
+    assert schedule["start_factor"] == pytest.approx(0.125)
     early = experiment["optimizer"]["early_stopping"]
     assert early["enabled"] is True
     assert early["min_iter"] == 40
@@ -378,9 +389,13 @@ def test_prescribed_mc_preview_resolves_production_settings() -> None:
     assert run_spec["eigen"]["whiten_basis"] is True
     assert run_spec["eigen"]["truncate_k"] is None
     assert run_spec["eigen"]["truncate_by_eigval"] is None
-    assert run_spec["optimizer"]["kind"] == "adam"
+    assert run_spec["optimizer"]["kind"] == "sgd"
     assert run_spec["optimizer"]["loss"] == "nll"
     assert run_spec["optimizer"]["n_iter"] == 200
+    assert run_spec["optimizer"]["base_lr"] == pytest.approx(0.7)
+    assert run_spec["optimizer"]["schedule"]["kind"] == "linear_warmup"
+    assert run_spec["optimizer"]["schedule"]["warmup_steps"] == 10
+    assert run_spec["optimizer"]["schedule"]["start_factor"] == pytest.approx(0.125)
     assert run_spec["optimizer"]["early_stopping"]["enabled"] is True
     assert run_spec["optimizer"]["early_stopping"]["min_iter"] == 40
     assert run_spec["outputs"]["plots"] is True

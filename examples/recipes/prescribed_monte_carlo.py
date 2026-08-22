@@ -85,6 +85,10 @@ from dluxshera.inference.run_artifacts import (
     build_param_summary,
     patch_summary,
 )
+from dluxshera.inference.schedules import (
+    build_schedule_factor_history,
+    validate_optimizer_schedule_config,
+)
 from dluxshera.inference.signals import build_signals
 from dluxshera.params.packing import (
     build_eigen_index_map,
@@ -1128,6 +1132,15 @@ def _normalize_optimizer_cfg(
             raise ValueError(f"{path}.n_iter must be > 0.")
         normalized["n_iter"] = n_iter
 
+    if "schedule" in normalized and normalized.get("schedule") is not None:
+        if "n_iter" not in normalized:
+            raise ValueError(f"{path}.schedule requires {path}.n_iter.")
+        normalized["schedule"] = validate_optimizer_schedule_config(
+            normalized.get("schedule"),
+            n_iter=int(normalized["n_iter"]),
+            path=f"{path}.schedule",
+        )
+
     normalized["kwargs"] = normalize_optimizer_kwargs(
         optimizer_kind,
         normalized.get("kwargs", {}),
@@ -1141,6 +1154,46 @@ def _normalize_optimizer_cfg(
             )
         )
     return normalized
+
+
+def _build_optimizer_schedule_histories(
+    optimizer_cfg: dict[str, Any],
+    *,
+    path: str = "optimizer",
+) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, Any] | None]:
+    """Build per-step schedule factor and scalar LR histories when configured."""
+
+    schedule_cfg = optimizer_cfg.get("schedule")
+    if schedule_cfg is None:
+        return None, None, None
+    n_iter = optimizer_cfg.get("n_iter")
+    if n_iter is None:
+        raise ValueError(f"{path}.schedule requires {path}.n_iter.")
+    base_lr = optimizer_cfg.get("base_lr")
+    if base_lr is None:
+        raise ValueError(f"{path}.schedule requires {path}.base_lr.")
+
+    factor_history, schedule_meta = build_schedule_factor_history(
+        schedule_cfg,
+        n_iter=int(n_iter),
+        path=f"{path}.schedule",
+    )
+    scalar_lr_history = float(base_lr) * np.asarray(factor_history, dtype=float)
+    schedule_meta = dict(schedule_meta)
+    schedule_meta.update(
+        {
+            "base_lr": float(base_lr),
+            "first_scalar_lr": float(scalar_lr_history[0]),
+            "last_scalar_lr": float(scalar_lr_history[-1]),
+            "scalar_lr_min": float(np.min(scalar_lr_history)),
+            "scalar_lr_max": float(np.max(scalar_lr_history)),
+        }
+    )
+    return (
+        np.asarray(factor_history, dtype=float),
+        np.asarray(scalar_lr_history, dtype=float),
+        schedule_meta,
+    )
 
 
 def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) -> None:
@@ -1162,6 +1215,7 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         "optimizer.kind",
         "optimizer.loss",
         "optimizer.n_iter",
+        "optimizer.schedule.kind",
         "optimizer.early_stopping.enabled",
         "optimizer.early_stopping.min_iter",
         "optimizer.kwargs",
@@ -1195,6 +1249,8 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
             value = _get_nested(spec, ["optimizer", "loss"])
         elif key == "optimizer.n_iter":
             value = _get_nested(spec, ["optimizer", "n_iter"])
+        elif key == "optimizer.schedule.kind":
+            value = _get_nested(spec, ["optimizer", "schedule", "kind"])
         elif key == "optimizer.early_stopping.enabled":
             value = _get_nested(spec, ["optimizer", "early_stopping", "enabled"])
         elif key == "optimizer.early_stopping.min_iter":
@@ -1641,6 +1697,9 @@ def _build_results_rows(
             optimizer_meta.get("preconditioning") if optimizer_meta else {}
         )
         precond_method = precond_meta.get("method")
+        schedule_meta = optimizer_meta.get("schedule") if optimizer_meta else {}
+        if not isinstance(schedule_meta, dict):
+            schedule_meta = {}
         optimizer_kind = optimizer_meta.get("kind")
         optimizer_kwargs = optimizer_meta.get("kwargs")
         optimizer_loss = optimizer_meta.get("loss")
@@ -1671,6 +1730,12 @@ def _build_results_rows(
             "optimizer.base_lr": optimizer_meta.get("learning_rate"),
             "optimizer.kind": optimizer_kind,
             "optimizer.actual_num_steps": optimizer_meta.get("actual_num_steps"),
+            "optimizer.schedule.enabled": schedule_meta.get("enabled"),
+            "optimizer.schedule.kind": schedule_meta.get("kind"),
+            "optimizer.schedule.first_factor": schedule_meta.get("first_factor"),
+            "optimizer.schedule.last_factor": schedule_meta.get("last_factor"),
+            "optimizer.schedule.first_scalar_lr": schedule_meta.get("first_scalar_lr"),
+            "optimizer.schedule.last_scalar_lr": schedule_meta.get("last_scalar_lr"),
             "optimizer.early_stopping.enabled": early_stopping.get("enabled"),
             "optimizer.early_stopping.stopped_early": early_stopping.get("stopped_early"),
             "optimizer.early_stopping.stop_reason": early_stopping.get("stop_reason"),
@@ -1798,6 +1863,12 @@ def _write_results_csv(
         "optimizer.base_lr",
         "optimizer.kind",
         "optimizer.actual_num_steps",
+        "optimizer.schedule.enabled",
+        "optimizer.schedule.kind",
+        "optimizer.schedule.first_factor",
+        "optimizer.schedule.last_factor",
+        "optimizer.schedule.first_scalar_lr",
+        "optimizer.schedule.last_scalar_lr",
         "optimizer.early_stopping.enabled",
         "optimizer.early_stopping.stopped_early",
         "optimizer.early_stopping.stop_reason",
@@ -2786,6 +2857,12 @@ def main() -> None:
         early_stopping_cfg = optimizer_cfg.get("early_stopping")
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
+        schedule_factor_history, scalar_lr_history, schedule_meta = (
+            _build_optimizer_schedule_histories(
+                optimizer_cfg,
+                path=f"run_spec[{run_counter - 1}].optimizer",
+            )
+        )
 
         run_diagnosis = False
         if run_diagnosis:
@@ -2842,6 +2919,9 @@ def main() -> None:
             learning_rate=base_lr,
             lr_vec=lr_vec,
             num_steps=n_iter,
+            scalar_lr_history=scalar_lr_history,
+            schedule_factor_history=schedule_factor_history,
+            schedule_meta=schedule_meta,
             optimizer_kind=opt_kind,
             optimizer_kwargs=optimizer_kwargs,
             early_stopping=early_stopping_cfg,
@@ -2903,8 +2983,8 @@ def main() -> None:
             binder_infer.strip_structural(final_store)
         )
 
-        loss_init = float(loss_fn(theta0))
-        loss_final = float(loss_fn(theta_final))
+        loss_init = float(loss_opt(theta0_opt))
+        loss_final = float(loss_opt(theta_final_opt))
         chi2_init = _reduced_chi2_between_images(
             data,
             init_psf,
