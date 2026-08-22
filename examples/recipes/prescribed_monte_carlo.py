@@ -75,6 +75,7 @@ from dluxshera.inference.optimization import (
     generate_fim_labels,
     make_binder_nll_fn,
     map_labels_to_keys,
+    normalize_early_stopping_config,
     run_shera_gd,
     diagnose_first_step,
 )
@@ -1132,6 +1133,13 @@ def _normalize_optimizer_cfg(
         normalized.get("kwargs", {}),
         path=f"{path}.kwargs",
     )
+    if "early_stopping" in normalized:
+        normalized["early_stopping"] = dataclasses.asdict(
+            normalize_early_stopping_config(
+                normalized.get("early_stopping"),
+                path=f"{path}.early_stopping",
+            )
+        )
     return normalized
 
 
@@ -1153,7 +1161,11 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
         "eigen.truncate_by_eigval",
         "optimizer.kind",
         "optimizer.loss",
+        "optimizer.n_iter",
+        "optimizer.early_stopping.enabled",
+        "optimizer.early_stopping.min_iter",
         "optimizer.kwargs",
+        "outputs.plots",
         "truth.x",
         "truth.y",
         "init.x",
@@ -1181,6 +1193,12 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
             value = _get_nested(spec, ["optimizer", "kind"])
         elif key == "optimizer.loss":
             value = _get_nested(spec, ["optimizer", "loss"])
+        elif key == "optimizer.n_iter":
+            value = _get_nested(spec, ["optimizer", "n_iter"])
+        elif key == "optimizer.early_stopping.enabled":
+            value = _get_nested(spec, ["optimizer", "early_stopping", "enabled"])
+        elif key == "optimizer.early_stopping.min_iter":
+            value = _get_nested(spec, ["optimizer", "early_stopping", "min_iter"])
         elif key == "optimizer.kwargs":
             kwargs_val = _get_nested(spec, ["optimizer", "kwargs"])
             if kwargs_val:
@@ -1190,6 +1208,8 @@ def _print_preview(run_specs: list[dict[str, Any]], limit: int | None = None) ->
                     value = str(kwargs_val)
             else:
                 value = ""
+        elif key == "outputs.plots":
+            value = _get_nested(spec, ["outputs", "plots"])
         elif key == "truth.x":
             value = _get_nested(spec, ["truth", "binary", "x_position_as"])
         elif key == "truth.y":
@@ -1624,6 +1644,9 @@ def _build_results_rows(
         optimizer_kind = optimizer_meta.get("kind")
         optimizer_kwargs = optimizer_meta.get("kwargs")
         optimizer_loss = optimizer_meta.get("loss")
+        early_stopping = optimizer_meta.get("early_stopping")
+        if not isinstance(early_stopping, dict):
+            early_stopping = {}
 
         row: dict[str, Any] = {
             "run_id": run_id,
@@ -1647,6 +1670,13 @@ def _build_results_rows(
             "optimizer.n_iter": optimizer_meta.get("num_steps"),
             "optimizer.base_lr": optimizer_meta.get("learning_rate"),
             "optimizer.kind": optimizer_kind,
+            "optimizer.actual_num_steps": optimizer_meta.get("actual_num_steps"),
+            "optimizer.early_stopping.enabled": early_stopping.get("enabled"),
+            "optimizer.early_stopping.stopped_early": early_stopping.get("stopped_early"),
+            "optimizer.early_stopping.stop_reason": early_stopping.get("stop_reason"),
+            "optimizer.early_stopping.actual_n_iter": early_stopping.get("actual_n_iter"),
+            "optimizer.early_stopping.best_iteration": early_stopping.get("best_iteration"),
+            "optimizer.early_stopping.best_loss": early_stopping.get("best_loss"),
             "optimizer.kwargs": (
                 json.dumps(optimizer_kwargs, sort_keys=True)
                 if isinstance(optimizer_kwargs, dict) and optimizer_kwargs
@@ -1767,6 +1797,13 @@ def _write_results_csv(
         "optimizer.n_iter",
         "optimizer.base_lr",
         "optimizer.kind",
+        "optimizer.actual_num_steps",
+        "optimizer.early_stopping.enabled",
+        "optimizer.early_stopping.stopped_early",
+        "optimizer.early_stopping.stop_reason",
+        "optimizer.early_stopping.actual_n_iter",
+        "optimizer.early_stopping.best_iteration",
+        "optimizer.early_stopping.best_loss",
         "optimizer.kwargs",
         "optimizer.loss",
         "eigen.use_eigen",
@@ -2746,6 +2783,7 @@ def main() -> None:
             raise ValueError(f"Run {run_id} resolved to a null optimizer.base_lr.")
         opt_kind = optimizer_cfg.get("kind", "sgd")
         optimizer_kwargs = optimizer_cfg.get("kwargs", {})
+        early_stopping_cfg = optimizer_cfg.get("early_stopping")
         n_iter = int(n_iter_value)
         base_lr = float(base_lr_value)
 
@@ -2806,6 +2844,7 @@ def main() -> None:
             num_steps=n_iter,
             optimizer_kind=opt_kind,
             optimizer_kwargs=optimizer_kwargs,
+            early_stopping=early_stopping_cfg,
             runs_dir=runs_dir,
             run_id=run_id,
             return_artifacts=True,

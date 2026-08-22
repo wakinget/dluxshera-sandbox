@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from pathlib import Path
 
 import jax.numpy as jnp
+import pytest
 
 
 def _load_module():
@@ -87,6 +89,75 @@ def test_monte_carlo_reuse_fim_populates_fim_defaults():
     _, defaults = m._mc_defaults_from_experiment(experiment_cfg, mc_cfg)
 
     assert defaults["fim"]["reuse_fim"] is True
+
+
+def test_optimizer_normalization_accepts_early_stopping_config():
+    m = _load_module()
+
+    normalized = m._normalize_optimizer_cfg(
+        {
+            "kind": "adam",
+            "n_iter": "200",
+            "base_lr": "0.2",
+            "kwargs": {},
+            "early_stopping": {
+                "enabled": True,
+                "min_iter": "40",
+                "patience": "10",
+                "loss_rtol": "1e-8",
+                "require_finite_loss": True,
+                "restore_best": True,
+                "monitor": "loss",
+            },
+        },
+        path="test.optimizer",
+    )
+
+    early = normalized["early_stopping"]
+    assert normalized["kind"] == "adam"
+    assert normalized["n_iter"] == 200
+    assert early["enabled"] is True
+    assert early["min_iter"] == 40
+    assert early["patience"] == 10
+    assert early["loss_rtol"] == pytest.approx(1.0e-8)
+    assert early["loss_atol"] is None
+    assert early["step_atol"] is None
+    assert early["grad_norm_atol"] is None
+    assert early["restore_best"] is True
+
+
+def test_optimizer_normalization_preserves_absent_early_stopping_behavior():
+    m = _load_module()
+
+    normalized = m._normalize_optimizer_cfg(
+        {"kind": "sgd", "n_iter": 5, "base_lr": 0.1, "kwargs": {}},
+        path="test.optimizer",
+    )
+
+    assert "early_stopping" not in normalized
+
+
+def test_optimizer_normalization_rejects_bad_early_stopping_config():
+    m = _load_module()
+
+    with pytest.raises(ValueError, match="unsupported"):
+        m._normalize_optimizer_cfg(
+            {
+                "kind": "adam",
+                "n_iter": 5,
+                "base_lr": 0.1,
+                "kwargs": {},
+                "early_stopping": {"enabled": True, "not_a_field": 1},
+            },
+            path="test.optimizer",
+        )
+
+
+def test_prescribed_mc_passes_early_stopping_to_run_shera_gd():
+    m = _load_module()
+    source = inspect.getsource(m.main)
+
+    assert "early_stopping=early_stopping_cfg" in source
 
 
 def test_detector_ke_policy_default_matches_fixed_per_experiment():

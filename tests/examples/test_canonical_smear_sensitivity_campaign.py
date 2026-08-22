@@ -17,6 +17,12 @@ SCRIPT_PATH = (
     / "canonical_smear_sensitivity_202608"
     / "canonical_smear_campaign.py"
 )
+PRESCRIBED_MC_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "recipes"
+    / "prescribed_monte_carlo.py"
+)
 
 
 def _load_module():
@@ -25,6 +31,15 @@ def _load_module():
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_prescribed_module():
+    spec = importlib.util.spec_from_file_location("prescribed_monte_carlo", PRESCRIBED_MC_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
@@ -251,23 +266,33 @@ def test_generated_sbatch_initializes_gattaca2_environment(tmp_path: Path) -> No
         "source /cm/shared/apps/miniforge/etc/profile.d/conda.sh",
         'DLUXSHERA_CONDA_ENV_PREFIX="${DLUXSHERA_CONDA_ENV_PREFIX:-/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311}"',
         'conda activate "$DLUXSHERA_CONDA_ENV_PREFIX"',
-        'export PYTHONPATH="${PYTHONPATH:-src}"',
+        f'export PYTHONPATH="{module.REPO_ROOT}/src${{PYTHONPATH:+:${{PYTHONPATH}}}}"',
         'echo "Conda env: ${CONDA_DEFAULT_ENV:-unset}"',
         'echo "CONDA_PREFIX: ${CONDA_PREFIX:-unset}"',
         'echo "Python executable: $(which python)"',
+        'echo "PYTHONPATH: ${PYTHONPATH}"',
         "python - <<'PYENV'\nimport sys",
         'print("sys.executable:", sys.executable)',
         "import jax",
         'print("jax:", jax.__version__)',
         "import dluxshera",
         'print("dluxshera import ok")',
+        'print("dluxshera path:", dluxshera.__file__)',
+        "#SBATCH --time=00:30:00",
+        "#SBATCH --cpus-per-task=2",
+        "#SBATCH --mem=24G",
         "\nPYENV\n",
     ):
         assert expected in text
     assert "sbatch -M edge" not in text
 
+    aggregate = (root / "aggregate.sbatch").read_text(encoding="utf-8")
+    assert "#SBATCH --time=03:00:00" in aggregate
+    assert "#SBATCH --mem=24G" in aggregate
+    assert f'export PYTHONPATH="{module.REPO_ROOT}/src${{PYTHONPATH:+:${{PYTHONPATH}}}}"' in aggregate
 
-def test_prescription_for_condition_forces_nll_and_noise_disabled() -> None:
+
+def test_prescription_for_condition_uses_production_optimizer_and_init_settings() -> None:
     module = _load_module()
     condition = module.build_condition(
         family="A",
@@ -278,11 +303,121 @@ def test_prescription_for_condition_forces_nll_and_noise_disabled() -> None:
     prescription = module.prescription_for_condition(condition)
     experiment = prescription["experiment"]
 
+    assert experiment["optimizer"]["kind"] == "adam"
     assert experiment["optimizer"]["loss"] == "nll"
-    assert experiment["eigenmodes"]["enable"] is False
+    assert experiment["optimizer"]["n_iter"] == 200
+    assert experiment["optimizer"]["base_lr"] == pytest.approx(module.PRODUCTION_BASE_LR)
+    early = experiment["optimizer"]["early_stopping"]
+    assert early["enabled"] is True
+    assert early["min_iter"] == 40
+    assert early["patience"] == 10
+    assert early["loss_rtol"] == pytest.approx(1.0e-8)
+    assert early["require_finite_loss"] is True
+    assert early["restore_best"] is True
+    assert early["monitor"] == "loss"
+    assert "loss_atol" not in early
+    assert "step_atol" not in early
+    assert "grad_norm_atol" not in early
+    assert experiment["eigenmodes"]["enable"] is True
+    assert experiment["eigenmodes"]["whiten"] is True
+    assert experiment["eigenmodes"]["truncate_k"] is None
+    assert experiment["eigenmodes"]["truncate_by_eigval"] is None
     assert experiment["noise"]["enabled"] is False
-    assert experiment["init"]["mode"] == "explicit"
+    assert experiment["init"]["sampling"] == "prior"
+    assert experiment["outputs"]["plots"] is True
     assert len(experiment["infer_keys"]) == 9
+
+
+def test_production_prior_scales_and_distribution_families_are_exact() -> None:
+    module = _load_module()
+    condition = module.build_condition(
+        family="A",
+        L_truth_pix=0.5,
+        orientation="parallel",
+        binary_pa_deg=0.0,
+    )
+    priors = module.prescription_for_condition(condition)["experiment"]["priors"]
+
+    assert priors == {
+        "source.separation_as": {"dist": "Normal", "sigma": 1.0e-4},
+        "source.position_angle_deg": {"dist": "Uniform", "sigma": 1.0e-2},
+        "source.x_position_as": {"dist": "Normal", "sigma": 1.0e-2},
+        "source.y_position_as": {"dist": "Normal", "sigma": 1.0e-2},
+        "source.log_flux_total": {"dist": "LogNormal", "sigma": 1.0e-4},
+        "source.contrast": {"dist": "LogNormal", "sigma": 1.0e-4},
+        "optics.plate_scale_as_per_pix": {"dist": "LogNormal", "sigma": 1.0e-3},
+        "optics.primary.zernike_coeffs_nm": {"dist": "Normal", "sigma": 2.0},
+        "optics.secondary.zernike_coeffs_nm": {"dist": "Normal", "sigma": 2.0},
+    }
+
+
+def test_prescribed_mc_preview_resolves_production_settings() -> None:
+    module = _load_module()
+    prescribed = _load_prescribed_module()
+    condition = module.build_condition(
+        family="A",
+        L_truth_pix=0.5,
+        orientation="parallel",
+        binary_pa_deg=0.0,
+    )
+    experiment = module.prescription_for_condition(condition)["experiment"]
+
+    mc_cfg, _ = prescribed._mc_defaults_from_experiment(
+        experiment,
+        experiment["monte_carlo"],
+    )
+    run_spec = prescribed._resolve_run_spec_with_id(
+        mc_cfg,
+        {},
+        index=0,
+        run_id_index=0,
+    )
+
+    assert run_spec["init"]["mode"] == "prior"
+    assert run_spec["eigen"]["use_eigen"] is True
+    assert run_spec["eigen"]["whiten_basis"] is True
+    assert run_spec["eigen"]["truncate_k"] is None
+    assert run_spec["eigen"]["truncate_by_eigval"] is None
+    assert run_spec["optimizer"]["kind"] == "adam"
+    assert run_spec["optimizer"]["loss"] == "nll"
+    assert run_spec["optimizer"]["n_iter"] == 200
+    assert run_spec["optimizer"]["early_stopping"]["enabled"] is True
+    assert run_spec["optimizer"]["early_stopping"]["min_iter"] == 40
+    assert run_spec["outputs"]["plots"] is True
+
+
+def test_representative_conditions_have_paired_prior_initial_theta() -> None:
+    module = _load_module()
+    conditions = [
+        module.build_condition(
+            family="A",
+            L_truth_pix=0.5,
+            orientation="parallel",
+            binary_pa_deg=0.0,
+        ),
+        module.build_condition(
+            family="B",
+            L_truth_pix=0.5,
+            orientation="parallel",
+            epsilon_L_percent=-5.0,
+            binary_pa_deg=0.0,
+        ),
+        module.build_condition(
+            family="C",
+            L_truth_pix=0.5,
+            orientation="perpendicular",
+            delta_theta_deg=2.0,
+            binary_pa_deg=0.0,
+        ),
+    ]
+
+    theta = [module.production_initial_theta_for_condition(condition) for condition in conditions]
+    assert theta[0].shape == (23,)
+    assert np.allclose(theta[0], theta[1])
+    assert np.allclose(theta[0], theta[2])
+    provenance = module.paired_initialization_seed_provenance()
+    assert provenance["experiment_seed"] == module.PRESCRIBED_MC_SEED
+    assert provenance["run_index"] == 1
 
 
 def test_prescriptions_start_from_preset_and_remove_jitter() -> None:
@@ -441,6 +576,10 @@ def test_condition_manifest_records_kernel_and_objective_provenance() -> None:
     assert manifest["objective_provenance"]["optimizer_loss"] == "nll"
     assert manifest["objective_provenance"]["parameter_count_expected"] == 23
     assert "jax.hessian" in manifest["objective_provenance"]["fim_theta_semantics"]
+    assert manifest["objective_provenance"]["optimizer_max_iterations"] == 200
+    assert manifest["objective_provenance"]["eigenmodes"]["enable"] is True
+    assert manifest["objective_provenance"]["init"]["sampling"] == "prior"
+    assert manifest["objective_provenance"]["plots_enabled"] is True
 
 
 def test_run_condition_uses_current_interpreter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

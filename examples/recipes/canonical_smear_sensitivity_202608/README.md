@@ -92,7 +92,35 @@ The generated prescriptions force:
   disabled-noise convention;
 - optimizer loss `nll`;
 - no MAP prior penalty;
-- primitive/full physical 23-scalar fit, not Schur-reduced optimization.
+- full physical 23-scalar fit, not Schur-reduced optimization;
+- Adam with a maximum of 200 optimizer updates;
+- existing early stopping enabled after at least 40 updates, with patience 10
+  and `loss_rtol=1.0e-8`;
+- full whitened FIM eigenbasis optimization with no `truncate_k` or eigenvalue
+  truncation;
+- deterministic paired prior initialization;
+- per-run diagnostic plots enabled.
+
+The initialization prior is used only to draw the starting point. The objective
+remains NLL; no MAP prior penalty is included.
+
+Initialization prior scales:
+
+- `source.separation_as`: `Normal`, `sigma=1.0e-4` arcsec
+- `source.position_angle_deg`: `Uniform`, `sigma=1.0e-2` deg
+- `source.x_position_as`: `Normal`, `sigma=1.0e-2` arcsec
+- `source.y_position_as`: `Normal`, `sigma=1.0e-2` arcsec
+- `source.log_flux_total`: `LogNormal`, `sigma=1.0e-4`
+- `source.contrast`: `LogNormal`, `sigma=1.0e-4`
+- `optics.plate_scale_as_per_pix`: `LogNormal`, `sigma=1.0e-3`
+- `optics.primary.zernike_coeffs_nm`: `Normal`, scalar `sigma=2.0`
+- `optics.secondary.zernike_coeffs_nm`: `Normal`, scalar `sigma=2.0`
+
+Each campaign condition is written as a one-row prescription with the common
+experiment seed `20260821`. The prescribed-MC runner folds that seed with run
+index 0 and then splits the result for initialization, so A/B/C conditions share
+the same deterministic physical prior draw. This keeps condition comparisons
+paired with respect to the optimizer starting point.
 
 Truth/inference mismatch isolation is audited in each condition manifest:
 
@@ -170,9 +198,16 @@ acceptable.
 The generated `submit_array.sbatch` follows the repository Gattaca2 convention:
 it initializes shared Miniforge, activates
 `/scratch-jpl/shera_hpc/dmckeith/conda/envs/dluxshera-py311` by explicit
-prefix, exports `PYTHONPATH="${PYTHONPATH:-src}"`, and prints Python/JAX/import
-diagnostics before running science. It does not hard-code `sbatch -M edge`;
-submit with `sbatch -M edge <file>` externally if Edge execution is desired.
+prefix, prepends the exact generated worktree `src` directory to `PYTHONPATH`,
+and prints Python/JAX/dLuxShera import diagnostics including
+`dluxshera.__file__` before running science. It does not hard-code
+`sbatch -M edge`; submit with `sbatch -M edge <file>` externally if Edge
+execution is desired.
+
+Generated Slurm resources are:
+
+- condition array: 2 CPUs, 24 GB, 30 minutes per condition
+- aggregate job: 2 CPUs, 24 GB, 3 hours
 
 Generation creates `<campaign_root>/slurm/` before submission so Slurm can open
 the declared output/error paths.
@@ -199,6 +234,22 @@ Do not submit production jobs before the smoke aggregation verifies:
 - parameter label count is 23;
 - matrix shapes are 23 x 23.
 
+Post-patch production preflight:
+
+1. Generate a fresh 3-condition smoke scaffold using the patched code.
+2. Confirm the resolved prescribed-MC preview reports `init.mode=prior`,
+   `eigen.use_eigen=True`, `eigen.whiten_basis=True`, no truncation, Adam/NLL,
+   `n_iter=200`, early stopping enabled with `min_iter=40`, and plots enabled.
+3. Run the three representative smoke conditions on a compute node.
+4. Inspect initial/final PSF comparison plots, loss history, signal history,
+   FIM, and eigenvalue spectrum.
+5. Confirm optimizer convergence and early-stopping behavior.
+6. Aggregate the smoke and verify 23 labels, a 23 x 23 local-curvature matrix,
+   matched near-zero final separation bias and truth-point gradient, and
+   sensible nonzero mismatch response in B/C.
+7. Only then generate and submit the complete 102-condition A/B/C campaign to
+   Edge.
+
 ## Outputs
 
 The generator writes:
@@ -222,3 +273,20 @@ Aggregation writes:
 - per-condition `derivative_diagnostics.npz`
 
 Review plots are written under `plots/`.
+
+For each completed prescribed-MC run, the existing per-run plots are under
+`<condition>/runs/<run_id>/plots/` and include, where applicable:
+
+- `fim.png`
+- `eigenvalue_spectrum.png`
+- `initial_psf_comparison.png`
+- `final_psf_comparison.png`
+- `loss_history.png`
+- signal and parameter-history grid products
+- detector-map diagnostics for detector layers with map products
+
+Convergence metadata is written by the optimizer core to each run's
+`summary.json`, `meta.json`, and `trace.npz`. Review `loss_true`/`loss_init`/
+`loss_final`, `chi2_init`/`chi2_final`, `num_steps_completed`,
+`optimizer.actual_num_steps`, and `optimizer.early_stopping` in those files or
+the aggregate `results.csv`.

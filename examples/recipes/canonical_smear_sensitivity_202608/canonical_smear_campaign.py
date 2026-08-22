@@ -30,6 +30,7 @@ from dluxshera.inference.optimization import (
     generate_fim_labels,
     make_binder_nll_fn,
 )
+from dluxshera.inference.prior import PriorSpec
 from dluxshera.params.packing import pack_params
 from dluxshera.params.store import ParameterStore
 from dluxshera.systems import SheraBinder
@@ -63,6 +64,33 @@ EXPOSURE_TIME_S = 0.05
 SEPARATION_INDEX = 0
 NLL_PSEUDOINVERSE_RTOL = 1.0e-10
 PARAMETER_COUNT = 23
+PRESCRIBED_MC_SEED = 20260821
+PRODUCTION_N_ITER = 200
+PRODUCTION_BASE_LR = 0.2
+PRODUCTION_EARLY_STOPPING = {
+    "enabled": True,
+    "min_iter": 40,
+    "patience": 10,
+    "loss_rtol": 1.0e-8,
+    "require_finite_loss": True,
+    "restore_best": True,
+    "monitor": "loss",
+}
+PRODUCTION_PRIORS = {
+    "source.separation_as": {"dist": "Normal", "sigma": 1.0e-4},
+    "source.position_angle_deg": {"dist": "Uniform", "sigma": 1.0e-2},
+    "source.x_position_as": {"dist": "Normal", "sigma": 1.0e-2},
+    "source.y_position_as": {"dist": "Normal", "sigma": 1.0e-2},
+    "source.log_flux_total": {"dist": "LogNormal", "sigma": 1.0e-4},
+    "source.contrast": {"dist": "LogNormal", "sigma": 1.0e-4},
+    "optics.plate_scale_as_per_pix": {"dist": "LogNormal", "sigma": 1.0e-3},
+    "optics.primary.zernike_coeffs_nm": {"dist": "Normal", "sigma": 2.0},
+    "optics.secondary.zernike_coeffs_nm": {"dist": "Normal", "sigma": 2.0},
+}
+SLURM_CONDITION_TIME = "00:30:00"
+SLURM_AGGREGATE_TIME = "03:00:00"
+SLURM_CPUS_PER_TASK = 2
+SLURM_MEMORY = "24G"
 
 INFER_KEYS = (
     "source.separation_as",
@@ -274,6 +302,63 @@ def truth_inference_config_audit(
     return audit
 
 
+def paired_initialization_seed_provenance(
+    *,
+    experiment_seed: int = PRESCRIBED_MC_SEED,
+    run_index: int = 1,
+) -> dict[str, Any]:
+    """Return the deterministic one-row prescribed-MC init seed provenance."""
+
+    base_key = jax.random.PRNGKey(int(experiment_seed))
+    run_key = jax.random.fold_in(base_key, int(run_index))
+    run_seed = int(np.asarray(run_key)[0])
+    rng_key = jax.random.PRNGKey(run_seed)
+    _, init_key = jax.random.split(rng_key)
+    return {
+        "experiment_seed": int(experiment_seed),
+        "run_index": int(run_index),
+        "run_seed": run_seed,
+        "init_key": [int(value) for value in np.asarray(init_key)],
+        "policy": (
+            "Each condition prescription has one enabled row at enabled index 1, so the "
+            "common experiment seed produces the same prior-sampled physical init."
+        ),
+    }
+
+
+def _refresh_preserving_derived_infer_keys(
+    store: ParameterStore,
+    *,
+    spec: Any,
+) -> ParameterStore:
+    sampled_derived: dict[str, Any] = {}
+    for key in INFER_KEYS:
+        if key in spec and spec.get(key).kind == "derived":
+            sampled_derived[key] = store.get(key)
+    refreshed = store.refresh_derived(spec)
+    return refreshed.replace(sampled_derived) if sampled_derived else refreshed
+
+
+def production_initial_theta_for_condition(condition: SmearCondition) -> np.ndarray:
+    """Return the production prior-sampled initial physical theta for audits."""
+
+    inference_system, _ = system_config_for_smear(
+        condition.model_kernel,
+        context=f"{condition.run_id}.initialization_audit",
+    )
+    spec = compose_forward_spec(inference_system)
+    store = ParameterStore.from_spec_defaults(spec).refresh_derived(spec)
+    init_key = jnp.asarray(paired_initialization_seed_provenance()["init_key"], dtype=jnp.uint32)
+    prior_spec = PriorSpec.from_info(store, PRODUCTION_PRIORS)
+    init_store = prior_spec.sample_near(
+        center_store=store,
+        rng_key=init_key,
+        keys=INFER_KEYS,
+    )
+    init_store = _refresh_preserving_derived_infer_keys(init_store, spec=spec)
+    return np.asarray(pack_params(spec.subset(INFER_KEYS), init_store), dtype=float)
+
+
 def build_condition(
     *,
     family: str,
@@ -390,9 +475,9 @@ def prescription_for_condition(
     condition: SmearCondition,
     *,
     outdir: str = ".",
-    n_iter: int = 400,
-    base_lr: float = 0.2,
-    plots: bool = False,
+    n_iter: int = PRODUCTION_N_ITER,
+    base_lr: float = PRODUCTION_BASE_LR,
+    plots: bool = True,
 ) -> dict[str, Any]:
     """Return a prescribed-MC prescription for one deterministic condition."""
 
@@ -415,7 +500,7 @@ def prescription_for_condition(
                 "Truth/data and inference systems differ only by the recorded "
                 "smear kernel for mismatch families."
             ),
-            "seed": 20260821,
+            "seed": PRESCRIBED_MC_SEED,
             "inference_system": inference_system,
             "monte_carlo": {
                 "n_runs": 1,
@@ -431,9 +516,10 @@ def prescription_for_condition(
                 "n_iter": int(n_iter),
                 "base_lr": float(base_lr),
                 "loss": "nll",
+                "early_stopping": copy.deepcopy(PRODUCTION_EARLY_STOPPING),
             },
             "eigenmodes": {
-                "enable": False,
+                "enable": True,
                 "whiten": True,
                 "truncate_k": None,
                 "truncate_by_eigval": None,
@@ -451,13 +537,14 @@ def prescription_for_condition(
                 "plots": bool(plots),
                 "save_results": True,
             },
-            "init": {"mode": "explicit"},
-            "priors": {},
+            "init": {"sampling": "prior"},
+            "priors": copy.deepcopy(PRODUCTION_PRIORS),
             "diagnostics": {
                 "objective": "nll",
                 "reference_point": "physical_truth_parameter_vector",
                 "noise": "disabled; variance=max(model_image, variance_floor)",
                 "variance_floor": 1.0,
+                "initialization_seed": paired_initialization_seed_provenance(),
             },
         },
     }
@@ -504,6 +591,22 @@ def condition_manifest(condition: SmearCondition) -> dict[str, Any]:
     payload["objective_provenance"] = {
         "optimizer_loss": "nll",
         "map_prior_penalty": "disabled",
+        "optimizer_kind": "adam",
+        "optimizer_max_iterations": PRODUCTION_N_ITER,
+        "optimizer_base_lr": PRODUCTION_BASE_LR,
+        "optimizer_early_stopping": copy.deepcopy(PRODUCTION_EARLY_STOPPING),
+        "eigenmodes": {
+            "enable": True,
+            "whiten": True,
+            "truncate_k": None,
+            "truncate_by_eigval": None,
+        },
+        "init": {
+            "sampling": "prior",
+            "paired_seed_provenance": paired_initialization_seed_provenance(),
+        },
+        "priors": copy.deepcopy(PRODUCTION_PRIORS),
+        "plots_enabled": True,
         "parameter_count_expected": PARAMETER_COUNT,
         "infer_keys": list(INFER_KEYS),
         "fim_theta_semantics": (
@@ -628,6 +731,25 @@ def generate_artifacts(
         "system_preset": SYSTEM_PRESET,
         "jitter_policy": "remove named jitter detector layer from truth and inference",
         "zero_smear_policy": "retained duplicate orientation controls with the named smear detector layer absent",
+        "production_optimizer": {
+            "kind": "adam",
+            "loss": "nll",
+            "n_iter": PRODUCTION_N_ITER,
+            "base_lr": PRODUCTION_BASE_LR,
+            "early_stopping": copy.deepcopy(PRODUCTION_EARLY_STOPPING),
+        },
+        "production_eigenmodes": {
+            "enable": True,
+            "whiten": True,
+            "truncate_k": None,
+            "truncate_by_eigval": None,
+        },
+        "production_init": {
+            "sampling": "prior",
+            "paired_seed_provenance": paired_initialization_seed_provenance(),
+            "priors": copy.deepcopy(PRODUCTION_PRIORS),
+        },
+        "plots_enabled": True,
         "conditions": [plan_row(row) for row in conditions],
     }
     if dry_run:
@@ -674,9 +796,9 @@ def write_launch_helpers(output_root: Path, *, array_max: int) -> None:
 #SBATCH --output={output_root}/slurm/%A_%a.out
 #SBATCH --error={output_root}/slurm/%A_%a.err
 #SBATCH --array=0-{max(0, int(array_max))}
-#SBATCH --time=00:20:00
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=6G
+#SBATCH --time={SLURM_CONDITION_TIME}
+#SBATCH --cpus-per-task={SLURM_CPUS_PER_TASK}
+#SBATCH --mem={SLURM_MEMORY}
 
 set -euo pipefail
 mkdir -p {output_root}/slurm
@@ -684,11 +806,12 @@ cd {REPO_ROOT}
 source /cm/shared/apps/miniforge/etc/profile.d/conda.sh
 DLUXSHERA_CONDA_ENV_PREFIX="${{DLUXSHERA_CONDA_ENV_PREFIX:-{GATTACA2_CONDA_ENV_PREFIX}}}"
 conda activate "$DLUXSHERA_CONDA_ENV_PREFIX"
-export PYTHONPATH="${{PYTHONPATH:-src}}"
+export PYTHONPATH="{REPO_ROOT}/src${{PYTHONPATH:+:${{PYTHONPATH}}}}"
 
 echo "Conda env: ${{CONDA_DEFAULT_ENV:-unset}}"
 echo "CONDA_PREFIX: ${{CONDA_PREFIX:-unset}}"
 echo "Python executable: $(which python)"
+echo "PYTHONPATH: ${{PYTHONPATH}}"
 python - <<'PYENV'
 import sys
 print("sys.executable:", sys.executable)
@@ -696,6 +819,7 @@ import jax
 print("jax:", jax.__version__)
 import dluxshera
 print("dluxshera import ok")
+print("dluxshera path:", dluxshera.__file__)
 PYENV
 
 python {RECIPE_DIR / 'canonical_smear_campaign.py'} run-index \\
@@ -720,9 +844,9 @@ echo "aggregate_and_plot.sh reconstructs models and computes JAX derivatives; us
 #SBATCH --job-name=canonical-smear-agg-202608
 #SBATCH --output={output_root}/slurm/aggregate_%j.out
 #SBATCH --error={output_root}/slurm/aggregate_%j.err
-#SBATCH --time=00:20:00
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=6G
+#SBATCH --time={SLURM_AGGREGATE_TIME}
+#SBATCH --cpus-per-task={SLURM_CPUS_PER_TASK}
+#SBATCH --mem={SLURM_MEMORY}
 
 set -euo pipefail
 mkdir -p {output_root}/slurm
@@ -730,11 +854,12 @@ cd {REPO_ROOT}
 source /cm/shared/apps/miniforge/etc/profile.d/conda.sh
 DLUXSHERA_CONDA_ENV_PREFIX="${{DLUXSHERA_CONDA_ENV_PREFIX:-{GATTACA2_CONDA_ENV_PREFIX}}}"
 conda activate "$DLUXSHERA_CONDA_ENV_PREFIX"
-export PYTHONPATH="${{PYTHONPATH:-src}}"
+export PYTHONPATH="{REPO_ROOT}/src${{PYTHONPATH:+:${{PYTHONPATH}}}}"
 
 echo "Conda env: ${{CONDA_DEFAULT_ENV:-unset}}"
 echo "CONDA_PREFIX: ${{CONDA_PREFIX:-unset}}"
 echo "Python executable: $(which python)"
+echo "PYTHONPATH: ${{PYTHONPATH}}"
 python - <<'PYENV'
 import sys
 print("sys.executable:", sys.executable)
@@ -742,6 +867,7 @@ import jax
 print("jax:", jax.__version__)
 import dluxshera
 print("dluxshera import ok")
+print("dluxshera path:", dluxshera.__file__)
 PYENV
 
 python {RECIPE_DIR / 'canonical_smear_campaign.py'} aggregate --campaign-root {output_root}
