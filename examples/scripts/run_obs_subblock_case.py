@@ -766,7 +766,20 @@ def run_case_workflow(
     _write_json(layout.render_config_path, render_cfg)
     summary["generated_configs"]["render"] = str(layout.render_config_path)
 
-    render_inputs = _discover_case_render_inputs(layout)
+    try:
+        render_inputs = _discover_case_render_inputs(layout)
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        if STAGE_RENDER not in selected_stages:
+            raise
+        summary["resolved_inputs"]["pre_render_discovery_error"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+        render_inputs = RenderInputs(
+            cube=ResolvedInput(None, None),
+            truth_trace=ResolvedInput(None, None),
+            manifest=ResolvedInput(None, None),
+        )
     render_inputs = _overlay_render_inputs(
         render_inputs,
         cube_path=cube_path_override,

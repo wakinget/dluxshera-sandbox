@@ -433,6 +433,12 @@ run root that already contains `campaign_plan.json` and completed subblock
 summary artifacts; it reuses stored trajectory/smear/template paths instead of
 regenerating per-subblock smear templates.
 
+For interrupted recovery runs, `experiment.subblocks.subprocess_timeout_s` or
+the CLI override `--subprocess-timeout-s <seconds>` bounds each parent-managed
+subblock child. A timeout is recorded as an abnormal subprocess failure in
+`subprocess_diagnostics.json`; any already-written
+`study/schur_summary/subblock_summary.json` is preserved for a later `--resume`.
+
 Aggregate-only replay after a completed execution:
 
 ```bash

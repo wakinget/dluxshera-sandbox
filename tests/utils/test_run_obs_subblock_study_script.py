@@ -309,6 +309,498 @@ class _RenderInputs:
     manifest: _ResolvedInput
 
 
+def _write_case_trace_artifact(case_root: Path) -> Path:
+    trace_path = case_root / "trace" / "obs_subblock_frame_truth.csv"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(
+        "frame_index,time_s,source.x_position_as\n0,0.0,0.0\n",
+        encoding="utf-8",
+    )
+    return trace_path
+
+
+def test_render_reuse_validation_requires_cube(tmp_path: Path):
+    module = _load_script_module()
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(None),
+        truth_trace=_ResolvedInput(None),
+        manifest=_ResolvedInput(None),
+    )
+
+    validation = module._render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key=None,
+        truth_value=None,
+        use_render_variance=False,
+    )
+
+    assert validation["reusable"] is False
+    assert validation["reasons"] == ["cube_missing"]
+
+
+def test_render_reuse_validation_reuses_complete_variance_render(tmp_path: Path):
+    module = _load_script_module()
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        tmp_path / "case",
+        truth_value=0.011,
+    )
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(cube_path),
+        truth_trace=_ResolvedInput(truth_path),
+        manifest=_ResolvedInput(manifest_path),
+    )
+
+    validation = module._render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key="optics.plate_scale_as_per_pix",
+        truth_value=0.011,
+        use_render_variance=True,
+    )
+
+    assert validation["reusable"] is True
+    assert validation["reasons"] == []
+    assert validation["variance_path"] == str(variance_path.resolve())
+
+
+def test_prepare_case_render_artifacts_reuses_complete_variance_render(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_complete_render"
+    cube_path, variance_path, _truth_path, _manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    _write_case_trace_artifact(case_root)
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key=None,
+        truth_value=None,
+        n_frames=None,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="disabled",
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert prep["stages_executed"] == []
+    assert prep["render_reuse_validation"]["reusable"] is True
+    assert prep["render_reuse_validation"]["variance_path"] == str(variance_path.resolve())
+    assert prep["render_inputs"].cube.path == cube_path.resolve()
+
+
+def test_prepare_case_render_artifacts_rerenders_manifest_missing_cube_artifact(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_manifest_missing_cube"
+    cube_path, variance_path, _truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    _write_case_trace_artifact(case_root)
+    manifest = _read_json(manifest_path)
+    manifest["artifacts"].pop("cube_fits")
+    _write_json(manifest_path, manifest)
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key=None,
+        truth_value=None,
+        n_frames=None,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="disabled",
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert cube_path.exists()
+    assert variance_path.exists()
+    assert prep["stages_executed"] == ["render"]
+    assert prep["render_reuse_validation"]["reusable"] is False
+    assert prep["render_reuse_validation"]["reasons"] == [
+        "manifest_cube_artifact_missing"
+    ]
+
+
+def test_prepare_case_render_artifacts_rerenders_manifest_missing_cube_file(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_manifest_missing_cube_file"
+    cube_path, variance_path, _truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    _write_case_trace_artifact(case_root)
+    manifest = _read_json(manifest_path)
+    manifest["artifacts"]["cube_fits"] = "missing_manifest_cube.fits"
+    _write_json(manifest_path, manifest)
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key=None,
+        truth_value=None,
+        n_frames=None,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="disabled",
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert cube_path.exists()
+    assert variance_path.exists()
+    assert prep["stages_executed"] == ["render"]
+    assert prep["render_reuse_validation"]["reusable"] is False
+    assert prep["render_reuse_validation"]["reasons"] == ["manifest_cube_file_missing"]
+
+
+def test_render_reuse_validation_requires_variance_artifact_when_requested(tmp_path: Path):
+    module = _load_script_module()
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        tmp_path / "case",
+    )
+    variance_path.unlink()
+    manifest = _read_json(manifest_path)
+    manifest["artifacts"].pop("variance_fits")
+    _write_json(manifest_path, manifest)
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(cube_path),
+        truth_trace=_ResolvedInput(truth_path),
+        manifest=_ResolvedInput(manifest_path),
+    )
+
+    validation = module._render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key=None,
+        truth_value=None,
+        use_render_variance=True,
+    )
+
+    assert validation["reusable"] is False
+    assert validation["reasons"] == ["variance_artifact_missing"]
+
+
+def test_render_reuse_validation_requires_referenced_variance_file(tmp_path: Path):
+    module = _load_script_module()
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        tmp_path / "case",
+    )
+    variance_path.unlink()
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(cube_path),
+        truth_trace=_ResolvedInput(truth_path),
+        manifest=_ResolvedInput(manifest_path),
+    )
+
+    validation = module._render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key=None,
+        truth_value=None,
+        use_render_variance=True,
+    )
+
+    assert validation["reusable"] is False
+    assert validation["reasons"] == ["variance_file_missing"]
+
+
+def test_prepare_case_render_artifacts_rerenders_referenced_missing_variance(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_missing_referenced_variance"
+    _cube_path, variance_path, _truth_path, _manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    _write_case_trace_artifact(case_root)
+    variance_path.unlink()
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key=None,
+        truth_value=None,
+        n_frames=None,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="disabled",
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert prep["stages_executed"] == ["render"]
+    assert prep["render_reuse_validation"]["reasons"] == ["variance_file_missing"]
+
+
+def test_render_reuse_validation_does_not_require_variance_when_not_requested(tmp_path: Path):
+    module = _load_script_module()
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        tmp_path / "case",
+    )
+    variance_path.unlink()
+    manifest = _read_json(manifest_path)
+    manifest["artifacts"].pop("variance_fits")
+    _write_json(manifest_path, manifest)
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(cube_path),
+        truth_trace=_ResolvedInput(truth_path),
+        manifest=_ResolvedInput(manifest_path),
+    )
+
+    validation = module._render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key=None,
+        truth_value=None,
+        use_render_variance=False,
+    )
+
+    assert validation["reusable"] is True
+    assert validation["reasons"] == []
+
+
+def test_render_reuse_validation_preserves_truth_mismatch_rerender(tmp_path: Path):
+    module = _load_script_module()
+    cube_path, _variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        tmp_path / "case",
+        truth_value=0.011,
+    )
+    render_inputs = _RenderInputs(
+        cube=_ResolvedInput(cube_path),
+        truth_trace=_ResolvedInput(truth_path),
+        manifest=_ResolvedInput(manifest_path),
+    )
+
+    validation = module._render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key="optics.plate_scale_as_per_pix",
+        truth_value=0.012,
+        use_render_variance=False,
+    )
+
+    assert validation["reusable"] is False
+    assert validation["reasons"] == ["render_truth_mismatch"]
+
+
+def test_schur_dry_run_plans_rerender_for_stale_cube_missing_variance(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_stale_cube"
+    cube_path, variance_path, _truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    variance_path.unlink()
+    manifest = _read_json(manifest_path)
+    manifest["artifacts"].pop("variance_fits")
+    _write_json(manifest_path, manifest)
+
+    summary = module.run_obs_subblock_study(
+        mode="schur_summary",
+        case_root=case_root,
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert cube_path.exists()
+    assert summary["case_prep_stages_executed"] == ["trace", "render"]
+    assert summary["render_reuse_validation"]["reasons"] == [
+        "variance_artifact_missing"
+    ]
+    assert "schur_config_path" not in summary
+
+
+def test_prepare_case_render_artifacts_rerenders_stale_cube_missing_variance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_rerender"
+    cube_path, variance_path, truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    variance_path.unlink()
+    manifest = _read_json(manifest_path)
+    manifest["artifacts"].pop("variance_fits")
+    _write_json(manifest_path, manifest)
+    calls: list[dict[str, Any]] = []
+
+    class _FakeCaseModule:
+        ResolvedInput = _ResolvedInput
+
+        @staticmethod
+        def build_case_layout(root: Path) -> Path:
+            return root
+
+        @staticmethod
+        def _discover_case_trace_input(_layout: Path) -> _ResolvedInput:
+            return _ResolvedInput(truth_path, "case")
+
+        @staticmethod
+        def _discover_case_render_inputs(_layout: Path) -> _RenderInputs:
+            return _RenderInputs(
+                cube=_ResolvedInput(cube_path if cube_path.exists() else None),
+                truth_trace=_ResolvedInput(truth_path if truth_path.exists() else None),
+                manifest=_ResolvedInput(manifest_path if manifest_path.exists() else None),
+            )
+
+        @staticmethod
+        def run_case_workflow(**kwargs: Any) -> dict:
+            calls.append(dict(kwargs))
+            variance_path.write_bytes(b"variance")
+            manifest = _read_json(manifest_path)
+            manifest.setdefault("artifacts", {})["variance_fits"] = variance_path.name
+            _write_json(manifest_path, manifest)
+            return {"summary_path": str(case_root / "case_summary.json")}
+
+    monkeypatch.setattr(module, "_load_case_runner_module", lambda: _FakeCaseModule)
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key=None,
+        truth_value=None,
+        n_frames=1,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="inherit",
+        use_render_variance=True,
+        dry_run=False,
+    )
+
+    assert calls
+    assert calls[0]["stages"] == ("render",)
+    assert prep["render_reuse_validation"]["reusable"] is True
+    assert variance_path.exists()
+
+
+def test_prepare_case_render_artifacts_rerenders_cube_without_manifest_for_variance(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_cube_without_manifest"
+    cube_path, _variance_path, _truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    _write_case_trace_artifact(case_root)
+    manifest_path.unlink()
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key=None,
+        truth_value=None,
+        n_frames=None,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="disabled",
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert cube_path.exists()
+    assert prep["stages_executed"] == ["render"]
+    assert prep["render_reuse_validation"]["reasons"] == ["manifest_missing"]
+
+
+def test_prepare_case_render_artifacts_rerenders_malformed_manifest_for_render_variance(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_malformed_manifest"
+    cube_path, _variance_path, _truth_path, manifest_path = _write_case_render_artifacts(
+        case_root,
+    )
+    _write_case_trace_artifact(case_root)
+    manifest_path.write_text("{truncated", encoding="utf-8")
+
+    prep = module._prepare_case_render_artifacts(
+        case_root=case_root,
+        template_paths={
+            "trace": trace_template,
+            "render": render_template,
+            "inference": inference_template,
+        },
+        candidate_key="optics.plate_scale_as_per_pix",
+        truth_value=0.01,
+        n_frames=None,
+        dt_s=None,
+        exposure_time_s=None,
+        noise_mode="disabled",
+        use_render_variance=True,
+        dry_run=True,
+    )
+
+    assert cube_path.exists()
+    assert prep["stages_executed"] == ["render"]
+    assert "manifest_unusable" in prep["render_reuse_validation"]["reasons"]
+    assert "JSONDecodeError" in prep["render_reuse_validation"]["manifest_read_error"]
+    assert "JSONDecodeError" in prep["render_reuse_validation"]["render_discovery_error"]
+
+
+def test_prepare_case_render_artifacts_keeps_malformed_manifest_strict_without_recovery(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_malformed_manifest_strict"
+    _write_case_render_artifacts(case_root)
+    _write_case_trace_artifact(case_root)
+    (case_root / "render" / "manifest.json").write_text("{truncated", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        module._prepare_case_render_artifacts(
+            case_root=case_root,
+            template_paths={
+                "trace": trace_template,
+                "render": render_template,
+                "inference": inference_template,
+            },
+            candidate_key=None,
+            truth_value=None,
+            n_frames=None,
+            dt_s=None,
+            exposure_time_s=None,
+            noise_mode="disabled",
+            use_render_variance=False,
+            dry_run=True,
+        )
+
+
 def test_parse_helpers_validate_mode_candidate_and_grid():
     module = _load_script_module()
 

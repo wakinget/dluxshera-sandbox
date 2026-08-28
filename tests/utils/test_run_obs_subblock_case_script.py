@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -282,6 +284,55 @@ def test_render_only_reuses_existing_case_trace_manifest(tmp_path: Path):
     assert summary["resolved_inputs"]["trace"]["source"] == "case_trace_manifest"
 
 
+def test_render_stage_reaches_runner_despite_malformed_historical_render_manifest(
+    tmp_path: Path,
+):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_malformed_render_manifest"
+
+    trace_dir = case_root / "trace"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_csv = trace_dir / "existing_frame_truth.csv"
+    trace_csv.write_text(
+        "frame_index,time_s,source.x_position_as\n0,0.0,0.0\n",
+        encoding="utf-8",
+    )
+    render_dir = case_root / "render"
+    render_dir.mkdir(parents=True, exist_ok=True)
+    (render_dir / "manifest.json").write_text("{truncated", encoding="utf-8")
+
+    calls: list[str] = []
+
+    def render_runner(config_path: Path, root: Path, dry_run: bool) -> dict:
+        calls.append("render")
+        return {
+            "dry_run": dry_run,
+            "artifacts": {
+                "cube_fits": str(root / "render" / "obs_subblock_cube.fits"),
+                "frame_truth_csv": str(root / "render" / "obs_subblock_truth.csv"),
+                "manifest_json": str(root / "render" / "manifest.json"),
+            },
+        }
+
+    summary = module.run_case_workflow(
+        case_root=case_root,
+        stages=("render",),
+        trace_template=trace_template,
+        render_template=render_template,
+        inference_template=inference_template,
+        render_runner=render_runner,
+        inference_runner=lambda *_args, **_kwargs: {},
+        quicklook_runner=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == ["render"]
+    assert summary["resolved_inputs"]["pre_render_discovery_error"]["type"] == (
+        "JSONDecodeError"
+    )
+    assert summary["resolved_inputs"]["render"]["cube"]["source"] == "render_stage"
+
+
 def test_quicklook_only_uses_existing_render_manifest_and_case_quicklook_dir(tmp_path: Path):
     module = _load_script_module()
     trace_template, render_template, inference_template = _write_templates(tmp_path)
@@ -334,6 +385,26 @@ def test_quicklook_only_uses_existing_render_manifest_and_case_quicklook_dir(tmp
     assert recorded["manifest"] == str((render_dir / "manifest.json").resolve())
     assert recorded["trace"] == str(truth_path.resolve())
     assert recorded["outdir"] == str((case_root / "render" / "quicklook").resolve())
+
+
+def test_quicklook_only_keeps_malformed_render_manifest_strict(tmp_path: Path):
+    module = _load_script_module()
+    trace_template, render_template, inference_template = _write_templates(tmp_path)
+    case_root = tmp_path / "Results" / "case_quicklook_malformed_manifest"
+    render_dir = case_root / "render"
+    render_dir.mkdir(parents=True, exist_ok=True)
+    (render_dir / "manifest.json").write_text("{truncated", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        module.run_case_workflow(
+            case_root=case_root,
+            stages=("quicklook",),
+            trace_template=trace_template,
+            render_template=render_template,
+            inference_template=inference_template,
+            inference_runner=lambda *_args, **_kwargs: {},
+            quicklook_runner=lambda *_args, **_kwargs: {},
+        )
 
 
 def test_inference_only_uses_explicit_render_overrides(tmp_path: Path):

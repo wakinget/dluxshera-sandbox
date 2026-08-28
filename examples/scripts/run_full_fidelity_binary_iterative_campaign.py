@@ -464,6 +464,7 @@ def run_full_fidelity_binary_iterative_campaign(
     profile_runtime_detail: str = "basic",
     memory_diagnostics: bool = False,
     render_retention: str | None = None,
+    subprocess_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     raw = load_config_file(config_path)
     validate_full_fidelity_smoke_config(raw, emit_warnings=True)
@@ -479,6 +480,7 @@ def run_full_fidelity_binary_iterative_campaign(
         fail_fast=fail_fast,
         quiet=quiet,
         resource_time=resource_time,
+        subprocess_timeout_s=subprocess_timeout_s,
         args=argparse.Namespace(
             aggregate_only=aggregate_only,
             resume=resume,
@@ -499,6 +501,7 @@ def run_full_fidelity_binary_iterative_campaign(
             schur_curvature_method=None,
             summary_information_scale=None,
             render_retention=render_retention,
+            subprocess_timeout_s=subprocess_timeout_s,
             profile_runtime=profile_runtime,
             profile_runtime_detail=profile_runtime_detail,
             memory_diagnostics=memory_diagnostics,
@@ -536,6 +539,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument("--no-resource-time", dest="resource_time", action="store_const", const="disabled")
+    parser.add_argument(
+        "--subprocess-timeout-s",
+        type=float,
+        default=None,
+        help="Optional positive per-subblock child-process timeout in seconds.",
+    )
     parser.add_argument("--profile-runtime", action="store_true", default=False)
     parser.add_argument("--profile-runtime-detail", choices=("basic", "full"), default="basic")
     parser.add_argument("--memory-diagnostics", action="store_true", default=False)
@@ -565,6 +574,7 @@ def main(argv: list[str] | None = None) -> None:
         profile_runtime_detail=str(args.profile_runtime_detail),
         memory_diagnostics=bool(args.memory_diagnostics),
         render_retention=args.render_retention,
+        subprocess_timeout_s=args.subprocess_timeout_s,
     )
 
 

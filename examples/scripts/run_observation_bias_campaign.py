@@ -18,7 +18,7 @@ import re
 import shlex
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -134,6 +134,8 @@ from dluxshera.utils.smear_audit import (
 from dluxshera.utils.subprocess_diagnostics import (
     require_resource_time_available,
     run_subprocess_with_diagnostics,
+    subprocess_succeeded,
+    subprocess_timed_out,
 )
 
 
@@ -1140,6 +1142,7 @@ def _apply_cli_overrides(experiment_cfg: dict[str, Any], args: argparse.Namespac
         ("summary_information_scale", "summary_information_scale"),
         ("render_retention", "render_retention"),
         ("profile_runtime_detail", "profile_runtime_detail"),
+        ("subprocess_timeout_s", "subprocess_timeout_s"),
     ):
         value = getattr(args, arg_name, None)
         if value is not None:
@@ -1388,6 +1391,19 @@ def _resolve_render_retention_policy(experiment_cfg: Mapping[str, Any]) -> str:
             + "."
         )
     return policy
+
+
+def _resolve_subprocess_timeout_s(value: Any) -> float | None:
+    """Return optional parent-side subblock subprocess timeout in seconds."""
+
+    if value is None or value == "":
+        return None
+    timeout_s = float(value)
+    if timeout_s <= 0.0 or not math.isfinite(timeout_s):
+        raise ValueError(
+            "experiment.subblocks.subprocess_timeout_s must be positive finite seconds when set."
+        )
+    return timeout_s
 
 
 def _resolve_iterative_forecast_config(experiment_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -2175,6 +2191,9 @@ def build_campaign_plan(
     effective_subblock_cfg["render_retention"] = _resolve_render_retention_policy(
         experiment_cfg
     )
+    effective_subblock_cfg["subprocess_timeout_s"] = _resolve_subprocess_timeout_s(
+        effective_subblock_cfg.get("subprocess_timeout_s")
+    )
     effective_subblock_cfg["noise_model"] = {
         **dict(effective_subblock_cfg.get("noise_model", {}) or {}),
         "normalized_subblock_noise": normalized_noise.to_dict(),
@@ -2348,6 +2367,9 @@ def build_campaign_plan(
                     "variance_floor": normalized_noise.variance_floor,
                     "variance_floor_source": normalized_noise.variance_floor_source,
                     "use_render_variance": normalized_noise.use_render_variance_resolved,
+                    "subprocess_timeout_s": effective_subblock_cfg[
+                        "subprocess_timeout_s"
+                    ],
                     "noise_request_normalized_json": str(noise_provenance_paths["noise_request_normalized_json"]),
                     "forwarded_flags": ",".join(
                         str(flag) for flag in subblock_command_options["forwarded_flags"]
@@ -2496,6 +2518,9 @@ def build_campaign_plan(
 def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
     subblock_cfg = plan.config["experiment"].get("subblocks", {})
     subblock_command_options = resolve_subblock_command_options(subblock_cfg)
+    subprocess_timeout_s = _resolve_subprocess_timeout_s(
+        subblock_cfg.get("subprocess_timeout_s")
+    )
     n_phi = 3 * int(subblock_cfg.get("n_frames", 3))
     combined_dim = int(plan.layout.size + n_phi)
     max_dense_dim = int(subblock_cfg.get("max_dense_dim", 40))
@@ -2543,6 +2568,7 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
             plan.config["experiment"].get("high_order_wfe_summary", {})
         ),
         "subblock_command_options": dict(subblock_command_options),
+        "subprocess_timeout_s": subprocess_timeout_s,
         "seeding": _resolve_seeding_config(plan.config["experiment"]),
         "iterative": dict(plan.iterative),
         "iterative_forecast": {
@@ -2644,6 +2670,34 @@ def _plan_payload(plan: CampaignPlan) -> dict[str, Any]:
     }
 
 
+def _subblock_summary_completion_status(summary_path: Path) -> dict[str, Any]:
+    """Return whether a science summary satisfies the canonical loader contract."""
+
+    if not summary_path.exists():
+        return {
+            "complete": False,
+            "status": "missing",
+            "summary_path": str(summary_path),
+            "error": None,
+        }
+    try:
+        loaded = load_subblock_summary(summary_path)
+    except Exception as exc:
+        return {
+            "complete": False,
+            "status": "invalid",
+            "summary_path": str(summary_path),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "complete": True,
+        "status": "valid",
+        "summary_path": str(summary_path),
+        "subblock_id": loaded.subblock_id,
+        "theta_labels": list(loaded.theta_labels),
+    }
+
+
 def execute_subblocks(
     plan: CampaignPlan,
     *,
@@ -2652,16 +2706,31 @@ def execute_subblocks(
     fail_fast: bool,
     quiet: bool,
     resource_time: bool | str | None,
+    subprocess_timeout_s: float | None = None,
 ) -> None:
     env = os.environ.copy()
     src_path = str(REPO_ROOT / "src")
     env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
     jobs: list[tuple[str, Path, list[str]]] = []
+    resume_invalid_rows: list[dict[str, Any]] = []
     for case_name, commands in plan.subblock_commands.items():
         for command, summary_path in zip(commands, plan.summary_paths[case_name], strict=True):
-            if resume and summary_path.exists():
-                continue
+            if resume:
+                completion = _subblock_summary_completion_status(summary_path)
+                if bool(completion["complete"]):
+                    continue
+                if summary_path.exists():
+                    resume_invalid_rows.append(
+                        {
+                            "case_name": case_name,
+                            "summary_path": str(summary_path),
+                            "completion_status": completion["status"],
+                            "error": completion.get("error"),
+                        }
+                    )
             jobs.append((case_name, summary_path, command))
+    if resume_invalid_rows:
+        _write_csv_rows(plan.run_root / "resume_incomplete_summaries.csv", resume_invalid_rows)
     if not jobs:
         return
     require_resource_time_available(resource_time)
@@ -2680,11 +2749,15 @@ def execute_subblocks(
             stderr_log=case_root / "subprocess.stderr.log",
             diagnostics_json=diagnostics_path,
             resource_time=resource_time,
+            subprocess_timeout_s=subprocess_timeout_s,
+            expected_summary_path=summary_path,
         )
+        timeout_diag = getattr(diag, "timeout", {}) or {}
+        semantic_success = subprocess_succeeded(diag)
         return case_name, summary_path, {
             "case_name": case_name,
             "summary_path": str(summary_path),
-            "status": "ok" if int(diag.return_code) == 0 else "failed",
+            "status": "ok" if semantic_success else "failed",
             "return_code": int(diag.return_code),
             "failure_class": diag.failure_class,
             "failure_hint": diag.failure_hint,
@@ -2699,6 +2772,12 @@ def execute_subblocks(
                 "resource_time_mode_effective",
                 diag.resource_time.get("mode_effective"),
             ),
+            "subprocess_timeout_s": subprocess_timeout_s,
+            "subprocess_timed_out": subprocess_timed_out(diag),
+            "expected_summary_exists_at_exit": timeout_diag.get(
+                "expected_summary",
+                {},
+            ).get("exists"),
             "stderr_tail": "\n".join(diag.stderr_tail),
         }
 
@@ -2722,7 +2801,7 @@ def execute_subblocks(
         )
 
     def _raise_for_failure(row: Mapping[str, Any]) -> None:
-        if int(row.get("return_code", 0)) == 0:
+        if str(row.get("status", "")) == "ok":
             return
         raise RuntimeError(
             f"Subprocess failed ({row['return_code']}) for {row['summary_path']}: "
@@ -2744,19 +2823,35 @@ def execute_subblocks(
                 print(str(exc), file=sys.stderr, flush=True)
         return
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_job = {pool.submit(_job, job): job for job in jobs}
-        for future in as_completed(future_to_job):
-            try:
-                case_name, summary_path, row = future.result()
-                _record(row)
-                _raise_for_failure(row)
-                if not quiet:
-                    print(f"[observation_bias_campaign] completed {case_name}: {summary_path}", flush=True)
-            except RuntimeError as exc:
-                if fail_fast:
-                    raise RuntimeError(str(exc)) from exc
-                print(str(exc), file=sys.stderr, flush=True)
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        pending_jobs = list(jobs)
+        active = {}
+        while pending_jobs and len(active) < max_workers:
+            job = pending_jobs.pop(0)
+            active[pool.submit(_job, job)] = job
+        while active:
+            done, _not_done = wait(active, return_when=FIRST_COMPLETED)
+            for future in done:
+                active.pop(future)
+                try:
+                    case_name, summary_path, row = future.result()
+                    _record(row)
+                    _raise_for_failure(row)
+                    if not quiet:
+                        print(f"[observation_bias_campaign] completed {case_name}: {summary_path}", flush=True)
+                except RuntimeError as exc:
+                    if fail_fast:
+                        for pending in active:
+                            pending.cancel()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise RuntimeError(str(exc)) from exc
+                    print(str(exc), file=sys.stderr, flush=True)
+            while pending_jobs and len(active) < max_workers:
+                job = pending_jobs.pop(0)
+                active[pool.submit(_job, job)] = job
+    finally:
+        pool.shutdown(wait=not fail_fast, cancel_futures=fail_fast)
 
 
 def _execution_context_payload(
@@ -2764,6 +2859,7 @@ def _execution_context_payload(
     run_root: Path,
     max_workers: int,
     resource_time: bool | str | None,
+    subprocess_timeout_s: float | None,
 ) -> dict[str, Any]:
     env = os.environ
     return {
@@ -2772,6 +2868,7 @@ def _execution_context_payload(
         "run_root": str(run_root),
         "max_workers": int(max_workers),
         "resource_time": resource_time,
+        "subprocess_timeout_s": subprocess_timeout_s,
         "slurm": {
             "job_id": env.get("SLURM_JOB_ID"),
             "job_name": env.get("SLURM_JOB_NAME"),
@@ -5184,6 +5281,7 @@ def execute_iterative_campaign(
     prior_source: str,
     allow_optimizer_scale_summaries: bool,
     resource_time: bool | str | None,
+    subprocess_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     summary_scale_policy = (
         SUMMARY_SCALE_POLICY_ALLOW_OPTIMIZER
@@ -5229,6 +5327,7 @@ def execute_iterative_campaign(
                         fail_fast=fail_fast,
                         quiet=quiet,
                         resource_time=resource_time,
+                        subprocess_timeout_s=subprocess_timeout_s,
                     )
                 finally:
                     window_status = _augment_iterative_status_rows(
@@ -6238,6 +6337,7 @@ def run_observation_bias_campaign(
     prior_source: str = "summary_theta_ref",
     allow_optimizer_scale_summaries: bool = False,
     resource_time: bool | str | None = None,
+    subprocess_timeout_s: float | None = None,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     plan_args = args
@@ -6262,9 +6362,16 @@ def run_observation_bias_campaign(
             schur_curvature_method=None,
             summary_information_scale=None,
             render_retention=None,
+            subprocess_timeout_s=subprocess_timeout_s,
             seed_policy=None,
             base_seed=None,
         )
+    elif (
+        getattr(plan_args, "subprocess_timeout_s", None) is None
+        and subprocess_timeout_s is not None
+    ):
+        plan_args = argparse.Namespace(**vars(plan_args))
+        plan_args.subprocess_timeout_s = subprocess_timeout_s
     if aggregate_only:
         replay_run_root = _resolve_aggregate_only_run_root(
             config_path=config_path,
@@ -6384,6 +6491,9 @@ def run_observation_bias_campaign(
                     partition=dict(stored_plan.get("state_partition", plan.partition)),
                 )
     _ensure_dir(plan.run_root)
+    resolved_subprocess_timeout_s = _resolve_subprocess_timeout_s(
+        plan.config["experiment"].get("subblocks", {}).get("subprocess_timeout_s")
+    )
     if not skip_plan_rewrite:
         _write_json(plan.run_root / "campaign_plan.json", _plan_payload(plan))
         _write_json(plan.run_root / "model_split.json", plan.config["experiment"].get("model_split", {}))
@@ -6413,6 +6523,7 @@ def run_observation_bias_campaign(
                 run_root=plan.run_root,
                 max_workers=max(1, int(max_workers)),
                 resource_time=resource_time,
+                subprocess_timeout_s=resolved_subprocess_timeout_s,
             ),
         )
     if dry_run:
@@ -6431,6 +6542,7 @@ def run_observation_bias_campaign(
                 prior_source=prior_source,
                 allow_optimizer_scale_summaries=allow_optimizer_scale_summaries,
                 resource_time=resource_time,
+                subprocess_timeout_s=resolved_subprocess_timeout_s,
             )
         execute_subblocks(
             plan,
@@ -6439,6 +6551,7 @@ def run_observation_bias_campaign(
             fail_fast=fail_fast,
             quiet=quiet,
             resource_time=resource_time,
+            subprocess_timeout_s=resolved_subprocess_timeout_s,
         )
     if bool(plan.iterative.get("enabled", False)):
         return aggregate_iterative_outputs(plan)
@@ -6501,6 +6614,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument("--no-resource-time", dest="resource_time", action="store_const", const="disabled")
+    parser.add_argument(
+        "--subprocess-timeout-s",
+        type=float,
+        default=None,
+        help="Optional positive per-subblock child-process timeout in seconds.",
+    )
     parser.add_argument("--profile-runtime", action="store_true", default=False)
     parser.add_argument("--profile-runtime-detail", choices=("basic", "full"), default=None)
     parser.add_argument("--memory-diagnostics", action="store_true", default=False)
@@ -6530,6 +6649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prior_source=str(args.prior_source),
         allow_optimizer_scale_summaries=bool(args.allow_optimizer_scale_summaries),
         resource_time="auto" if args.resource_time is None else str(args.resource_time),
+        subprocess_timeout_s=args.subprocess_timeout_s,
         args=args,
     )
     return 0

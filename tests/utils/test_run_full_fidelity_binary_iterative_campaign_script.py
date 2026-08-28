@@ -136,3 +136,47 @@ def test_projected_30min_config_dry_run_plans_actual_windows_only(tmp_path: Path
     assert resolved["experiment"]["detector_calibration_knowledge_error"]["pixel_offsets"]["sigma_pix"] == "1e-5"
     assert resolved["experiment"]["detector_calibration_knowledge_error"]["pixel_response"]["sigma_fractional"] == "1e-5"
     assert resolved["experiment"]["prior_draws"]["sigmas"]["source.separation_as"]["sigma"] == 1.0e-04
+
+
+def test_full_fidelity_wrapper_forwards_subprocess_timeout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_module()
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_observation_bias_campaign(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"run_root": str(tmp_path / "run")}
+
+    monkeypatch.setattr(
+        module,
+        "run_observation_bias_campaign",
+        fake_run_observation_bias_campaign,
+    )
+
+    status = module.run_full_fidelity_binary_iterative_campaign(
+        config_path=CONFIG_PATH,
+        results_root=tmp_path,
+        run_name="timeout_wrapper",
+        dry_run=True,
+        aggregate_only=False,
+        resume=False,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+        subprocess_timeout_s=7200.0,
+    )
+
+    assert status["run_root"].endswith("run")
+    assert calls[0]["subprocess_timeout_s"] == 7200.0
+    assert calls[0]["args"].subprocess_timeout_s == 7200.0
+
+
+def test_full_fidelity_parser_accepts_subprocess_timeout() -> None:
+    module = load_module()
+    args = module._build_parser().parse_args(
+        ["--config", str(CONFIG_PATH), "--subprocess-timeout-s", "7200"]
+    )
+    assert args.subprocess_timeout_s == 7200.0

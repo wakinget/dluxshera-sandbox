@@ -181,6 +181,28 @@ when pruning is active. The latest JSON and JSONL history record the policy,
 window index, completion guard artifacts, deleted file count, deleted logical
 bytes, allowed suffixes, skipped candidates, and unlink errors.
 
+## Subprocess Timeout
+
+Subblock subprocess execution is unbounded by default for backward
+compatibility. Recovery campaigns may opt in to a finite parent-side timeout:
+
+```yaml
+experiment:
+  subblocks:
+    subprocess_timeout_s: 21600
+```
+
+The same value can be overridden from the observation-bias or full-fidelity
+wrapper CLIs with `--subprocess-timeout-s <seconds>`. Values must be positive
+finite seconds; unset/null preserves the historical no-timeout behavior.
+
+On timeout, the parent terminates the child process group where supported,
+writes `subprocess_diagnostics.json` with `failure_class: timeout`, preserves
+any already-written `study/schur_summary/subblock_summary.json`, and reports the
+subblock as failed for the current invocation. A later `--resume` continues to
+use the existing science summary as the completion marker only when the
+canonical science summary is present and valid/loadable.
+
 ## High-Order WFE
 
 `experiment.high_order_wfe` remains backward-compatible with the original scalar

@@ -190,6 +190,13 @@ CONFIG_FIELD_REGISTRY: dict[str, dict[str, Any]] = {
         provenance_effect="writes per-window render-retention cleanup provenance when pruning is active",
         notes="Cleanup boundary is the completed iterative window, not an individual completed subblock.",
     ),
+    "experiment.subblocks.subprocess_timeout_s": _entry(
+        default=None,
+        consumed_by="observation_bias parent runner",
+        runtime_effect="optional positive per-subblock child-process timeout",
+        provenance_effect="recorded in campaign plan, subblock plan rows, execution context, and subprocess diagnostics",
+        notes="Unset/null preserves historical unbounded subprocess waits; timeout failures remain abnormal and preserve any already-written science summary for later resume.",
+    ),
     "experiment.subblocks.phi_ref": _entry(valid_values=_values(("truth_when_available", "implemented", "Use truth fast-state reference where available."), ("recovered", "implemented", "Use recovered-reference inference."), ("init", "future_placeholder", "Initialization reference where supported.")), consumed_by="subblock runner"),
     "experiment.subblocks.schur_curvature_method": _entry(valid_values=_values(("auto", "implemented", "Select available curvature path."), ("dense", "implemented", "Dense curvature path where dimensions allow."), ("structured", "implemented", "Structured curvature path.")), consumed_by="subblock runner"),
     "experiment.subblocks.reference_diagnostics_profile": _entry(valid_values=_values(("none", "implemented", "Disable extra diagnostics."), ("basic", "implemented", "Basic diagnostics."), ("review", "implemented", "Review diagnostics and plots."), ("full", "implemented", "Full expensive diagnostics.")), consumed_by="subblock runner"),

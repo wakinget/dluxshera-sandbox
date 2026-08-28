@@ -4,6 +4,8 @@ import importlib.util
 import json
 import math
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
@@ -1018,6 +1020,359 @@ def test_no_resource_time_executes_without_external_time_probe(
     assert set(calls) == {"disabled"}
 
 
+def test_execute_subblocks_forwards_subprocess_timeout_and_expected_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="timeout_forward",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        Path(kwargs["stdout_log"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(kwargs["stdout_log"]).write_text("", encoding="utf-8")
+        Path(kwargs["stderr_log"]).write_text("", encoding="utf-8")
+        return SimpleNamespace(
+            return_code=0,
+            failure_class=None,
+            failure_hint=None,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            timeout={
+                "timed_out": False,
+                "expected_summary": {"exists": False},
+            },
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(
+        module,
+        "run_subprocess_with_diagnostics",
+        fake_run_subprocess_with_diagnostics,
+    )
+
+    module.execute_subblocks(
+        plan,
+        resume=False,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+        subprocess_timeout_s=123.0,
+    )
+
+    assert calls
+    assert {call["subprocess_timeout_s"] for call in calls} == {123.0}
+    expected = {
+        str(path)
+        for paths in plan.summary_paths.values()
+        for path in paths
+    }
+    assert {str(call["expected_summary_path"]) for call in calls} == expected
+
+
+def test_execute_subblocks_resume_skips_existing_summary_without_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="resume_skip",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    labels = plan.layout.labels
+    theta_ref = plan.prior_truth.copy()
+    for paths in plan.summary_paths.values():
+        for summary_path in paths:
+            write_summary(summary_path, labels, theta_ref, plan.prior_truth)
+
+    def fail_run_subprocess_with_diagnostics(**_kwargs: Any) -> Any:
+        raise AssertionError("resume should skip completed subblocks")
+
+    monkeypatch.setattr(
+        module,
+        "run_subprocess_with_diagnostics",
+        fail_run_subprocess_with_diagnostics,
+    )
+
+    module.execute_subblocks(
+        plan,
+        resume=True,
+        max_workers=2,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+        subprocess_timeout_s=0.1,
+    )
+
+    for paths in plan.summary_paths.values():
+        for summary_path in paths:
+            assert module.load_subblock_summary(summary_path).subblock_id
+
+
+def test_execute_subblocks_resume_reruns_truncated_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="resume_truncated",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    first_summary = next(iter(plan.summary_paths.values()))[0]
+    first_summary.parent.mkdir(parents=True, exist_ok=True)
+    first_summary.write_text('{"theta_labels": [', encoding="utf-8")
+    calls: list[Path] = []
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        calls.append(Path(kwargs["expected_summary_path"]))
+        return SimpleNamespace(
+            return_code=0,
+            failure_class=None,
+            failure_hint=None,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            timeout={"timed_out": False, "expected_summary": {"exists": False}},
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(module, "run_subprocess_with_diagnostics", fake_run_subprocess_with_diagnostics)
+
+    module.execute_subblocks(
+        plan,
+        resume=True,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+    )
+
+    assert first_summary in calls
+    invalid_rows = module._read_csv_rows(plan.run_root / "resume_incomplete_summaries.csv")
+    assert invalid_rows[0]["completion_status"] == "invalid"
+
+
+def test_execute_subblocks_resume_reruns_readable_invalid_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="resume_invalid",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    first_summary = next(iter(plan.summary_paths.values()))[0]
+    first_summary.parent.mkdir(parents=True, exist_ok=True)
+    first_summary.write_text('{"complete": true}', encoding="utf-8")
+    calls: list[Path] = []
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        calls.append(Path(kwargs["expected_summary_path"]))
+        return SimpleNamespace(
+            return_code=0,
+            failure_class=None,
+            failure_hint=None,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            timeout={"timed_out": False, "expected_summary": {"exists": False}},
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(module, "run_subprocess_with_diagnostics", fake_run_subprocess_with_diagnostics)
+
+    module.execute_subblocks(
+        plan,
+        resume=True,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+    )
+
+    assert first_summary in calls
+
+
+def test_execute_subblocks_resume_schedules_missing_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="resume_missing",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    calls: list[Path] = []
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        calls.append(Path(kwargs["expected_summary_path"]))
+        return SimpleNamespace(
+            return_code=0,
+            failure_class=None,
+            failure_hint=None,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            timeout={"timed_out": False, "expected_summary": {"exists": False}},
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(module, "run_subprocess_with_diagnostics", fake_run_subprocess_with_diagnostics)
+
+    module.execute_subblocks(
+        plan,
+        resume=True,
+        max_workers=1,
+        fail_fast=True,
+        quiet=True,
+        resource_time="disabled",
+    )
+
+    expected = {
+        path for paths in plan.summary_paths.values() for path in paths
+    }
+    assert set(calls) == expected
+
+
+def test_execute_subblocks_fail_fast_cancels_queued_threaded_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["experiment"]["subblocks"]["n_subblocks"] = 4
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="fail_fast_cancel",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+    lock = threading.Lock()
+    calls = 0
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        nonlocal calls
+        with lock:
+            calls += 1
+            call_index = calls
+        if call_index > 1:
+            time.sleep(0.5)
+        return SimpleNamespace(
+            return_code=9 if call_index == 1 else 0,
+            failure_class="nonzero_exit" if call_index == 1 else None,
+            failure_hint="failed" if call_index == 1 else None,
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            timeout={
+                "timed_out": False,
+                "expected_summary": {"exists": False},
+            },
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(
+        module,
+        "run_subprocess_with_diagnostics",
+        fake_run_subprocess_with_diagnostics,
+    )
+
+    with pytest.raises(RuntimeError, match="Subprocess failed"):
+        module.execute_subblocks(
+            plan,
+            resume=False,
+            max_workers=2,
+            fail_fast=True,
+            quiet=True,
+            resource_time="disabled",
+            subprocess_timeout_s=10.0,
+        )
+
+    time.sleep(0.8)
+    assert calls <= 2
+
+
+def test_execute_subblocks_treats_return_code_zero_timeout_as_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    config_path = tmp_path / "campaign.json"
+    write_config(config_path)
+    plan = module.build_campaign_plan(
+        config_path=config_path,
+        results_root=tmp_path,
+        run_name="timeout_rc0_failed",
+        system_preset="SHERA_FLIGHT_3P",
+    )
+
+    def fake_run_subprocess_with_diagnostics(**kwargs: Any) -> Any:
+        return SimpleNamespace(
+            return_code=0,
+            failure_class="timeout",
+            failure_hint="timed out",
+            stdout_log=str(kwargs["stdout_log"]),
+            stderr_log=str(kwargs["stderr_log"]),
+            last_stderr_line=None,
+            resource_time={"resource_time_mode_effective": "disabled"},
+            timeout={"timed_out": True, "expected_summary": {"exists": True}},
+            stderr_tail=[],
+        )
+
+    monkeypatch.setattr(module, "run_subprocess_with_diagnostics", fake_run_subprocess_with_diagnostics)
+
+    with pytest.raises(RuntimeError, match="Subprocess failed"):
+        module.execute_subblocks(
+            plan,
+            resume=False,
+            max_workers=1,
+            fail_fast=True,
+            quiet=True,
+            resource_time="disabled",
+            subprocess_timeout_s=0.1,
+        )
+
+    rows = module._read_csv_rows(plan.run_root / "subblock_status.csv")
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["return_code"] == "0"
+    assert rows[0]["failure_class"] == "timeout"
+    assert rows[0]["subprocess_timed_out"] == "True"
+
+
 def test_aggregate_update_from_synthetic_summaries(tmp_path: Path):
     module = load_module()
     config_path = tmp_path / "campaign.json"
@@ -1564,6 +1919,7 @@ def test_bias_parser_supports_resource_time_flags() -> None:
     assert parser.parse_args(["--no-resource-time"]).resource_time == "disabled"
     assert parser.parse_args(["--resource-time"]).resource_time == "enabled"
     assert parser.parse_args(["--resource-time", "auto"]).resource_time == "auto"
+    assert parser.parse_args(["--subprocess-timeout-s", "3600"]).subprocess_timeout_s == 3600.0
     parsed = parser.parse_args(["--no-resource-time", "--dry-run"])
     assert parsed.resource_time == "disabled"
     assert parsed.dry_run is True

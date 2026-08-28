@@ -1163,6 +1163,21 @@ def _study_log(message: str, **fields: Any) -> None:
     print(" ".join(parts), flush=True)
 
 
+def _write_study_checkpoint(study_root: Path, stage: str, **fields: Any) -> None:
+    """Append one durable stage checkpoint for subprocess finalization forensics."""
+
+    payload = {
+        "timestamp": now_iso_local_ms(),
+        "stage": str(stage),
+        **_json_safe(fields),
+    }
+    path = study_root / "study_stage_checkpoints.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    _study_log(stage, **fields)
+
+
 def _select_fisher_curvature_method(
     *,
     theta_size: int,
@@ -3506,6 +3521,7 @@ def _prepare_case_render_artifacts(
     noise_mode: str,
     render_seed: int | None = None,
     external_frame_truth_csv: Path | None = None,
+    use_render_variance: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Ensure the case has render-ready artifacts for a screening study.
@@ -3524,20 +3540,59 @@ def _prepare_case_render_artifacts(
             external_frame_truth_csv.resolve(),
             "external_frame_truth_csv",
         )
-    render_inputs = case_module._discover_case_render_inputs(layout)
+    render_discovery_error: str | None = None
+    try:
+        render_inputs = case_module._discover_case_render_inputs(layout)
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        if not use_render_variance:
+            raise
+        render_discovery_error = f"{type(exc).__name__}: {exc}"
+        cube_path = max(
+            (path for path in layout.render_dir.glob("*_cube.fits") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            default=None,
+        )
+        truth_path = max(
+            (
+                path
+                for path in layout.render_dir.glob("*_frame_truth.csv")
+                if path.is_file()
+            ),
+            key=lambda path: path.stat().st_mtime,
+            default=None,
+        )
+        manifest_path = layout.render_dir / "manifest.json"
+        render_inputs = case_module.RenderInputs(
+            cube=case_module.ResolvedInput(
+                None if cube_path is None else cube_path.resolve(),
+                "case_render_latest_cube_after_discovery_error"
+                if cube_path is not None
+                else None,
+            ),
+            truth_trace=case_module.ResolvedInput(
+                None if truth_path is None else truth_path.resolve(),
+                "case_render_latest_truth_csv_after_discovery_error"
+                if truth_path is not None
+                else None,
+            ),
+            manifest=case_module.ResolvedInput(
+                manifest_path.resolve() if manifest_path.exists() else None,
+                "case_render_manifest_after_discovery_error"
+                if manifest_path.exists()
+                else None,
+            ),
+        )
 
     stages_to_run: list[str] = []
-    render_truth_mismatch = False
-    if truth_value is not None and candidate_key is not None:
-        current_truth = _truth_value_from_render_manifest(
-            render_inputs.manifest.path,
-            candidate_key=candidate_key,
-        )
-        if current_truth is None or not np.isclose(current_truth, truth_value):
-            render_truth_mismatch = True
-
-    need_render = render_inputs.cube.path is None or render_truth_mismatch
-    if need_render:
+    reuse_validation = _render_reuse_validation(
+        render_inputs=render_inputs,
+        candidate_key=candidate_key,
+        truth_value=truth_value,
+        use_render_variance=bool(use_render_variance),
+    )
+    if render_discovery_error is not None:
+        reuse_validation["render_discovery_error"] = render_discovery_error
+    if not bool(reuse_validation["reusable"]):
         if trace_input.path is None:
             stages_to_run.append(TRACE_STAGE)
         stages_to_run.append(RENDER_STAGE)
@@ -3549,6 +3604,7 @@ def _prepare_case_render_artifacts(
                 "prepare_case_render_artifacts.plan_only",
                 case_root=case_root,
                 planned_stages=stages_to_run,
+                render_reuse_validation=reuse_validation,
             )
         else:
             case_prep_summary = case_module.run_case_workflow(
@@ -3566,12 +3622,19 @@ def _prepare_case_render_artifacts(
                 dry_run=dry_run,
             )
             render_inputs = case_module._discover_case_render_inputs(layout)
+            reuse_validation = _render_reuse_validation(
+                render_inputs=render_inputs,
+                candidate_key=candidate_key,
+                truth_value=truth_value,
+                use_render_variance=bool(use_render_variance),
+            )
 
     return {
         "layout": layout,
         "render_inputs": render_inputs,
         "case_prep_summary": case_prep_summary,
         "stages_executed": stages_to_run,
+        "render_reuse_validation": reuse_validation,
     }
 
 
@@ -4120,6 +4183,98 @@ def _resolve_render_variance_artifact(manifest_path: Path | None) -> Path | None
         manifest_path=manifest_path,
         artifact_name="variance_fits",
     )
+
+
+def _render_reuse_validation(
+    *,
+    render_inputs: Any,
+    candidate_key: str | None,
+    truth_value: float | None,
+    use_render_variance: bool,
+) -> dict[str, Any]:
+    """Return reusable-render status and audit reasons for current downstream needs."""
+
+    reasons: list[str] = []
+    cube_path = render_inputs.cube.path
+    manifest_path = render_inputs.manifest.path
+    manifest_cube_path: Path | None = None
+    variance_path: Path | None = None
+    manifest_read_error: str | None = None
+
+    if cube_path is None or not Path(cube_path).exists():
+        reasons.append("cube_missing")
+
+    if truth_value is not None and candidate_key is not None:
+        try:
+            current_truth = _truth_value_from_render_manifest(
+                manifest_path,
+                candidate_key=candidate_key,
+            )
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            if not use_render_variance:
+                raise
+            manifest_read_error = f"{type(exc).__name__}: {exc}"
+            reasons.append("manifest_unusable")
+            current_truth = None
+        if (
+            manifest_read_error is None
+            and (current_truth is None or not np.isclose(current_truth, truth_value))
+        ):
+            reasons.append("render_truth_mismatch")
+
+    if use_render_variance:
+        if manifest_path is None or not Path(manifest_path).exists():
+            reasons.append("manifest_missing")
+        elif manifest_read_error is None:
+            try:
+                manifest = _read_json(Path(manifest_path))
+                manifest_cube_path = _resolve_manifest_artifact_path(
+                    manifest,
+                    manifest_path=Path(manifest_path),
+                    artifact_name="cube_fits",
+                )
+                variance_path = _resolve_manifest_artifact_path(
+                    manifest,
+                    manifest_path=Path(manifest_path),
+                    artifact_name="variance_fits",
+                )
+            except (json.JSONDecodeError, ValueError, OSError) as exc:
+                manifest_read_error = f"{type(exc).__name__}: {exc}"
+                if "manifest_unusable" not in reasons:
+                    reasons.append("manifest_unusable")
+            else:
+                if manifest_cube_path is None:
+                    reasons.append("manifest_cube_artifact_missing")
+                elif not manifest_cube_path.exists():
+                    reasons.append("manifest_cube_file_missing")
+                elif (
+                    cube_path is None
+                    or Path(cube_path).resolve() != manifest_cube_path.resolve()
+                ):
+                    reasons.append("manifest_cube_mismatch")
+                if variance_path is None:
+                    reasons.append("variance_artifact_missing")
+                elif not variance_path.exists():
+                    reasons.append("variance_file_missing")
+
+    return {
+        "reusable": not reasons,
+        "reasons": reasons,
+        "requires_render_variance": bool(use_render_variance),
+        "cube_path": None if cube_path is None else str(Path(cube_path).resolve()),
+        "manifest_cube_path": (
+            None
+            if manifest_cube_path is None
+            else str(Path(manifest_cube_path).resolve())
+        ),
+        "manifest_path": (
+            None if manifest_path is None else str(Path(manifest_path).resolve())
+        ),
+        "variance_path": (
+            None if variance_path is None else str(Path(variance_path).resolve())
+        ),
+        "manifest_read_error": manifest_read_error,
+    }
 
 
 def build_starting_guess_column_map(
@@ -7294,6 +7449,13 @@ def _evaluate_schur_summary(
             matrix_npz_path=summary_npz_path,
             dense_global_hessian_materialized=True,
         )
+        _write_study_checkpoint(
+            output_dir,
+            "subblock_summary.write.start",
+            summary_json_path=str(summary_json_path.resolve()),
+            matrix_npz_path=str(summary_npz_path.resolve()),
+            dense_global_hessian_materialized=True,
+        )
         with _runtime_profile_stage(
             runtime_profiler,
             "subblock_summary.write",
@@ -7311,6 +7473,14 @@ def _evaluate_schur_summary(
             summary_json_written=summary_json_path.exists(),
             matrix_npz_written=summary_npz_path.exists(),
         )
+        _write_study_checkpoint(
+            output_dir,
+            "subblock_summary.write.done",
+            summary_json_path=str(summary_json_path.resolve()),
+            matrix_npz_path=str(summary_npz_path.resolve()),
+            summary_json_written=summary_json_path.exists(),
+            matrix_npz_written=summary_npz_path.exists(),
+        )
         schur_diagnostics = reduced.to_diagnostics_dict()
         curvature_diagnostics = _combined_curvature_diagnostics(blocks=blocks)
     else:
@@ -7320,6 +7490,13 @@ def _evaluate_schur_summary(
             "subblock_summary.write.start",
             summary_json_path=summary_json_path,
             matrix_npz_path=summary_npz_path,
+            dense_global_hessian_materialized=False,
+        )
+        _write_study_checkpoint(
+            output_dir,
+            "subblock_summary.write.start",
+            summary_json_path=str(summary_json_path.resolve()),
+            matrix_npz_path=str(summary_npz_path.resolve()),
             dense_global_hessian_materialized=False,
         )
         with _runtime_profile_stage(
@@ -7343,6 +7520,14 @@ def _evaluate_schur_summary(
             "subblock_summary.write.done",
             summary_json_path=summary_json_path,
             matrix_npz_path=summary_npz_path,
+            summary_json_written=summary_json_path.exists(),
+            matrix_npz_written=summary_npz_path.exists(),
+        )
+        _write_study_checkpoint(
+            output_dir,
+            "subblock_summary.write.done",
+            summary_json_path=str(summary_json_path.resolve()),
+            matrix_npz_path=str(summary_npz_path.resolve()),
             summary_json_written=summary_json_path.exists(),
             matrix_npz_written=summary_npz_path.exists(),
         )
@@ -7393,6 +7578,11 @@ def _evaluate_schur_summary(
     )
     _write_json(schur_diag_path, schur_diagnostics)
     _write_json(curvature_diag_path, curvature_diagnostics)
+    _write_study_checkpoint(
+        output_dir,
+        "active_key_sensitivity.start",
+        active_key_sensitivity_path=str(active_key_sensitivity_path.resolve()),
+    )
     active_key_sensitivity = _active_key_sensitivity_diagnostics(
         combined_loss_fn=combined_loss_fn,
         combined_reference_vector=combined_reference_vector,
@@ -7400,6 +7590,12 @@ def _evaluate_schur_summary(
         phi_labels=phi_labels,
     )
     _write_json(active_key_sensitivity_path, active_key_sensitivity)
+    _write_study_checkpoint(
+        output_dir,
+        "active_key_sensitivity.done",
+        active_key_sensitivity_path=str(active_key_sensitivity_path.resolve()),
+        item_count=len(active_key_sensitivity.get("items", [])),
+    )
     null_keys = [
         str(item["key"])
         for item in active_key_sensitivity.get("items", [])
@@ -7415,6 +7611,12 @@ def _evaluate_schur_summary(
         )
 
     validation_rows: list[dict[str, Any]] = []
+    _write_study_checkpoint(
+        output_dir,
+        "surrogate_validation.start",
+        validate_surrogate=bool(validate_surrogate),
+        validation_steps=int(validation_steps),
+    )
     if validate_surrogate:
         validation_rows = _local_surrogate_validation_rows(
             combined_loss_fn=combined_loss_fn,
@@ -7432,7 +7634,22 @@ def _evaluate_schur_summary(
         )
     else:
         _write_rows_csv(surrogate_csv_path, validation_rows)
+    _write_study_checkpoint(
+        output_dir,
+        "surrogate_validation.done",
+        validate_surrogate=bool(validate_surrogate),
+        validation_row_count=len(validation_rows),
+        surrogate_csv_path=str(surrogate_csv_path.resolve()),
+        surrogate_png_path=None
+        if not validate_surrogate
+        else str(surrogate_png_path.resolve()),
+    )
 
+    _write_study_checkpoint(
+        output_dir,
+        "final_summary_validation.start",
+        summary_json_path=str(summary_json_path.resolve()),
+    )
     with _runtime_profile_stage(
         runtime_profiler,
         "subblock_summary.validate",
@@ -7442,6 +7659,13 @@ def _evaluate_schur_summary(
         loaded_summary = load_subblock_summary(summary_json_path)
     record(
         "subblock_summary.validate.done",
+        loaded_theta_labels=list(loaded_summary.theta_labels),
+        summary_json_written=summary_json_path.exists(),
+        matrix_npz_written=summary_npz_path.exists(),
+    )
+    _write_study_checkpoint(
+        output_dir,
+        "final_summary_validation.done",
         loaded_theta_labels=list(loaded_summary.theta_labels),
         summary_json_written=summary_json_path.exists(),
         matrix_npz_written=summary_npz_path.exists(),
@@ -7503,6 +7727,11 @@ def _evaluate_schur_summary(
         },
         "active_key_sensitivity": active_key_sensitivity,
     }
+    _write_study_checkpoint(
+        output_dir,
+        "schur_evaluation.return",
+        summary_json_path=str(summary_json_path.resolve()),
+    )
     return summary_payload
 
 
@@ -8175,6 +8404,7 @@ def run_obs_subblock_study(
             noise_mode=noise_mode,
             render_seed=render_seed,
             external_frame_truth_csv=external_frame_truth_csv,
+            use_render_variance=bool(use_render_variance),
             dry_run=dry_run,
         )
 
@@ -8191,6 +8421,16 @@ def run_obs_subblock_study(
         )
     render_inputs = prep["render_inputs"]
     summary["case_prep_stages_executed"] = list(prep["stages_executed"])
+    summary["render_reuse_validation"] = dict(
+        prep.get(
+            "render_reuse_validation",
+            {
+                "reusable": render_inputs.cube.path is not None,
+                "reasons": [] if render_inputs.cube.path is not None else ["cube_missing"],
+                "requires_render_variance": bool(use_render_variance),
+            },
+        )
+    )
     if prep["case_prep_summary"] is not None:
         summary["case_prep_summary_path"] = prep["case_prep_summary"]["summary_path"]
     summary["render_inputs"] = {
@@ -8202,6 +8442,14 @@ def run_obs_subblock_study(
             None if render_inputs.manifest.path is None else str(render_inputs.manifest.path)
         ),
     }
+
+    if (
+        dry_run
+        and bool(use_render_variance)
+        and summary["case_prep_stages_executed"]
+    ):
+        _write_json(summary_path, summary)
+        return summary
 
     if render_inputs.cube.path is None and not dry_run:
         raise ValueError(
@@ -8512,6 +8760,11 @@ def run_obs_subblock_study(
                     )
                 summary["recovered_inference"] = recovered_reference_metadata
 
+        _write_study_checkpoint(
+            study_root,
+            "schur_evaluation.start",
+            summary_json_expected=str((study_root / "subblock_summary.json").resolve()),
+        )
         schur_summary = _evaluate_schur_summary(
             config_path=schur_config_path,
             output_dir=study_root,
@@ -8540,11 +8793,26 @@ def run_obs_subblock_study(
             memory_recorder=memory_recorder,
             runtime_profiler=runtime_profiler,
         )
+        _write_study_checkpoint(
+            study_root,
+            "schur_evaluation.done",
+            summary_json=schur_summary["artifacts"].get("subblock_summary_json"),
+            summary_json_exists=Path(
+                schur_summary["artifacts"]["subblock_summary_json"]
+            ).exists(),
+        )
         summary["schur_summary"] = schur_summary
+        _write_study_checkpoint(study_root, "frame_truth_preview.start")
         frame_truth_preview = _write_frame_truth_preview(
             trace_csv_path=render_inputs.truth_trace.path,
             preview_path=study_root / FRAME_TRUTH_PREVIEW_FILENAME,
         )
+        _write_study_checkpoint(
+            study_root,
+            "frame_truth_preview.done",
+            preview_path=str((study_root / FRAME_TRUTH_PREVIEW_FILENAME).resolve()),
+        )
+        _write_study_checkpoint(study_root, "schur_summary_audit.start")
         audit = _build_schur_summary_audit(
             plan=schur_plan,
             plan_path=schur_plan_path,
@@ -8554,9 +8822,15 @@ def run_obs_subblock_study(
         )
         audit_path = study_root / SCHUR_SUMMARY_AUDIT_FILENAME
         _write_json(audit_path, audit)
+        _write_study_checkpoint(
+            study_root,
+            "schur_summary_audit.done",
+            audit_path=str(audit_path.resolve()),
+        )
         summary["schur_summary_audit_path"] = str(audit_path.resolve())
         summary["schur_summary_audit"] = audit
         if memory_recorder is not None:
+            _write_study_checkpoint(study_root, "memory_diagnostics.finalize.start")
             memory_recorder.record(
                 "schur_summary.done",
                 n_frames=schur_summary.get("n_frames"),
@@ -8589,6 +8863,14 @@ def run_obs_subblock_study(
                 summary["memory_diagnostics"]["audit_json"] = str(
                     memory_audit_path.resolve()
                 )
+            _write_study_checkpoint(
+                study_root,
+                "memory_diagnostics.finalize.done",
+                audit_path=None
+                if memory_audit_path is None
+                else str(memory_audit_path.resolve()),
+            )
+        _write_study_checkpoint(study_root, "runtime_profile.finalize.start")
         _write_runtime_profile_artifacts(
             runtime_profiler=runtime_profiler,
             summary_path=runtime_profile_summary_path,
@@ -8603,7 +8885,27 @@ def run_obs_subblock_study(
                 ),
             },
         )
+        _write_study_checkpoint(
+            study_root,
+            "runtime_profile.finalize.done",
+            summary_path=None
+            if runtime_profile_summary_path is None
+            else str(runtime_profile_summary_path.resolve()),
+            timeline_path=None
+            if runtime_profile_timeline_path is None
+            else str(runtime_profile_timeline_path.resolve()),
+        )
+        _write_study_checkpoint(
+            study_root,
+            "outer_study_summary.write.start",
+            summary_path=str(summary_path.resolve()),
+        )
         _write_json(summary_path, summary)
+        _write_study_checkpoint(
+            study_root,
+            "outer_study_summary.write.done",
+            summary_path=str(summary_path.resolve()),
+        )
         return summary
 
     nuisance_summary = _run_nuisance_absorption(
