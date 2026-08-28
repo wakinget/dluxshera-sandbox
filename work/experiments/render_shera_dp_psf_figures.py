@@ -35,7 +35,9 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm, PowerNorm
+from matplotlib import font_manager
 from matplotlib.patches import Circle
+from matplotlib.ticker import FormatStrFormatter
 
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
@@ -54,17 +56,18 @@ from dluxshera.utils.utils import default_diffractive_pupil_path, scale_array
 
 SYSTEM_PRESET = "SHERA_FLIGHT_3P_SIMPLE"
 
-PSF_NPIX = 128
+PSF_NPIX = 160
 PSF_OVERSAMPLE = 1
 PUPIL_NPIX = 2048
 EXPOSURE_TIME_S = 0.05
 N_LAMBDA = 11
 
 PSF_STRETCH = "sqrt"  # Supported: "log", "sqrt".
+PSF_COLORBAR_TICKS = (0.0, 0.1, 0.2, 0.5, 0.8, 1.0)
 DISPLAY_PMIN = 1.0
 DISPLAY_PMAX = 99.9
 
-SHOW_DIAMETER_CIRCLE = True
+SHOW_DIAMETER_CIRCLE = False
 CIRCLE_DIAMETER_AS = 10.0
 CIRCLE_COLOR = "red"
 CIRCLE_LINESTYLE = "--"
@@ -72,6 +75,16 @@ CIRCLE_LINEWIDTH = 1.7
 
 DP_ENABLED = True
 GRATING_ENABLED = True
+
+# These controls replace only the modeled M1 amplitude transmission; M2
+# geometry and all DP/grating OPD values remain on the selected preset path.
+SECONDARY_OBSCURATION_ENABLED = True
+CUSTOM_OBSCURATION = True
+CUSTOM_N_STRUTS = 4
+CUSTOM_STRUT_ROTATION_DEG = 0.0
+CUSTOM_STRUT_WIDTH_M = 5.0e-3
+CUSTOM_CENTRAL_OBSCURATION_DIAMETER_M = 0.055
+
 GRATING_PHASE_AMPLITUDE_RAD = pi / 16.0
 GRATING_FREQUENCY = 128.0
 GRATING_ANGLE_DEG = 45.0
@@ -91,16 +104,68 @@ OPD_CMAP_NAME = "inferno_nan"
 PSF_CMAP_NAME = "inferno"
 
 FONT_FAMILY = "sans-serif"
-TITLE_FONT_SIZE = 20
-AXIS_LABEL_FONT_SIZE = 16
-TICK_LABEL_FONT_SIZE = 13
-COLORBAR_LABEL_FONT_SIZE = 15
-COLORBAR_TICK_LABEL_FONT_SIZE = 12
+SANS_SERIF_FONT_PREFERENCE = (
+    "Helvetica",
+    "Arial",
+    "Liberation Sans",
+    "DejaVu Sans",
+)
+TITLE_FONT_SIZE = 28
+TITLES_BOLD = True
+AXIS_LABEL_FONT_SIZE = 28
+TICK_LABEL_FONT_SIZE = 22
+COLORBAR_LABEL_FONT_SIZE = 22
+COLORBAR_TICK_LABEL_FONT_SIZE = 20
 
 
 # -------------------------------------------------------------------------
 # Small plotting / coordinate helpers
 # -------------------------------------------------------------------------
+
+
+def _configure_font_preferences() -> str:
+    """Prefer Helvetica/Arial-style fonts for Matplotlib sans-serif text."""
+
+    active_preference = list(SANS_SERIF_FONT_PREFERENCE)
+    if TITLES_BOLD:
+        bold_capable = [
+            family
+            for family in active_preference
+            if _font_family_has_bold_face(family)
+        ]
+        if bold_capable:
+            preferred_bold_family = bold_capable[0]
+            active_preference = [
+                preferred_bold_family,
+                *[
+                    family
+                    for family in active_preference
+                    if family != preferred_bold_family
+                ],
+            ]
+
+    plt.rcParams["font.family"] = FONT_FAMILY
+    plt.rcParams["font.sans-serif"] = active_preference
+    normal_font_path = font_manager.findfont(
+        font_manager.FontProperties(family=[FONT_FAMILY], weight="normal"),
+        fallback_to_default=True,
+    )
+    bold_font_path = font_manager.findfont(
+        font_manager.FontProperties(family=[FONT_FAMILY], weight="bold"),
+        fallback_to_default=True,
+    )
+    normal_font = font_manager.FontProperties(fname=normal_font_path).get_name()
+    bold_font = font_manager.FontProperties(fname=bold_font_path).get_name()
+    return f"normal={normal_font}, bold={bold_font}"
+
+
+def _font_family_has_bold_face(family: str) -> bool:
+    """Return whether Matplotlib knows an explicit bold face for a font family."""
+
+    return any(
+        font.name == family and font.style == "normal" and int(font.weight) >= 600
+        for font in font_manager.fontManager.ttflist
+    )
 
 
 def image_extent_from_diameter(pupil_diameter_m: float) -> np.ndarray:
@@ -166,10 +231,11 @@ def _imshow_psf_stretched(
 ) -> Any:
     """Render a normalized PSF with a compact selectable nonlinear stretch."""
 
-    vmin, vmax = _resolve_display_limits(display_psf, stretch=stretch)
     if stretch == "log":
+        vmin, vmax = _resolve_display_limits(display_psf, stretch=stretch)
         norm = LogNorm(vmin=vmin, vmax=vmax)
     elif stretch == "sqrt":
+        vmin, vmax = 0.0, 1.0
         norm = PowerNorm(gamma=0.5, vmin=vmin, vmax=vmax)
     else:
         raise ValueError(f"Unsupported PSF_STRETCH={stretch!r}; use 'log' or 'sqrt'.")
@@ -205,14 +271,232 @@ def _opd_display_limits_nm(
     return vmin, vmax
 
 
-def _extract_m1_support(binder: SheraBinder) -> np.ndarray:
-    """Return the actual primary pupil support used by the built optics."""
+def _extract_aperture_transmission(binder: SheraBinder, name: str) -> np.ndarray:
+    """Return one aperture transmission from the built optics."""
 
     try:
-        transmission = binder.telescope.optics.m1_aperture.transmission
+        transmission = getattr(binder.telescope.optics, name).transmission
     except AttributeError:
-        transmission = binder.telescope.optics.aperture.transmission
-    return np.asarray(transmission, dtype=float) > 0.0
+        transmission = getattr(binder, name).transmission
+    return np.asarray(transmission, dtype=float)
+
+
+def _extract_m1_transmission(binder: SheraBinder) -> np.ndarray:
+    """Return the actual primary pupil transmission used by the built optics."""
+
+    try:
+        return _extract_aperture_transmission(binder, "m1_aperture")
+    except AttributeError:
+        return np.asarray(binder.telescope.optics.aperture.transmission, dtype=float)
+
+
+def _build_m1_transmission(
+    *,
+    npix: int,
+    m1_diameter_m: float,
+    central_obscuration_diameter_m: float,
+    n_struts: int,
+    strut_width_m: float,
+    strut_rotation_deg: float,
+) -> np.ndarray:
+    """Return an M1 transmission using the canonical three-plane recipe."""
+
+    pupil_oversample = 2
+    m1_diameter_m = float(m1_diameter_m)
+    central_obscuration_diameter_m = float(central_obscuration_diameter_m)
+    n_struts = int(n_struts)
+    strut_width_m = float(strut_width_m)
+    strut_rotation_deg = float(strut_rotation_deg)
+
+    coords = dlu.pixel_coords(pupil_oversample * int(npix), m1_diameter_m)
+    components = [dlu.circle(coords, m1_diameter_m / 2.0)]
+
+    if central_obscuration_diameter_m > 0.0:
+        components.append(
+            dlu.circle(coords, central_obscuration_diameter_m / 2.0, invert=True)
+        )
+
+    if n_struts > 0 and strut_width_m > 0.0:
+        strut_angles = (
+            jnp.linspace(0.0, 360.0, n_struts + 1)[:-1] + strut_rotation_deg
+        )
+        components.append(dlu.spider(coords, strut_width_m, strut_angles))
+
+    return np.asarray(dlu.combine(components, pupil_oversample), dtype=float)
+
+
+def _validate_m1_obscuration_geometry(
+    *,
+    m1_diameter_m: float,
+    central_obscuration_diameter_m: float,
+    n_struts: int,
+    strut_width_m: float,
+) -> None:
+    """Validate the selected experimental M1 obscuration geometry."""
+
+    if int(n_struts) != n_struts or int(n_struts) < 0:
+        raise ValueError("CUSTOM_N_STRUTS must be a non-negative integer.")
+    if float(strut_width_m) < 0.0:
+        raise ValueError("CUSTOM_STRUT_WIDTH_M must be non-negative.")
+    if float(central_obscuration_diameter_m) < 0.0:
+        raise ValueError("CUSTOM_CENTRAL_OBSCURATION_DIAMETER_M must be non-negative.")
+    if float(central_obscuration_diameter_m) > float(m1_diameter_m):
+        raise ValueError(
+            "CUSTOM_CENTRAL_OBSCURATION_DIAMETER_M must not exceed m1_diameter_m."
+        )
+    if float(strut_width_m) > float(m1_diameter_m):
+        raise ValueError("CUSTOM_STRUT_WIDTH_M must not exceed m1_diameter_m.")
+
+
+def _resolve_selected_m1_transmission(
+    binder: SheraBinder,
+    *,
+    system_cfg: Mapping[str, Any],
+    secondary_obscuration_enabled: bool,
+    custom_obscuration: bool,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return the M1 transmission selected for both the model and DP plot.
+
+    The selected transmission is installed on the modeled M1 aperture before
+    the PSF is rendered. The DP portrait support is derived from the installed
+    modeled transmission so the pupil plot and PSF always share one aperture.
+    """
+
+    optics_cfg = system_cfg["optics"]
+    m1_diameter_m = float(optics_cfg["m1_diameter_m"])
+    m2_diameter_m = float(optics_cfg["m2_diameter_m"])
+    m1_transmission = _extract_m1_transmission(binder)
+    info: dict[str, Any] = {
+        "secondary_obscuration_enabled": bool(secondary_obscuration_enabled),
+        "custom_obscuration": bool(custom_obscuration),
+        "nominal_n_struts": int(optics_cfg["n_struts"]),
+        "nominal_strut_rotation_deg": float(optics_cfg["strut_rotation_deg"]),
+        "nominal_strut_width_m": float(optics_cfg["strut_width_m"]),
+        "nominal_central_obscuration_diameter_m": m2_diameter_m,
+        "m1_diameter_m": m1_diameter_m,
+        "m2_diameter_m": m2_diameter_m,
+        "nominal_m1_transmission_shape": tuple(m1_transmission.shape),
+    }
+    optics = getattr(getattr(binder, "telescope", None), "optics", None)
+    if optics is not None and hasattr(optics, "wf_npixels"):
+        info["optics_wf_npixels"] = int(np.asarray(optics.wf_npixels))
+
+    if not secondary_obscuration_enabled:
+        info.update(
+            {
+                "pupil_mode": "clear",
+                "selected_n_struts": 0,
+                "selected_strut_rotation_deg": 0.0,
+                "selected_strut_width_m": 0.0,
+                "selected_central_obscuration_diameter_m": 0.0,
+            }
+        )
+        return (
+            _build_m1_transmission(
+                npix=m1_transmission.shape[-1],
+                m1_diameter_m=m1_diameter_m,
+                central_obscuration_diameter_m=0.0,
+                n_struts=0,
+                strut_width_m=0.0,
+                strut_rotation_deg=0.0,
+            ),
+            info,
+        )
+
+    if custom_obscuration:
+        _validate_m1_obscuration_geometry(
+            m1_diameter_m=m1_diameter_m,
+            central_obscuration_diameter_m=CUSTOM_CENTRAL_OBSCURATION_DIAMETER_M,
+            n_struts=CUSTOM_N_STRUTS,
+            strut_width_m=CUSTOM_STRUT_WIDTH_M,
+        )
+        info.update(
+            {
+                "pupil_mode": "custom",
+                "selected_n_struts": int(CUSTOM_N_STRUTS),
+                "selected_strut_rotation_deg": float(CUSTOM_STRUT_ROTATION_DEG),
+                "selected_strut_width_m": float(CUSTOM_STRUT_WIDTH_M),
+                "selected_central_obscuration_diameter_m": float(
+                    CUSTOM_CENTRAL_OBSCURATION_DIAMETER_M
+                ),
+            }
+        )
+        return (
+            _build_m1_transmission(
+                npix=m1_transmission.shape[-1],
+                m1_diameter_m=m1_diameter_m,
+                central_obscuration_diameter_m=(
+                    CUSTOM_CENTRAL_OBSCURATION_DIAMETER_M
+                ),
+                n_struts=CUSTOM_N_STRUTS,
+                strut_width_m=CUSTOM_STRUT_WIDTH_M,
+                strut_rotation_deg=CUSTOM_STRUT_ROTATION_DEG,
+            ),
+            info,
+        )
+
+    info.update(
+        {
+            "pupil_mode": "nominal",
+            "selected_n_struts": int(optics_cfg["n_struts"]),
+            "selected_strut_rotation_deg": float(optics_cfg["strut_rotation_deg"]),
+            "selected_strut_width_m": float(optics_cfg["strut_width_m"]),
+            "selected_central_obscuration_diameter_m": m2_diameter_m,
+        }
+    )
+    return m1_transmission, info
+
+
+def _with_modeled_m1_transmission(
+    binder: SheraBinder,
+    transmission: np.ndarray,
+) -> SheraBinder:
+    """Return a binder whose modeled M1 amplitude transmission is replaced."""
+
+    updated = binder.__class__.__new__(binder.__class__)
+    updated.cfg = binder.cfg
+    updated.forward_spec = binder.forward_spec
+    updated.base_forward_store = binder.base_forward_store
+    updated.structural_hash = binder.structural_hash
+    updated.telescope = binder.telescope.set(
+        "optics.m1_aperture.transmission",
+        jnp.asarray(transmission),
+    )
+    return updated
+
+
+def _resolve_and_apply_m1_transmission(
+    binder: SheraBinder,
+    *,
+    system_cfg: Mapping[str, Any],
+    secondary_obscuration_enabled: bool,
+    custom_obscuration: bool,
+) -> tuple[SheraBinder, np.ndarray, dict[str, Any]]:
+    """Install the selected modeled M1 transmission and return its support."""
+
+    selected_transmission, info = _resolve_selected_m1_transmission(
+        binder,
+        system_cfg=system_cfg,
+        secondary_obscuration_enabled=secondary_obscuration_enabled,
+        custom_obscuration=custom_obscuration,
+    )
+    if selected_transmission.shape != _extract_m1_transmission(binder).shape:
+        raise ValueError(
+            "Selected M1 transmission shape must match nominal M1 transmission "
+            f"shape; got {selected_transmission.shape} and "
+            f"{_extract_m1_transmission(binder).shape}."
+        )
+
+    if info["pupil_mode"] == "nominal":
+        modeled_binder = binder
+    else:
+        modeled_binder = _with_modeled_m1_transmission(binder, selected_transmission)
+
+    modeled_transmission = _extract_m1_transmission(modeled_binder)
+    info["final_m1_transmission_shape"] = tuple(modeled_transmission.shape)
+    info["final_m1_support_fraction"] = float(np.mean(modeled_transmission > 0.0))
+    info["plot_support_from_modeled_m1_transmission"] = True
+    return modeled_binder, modeled_transmission > 0.0, info
 
 
 def _apply_axis_typography(ax: plt.Axes) -> None:
@@ -220,10 +504,13 @@ def _apply_axis_typography(ax: plt.Axes) -> None:
 
     ax.title.set_fontfamily(FONT_FAMILY)
     ax.title.set_fontsize(TITLE_FONT_SIZE)
+    ax.title.set_fontweight("bold" if TITLES_BOLD else "normal")
     ax.xaxis.label.set_fontfamily(FONT_FAMILY)
     ax.xaxis.label.set_fontsize(AXIS_LABEL_FONT_SIZE)
+    ax.xaxis.label.set_fontweight("bold" if TITLES_BOLD else "normal")
     ax.yaxis.label.set_fontfamily(FONT_FAMILY)
     ax.yaxis.label.set_fontsize(AXIS_LABEL_FONT_SIZE)
+    ax.yaxis.label.set_fontweight("bold" if TITLES_BOLD else "normal")
     ax.tick_params(axis="both", labelsize=TICK_LABEL_FONT_SIZE)
     for label in [*ax.get_xticklabels(), *ax.get_yticklabels()]:
         label.set_fontfamily(FONT_FAMILY)
@@ -234,6 +521,7 @@ def _apply_colorbar_typography(cbar: Any) -> None:
 
     cbar.ax.yaxis.label.set_fontfamily(FONT_FAMILY)
     cbar.ax.yaxis.label.set_fontsize(COLORBAR_LABEL_FONT_SIZE)
+    cbar.ax.yaxis.label.set_fontweight("bold" if TITLES_BOLD else "normal")
     cbar.ax.tick_params(labelsize=COLORBAR_TICK_LABEL_FONT_SIZE)
     for label in cbar.ax.get_yticklabels():
         label.set_fontfamily(FONT_FAMILY)
@@ -461,9 +749,11 @@ def build_dp_opd_plot(
         extent=extent_cm,
     )
     ax.set_title("SHERA Diffractive Pupil OPD")
-    ax.set_xlabel("X (cm)")
-    ax.set_ylabel("Y (cm)")
+    ax.set_xlabel("X [cm]")
+    ax.set_ylabel("Y [cm]")
     ax.set_aspect("equal")
+    ax.xaxis.set_major_formatter(FormatStrFormatter("%.0f"))
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.0f"))
     _apply_axis_typography(ax)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
     cbar.set_label("OPD [nm]")
@@ -509,12 +799,14 @@ def build_single_star_psf_plot(
         )
 
     ax.set_title("SHERA PSF")
-    ax.set_xlabel("X (arcsec)")
-    ax.set_ylabel("Y (arcsec)")
+    ax.set_xlabel("X [arcsec]")
+    ax.set_ylabel("Y [arcsec]")
     ax.set_aspect("equal")
     _apply_axis_typography(ax)
     cbar = fig.colorbar(im, cax=merge_cbar(ax))
-    cbar.set_label(f"Normalized Intensity ({stretch})")
+    cbar.set_label(f"Normalized Intensity [{stretch}]")
+    if stretch == "sqrt":
+        cbar.set_ticks(PSF_COLORBAR_TICKS)
     _apply_colorbar_typography(cbar)
     fig.tight_layout()
     return fig, ax
@@ -534,9 +826,15 @@ def _print_diagnostics(
     store: ParameterStore,
     psf: np.ndarray,
     support: np.ndarray,
+    support_info: Mapping[str, Any],
+    nominal_m1_transmission: np.ndarray,
+    final_m1_transmission: np.ndarray,
+    nominal_m2_transmission: np.ndarray,
+    final_m2_transmission: np.ndarray,
     dp_payload: Mapping[str, Any],
     opd_path: Path,
     psf_path: Path,
+    resolved_sans_serif_font: str,
 ) -> None:
     """Print concise smoke-run diagnostics for manual figure inspection."""
 
@@ -544,7 +842,9 @@ def _print_diagnostics(
     source_cfg = system_cfg["source"]
     pupil_diameter_m = float(optics_cfg["m1_diameter_m"])
     pupil_extent_cm = image_extent_from_diameter(pupil_diameter_m)
-    plate_scale_as_per_pix = float(np.asarray(store.get("optics.plate_scale_as_per_pix")))
+    plate_scale_as_per_pix = float(
+        np.asarray(store.get("optics.plate_scale_as_per_pix"))
+    )
     oversample = int(np.asarray(store.get("optics.oversample")))
     display_pixel_scale_as_per_pix = plate_scale_as_per_pix / float(oversample)
     psf_extent = psf_extent_as(psf, plate_scale_as_per_pix, oversample)
@@ -552,14 +852,84 @@ def _print_diagnostics(
     display_opd = np.where(support, combined_opd, np.nan)
     injected_opd = np.asarray(np.load(Path(str(optics_cfg["dp_path"]))), dtype=float)
     circle_radius_as = 0.5 * float(CIRCLE_DIAMETER_AS)
+    display_psf = np.asarray(psf, dtype=float) / float(np.nanmax(psf))
+    if PSF_STRETCH == "sqrt":
+        psf_display_vmin = 0.0
+        psf_display_vmax = 1.0
+        psf_colorbar_ticks = list(PSF_COLORBAR_TICKS)
+    else:
+        psf_display_vmin, psf_display_vmax = _resolve_display_limits(
+            display_psf,
+            stretch=PSF_STRETCH,
+        )
+        psf_colorbar_ticks = None
 
     print("SHERA DP + PSF figure smoke diagnostics")
     print(f"  system_preset: {SYSTEM_PRESET}")
+    print(f"  resolved_sans_serif_font: {resolved_sans_serif_font}")
     print(f"  m1_diameter_m: {pupil_diameter_m:.6f}")
+    print(f"  m2_diameter_m: {float(optics_cfg['m2_diameter_m']):.6f}")
     print(f"  pupil_extent_cm: {pupil_extent_cm.tolist()}")
     print(f"  pupil_npix: {int(optics_cfg['pupil_npix'])}")
     print(f"  combined_opd_shape: {combined_opd.shape}")
-    print(f"  outside_pupil_nan_for_display: {bool(np.isnan(display_opd[~support]).all())}")
+    print(
+        "  secondary_obscuration_enabled: "
+        f"{bool(support_info['secondary_obscuration_enabled'])}"
+    )
+    print(f"  custom_obscuration: {bool(support_info['custom_obscuration'])}")
+    print(f"  pupil_mode: {support_info['pupil_mode']}")
+    print(f"  nominal_n_struts: {support_info['nominal_n_struts']}")
+    print(
+        "  nominal_strut_rotation_deg: "
+        f"{support_info['nominal_strut_rotation_deg']:.6g}"
+    )
+    print(f"  nominal_strut_width_m: {support_info['nominal_strut_width_m']:.6g}")
+    print(
+        "  nominal_central_obscuration_diameter_m: "
+        f"{support_info['nominal_central_obscuration_diameter_m']:.6g}"
+    )
+    print(f"  selected_n_struts: {support_info['selected_n_struts']}")
+    print(
+        "  selected_strut_rotation_deg: "
+        f"{support_info['selected_strut_rotation_deg']:.6g}"
+    )
+    print(f"  selected_strut_width_m: {support_info['selected_strut_width_m']:.6g}")
+    print(
+        "  selected_central_obscuration_diameter_m: "
+        f"{support_info['selected_central_obscuration_diameter_m']:.6g}"
+    )
+    print(
+        "  nominal_m1_transmission_shape: "
+        f"{support_info['nominal_m1_transmission_shape']}"
+    )
+    print(
+        "  final_m1_transmission_shape: "
+        f"{support_info['final_m1_transmission_shape']}"
+    )
+    print(f"  m2_transmission_shape: {nominal_m2_transmission.shape}")
+    if "optics_wf_npixels" in support_info:
+        print(f"  optics_wf_npixels: {support_info['optics_wf_npixels']}")
+    print(f"  pupil_plot_support_shape: {support.shape}")
+    print(
+        "  final_m1_support_fraction: "
+        f"{support_info['final_m1_support_fraction']:.6g}"
+    )
+    print(
+        "  plotting_support_from_modeled_m1_transmission: "
+        f"{bool(support_info['plot_support_from_modeled_m1_transmission'])}"
+    )
+    print(
+        "  nominal_m1_transmission_retained: "
+        f"{bool(np.array_equal(nominal_m1_transmission, final_m1_transmission))}"
+    )
+    print(
+        "  m2_transmission_unchanged: "
+        f"{bool(np.array_equal(nominal_m2_transmission, final_m2_transmission))}"
+    )
+    print(
+        "  outside_pupil_nan_for_display: "
+        f"{bool(np.isnan(display_opd[~support]).all())}"
+    )
     print("  opd_colorbar_label: OPD [nm]")
     print(f"  psf_shape: {psf.shape}")
     print(f"  base_psf_npix: {PSF_NPIX}")
@@ -568,12 +938,19 @@ def _print_diagnostics(
     print(f"  plate_scale_as_per_pix: {plate_scale_as_per_pix:.12g}")
     print(f"  display_pixel_scale_as_per_pix: {display_pixel_scale_as_per_pix:.12g}")
     print(f"  psf_extent_as: {psf_extent.tolist()}")
+    print(f"  psf_stretch: {PSF_STRETCH}")
+    print(f"  psf_display_vmin: {psf_display_vmin:.12g}")
+    print(f"  psf_display_vmax: {psf_display_vmax:.12g}")
+    print(f"  psf_colorbar_ticks: {psf_colorbar_ticks}")
     print(
         "  source_center_as: "
         f"({float(source_cfg['x_position_as']):.6g}, {float(source_cfg['y_position_as']):.6g})"
     )
     print("  noiseless: True")
-    print(f"  same_opd_in_plot_and_model: {bool(np.array_equal(combined_opd, injected_opd))}")
+    print(
+        "  same_opd_in_plot_and_model: "
+        f"{bool(np.array_equal(combined_opd, injected_opd))}"
+    )
     print(f"  circle_enabled: {SHOW_DIAMETER_CIRCLE}")
     print(f"  circle_radius_as: {circle_radius_as:.6g}")
     print(
@@ -593,15 +970,34 @@ def main() -> None:
     """Render and save the two standalone figure files."""
 
     apply_plot_defaults(font_family=FONT_FAMILY, figure_dpi=120)
+    resolved_sans_serif_font = _configure_font_preferences()
     get_default_cmaps(bad_color="0.5", bad_alpha=1.0)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     system_cfg, store, binder, dp_payload = build_figure_system()
-    support = _extract_m1_support(binder)
+    pupil_diameter_m = float(system_cfg["optics"]["m1_diameter_m"])
+    nominal_m1_transmission = _extract_m1_transmission(binder)
+    nominal_m2_transmission = _extract_aperture_transmission(binder, "m2_aperture")
+    binder, support, support_info = _resolve_and_apply_m1_transmission(
+        binder,
+        system_cfg=system_cfg,
+        secondary_obscuration_enabled=SECONDARY_OBSCURATION_ENABLED,
+        custom_obscuration=CUSTOM_OBSCURATION,
+    )
+    final_m1_transmission = _extract_m1_transmission(binder)
+    final_m2_transmission = _extract_aperture_transmission(binder, "m2_aperture")
+    if support.shape != np.asarray(dp_payload["combined_opd_m"]).shape:
+        raise ValueError(
+            "DP plotting support shape must match combined OPD shape; "
+            f"got support={support.shape}, opd={np.asarray(dp_payload['combined_opd_m']).shape}."
+        )
+    if not np.array_equal(support, final_m1_transmission > 0.0):
+        raise RuntimeError("DP plotting support must match the modeled M1 support.")
     psf = render_noiseless_psf(binder, store)
 
-    pupil_diameter_m = float(system_cfg["optics"]["m1_diameter_m"])
-    plate_scale_as_per_pix = float(np.asarray(store.get("optics.plate_scale_as_per_pix")))
+    plate_scale_as_per_pix = float(
+        np.asarray(store.get("optics.plate_scale_as_per_pix"))
+    )
     oversample = int(np.asarray(store.get("optics.oversample")))
 
     opd_fig, _ = build_dp_opd_plot(
@@ -653,9 +1049,15 @@ def main() -> None:
         store=store,
         psf=psf,
         support=support,
+        support_info=support_info,
+        nominal_m1_transmission=nominal_m1_transmission,
+        final_m1_transmission=final_m1_transmission,
+        nominal_m2_transmission=nominal_m2_transmission,
+        final_m2_transmission=final_m2_transmission,
         dp_payload=dp_payload,
         opd_path=opd_path,
         psf_path=psf_path,
+        resolved_sans_serif_font=resolved_sans_serif_font,
     )
 
 
