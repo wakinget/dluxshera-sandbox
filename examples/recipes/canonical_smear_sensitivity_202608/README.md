@@ -133,6 +133,13 @@ Truth/inference mismatch isolation is audited in each condition manifest:
   `detector.layers.smear.kernel.theta_deg`, except the zero-error rows which
   match.
 
+The prescribed-MC runtime must preserve these inference-system defaults when it
+constructs the effective inference `ParameterStore`. Shared physical
+truth/run overrides may be applied to both data and inference stores where
+supported, but common `ParamSpec` values must not be blindly copied from the
+data store into the inference store. For model-mismatch campaigns, audit the
+effective runtime store/binder state, not only the prescription dictionaries.
+
 The parameter layout is resolved from the current config and written into the
 derivative sidecars. Expected scalar count is 23:
 

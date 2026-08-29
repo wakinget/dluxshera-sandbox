@@ -8,6 +8,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from dluxshera.params.spec import ParamField, ParamSpec
+from dluxshera.params.store import ParameterStore
+
 
 def _load_module():
     repo_root = Path(__file__).resolve().parents[2]
@@ -242,6 +245,35 @@ def test_prescribed_mc_passes_schedule_to_run_shera_gd():
     assert "scalar_lr_history=scalar_lr_history" in source
     assert "schedule_factor_history=schedule_factor_history" in source
     assert "schedule_meta=schedule_meta" in source
+
+
+def test_build_truth_stores_preserves_unoverridden_inference_model_defaults():
+    m = _load_module()
+    data_spec = ParamSpec(
+        [
+            ParamField("source.separation_as", group="source", kind="primitive", default=0.5),
+            ParamField("detector.layers.smear.length", group="detector", kind="primitive", default=1.0),
+        ]
+    )
+    inference_spec = ParamSpec(
+        [
+            ParamField("source.separation_as", group="source", kind="primitive", default=0.5),
+            ParamField("detector.layers.smear.length", group="detector", kind="primitive", default=0.8),
+        ]
+    )
+
+    truth_store_data, truth_store_infer = m._build_truth_stores(
+        base_store_data=ParameterStore.from_spec_defaults(data_spec),
+        forward_spec_data=data_spec,
+        base_store_infer=ParameterStore.from_spec_defaults(inference_spec),
+        forward_spec_infer=inference_spec,
+        truth_overrides_flat={"source.separation_as": 0.75},
+    )
+
+    assert truth_store_data.get("source.separation_as") == pytest.approx(0.75)
+    assert truth_store_infer.get("source.separation_as") == pytest.approx(0.75)
+    assert truth_store_data.get("detector.layers.smear.length") == pytest.approx(1.0)
+    assert truth_store_infer.get("detector.layers.smear.length") == pytest.approx(0.8)
 
 
 def test_detector_ke_policy_default_matches_fixed_per_experiment():

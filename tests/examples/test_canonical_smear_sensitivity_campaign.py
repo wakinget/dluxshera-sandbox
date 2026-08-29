@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -40,8 +42,85 @@ def _load_prescribed_module():
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _runtime_smear_case(
+    module,
+    prescribed_module,
+    *,
+    family: str,
+    L_truth_pix: float = 1.0,
+    orientation: str = "perpendicular",
+    epsilon_L_percent: float = 0.0,
+    delta_theta_deg: float = 0.0,
+):
+    condition = module.build_condition(
+        family=family,
+        L_truth_pix=L_truth_pix,
+        orientation=orientation,
+        epsilon_L_percent=epsilon_L_percent,
+        delta_theta_deg=delta_theta_deg,
+        binary_pa_deg=0.0,
+    )
+    prescription = module.prescription_for_condition(condition)
+    system_cfg = module.resolve_system_config(prescription["system"])
+    inference_system_cfg = module.resolve_system_config(
+        prescription["experiment"]["inference_system"]
+    )
+    forward_spec_data = module.compose_forward_spec(system_cfg)
+    forward_spec_infer = module.compose_forward_spec(inference_system_cfg)
+    truth_store_data, truth_store_infer = prescribed_module._build_truth_stores(
+        base_store_data=module.ParameterStore.from_spec_defaults(forward_spec_data),
+        forward_spec_data=forward_spec_data,
+        base_store_infer=module.ParameterStore.from_spec_defaults(forward_spec_infer),
+        forward_spec_infer=forward_spec_infer,
+        truth_overrides_flat={},
+    )
+    audit = prescribed_module._truth_inference_runtime_store_audit(
+        truth_store_data=truth_store_data,
+        truth_store_infer=truth_store_infer,
+        forward_spec_data=forward_spec_data,
+        forward_spec_infer=forward_spec_infer,
+        truth_override_keys=(),
+    )
+    binder_data = module.SheraBinder(system_cfg, forward_spec_data, truth_store_data)
+    binder_infer = module.SheraBinder(
+        inference_system_cfg,
+        forward_spec_infer,
+        truth_store_infer,
+    )
+    data_image = np.asarray(binder_data.model())
+    inference_image = np.asarray(binder_infer.model())
+    data_var = module._deterministic_noiseless_variance(data_image, floor=1.0)
+    inference_subspec = forward_spec_infer.subset(module.INFER_KEYS)
+    nll_loss_fn, _ = module.make_binder_nll_fn(
+        binder=binder_infer,
+        infer_keys=module.INFER_KEYS,
+        data=data_image,
+        var=data_var,
+        noise_model="gaussian",
+        reduce="sum",
+        theta0_store=truth_store_infer,
+    )
+    theta_truth = np.asarray(module.pack_params(inference_subspec, truth_store_infer), dtype=float)
+    residual_penalty = float(
+        np.sum((np.asarray(data_image) - np.asarray(inference_image)) ** 2 / np.asarray(data_var))
+    )
+    return {
+        "condition": condition,
+        "data_store": truth_store_data,
+        "inference_store": truth_store_infer,
+        "data_image": data_image,
+        "inference_image": inference_image,
+        "loss_fn": nll_loss_fn,
+        "loss_truth": float(nll_loss_fn(theta_truth)),
+        "residual_penalty": residual_penalty,
+        "theta_truth": theta_truth,
+        "runtime_audit": audit,
+    }
 
 
 def test_sweep_generation_counts_are_nominal() -> None:
@@ -545,6 +624,130 @@ def test_truth_inference_mismatch_fields_are_family_specific() -> None:
     assert module.truth_inference_config_audit(family_c)["mismatch_fields"] == [
         "detector.layers.smear.kernel.theta_deg"
     ]
+
+
+def test_runtime_store_matched_family_a_smear_remains_equal() -> None:
+    module = _load_module()
+    prescribed = _load_prescribed_module()
+
+    case = _runtime_smear_case(
+        module,
+        prescribed,
+        family="A",
+        L_truth_pix=1.0,
+        orientation="perpendicular",
+    )
+
+    assert float(case["data_store"].get("detector.layers.smear.length")) == pytest.approx(1.0)
+    assert float(case["inference_store"].get("detector.layers.smear.length")) == pytest.approx(1.0)
+    assert float(case["data_store"].get("detector.layers.smear.theta_deg")) == pytest.approx(
+        float(case["inference_store"].get("detector.layers.smear.theta_deg"))
+    )
+    assert case["runtime_audit"]["common_value_differences"] == {}
+    np.testing.assert_allclose(case["data_image"], case["inference_image"], rtol=0.0, atol=0.0)
+    assert case["residual_penalty"] == pytest.approx(0.0, abs=1.0e-8)
+
+
+def test_runtime_store_family_b_length_mismatch_survives_binder_path() -> None:
+    module = _load_module()
+    prescribed = _load_prescribed_module()
+
+    case = _runtime_smear_case(
+        module,
+        prescribed,
+        family="B",
+        L_truth_pix=1.0,
+        orientation="perpendicular",
+        epsilon_L_percent=-20.0,
+    )
+
+    assert float(case["data_store"].get("detector.layers.smear.length")) == pytest.approx(1.0)
+    assert float(case["inference_store"].get("detector.layers.smear.length")) == pytest.approx(0.8)
+    differences = case["runtime_audit"]["common_value_differences"]
+    assert differences["detector.layers.smear.length"]["data"] == pytest.approx(1.0)
+    assert differences["detector.layers.smear.length"]["inference"] == pytest.approx(0.8)
+    assert not np.array_equal(case["data_image"], case["inference_image"])
+    assert not np.allclose(case["data_image"], case["inference_image"], rtol=0.0, atol=1.0e-10)
+    assert case["residual_penalty"] > 0.0
+    assert case["loss_truth"] > 0.0
+
+
+def test_runtime_store_family_c_direction_mismatch_survives_binder_path() -> None:
+    module = _load_module()
+    prescribed = _load_prescribed_module()
+
+    case = _runtime_smear_case(
+        module,
+        prescribed,
+        family="C",
+        L_truth_pix=1.0,
+        orientation="perpendicular",
+        delta_theta_deg=20.0,
+    )
+    theta_truth = float(case["condition"].truth_kernel["theta_deg"])
+
+    assert float(case["data_store"].get("detector.layers.smear.theta_deg")) == pytest.approx(
+        theta_truth
+    )
+    assert float(case["inference_store"].get("detector.layers.smear.theta_deg")) == pytest.approx(
+        theta_truth + 20.0
+    )
+    differences = case["runtime_audit"]["common_value_differences"]
+    assert differences["detector.layers.smear.theta_deg"]["data"] == pytest.approx(theta_truth)
+    assert differences["detector.layers.smear.theta_deg"]["inference"] == pytest.approx(
+        theta_truth + 20.0
+    )
+    assert not np.array_equal(case["data_image"], case["inference_image"])
+    assert not np.allclose(case["data_image"], case["inference_image"], rtol=0.0, atol=1.0e-10)
+    assert case["residual_penalty"] > 0.0
+    assert case["loss_truth"] > 0.0
+
+
+def test_paired_initialization_no_longer_masks_strong_smear_mismatch_objectives() -> None:
+    module = _load_module()
+    prescribed = _load_prescribed_module()
+    matched = _runtime_smear_case(
+        module,
+        prescribed,
+        family="A",
+        L_truth_pix=1.0,
+        orientation="perpendicular",
+    )
+    amp_mismatch = _runtime_smear_case(
+        module,
+        prescribed,
+        family="B",
+        L_truth_pix=1.0,
+        orientation="perpendicular",
+        epsilon_L_percent=-20.0,
+    )
+    dir_mismatch = _runtime_smear_case(
+        module,
+        prescribed,
+        family="C",
+        L_truth_pix=1.0,
+        orientation="perpendicular",
+        delta_theta_deg=20.0,
+    )
+
+    theta0_matched = module.production_initial_theta_for_condition(matched["condition"])
+    theta0_amp = module.production_initial_theta_for_condition(amp_mismatch["condition"])
+    theta0_dir = module.production_initial_theta_for_condition(dir_mismatch["condition"])
+
+    np.testing.assert_allclose(theta0_matched, theta0_amp, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(theta0_matched, theta0_dir, rtol=0.0, atol=0.0)
+
+    loss_matched = float(matched["loss_fn"](jnp.asarray(theta0_matched)))
+    loss_amp = float(amp_mismatch["loss_fn"](jnp.asarray(theta0_amp)))
+    loss_dir = float(dir_mismatch["loss_fn"](jnp.asarray(theta0_dir)))
+    grad_matched = np.asarray(jax.grad(matched["loss_fn"])(jnp.asarray(theta0_matched)))
+    grad_amp = np.asarray(jax.grad(amp_mismatch["loss_fn"])(jnp.asarray(theta0_amp)))
+    grad_dir = np.asarray(jax.grad(dir_mismatch["loss_fn"])(jnp.asarray(theta0_dir)))
+
+    assert loss_amp != pytest.approx(loss_matched, rel=0.0, abs=0.0)
+    assert loss_dir != pytest.approx(loss_matched, rel=0.0, abs=0.0)
+    assert not np.array_equal(grad_matched, grad_amp)
+    assert not np.array_equal(grad_matched, grad_dir)
 
 
 def test_derivative_summary_row_dimensions_and_labels_are_preserved() -> None:

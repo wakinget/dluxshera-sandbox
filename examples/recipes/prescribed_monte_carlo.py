@@ -1398,6 +1398,114 @@ def _partition_overrides_by_kind(
     return primitive_overrides, derived_overrides, unknown_overrides
 
 
+def _store_with_truth_overrides(
+    base_store: ParameterStore,
+    forward_spec: Any,
+    truth_overrides_flat: dict[str, Any] | None = None,
+) -> ParameterStore:
+    """Apply explicit truth overrides to one model store and refresh derived values.
+
+    The caller supplies the model-specific baseline store. This helper never
+    copies values from a different model's store, so intentional truth/inference
+    ParamSpec default differences remain visible to runtime detector/optics/source
+    bindings.
+    """
+    store = base_store
+    if truth_overrides_flat:
+        store = store.replace(truth_overrides_flat)
+    return store.refresh_derived(forward_spec)
+
+
+def _build_truth_stores(
+    *,
+    base_store_data: ParameterStore,
+    forward_spec_data: Any,
+    base_store_infer: ParameterStore,
+    forward_spec_infer: Any,
+    truth_overrides_flat: dict[str, Any] | None = None,
+) -> tuple[ParameterStore, ParameterStore]:
+    """Build data and inference truth stores without cross-model value alignment."""
+    truth_store_data = _store_with_truth_overrides(
+        base_store_data,
+        forward_spec_data,
+        truth_overrides_flat,
+    )
+    truth_store_infer = _store_with_truth_overrides(
+        base_store_infer,
+        forward_spec_infer,
+        truth_overrides_flat,
+    )
+    return truth_store_data, truth_store_infer
+
+
+def _runtime_store_value_for_json(value: Any) -> Any:
+    """Return compact JSON-friendly runtime store value metadata."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return str(value)
+    if array.shape == ():
+        item = array.item()
+        if isinstance(item, np.generic):
+            return item.item()
+        return item
+    if array.size <= 16:
+        return array.tolist()
+    return {
+        "shape": list(array.shape),
+        "dtype": str(array.dtype),
+        "sha256": _hash_array_bytes(array),
+    }
+
+
+def _runtime_values_equal(left: Any, right: Any) -> bool:
+    """Compare two store values exactly enough for runtime provenance."""
+    try:
+        return bool(np.array_equal(np.asarray(left), np.asarray(right)))
+    except Exception:
+        return left == right
+
+
+def _truth_inference_runtime_store_audit(
+    *,
+    truth_store_data: ParameterStore,
+    truth_store_infer: ParameterStore,
+    forward_spec_data: Any,
+    forward_spec_infer: Any,
+    truth_override_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Summarize effective runtime truth/inference store differences.
+
+    This intentionally audits the ParameterStore values consumed by Binder
+    runtime bindings, not just the pre-execution system dictionaries.
+    """
+    common_keys = sorted(set(forward_spec_data.keys()) & set(forward_spec_infer.keys()))
+    differences: dict[str, dict[str, Any]] = {}
+    for key in common_keys:
+        try:
+            data_value = truth_store_data.get(key)
+            inference_value = truth_store_infer.get(key)
+        except KeyError:
+            continue
+        if _runtime_values_equal(data_value, inference_value):
+            continue
+        differences[key] = {
+            "data": _runtime_store_value_for_json(data_value),
+            "inference": _runtime_store_value_for_json(inference_value),
+        }
+
+    return {
+        "semantic": "independent_model_baselines_plus_explicit_truth_overrides",
+        "truth_override_keys": list(truth_override_keys),
+        "common_param_count": len(common_keys),
+        "common_value_differences": differences,
+    }
+
+
 def _resolve_config_id(config_id: str | None) -> str:
     """Map a legacy config_id to a system preset name (legacy compatibility)."""
     if not config_id:
@@ -2359,14 +2467,15 @@ def main() -> None:
     # dotted keys, then recompute any derived parameters to keep the store
     # self-consistent for forward/inference use.
     base_store_data = ParameterStore.from_spec_defaults(forward_spec_data)
-    if truth_defaults:
-        base_store_data = base_store_data.replace(_flatten_store_overrides(truth_defaults))
-    base_store_data = base_store_data.refresh_derived(forward_spec_data)
-
     base_store_infer = ParameterStore.from_spec_defaults(forward_spec_infer)
-    if truth_defaults:
-        base_store_infer = base_store_infer.replace(_flatten_store_overrides(truth_defaults))
-    base_store_infer = base_store_infer.refresh_derived(forward_spec_infer)
+    truth_defaults_flat = _flatten_store_overrides(truth_defaults)
+    base_store_data, base_store_infer = _build_truth_stores(
+        base_store_data=base_store_data,
+        forward_spec_data=forward_spec_data,
+        base_store_infer=base_store_infer,
+        forward_spec_infer=forward_spec_infer,
+        truth_overrides_flat=truth_defaults_flat,
+    )
 
     prior_info_raw = experiment_cfg.get("priors", {})
     prior_info = _migrate_key_mapping(prior_info_raw)
@@ -2448,24 +2557,30 @@ def main() -> None:
         inference_subspec = forward_spec_infer_run.subset(infer_keys)
         cfg_hash = _stable_hash_payload(inference_system_cfg_run)
         forward_spec_hash = _stable_hash_payload(forward_spec_infer_run)
+        base_store_infer_run = _store_with_truth_overrides(
+            ParameterStore.from_spec_defaults(forward_spec_infer_run),
+            forward_spec_infer_run,
+            truth_defaults_flat,
+        )
 
         print(f"Generating synthetic data...")
         # Synthetic data generation + noise handling: build the "truth" store,
         # refresh derived values, then forward-model data and inject noise.
         truth_overrides = _flatten_store_overrides(run_spec.get("truth", {}))
-        truth_store_data = base_store_data.replace(truth_overrides)
-        truth_store_data = truth_store_data.refresh_derived(forward_spec_data)
-
-        truth_store_infer = base_store_infer.replace(truth_overrides)
-        aligned_truth = {}
-        for key in forward_spec_infer_run.keys():
-            try:
-                aligned_truth[key] = truth_store_data.get(key)
-            except KeyError:
-                continue
-        if aligned_truth:
-            truth_store_infer = truth_store_infer.replace(aligned_truth)
-        truth_store_infer = truth_store_infer.refresh_derived(forward_spec_infer_run)
+        truth_store_data, truth_store_infer = _build_truth_stores(
+            base_store_data=base_store_data,
+            forward_spec_data=forward_spec_data,
+            base_store_infer=base_store_infer_run,
+            forward_spec_infer=forward_spec_infer_run,
+            truth_overrides_flat=truth_overrides,
+        )
+        truth_runtime_audit = _truth_inference_runtime_store_audit(
+            truth_store_data=truth_store_data,
+            truth_store_infer=truth_store_infer,
+            forward_spec_data=forward_spec_data,
+            forward_spec_infer=forward_spec_infer_run,
+            truth_override_keys=tuple(sorted(truth_overrides)),
+        )
 
         binder_data = SheraBinder(system_cfg, forward_spec_data, truth_store_data)
         binder_infer = SheraBinder(inference_system_cfg_run, forward_spec_infer_run, truth_store_infer)
@@ -2964,6 +3079,7 @@ def main() -> None:
                     "data": data_detector_ke_meta,
                     "inference": inference_detector_ke_meta,
                 },
+                "truth_inference_runtime": truth_runtime_audit,
             },
         )
 

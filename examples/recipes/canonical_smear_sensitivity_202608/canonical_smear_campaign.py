@@ -1028,13 +1028,6 @@ def compute_derivative_diagnostics(
     truth_store_data = ParameterStore.from_spec_defaults(forward_spec_data)
     truth_store_data = truth_store_data.refresh_derived(forward_spec_data)
     truth_store_infer = ParameterStore.from_spec_defaults(forward_spec_infer)
-    aligned_truth = {}
-    for key in forward_spec_infer.keys():
-        try:
-            aligned_truth[key] = truth_store_data.get(key)
-        except KeyError:
-            continue
-    truth_store_infer = truth_store_infer.replace(aligned_truth)
     truth_store_infer = truth_store_infer.refresh_derived(forward_spec_infer)
 
     binder_data = SheraBinder(system_cfg, forward_spec_data, truth_store_data)
