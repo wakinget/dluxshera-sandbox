@@ -67,6 +67,7 @@ from dluxshera.inference.optimization import (
     build_fim_diagonal_preconditioner,
     fim_theta,
     generate_fim_labels,
+    hessian_theta,
     make_binder_nll_fn,
     map_labels_to_keys,
     run_shera_gd,
@@ -329,7 +330,7 @@ def main(
     )
 
     print("Building the loss function...")
-    nll_loss_fn, theta0 = make_binder_nll_fn(
+    nll_loss_fn, theta0, predict_fn = make_binder_nll_fn(
         binder=binder,
         infer_keys=infer_keys,
         data=data,
@@ -337,6 +338,7 @@ def main(
         noise_model="gaussian",
         reduce="sum",
         theta0_store=init_store,
+        return_predict_fn=True,
     )
     fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=init_store)
 
@@ -372,7 +374,17 @@ def main(
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
-    F = fim_theta(nll_loss_fn, fim_point)
+    F = fim_theta(predict_fn, fim_point, data_var)
+    if loss_kind == "map":
+        def prior_metric_loss(theta: np.ndarray) -> np.ndarray:
+            store_theta = store_unpack_params(inference_subspec, theta, init_store)
+            return prior_spec.quadratic_penalty(
+                store_theta,
+                center_store=truth_store,
+                keys=infer_keys,
+            )
+
+        F = F + hessian_theta(prior_metric_loss, fim_point)
     fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=init_store)
     if save_plots:
         plot_fim(

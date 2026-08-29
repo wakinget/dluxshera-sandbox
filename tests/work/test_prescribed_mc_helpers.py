@@ -504,6 +504,7 @@ def test_fim_cache_key_payload_hash_changes_with_cfg_hash():
         cfg_hash="cfg_A",
         forward_spec_hash="spec_same",
         theta_true_hash="theta_same",
+        variance_hash="var_same",
         loss_kind="nll",
     )
     payload_b = m._build_fim_cache_key_payload(
@@ -512,6 +513,7 @@ def test_fim_cache_key_payload_hash_changes_with_cfg_hash():
         cfg_hash="cfg_B",
         forward_spec_hash="spec_same",
         theta_true_hash="theta_same",
+        variance_hash="var_same",
         loss_kind="nll",
     )
 
@@ -520,6 +522,74 @@ def test_fim_cache_key_payload_hash_changes_with_cfg_hash():
     assert payload_a["cfg_hash"] == "cfg_A"
     assert payload_b["cfg_hash"] == "cfg_B"
     assert hash_a != hash_b
+
+
+def test_fim_cache_key_payload_hash_changes_with_variance_hash():
+    m = _load_module()
+    payload_a = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_same",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        variance_hash="var_A",
+        loss_kind="nll",
+    )
+    payload_b = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_same",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        variance_hash="var_B",
+        loss_kind="nll",
+    )
+
+    assert payload_a["fim_semantics"] == "fixed_variance_gaussian_fisher_v1"
+    assert payload_a["variance_hash"] == "var_A"
+    assert payload_b["variance_hash"] == "var_B"
+    assert m._stable_hash_payload(payload_a) != m._stable_hash_payload(payload_b)
+
+
+def test_fim_cache_key_payload_distinguishes_map_metric_semantics_and_prior_hash():
+    m = _load_module()
+    payload_nll = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_same",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        variance_hash="var_same",
+        loss_kind="nll",
+    )
+    payload_map_a = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_same",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        variance_hash="var_same",
+        loss_kind="map",
+        prior_hash="prior_A",
+    )
+    payload_map_b = m._build_fim_cache_key_payload(
+        infer_keys=("source.separation_as",),
+        system_label="SYS",
+        cfg_hash="cfg_same",
+        forward_spec_hash="spec_same",
+        theta_true_hash="theta_same",
+        variance_hash="var_same",
+        loss_kind="map",
+        prior_hash="prior_B",
+    )
+
+    assert payload_nll["fim_semantics"] == "fixed_variance_gaussian_fisher_v1"
+    assert (
+        payload_map_a["fim_semantics"]
+        == "fixed_variance_gaussian_fisher_plus_prior_hessian_v1"
+    )
+    assert m._stable_hash_payload(payload_nll) != m._stable_hash_payload(payload_map_a)
+    assert m._stable_hash_payload(payload_map_a) != m._stable_hash_payload(payload_map_b)
 
 
 def test_detector_ke_policy_invalid_value_raises():

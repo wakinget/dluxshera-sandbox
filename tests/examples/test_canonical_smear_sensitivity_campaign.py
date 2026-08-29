@@ -11,6 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from dluxshera.inference.optimization import EigenThetaMap
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -96,7 +98,7 @@ def _runtime_smear_case(
     inference_image = np.asarray(binder_infer.model())
     data_var = module._deterministic_noiseless_variance(data_image, floor=1.0)
     inference_subspec = forward_spec_infer.subset(module.INFER_KEYS)
-    nll_loss_fn, _ = module.make_binder_nll_fn(
+    nll_loss_fn, _, predict_fn = module.make_binder_nll_fn(
         binder=binder_infer,
         infer_keys=module.INFER_KEYS,
         data=data_image,
@@ -104,6 +106,7 @@ def _runtime_smear_case(
         noise_model="gaussian",
         reduce="sum",
         theta0_store=truth_store_infer,
+        return_predict_fn=True,
     )
     theta_truth = np.asarray(module.pack_params(inference_subspec, truth_store_infer), dtype=float)
     residual_penalty = float(
@@ -115,12 +118,40 @@ def _runtime_smear_case(
         "inference_store": truth_store_infer,
         "data_image": data_image,
         "inference_image": inference_image,
+        "data_var": data_var,
+        "predict_fn": predict_fn,
         "loss_fn": nll_loss_fn,
         "loss_truth": float(nll_loss_fn(theta_truth)),
         "residual_penalty": residual_penalty,
         "theta_truth": theta_truth,
         "runtime_audit": audit,
     }
+
+
+def _assert_smear_fisher_whitening_is_finite(module, case) -> None:
+    jax.config.update("jax_enable_x64", True)
+    theta_truth = jnp.asarray(case["theta_truth"])
+    theta0 = jnp.asarray(module.production_initial_theta_for_condition(case["condition"]))
+    F = module.fim_theta(case["predict_fn"], theta_truth, case["data_var"])
+    F_np = np.asarray(F, dtype=float)
+    eigvals = np.linalg.eigvalsh(F_np)
+
+    assert np.all(np.isfinite(F_np))
+    assert np.all(np.isfinite(eigvals))
+    assert eigvals.min() >= -1.0e-8
+    assert np.all(np.isfinite(np.asarray(theta0)))
+
+    eigen_map = EigenThetaMap.from_fim(F, theta0, whiten=True)
+    z0 = eigen_map.z_from_theta(theta0)
+    theta_roundtrip = eigen_map.theta_from_z(z0)
+    loss_z0 = case["loss_fn"](theta_roundtrip)
+    grad_z = jax.grad(lambda z: case["loss_fn"](eigen_map.theta_from_z(z)))(z0)
+
+    assert np.all(np.isfinite(np.asarray(z0)))
+    assert np.all(np.isfinite(np.asarray(theta_roundtrip)))
+    np.testing.assert_allclose(np.asarray(theta_roundtrip), np.asarray(theta0), rtol=1e-9, atol=1e-9)
+    assert np.isfinite(float(loss_z0))
+    assert np.all(np.isfinite(np.asarray(grad_z)))
 
 
 def test_sweep_generation_counts_are_nominal() -> None:
@@ -646,6 +677,7 @@ def test_runtime_store_matched_family_a_smear_remains_equal() -> None:
     assert case["runtime_audit"]["common_value_differences"] == {}
     np.testing.assert_allclose(case["data_image"], case["inference_image"], rtol=0.0, atol=0.0)
     assert case["residual_penalty"] == pytest.approx(0.0, abs=1.0e-8)
+    _assert_smear_fisher_whitening_is_finite(module, case)
 
 
 def test_runtime_store_family_b_length_mismatch_survives_binder_path() -> None:
@@ -670,6 +702,7 @@ def test_runtime_store_family_b_length_mismatch_survives_binder_path() -> None:
     assert not np.allclose(case["data_image"], case["inference_image"], rtol=0.0, atol=1.0e-10)
     assert case["residual_penalty"] > 0.0
     assert case["loss_truth"] > 0.0
+    _assert_smear_fisher_whitening_is_finite(module, case)
 
 
 def test_runtime_store_family_c_direction_mismatch_survives_binder_path() -> None:
@@ -701,6 +734,7 @@ def test_runtime_store_family_c_direction_mismatch_survives_binder_path() -> Non
     assert not np.allclose(case["data_image"], case["inference_image"], rtol=0.0, atol=1.0e-10)
     assert case["residual_penalty"] > 0.0
     assert case["loss_truth"] > 0.0
+    _assert_smear_fisher_whitening_is_finite(module, case)
 
 
 def test_paired_initialization_no_longer_masks_strong_smear_mismatch_objectives() -> None:
@@ -793,7 +827,8 @@ def test_condition_manifest_records_kernel_and_objective_provenance() -> None:
     assert manifest["detector_provenance"]["truth_inference_config_audit"]["matches_expected_mismatch"] is True
     assert manifest["objective_provenance"]["optimizer_loss"] == "nll"
     assert manifest["objective_provenance"]["parameter_count_expected"] == 23
-    assert "jax.hessian" in manifest["objective_provenance"]["fim_theta_semantics"]
+    assert "fixed-variance Gaussian Fisher" in manifest["objective_provenance"]["fim_theta_semantics"]
+    assert "hessian_theta" in manifest["objective_provenance"]["fim_theta_semantics"]
     assert manifest["objective_provenance"]["optimizer_max_iterations"] == 200
     assert manifest["objective_provenance"]["eigenmodes"]["enable"] is True
     assert manifest["objective_provenance"]["init"]["sampling"] == "prior"

@@ -1,5 +1,6 @@
+import jax
 import jax.numpy as jnp
-from dluxshera.inference.optimization import run_shera_gd
+from dluxshera.inference.optimization import _gd_loop, run_shera_gd
 
 
 def test_early_stopping_disabled_runs_full_iterations():
@@ -50,3 +51,57 @@ def test_early_stopping_non_finite_loss_records_reason():
         early_stopping={"enabled": True, "require_finite_loss": True},
     )
     assert hist["early_stopping"]["stop_reason"] == "non_finite_loss"
+
+
+def test_non_finite_loss_artifact_summary_is_failed():
+    loss_fn = lambda t: jnp.array(float("nan"))
+    _, hist, artifacts = run_shera_gd(
+        loss_fn=loss_fn,
+        theta0=jnp.array([0.0]),
+        learning_rate=1.0,
+        num_steps=10,
+        return_artifacts=True,
+        show_progress=False,
+    )
+
+    assert hist["early_stopping"]["stop_reason"] == "non_finite_loss"
+    assert artifacts["summary"]["status"] == "failed"
+    assert artifacts["summary"]["failure_reason"] == "non_finite_loss"
+
+
+def test_non_finite_gradient_is_caught_before_update_and_marked_failed():
+    @jax.custom_jvp
+    def finite_loss_bad_grad(theta):
+        return theta[0] * 0.0 + 1.0
+
+    @finite_loss_bad_grad.defjvp
+    def finite_loss_bad_grad_jvp(primals, tangents):
+        theta, = primals
+        tangent, = tangents
+        return finite_loss_bad_grad(theta), tangent[0] * jnp.array(float("nan"), dtype=theta.dtype)
+
+    theta0 = jnp.array([2.0])
+    theta_final, trace = _gd_loop(
+        finite_loss_bad_grad,
+        theta0,
+        learning_rate=1.0,
+        num_steps=5,
+        show_progress=False,
+    )
+
+    assert jnp.allclose(theta_final, theta0)
+    assert trace["early_stopping"]["stop_reason"] == "non_finite_gradient"
+    assert trace["early_stopping"]["actual_n_iter"] == 0
+
+    _, hist, artifacts = run_shera_gd(
+        loss_fn=finite_loss_bad_grad,
+        theta0=theta0,
+        learning_rate=1.0,
+        num_steps=5,
+        return_artifacts=True,
+        show_progress=False,
+    )
+
+    assert hist["early_stopping"]["stop_reason"] == "non_finite_gradient"
+    assert artifacts["summary"]["status"] == "failed"
+    assert artifacts["summary"]["failure_reason"] == "non_finite_gradient"

@@ -42,12 +42,12 @@ this recipe. In particular, `pixel_mtf`, diffusion, pixel offsets, pixel
 response, and native pixel-MTF / `optics.oversample` behavior remain inherited
 from the preset path.
 
-Derivative support uses the existing `fim_theta` machinery. Audit finding:
-`fim_theta()` is currently a direct `jax.hessian(loss_fn)(theta_ref)` wrapper,
-not a separate Gauss-Newton construction. The campaign keeps the existing `F`
-sidecar name for compatibility, but the optional `--hessian` comparison is
-therefore redundant unless `fim_theta()` is changed in a future inference-library
-patch. The first Gattaca2 smoke should run without `--hessian`.
+Derivative support uses the inference-layer `fim_theta` machinery.
+`fim_theta()` computes the fixed-variance Gaussian Fisher/Gauss-Newton matrix
+`J.T @ W @ J` from the Binder prediction Jacobian. Optional `--hessian`
+diagnostics use `hessian_theta()` to compute the observed scalar NLL Hessian;
+under model mismatch this Hessian can differ from the PSD Fisher matrix and may
+be indefinite.
 
 ## Campaign Families
 

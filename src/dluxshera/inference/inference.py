@@ -23,6 +23,7 @@ from ..params.store import ParameterStore
 from .optimization import (
     EigenThetaMap,
     fim_theta,
+    hessian_theta,
     make_binder_image_nll_fn,
     run_image_gd,
     run_simple_gd,
@@ -228,7 +229,10 @@ def run_shera_image_gd_eigen(
        ``make_binder_image_nll_fn``.
     2) Compute a θ-space curvature/FIM around ``theta_ref`` (defaults to
        ``theta0``) once, then build ``EigenThetaMap.from_fim`` with optional
-       truncation/whitening.
+       truncation/whitening. Automatic Binder-based preconditioning currently
+       uses the fixed-variance Gaussian Fisher and therefore supports only
+       ``noise_model="gaussian"``. Custom scalar-loss usage retains the
+       documented observed-Hessian fallback when no ``predict_fn`` is supplied.
     3) Map θ→z, run GD in z-space with the *same* Binder-based loss, then
        map back to θ for inspection.
 
@@ -262,15 +266,18 @@ def run_shera_image_gd_eigen(
     theta_ref : array-like, optional
         Reference θ for the FIM; defaults to ``theta0``.
     fim_kwargs : dict, optional
-        Reserved for future extensions; currently unused but accepted to
-        mirror other FIM helpers.
+        Optional Fisher inputs for custom loss use. Supported keys are
+        ``predict_fn``, ``var``, and ``reduce``. When a Binder loss is built by
+        this helper, the matching Binder prediction function and ``var`` are
+        used automatically. When no ``predict_fn`` is available, the helper
+        falls back to observed scalar-loss curvature via ``hessian_theta``.
     Returns
     -------
     EigenGdResults
         Diagnostic container with eigen map, histories, and final θ/z.
     """
 
-    fim_kwargs = fim_kwargs or {}
+    fim_kwargs = dict(fim_kwargs or {})
 
     # ------------------------------------------------------------------
     # 0) Harmonise aliases
@@ -281,9 +288,18 @@ def run_shera_image_gd_eigen(
     # ------------------------------------------------------------------
     # 1) Build θ-space Binder-based loss once (unless provided)
     # ------------------------------------------------------------------
+    predict_fn = fim_kwargs.pop("predict_fn", None)
+    fim_var = fim_kwargs.pop("var", var)
+    fim_reduce = fim_kwargs.pop("reduce", "sum")
+
     if loss_fn is None or theta0 is None:
         if data is None or var is None:
             raise ValueError("data and var must be provided when loss_fn is None")
+        if noise_model != "gaussian":
+            raise ValueError(
+                "run_shera_image_gd_eigen Fisher preconditioning currently "
+                "supports only noise_model='gaussian'."
+            )
 
         if forward_spec is None:
             forward_spec = build_forward_spec_from_config(cfg)
@@ -292,7 +308,7 @@ def run_shera_image_gd_eigen(
 
         base_forward_store = base_forward_store.refresh_derived(forward_spec)
 
-        loss_fn, theta0 = make_binder_image_nll_fn(
+        loss_fn, theta0, predict_fn = make_binder_image_nll_fn(
             cfg,
             forward_spec,
             base_forward_store,
@@ -301,6 +317,7 @@ def run_shera_image_gd_eigen(
             var,
             noise_model=noise_model,
             reduce="sum",
+            return_predict_fn=True,
         )
     else:
         if theta0 is None:
@@ -313,12 +330,21 @@ def run_shera_image_gd_eigen(
     # 2) One-time curvature/FIM estimation in θ-space
     # ------------------------------------------------------------------
     if fim_kwargs:
-        raise ValueError("fim_kwargs is reserved for future use and must be empty today")
+        raise ValueError(
+            "fim_kwargs supports only 'predict_fn', 'var', and 'reduce'; "
+            f"got {sorted(fim_kwargs)}."
+        )
 
-    F = fim_theta(loss_fn, theta_ref)
+    if predict_fn is not None:
+        if fim_var is None:
+            raise ValueError("var must be provided when computing a Gaussian Fisher.")
+        F = fim_theta(predict_fn, theta_ref, fim_var, reduce=fim_reduce)
+    else:
+        F = hessian_theta(loss_fn, theta_ref)
     F = jnp.asarray(F)
-    F = jnp.nan_to_num((F + F.T) / 2.0)
-    F = F + 1e-8 * jnp.eye(F.shape[0], dtype=F.dtype)
+    # Keep the metric unregularized here. EigenThetaMap enforces finite PSD
+    # input and handles only roundoff-scale negative eigenvalues explicitly.
+    F = (F + F.T) / 2.0
 
     # ------------------------------------------------------------------
     # 3) Build EigenThetaMap (optionally truncate/whiten)
@@ -334,6 +360,10 @@ def run_shera_image_gd_eigen(
     # 4) Map θ₀ → z₀ and choose learning rate if unspecified
     # ------------------------------------------------------------------
     z0 = eigen_map.z_from_theta(theta0)
+    if not bool(jnp.all(jnp.isfinite(z0))):
+        raise FloatingPointError(
+            "Non-finite initial z state in run_shera_image_gd_eigen."
+        )
     if learning_rate is None:
         eigvals = eigen_map.eigvals if eigen_map.eigvals is not None else None
         if eigvals is None or eigvals.size == 0:
@@ -355,18 +385,31 @@ def run_shera_image_gd_eigen(
     @jax.jit
     def _step(z, opt_state):
         loss, g = loss_grad(z)
-        updates, opt_state = optimizer.update(g, opt_state, z)
-        z = optax.apply_updates(z, updates)
-        z = jnp.nan_to_num(z)
-        return z, opt_state, loss
+        updates, new_opt_state = optimizer.update(g, opt_state, z)
+        z_next = optax.apply_updates(z, updates)
+        diagnostics = {
+            "loss": jnp.all(jnp.isfinite(loss)),
+            "gradient": jnp.all(jnp.isfinite(g)),
+            "optimizer_update": jnp.all(jnp.isfinite(updates)),
+            "proposed_z": jnp.all(jnp.isfinite(z_next)),
+        }
+        return z_next, new_opt_state, loss, diagnostics
 
     z_history = []
     theta_history = []
     loss_history = []
 
     z = z0
-    for _ in range(num_steps):
-        z, opt_state, loss_val = _step(z, opt_state)
+    for iteration in range(num_steps):
+        z_next, next_opt_state, loss_val, diagnostics = _step(z, opt_state)
+        for quantity in ("loss", "gradient", "optimizer_update", "proposed_z"):
+            if not bool(diagnostics[quantity]):
+                raise FloatingPointError(
+                    "Non-finite numerical state in run_shera_image_gd_eigen: "
+                    f"iteration={iteration}, quantity={quantity}."
+                )
+        z = z_next
+        opt_state = next_opt_state
         z_history.append(z)
         loss_history.append(loss_val)
         theta_history.append(eigen_map.theta_from_z(z))

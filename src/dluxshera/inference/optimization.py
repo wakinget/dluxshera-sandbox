@@ -156,6 +156,8 @@ __all__ = [
 
     # θ-space eigen reparameterisation
     "EigenThetaMap",
+    "fim_theta",
+    "hessian_theta",
 
     # legacy likelihood / step fns (model-params space)
     "loglikelihood", "loss_fn",
@@ -221,9 +223,9 @@ def gaussian_loglikelihood_image(
     logp = jstats.norm.logpdf(data_image, loc=model_image, scale=sigma)
 
     if reduce == "sum":
-        return np.nansum(logp)
+        return np.sum(logp)
     elif reduce == "mean":
-        return np.nanmean(logp)
+        return np.mean(logp)
     else:
         return logp
 
@@ -259,9 +261,9 @@ def poisson_loglikelihood_image(
     logp = jstats.poisson.logpmf(data_image, model_image)
 
     if reduce == "sum":
-        return np.nansum(logp)
+        return np.sum(logp)
     elif reduce == "mean":
-        return np.nanmean(logp)
+        return np.mean(logp)
     else:
         return logp
 
@@ -880,16 +882,23 @@ def _gd_loop(
     for step_idx in iterator:
         loss, g = jax.value_and_grad(loss_fn)(theta)
         losses.append(loss)
-        if stop_cfg.enabled and stop_cfg.require_finite_loss and not bool(np.isfinite(loss)):
+        if stop_cfg.require_finite_loss and not bool(np.isfinite(loss)):
             stopped_early = True
             stop_reason = "non_finite_loss"
             stop_iteration = int(step_idx)
+            break
+        grad_norm = np.linalg.norm(g)
+        if not bool(np.all(np.isfinite(g))):
+            stopped_early = True
+            stop_reason = "non_finite_gradient"
+            stop_iteration = int(step_idx)
+            grad_norms.append(grad_norm)
             break
 
         updates, opt_state = optimizer.update(g, opt_state, params=theta)
         theta = optax.apply_updates(theta, updates)
 
-        grad_norms.append(np.linalg.norm(g))
+        grad_norms.append(grad_norm)
         step_norms.append(np.linalg.norm(updates))
         theta_history.append(theta)
         if stop_cfg.enabled and step_idx + 1 >= max(stop_cfg.min_iter, stop_cfg.patience):
@@ -925,7 +934,13 @@ def _gd_loop(
     if step_norms:
         trace["step_norm"] = np.stack(step_norms)
     loss_arr = np.stack(losses)
-    best_iter = int(onp.nanargmin(onp.asarray(loss_arr))) if loss_arr.size else None
+    loss_arr_np = onp.asarray(loss_arr, dtype=float)
+    finite_loss_mask = onp.isfinite(loss_arr_np)
+    best_iter = (
+        int(onp.argmin(onp.where(finite_loss_mask, loss_arr_np, onp.inf)))
+        if loss_arr_np.size and onp.any(finite_loss_mask)
+        else None
+    )
     trace["early_stopping"] = {
         "enabled": bool(stop_cfg.enabled),
         "stopped_early": bool(stopped_early),
@@ -1333,15 +1348,21 @@ def run_gd_with_artifacts(
     full_state_theta = onp.asarray(full_theta[: actual_steps + 1])
     loss_init = initial_loss
     loss_final = returned_loss
+    finite_state_loss_mask = onp.isfinite(full_state_loss)
     best_state_idx = (
-        int(onp.nanargmin(full_state_loss)) if full_state_loss.size else None
+        int(onp.argmin(onp.where(finite_state_loss_mask, full_state_loss, onp.inf)))
+        if full_state_loss.size and onp.any(finite_state_loss_mask)
+        else None
     )
     loss_best = (
         float(full_state_loss[best_state_idx]) if best_state_idx is not None else None
     )
+    stop_reason = early_stopping_result.get("stop_reason")
+    failure_reasons = {"non_finite_loss", "non_finite_gradient"}
+    status = "failed" if stop_reason in failure_reasons else "ok"
 
     base_summary: Dict[str, Any] = {
-        "status": "ok",
+        "status": status,
         "run_id": resolved_run_id,
         "created_at": created_at,
         "num_steps_completed": int(loss_array.size),
@@ -1349,6 +1370,8 @@ def run_gd_with_artifacts(
         "loss_final": loss_final,
         "early_stopping": early_stopping_result,
     }
+    if status != "ok":
+        base_summary["failure_reason"] = stop_reason
 
     if extra_summary:
         base_summary.update(extra_summary)
@@ -2073,37 +2096,137 @@ def map_labels_to_keys(
     return labels_by_key
 
 
-def fim_theta(
+def hessian_theta(
     loss_fn: Callable[[np.ndarray], np.ndarray],
     theta_ref: np.ndarray,
 ) -> np.ndarray:
-    """
-    Compute a Fisher Information Matrix (FIM) in θ-space for a given
-    scalar loss or NLL function.
+    """Compute the observed Hessian of a scalar θ-space loss/NLL.
 
-    This is a thin wrapper around `jax.hessian(loss_fn)(theta_ref)`,
-    but keeps the intent clear: the Hessian of the *negative*
-    log-likelihood (or loss) at a reference point.
+    This is the full local curvature of the realized scalar objective:
+    ``jax.hessian(loss_fn)(theta_ref)``. For a fixed-variance Gaussian NLL it
+    contains both the Gauss-Newton/Fisher term and residual-dependent
+    second-order model terms. It is therefore an observed Hessian, not a
+    Fisher information matrix, and may be indefinite under model mismatch.
 
     Parameters
     ----------
     loss_fn :
         Callable taking a 1D θ vector and returning a scalar loss or
-        negative log-likelihood. In Shera usage, this is usually the
-        closure returned by `make_binder_image_nll_fn(...)`.
+        negative log-likelihood.
     theta_ref :
-        1D JAX array representing the reference parameter vector at
-        which to evaluate the FIM (e.g. truth or current MAP).
+        1D JAX array representing the reference parameter vector at which to
+        evaluate the observed Hessian.
+
+    Returns
+    -------
+    H : jnp.ndarray
+        (N, N) observed Hessian in θ coordinates.
+    """
+    theta_ref = np.asarray(theta_ref)
+    return jax.hessian(loss_fn)(theta_ref)
+
+
+def fim_theta(
+    predict_fn: Callable[[np.ndarray], np.ndarray],
+    theta_ref: np.ndarray,
+    var: np.ndarray,
+    *,
+    reduce: Literal["sum", "mean"] = "sum",
+) -> np.ndarray:
+    r"""Compute the fixed-variance Gaussian Fisher matrix in θ-space.
+
+    This helper implements the Fisher/Gauss-Newton information matrix for
+    independent Gaussian image pixels with θ-independent variance. For model
+    prediction ``m(theta)``, image Jacobian
+    ``J[p, i] = d m_p / d theta_i``, and pixel variance ``var[p]``,
+
+    ``F_ij = sum_p J[p, i] J[p, j] / var[p]``.
+
+    Equivalently, ``J_white = J / sqrt(var)[..., None]`` and
+    ``F = J_white.reshape((-1, n_params)).T @ J_white.reshape((-1, n_params))``.
+    No pixel-by-pixel diagonal weight matrix is constructed.
+
+    This is not the same object as the observed NLL Hessian under model
+    mismatch. For a fixed-variance Gaussian NLL,
+
+    ``H_NLL = J.T @ W @ J + residual-dependent second-order model terms``,
+
+    while the Fisher information is ``F = J.T @ W @ J``. At a matched
+    zero-residual solution the residual-dependent term vanishes and the two
+    matrices agree locally. Under deliberate model mismatch they generally do
+    not; the observed Hessian can become indefinite even though the Fisher
+    matrix remains PSD. This matters for dLuxShera because ``EigenThetaMap``
+    whitening expects finite PSD curvature/information, and negative observed
+    Hessian modes produce invalid whitening scales.
+
+    The formula here assumes independent Gaussian pixels and a fixed
+    θ-independent variance map. It is not automatically the Fisher matrix for
+    future likelihoods with θ-dependent noise or non-Gaussian observations.
+
+    Parameters
+    ----------
+    predict_fn :
+        Callable taking a 1D θ vector and returning the model image used by the
+        Gaussian likelihood.
+    theta_ref :
+        1D θ vector at which to evaluate the image Jacobian.
+    var :
+        Scalar variance or variance image broadcast-compatible with
+        ``predict_fn(theta_ref)``. Values must be finite and strictly positive.
+    reduce :
+        ``"sum"`` returns the summed-pixel likelihood Fisher. ``"mean"``
+        scales the matrix by the number of broadcast pixels to match a mean
+        loss reduction.
 
     Returns
     -------
     F : jnp.ndarray
-        (N, N) Fisher matrix in θ coordinates, where N = theta_ref.size.
+        (N, N) Fisher matrix in θ coordinates, PSD by construction up to
+        floating-point roundoff.
     """
     theta_ref = np.asarray(theta_ref)
+    if theta_ref.ndim != 1:
+        raise ValueError("theta_ref must be a 1D parameter vector.")
+    if reduce not in {"sum", "mean"}:
+        raise ValueError("reduce must be 'sum' or 'mean'.")
 
-    # We don't need any special tricks here; θ is already flat.
-    return jax.hessian(loss_fn)(theta_ref)
+    pred_ref = np.asarray(predict_fn(theta_ref))
+    variance = np.asarray(var)
+    try:
+        variance = np.broadcast_to(variance, pred_ref.shape)
+    except ValueError as exc:
+        raise ValueError(
+            "Variance must be scalar or broadcast-compatible with prediction shape "
+            f"{tuple(pred_ref.shape)}; got {tuple(np.asarray(var).shape)}."
+        ) from exc
+
+    if not bool(np.all(np.isfinite(pred_ref))):
+        raise ValueError("Prediction at theta_ref contains non-finite values.")
+    if not bool(np.all(np.isfinite(variance))):
+        raise ValueError("Gaussian variance contains non-finite values.")
+    if not bool(np.all(variance > 0.0)):
+        raise ValueError("Gaussian variance must be strictly positive.")
+
+    jac = jax.jacfwd(predict_fn)(theta_ref)
+    jac = np.asarray(jac)
+    expected_shape = pred_ref.shape + theta_ref.shape
+    if jac.shape != expected_shape:
+        raise ValueError(
+            "Prediction Jacobian shape mismatch: expected "
+            f"{expected_shape}, got {jac.shape}."
+        )
+    if not bool(np.all(np.isfinite(jac))):
+        raise ValueError("Prediction Jacobian contains non-finite values.")
+
+    white = jac / np.sqrt(variance)[..., None]
+    jac2 = white.reshape((-1, int(theta_ref.size)))
+    F = jac2.T @ jac2
+    if reduce == "mean":
+        F = F / pred_ref.size
+    if not bool(np.all(np.isfinite(F))):
+        raise ValueError("Computed Fisher matrix contains non-finite values.")
+
+    return 0.5 * (F + F.T)
 
 
 def build_fim_diagonal_preconditioner(
@@ -2199,8 +2322,8 @@ def fim_theta_shera(
     return_labels: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, list[str]]:
     """
-    Convenience helper: build a Binder-based θ-space NLL for Shera and
-    compute its Fisher Information Matrix at the corresponding θ₀.
+    Convenience helper: build a Binder-based θ-space Gaussian image model and
+    compute its fixed-variance Fisher Information Matrix at θ₀.
 
     Parameters
     ----------
@@ -2218,7 +2341,8 @@ def fim_theta_shera(
     var :
         Per-pixel variance image (ignored for Poisson, but kept for API).
     noise_model :
-        "gaussian" or "poisson".
+        Must be "gaussian". Poisson Fisher construction is not implemented by
+        this fixed-variance Gaussian helper.
     reduce :
         Reduction inside the NLL (passed through to the image kernels).
 
@@ -2236,8 +2360,11 @@ def fim_theta_shera(
     labels : list[str]
         Optional labels aligned with θ (returned when ``return_labels=True``).
     """
+    if noise_model != "gaussian":
+        raise ValueError("fim_theta_shera currently supports only noise_model='gaussian'.")
+
     # Reuse the canonical Binder-based NLL closure
-    loss_fn, theta0 = make_binder_image_nll_fn(
+    _loss_fn, theta0, predict_fn = make_binder_image_nll_fn(
         cfg,
         forward_spec,
         base_forward_store,
@@ -2246,9 +2373,10 @@ def fim_theta_shera(
         var,
         noise_model=noise_model,
         reduce=reduce,
+        return_predict_fn=True,
     )
 
-    F = fim_theta(loss_fn, theta0)
+    F = fim_theta(predict_fn, theta0, var, reduce=reduce)
     if return_labels:
         labels = generate_fim_labels(
             infer_keys,
@@ -2307,14 +2435,22 @@ class EigenThetaMap:
         *,
         truncate: Optional[int] = None,
         whiten: bool = False,
+        psd_rtol: float = 100.0,
     ) -> "EigenThetaMap":
         """
-        Build an EigenThetaMap from a (symmetric, PSD) curvature matrix ``F``.
+        Build an EigenThetaMap from a finite symmetric PSD matrix ``F``.
+
+        ``F`` is symmetrized as ``0.5 * (F + F.T)`` before eigendecomposition.
+        Tiny negative eigenvalues compatible with floating-point roundoff are
+        clamped to zero. Materially negative eigenvalues are rejected because
+        whitening scales by ``sqrt(eigvals)`` and mathematically requires a PSD
+        information/curvature matrix.
 
         Parameters
         ----------
         F :
-            (N, N) Fisher / Hessian / curvature matrix at theta_ref.
+            (N, N) Fisher / curvature matrix at theta_ref. Observed Hessians
+            are only valid here if they are finite and PSD.
         theta_ref :
             Reference θ vector (N,).
         truncate :
@@ -2324,16 +2460,54 @@ class EigenThetaMap:
             If True, coordinates z are scaled by sqrt(λ_j) so that the
             Hessian in z-space is approximately the identity in the retained
             subspace.
+        psd_rtol :
+            Multiplier on machine epsilon for PSD validation. The absolute
+            tolerance is ``psd_rtol * eps * max(max(abs(eigvals)), 1.0)``.
 
         Returns
         -------
         EigenThetaMap
         """
-        F_np = np.asarray(F)
+        F_np = onp.asarray(F, dtype=float)
+        theta_ref_np = onp.asarray(theta_ref, dtype=float)
+        if F_np.ndim != 2 or F_np.shape[0] != F_np.shape[1]:
+            raise ValueError("FIM/curvature matrix must be square.")
+        if theta_ref_np.ndim != 1:
+            raise ValueError("theta_ref must be a 1D parameter vector.")
+        if F_np.shape[0] != theta_ref_np.size:
+            raise ValueError(
+                "FIM/curvature matrix dimension must match theta_ref size: "
+                f"got F.shape={F_np.shape}, theta_ref.size={theta_ref_np.size}."
+            )
+        if not onp.all(onp.isfinite(F_np)):
+            raise ValueError("FIM/curvature matrix contains non-finite values.")
+        if psd_rtol < 0.0 or not onp.isfinite(psd_rtol):
+            raise ValueError("psd_rtol must be finite and non-negative.")
+
+        F_sym = 0.5 * (F_np + F_np.T)
         # eigh → eigenvalues ascending; reorder to descending magnitude for
         # convenience when truncating to the most informative modes.
-        evals, evecs = np.linalg.eigh(F_np)
-        idx = np.argsort(evals)[::-1]
+        evals, evecs = onp.linalg.eigh(F_sym)
+        if not onp.all(onp.isfinite(evals)):
+            raise ValueError("FIM/curvature eigenspectrum contains non-finite values.")
+        spectral_scale = float(max(onp.max(onp.abs(evals)) if evals.size else 0.0, 1.0))
+        eps = onp.finfo(F_sym.dtype).eps
+        psd_tol = float(psd_rtol) * float(eps) * spectral_scale
+        negative_count = int(onp.count_nonzero(evals < 0.0))
+        material_negative_count = int(onp.count_nonzero(evals < -psd_tol))
+        if material_negative_count:
+            raise ValueError(
+                "FIM/curvature matrix is not PSD: "
+                f"minimum eigenvalue={float(onp.min(evals)):.6e}, "
+                f"negative_eigenvalues={negative_count}, "
+                f"material_negative_eigenvalues={material_negative_count}, "
+                f"psd_tolerance={psd_tol:.6e}, "
+                f"spectral_scale={spectral_scale:.6e}."
+            )
+        if negative_count:
+            evals = onp.where(evals < 0.0, 0.0, evals)
+
+        idx = onp.argsort(evals)[::-1]
         evals = evals[idx]
         evecs = evecs[:, idx]
 
@@ -2343,7 +2517,7 @@ class EigenThetaMap:
             evecs = evecs[:, :k]
 
         return cls(
-            theta_ref=np.asarray(theta_ref),
+            theta_ref=np.asarray(theta_ref_np),
             eigvecs=np.asarray(evecs),
             eigvals=np.asarray(evals),
             whiten=whiten,
@@ -2412,4 +2586,4 @@ def loglikelihood(model, data, var):
 
 def loss_fn(model, data, var):
     """Negative log-likelihood (loss function)."""
-    return -np.nansum(loglikelihood(model, data, var))
+    return -np.sum(loglikelihood(model, data, var))

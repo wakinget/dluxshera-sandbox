@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -12,6 +13,8 @@ from dluxshera.systems.three_plane import (
 from dluxshera.params.spec import build_inference_spec_basic
 from dluxshera.params.store import ParameterStore
 from dluxshera.params.packing import pack_params as store_pack_params, unpack_params as store_unpack_params
+
+jax.config.update("jax_enable_x64", True)
 
 
 def test_eigen_helper_quadratic_roundtrip_and_descent():
@@ -188,3 +191,111 @@ def test_eigen_and_pure_theta_share_binder_loss():
     assert pure_dist < init_dist
     assert eigen_dist < init_dist
     assert abs(pure_dist - eigen_dist) < 0.25 * init_dist
+
+
+def test_run_shera_image_gd_eigen_rejects_automatic_poisson_fisher():
+    with pytest.raises(ValueError, match="Fisher preconditioning.*gaussian"):
+        run_shera_image_gd_eigen(
+            data=jnp.ones((2, 2)),
+            var=jnp.ones((2, 2)),
+            noise_model="poisson",
+            num_steps=0,
+        )
+
+
+def test_run_shera_image_gd_eigen_custom_loss_allows_non_gaussian_label():
+    theta_true = jnp.array([1.0])
+
+    def loss_fn(theta):
+        return 0.5 * jnp.sum((theta - theta_true) ** 2)
+
+    results = run_shera_image_gd_eigen(
+        loss_fn=loss_fn,
+        theta0=jnp.array([2.0]),
+        noise_model="poisson",
+        num_steps=3,
+        learning_rate=0.1,
+        whiten=True,
+    )
+
+    assert jnp.isfinite(results.loss_history[-1])
+    assert float(results.loss_history[-1]) < float(results.loss_history[0])
+
+
+def test_run_shera_image_gd_eigen_rejects_nonfinite_loss():
+    def loss_fn(theta):
+        return jnp.where(theta[0] == theta[0], jnp.nan, 1.0)
+
+    with pytest.raises(FloatingPointError, match="quantity=loss"):
+        run_shera_image_gd_eigen(
+            loss_fn=loss_fn,
+            theta0=jnp.array([0.0]),
+            num_steps=1,
+            learning_rate=0.1,
+            whiten=True,
+            fim_kwargs={"predict_fn": lambda theta: theta, "var": 1.0},
+        )
+
+
+def test_run_shera_image_gd_eigen_rejects_nonfinite_gradient():
+    @jax.custom_jvp
+    def finite_loss_bad_grad(theta):
+        return theta[0] * 0.0 + 1.0
+
+    @finite_loss_bad_grad.defjvp
+    def finite_loss_bad_grad_jvp(primals, tangents):
+        theta, = primals
+        tangent, = tangents
+        return finite_loss_bad_grad(theta), tangent[0] * jnp.asarray(jnp.nan, dtype=theta.dtype)
+
+    with pytest.raises(FloatingPointError, match="quantity=gradient"):
+        run_shera_image_gd_eigen(
+            loss_fn=finite_loss_bad_grad,
+            theta0=jnp.array([0.0]),
+            num_steps=1,
+            learning_rate=0.1,
+            whiten=True,
+            fim_kwargs={"predict_fn": lambda theta: theta, "var": 1.0},
+        )
+
+
+def test_run_shera_image_gd_eigen_rejects_nonfinite_optimizer_update():
+    def loss_fn(theta):
+        return theta[0] * 0.0 + 1.0
+
+    with pytest.raises(FloatingPointError, match="quantity=optimizer_update"):
+        run_shera_image_gd_eigen(
+            loss_fn=loss_fn,
+            theta0=jnp.array([1.0]),
+            num_steps=1,
+            learning_rate=float("inf"),
+            whiten=True,
+        )
+
+
+def test_run_shera_image_gd_eigen_rejects_nonfinite_proposed_z(monkeypatch):
+    class _HugeFiniteUpdate:
+        def init(self, params):
+            return None
+
+        def update(self, updates, state, params=None):
+            del updates, params
+            return jnp.asarray([np.finfo(np.float64).max], dtype=jnp.float64), state
+
+    monkeypatch.setattr(
+        "dluxshera.inference.inference.optax.adam",
+        lambda _learning_rate: _HugeFiniteUpdate(),
+    )
+
+    def loss_fn(theta):
+        return theta[0] * 0.0 + 1.0
+
+    with pytest.raises(FloatingPointError, match="quantity=proposed_z"):
+        run_shera_image_gd_eigen(
+            loss_fn=loss_fn,
+            theta0=jnp.asarray([np.finfo(np.float64).max], dtype=jnp.float64),
+            theta_ref=jnp.asarray([0.0], dtype=jnp.float64),
+            num_steps=1,
+            learning_rate=0.1,
+            whiten=False,
+        )

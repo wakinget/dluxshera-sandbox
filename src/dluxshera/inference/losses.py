@@ -50,8 +50,9 @@ def gaussian_image_nll(
         \mathcal{L} = \tfrac{1}{2} \left[\frac{(m - d)^2}{\sigma^2} + \log(2\pi
         \sigma^2)\right]
 
-    where ``m`` = ``pred``, ``d`` = ``data``, and ``var`` = ``σ²``. NaNs in the
-    inputs are handled by the ``nan`` reduction variants.
+    where ``m`` = ``pred``, ``d`` = ``data``, and ``var`` = ``σ²``. Non-finite
+    values are intentionally not masked: NaNs/Infs in the inputs propagate
+    through the reduction. Use an explicit mask upstream for masked pixels.
     """
     pred = jnp.asarray(pred)
     data = jnp.asarray(data)
@@ -60,9 +61,9 @@ def gaussian_image_nll(
     nll = 0.5 * ((pred - data) ** 2 / var + jnp.log(2.0 * jnp.pi * var))
 
     if reduce == "sum":
-        return jnp.nansum(nll)
+        return jnp.sum(nll)
     if reduce == "mean":
-        return jnp.nanmean(nll)
+        return jnp.mean(nll)
     if reduce is None:
         return nll
 

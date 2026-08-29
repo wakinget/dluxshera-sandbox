@@ -73,6 +73,7 @@ from dluxshera.inference.optimization import (
     EigenThetaMap,
     fim_theta,
     generate_fim_labels,
+    hessian_theta,
     make_binder_nll_fn,
     map_labels_to_keys,
     normalize_early_stopping_config,
@@ -798,16 +799,27 @@ def _build_fim_cache_key_payload(
     cfg_hash: str,
     forward_spec_hash: str,
     theta_true_hash: str,
+    variance_hash: str,
     loss_kind: str,
+    reduce: str = "sum",
+    prior_hash: str | None = None,
 ) -> dict[str, Any]:
-    """Build a structured FIM-cache payload to hash into a cache key."""
+    """Build a structured FIM/metric-cache payload to hash into a cache key."""
+    if loss_kind == "map":
+        fim_semantics = "fixed_variance_gaussian_fisher_plus_prior_hessian_v1"
+    else:
+        fim_semantics = "fixed_variance_gaussian_fisher_v1"
     return {
+        "fim_semantics": fim_semantics,
         "infer_keys": infer_keys,
         "model_config_id": system_label,
         "cfg_hash": cfg_hash,
         "forward_spec_hash": forward_spec_hash,
         "theta_true_hash": theta_true_hash,
+        "variance_hash": variance_hash,
+        "reduce": reduce,
         "loss_kind": loss_kind,
+        "prior_hash": prior_hash,
     }
 
 
@@ -2621,7 +2633,7 @@ def main() -> None:
 
         noise_model = "gaussian"
         reduce = "sum"
-        nll_loss_fn, _ = make_binder_nll_fn(
+        nll_loss_fn, _, predict_fn = make_binder_nll_fn(
             binder=binder_infer,
             infer_keys=infer_keys,
             data=data,
@@ -2629,6 +2641,7 @@ def main() -> None:
             noise_model=noise_model,
             reduce=reduce,
             theta0_store=truth_store_infer,
+            return_predict_fn=True,
         )
         fim_labels = generate_fim_labels(
             infer_keys,
@@ -2692,11 +2705,12 @@ def main() -> None:
         }
         init_overrides_flat = _flatten_store_overrides(init_overrides)
         prior_overrides = _migrate_key_mapping(run_spec.get("prior_overrides") or {})
+        run_prior_spec = prior_spec
+        effective_prior_info = prior_info
 
         if init_mode == "prior":
             # Per-run prior overrides only affect prior sampling and do not
             # change init.mode semantics.
-            run_prior_spec = prior_spec
             if prior_overrides:
                 run_prior_info, applied_keys = _apply_prior_overrides(
                     prior_info,
@@ -2705,6 +2719,7 @@ def main() -> None:
                     base_store=base_store_infer,
                 )
                 if applied_keys:
+                    effective_prior_info = run_prior_info
                     cache_key = _stable_hash_payload(run_prior_info)
                     run_prior_spec = prior_spec_cache.get(cache_key)
                     if run_prior_spec is None:
@@ -2834,15 +2849,27 @@ def main() -> None:
         loss_true = float(loss_fn(theta_true))
 
         fim_point = theta_true
-        # FIM cache key includes loss_kind so MAP and NLL cache separately.
+        # Metric cache key includes loss_kind/semantics so MAP posterior
+        # metrics and NLL likelihood Fishers cache separately.
         cache_key_payload = _build_fim_cache_key_payload(
             infer_keys=infer_keys,
             system_label=system_label,
             cfg_hash=cfg_hash,
             forward_spec_hash=forward_spec_hash,
             theta_true_hash=_hash_array_bytes(theta_true),
+            variance_hash=_hash_array_bytes(data_var),
             loss_kind=loss_kind,
+            reduce=reduce,
+            prior_hash=(
+                _stable_hash_payload(effective_prior_info)
+                if loss_kind == "map"
+                else None
+            ),
         )
+        precond_meta_base = {
+            **precond_meta_base,
+            "metric_semantics": cache_key_payload["fim_semantics"],
+        }
         fim_cache_key = _stable_hash_payload(cache_key_payload)[:12]
         cache_key = json.dumps(cache_key_payload, sort_keys=True, default=str)
         cache_entry = fim_cache.get(cache_key)
@@ -2862,7 +2889,21 @@ def main() -> None:
             fim_cache_hit = False
         else:
             print("FIM cache miss; computing new FIM...")
-            F = fim_theta(loss_fn, fim_point)
+            F = fim_theta(predict_fn, fim_point, data_var, reduce=reduce)
+            if loss_kind == "map":
+                def prior_metric_loss(theta: np.ndarray) -> np.ndarray:
+                    store_theta = store_unpack_params(
+                        inference_subspec,
+                        theta,
+                        init_store,
+                    )
+                    return run_prior_spec.quadratic_penalty(
+                        store_theta,
+                        center_store=init_store,
+                        keys=infer_keys,
+                    )
+
+                F = F + hessian_theta(prior_metric_loss, fim_point)
             fim_diag = jnp.diag(F)
             fim_cache_hit = False
             fim_cache[cache_key] = {"F": F, "fim_diag": fim_diag}

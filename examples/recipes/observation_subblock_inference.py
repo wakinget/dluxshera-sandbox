@@ -84,7 +84,7 @@ from dluxshera.inference.optimization import (
     normalize_early_stopping_config,
     build_fim_diagonal_preconditioner,
     build_schedule_factor_history,
-    fim_theta,
+    hessian_theta,
     run_shera_gd,
 )
 from dluxshera.inference.structured_preconditioning import (
@@ -1992,7 +1992,7 @@ def _build_theta_preconditioning_bundle(
     )
 
     theta_ref_vec = jnp.asarray(theta_ref)
-    fim = np.asarray(fim_theta(loss_fn, theta_ref_vec), dtype=float)
+    fim = np.asarray(hessian_theta(loss_fn, theta_ref_vec), dtype=float)
     if fim.ndim != 2 or fim.shape[0] != fim.shape[1]:
         raise ValueError("Theta-space curvature must be a square matrix.")
     if fim.shape[0] != int(theta_ref_vec.size):

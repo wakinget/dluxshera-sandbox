@@ -28,6 +28,7 @@ from dluxshera.config.resolver import resolve_config, resolve_system_config
 from dluxshera.inference.optimization import (
     fim_theta,
     generate_fim_labels,
+    hessian_theta,
     make_binder_nll_fn,
 )
 from dluxshera.inference.prior import PriorSpec
@@ -618,8 +619,9 @@ def condition_manifest(condition: SmearCondition) -> dict[str, Any]:
         "parameter_count_expected": PARAMETER_COUNT,
         "infer_keys": list(INFER_KEYS),
         "fim_theta_semantics": (
-            "current fim_theta is a direct jax.hessian(loss_fn)(theta_ref) wrapper, "
-            "so optional exact-Hessian diagnostics are redundant unless fim_theta changes"
+            "fim_theta computes the fixed-variance Gaussian Fisher J.T W J "
+            "from the Binder prediction Jacobian; hessian_theta computes "
+            "observed scalar-loss curvature when exact Hessian diagnostics are requested"
         ),
     }
     return payload
@@ -1043,7 +1045,7 @@ def compute_derivative_diagnostics(
     data_var = _deterministic_noiseless_variance(data_psf, floor=1.0)
 
     inference_subspec = forward_spec_infer.subset(INFER_KEYS)
-    nll_loss_fn, _ = make_binder_nll_fn(
+    nll_loss_fn, _, predict_fn = make_binder_nll_fn(
         binder=binder_infer,
         infer_keys=INFER_KEYS,
         data=data,
@@ -1051,6 +1053,7 @@ def compute_derivative_diagnostics(
         noise_model="gaussian",
         reduce="sum",
         theta0_store=truth_store_infer,
+        return_predict_fn=True,
     )
     theta_true = np.asarray(pack_params(inference_subspec, truth_store_infer), dtype=float)
     labels = generate_fim_labels(INFER_KEYS, cfg=inference_system_cfg, store=truth_store_infer)
@@ -1066,7 +1069,7 @@ def compute_derivative_diagnostics(
 
     loss_truth = float(nll_loss_fn(theta_true))
     gradient = np.asarray(jax.grad(nll_loss_fn)(theta_true), dtype=float)
-    F = np.asarray(fim_theta(nll_loss_fn, theta_true), dtype=float)
+    F = np.asarray(fim_theta(predict_fn, theta_true, data_var), dtype=float)
     schur = _schur_diagnostics(F, labels_by_key=labels_by_key)
     delta_F = _solve_linearized(F, gradient)
 
@@ -1074,7 +1077,7 @@ def compute_derivative_diagnostics(
     delta_H = None
     hessian_diag: dict[str, Any] = {"computed": False}
     if include_hessian:
-        H = np.asarray(jax.hessian(nll_loss_fn)(theta_true), dtype=float)
+        H = np.asarray(hessian_theta(nll_loss_fn, theta_true), dtype=float)
         delta_H = _solve_linearized(H, gradient)
         hessian_diag = {
             "computed": True,

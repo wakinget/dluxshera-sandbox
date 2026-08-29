@@ -3859,7 +3859,7 @@ def _evaluate_fisher_only(
             fisher_method=fisher_method,
         )
         fim = np.asarray(
-            recipe.fim_theta(
+            recipe.hessian_theta(
                 context["objective_bundle"].total_loss_fn,
                 theta_ref,
             ),

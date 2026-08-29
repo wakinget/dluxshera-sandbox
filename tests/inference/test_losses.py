@@ -2,6 +2,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from dluxshera.inference.losses import gaussian_image_nll
+from dluxshera.inference.optimization import (
+    gaussian_loglikelihood_image,
+    poisson_loglikelihood_image,
+)
 
 
 def test_gaussian_image_nll_matches_closed_form_sum():
@@ -26,3 +30,23 @@ def test_gaussian_image_nll_supports_mean_and_none():
 
     mean_loss = gaussian_image_nll(pred, data, var, reduce="mean")
     np.testing.assert_allclose(np.array(mean_loss), np.array(expected_per_pixel.mean()))
+
+
+def test_gaussian_image_nll_nan_prediction_propagates_for_sum_and_mean():
+    pred = jnp.array([jnp.nan, jnp.nan])
+    data = jnp.array([1.0, 2.0])
+    var = jnp.ones_like(data)
+
+    assert jnp.isnan(gaussian_image_nll(pred, data, var, reduce="sum"))
+    assert jnp.isnan(gaussian_image_nll(pred, data, var, reduce="mean"))
+
+
+def test_legacy_likelihood_reductions_do_not_skip_nans():
+    model = jnp.array([jnp.nan, jnp.nan])
+    data = jnp.array([1.0, 2.0])
+    var = jnp.ones_like(data)
+
+    assert jnp.isnan(gaussian_loglikelihood_image(model, data, var, reduce="sum"))
+    assert jnp.isnan(gaussian_loglikelihood_image(model, data, var, reduce="mean"))
+    assert jnp.isnan(poisson_loglikelihood_image(model, data, reduce="sum"))
+    assert jnp.isnan(poisson_loglikelihood_image(model, data, reduce="mean"))

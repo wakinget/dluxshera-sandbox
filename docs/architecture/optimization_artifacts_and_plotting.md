@@ -280,12 +280,13 @@ Block semantics (e.g., ‘all primary Zernikes share one LR’) are implemented 
 ### Curvature sources for learning-rate construction
 We aim to derive lr_scale from a curvature proxy. We explicitly distinguish “what the optimizer needs” (a nonnegative vector of curvature magnitudes) from “what we call it” (Fisher, Hessian, Gauss–Newton, empirical Fisher).
 
-When using FIM-based preconditioning, we compute the FIM via fim_theta(loss_fn, theta_ref), where loss_fn is the same θ-space loss used during optimization. This avoids misalignment between the FIM and the actual objective.
+When using fixed-variance Gaussian FIM-based preconditioning, we compute the FIM via `fim_theta(predict_fn, theta_ref, var)`, where `predict_fn` is the same Binder image-prediction path used by the likelihood. `hessian_theta(loss_fn, theta_ref)` remains available for observed scalar-loss curvature, but that object is not generally the Fisher matrix under model mismatch.
 
 Candidate curvature definitions (diagonal-only preferred):
 
 1) Diagonal Fisher Information Matrix (FIM) (idealized target)
 - FIM is often defined as: F(θ) = E[ (∂/∂θ log p(y|θ)) (∂/∂θ log p(y|θ))^T ]
+- For the current independent Gaussian image likelihood with fixed, θ-independent variance, the implemented dense form is `F = J.T @ W @ J`.
 - For our purposes, we typically only need diag(F), a D-vector.
 
 2) Empirical Fisher / gradient-statistics (practical, robust)

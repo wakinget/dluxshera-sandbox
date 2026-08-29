@@ -8,7 +8,7 @@ Some parameter combinations are far better constrained than others. Working in a
 
 ## Where in the code?
 - `dluxshera.inference.optimization.EigenThetaMap` provides the core mapping helpers (`from_fim`, `z_from_theta`, `theta_from_z`).
-- `dluxshera.inference.optimization.fim_theta(loss_fn, theta_ref)` computes the local Fisher Information Matrix; `fim_theta_shera(...)` is a convenience wrapper around the same idea for SHERA-specific setups.
+- `dluxshera.inference.optimization.fim_theta(predict_fn, theta_ref, var)` computes the fixed-variance Gaussian Fisher Information Matrix from the image prediction Jacobian; `hessian_theta(loss_fn, theta_ref)` computes observed scalar-loss curvature when that is actually desired. `fim_theta_shera(...)` is a Binder convenience wrapper around the Gaussian Fisher path.
 - `dluxshera.inference.inference.run_shera_image_gd_eigen(...)` is the turnkey eigen-GD runner built for SHERA image inference.
 - `dluxshera.inference.optimization.run_shera_gd(...)` can also run eigen-GD with the right preparation; see `examples/recipes/canonical_astrometry.py` for a complete workflow.
 
@@ -78,7 +78,17 @@ The recommended validation sequence is:
 4. Evaluate `eigen_damped` as a production candidate.
 
 ## Math sketch
-Let θ ∈ R^D be the primitive parameter vector used by the optimiser. Choose a reference point θ_ref and evaluate a local Fisher Information Matrix F(θ_ref). With eigen-decomposition
+Let θ ∈ R^D be the primitive parameter vector used by the optimiser. For independent Gaussian pixels with fixed, θ-independent variance, choose a reference point θ_ref and evaluate the image Jacobian J = ∂m(θ_ref)/∂θ. The Fisher/Gauss-Newton information matrix is
+
+    F = Jᵀ W J,   W = diag(1 / var)
+
+This is PSD by construction up to numerical roundoff. It is not generally equal to the observed NLL Hessian under model mismatch:
+
+    H_NLL = Jᵀ W J + residual-dependent second-order model terms
+
+At a matched zero-residual solution, the residual-dependent term vanishes and the two agree locally. Under deliberate model mismatch the observed Hessian can be indefinite, which is invalid for eigen whitening. `EigenThetaMap.from_fim` therefore requires a finite PSD matrix and rejects material negative eigenvalues.
+
+With eigen-decomposition
 
     F = V Λ Vᵀ,   Λ ≥ 0
 
@@ -108,13 +118,13 @@ Practical caveats:
 Whitening conceptually means scaling each retained eigen direction by √λ so that a unit step in z corresponds to an equal-curvature step in θ. When truncating, dropped modes are set to zero in z, and the reconstructed θ stays in the retained subspace around θ_ref.
 
 ## Typical workflow
-For a worked end-to-end routine, `examples/recipes/canonical_astrometry.py` shows how to build the loss, compute the FIM, and run eigen-GD.
+For a worked end-to-end routine, `examples/recipes/canonical_astrometry.py` shows how to build the loss and matching prediction function, compute the FIM, and run eigen-GD.
 
 High-level pseudocode for the same flow:
 
-    loss_fn = make_binder_image_nll_fn(...)
+    loss_fn, theta0, predict_fn = make_binder_image_nll_fn(..., return_predict_fn=True)
     theta_ref = theta0  # or a later iterate
-    F = fim_theta(loss_fn, theta_ref)
+    F = fim_theta(predict_fn, theta_ref, var)
     eigen_map = EigenThetaMap.from_fim(F, theta_ref, truncate=K, whiten=True)
     z0 = eigen_map.z_from_theta(theta0)
     z_star = run_gd_in_z(loss_fn, z0, eigen_map)

@@ -339,7 +339,7 @@ def main(
     _write_json(results_dir / "manifest.json", _coerce_jsonable(manifest))
 
     print("Building the loss function...")
-    nll_loss_fn, _ = make_binder_nll_fn(
+    nll_loss_fn, _, predict_fn = make_binder_nll_fn(
         binder=binder,
         infer_keys=infer_keys,
         data=data,
@@ -347,6 +347,7 @@ def main(
         noise_model="gaussian",
         reduce="sum",
         theta0_store=truth_store,
+        return_predict_fn=True,
     )
     fim_labels = generate_fim_labels(infer_keys, cfg=system_cfg, store=truth_store)
 
@@ -355,7 +356,7 @@ def main(
 
     print("Computing Fisher Information Matrix (FIM) for preconditioning...")
     fim_point = theta_true
-    F = fim_theta(nll_loss_fn, fim_point)
+    F = fim_theta(predict_fn, fim_point, data_var)
     if save_plots:
         plot_fim(
             F,
