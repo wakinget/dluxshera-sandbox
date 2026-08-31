@@ -13,11 +13,20 @@ It is intentionally brief and points to canonical sources.
 From repository root:
 
 ```bash
-# Install (editable)
+# Core/headless install
 python -m pip install -e .
 
-# If you need dev tools / test extras
-python -m pip install -r requirements-dev.txt
+# Local notebook environment
+python -m pip install -e ".[notebooks]"
+
+# ML environment
+python -m pip install -e ".[ml]"
+
+# Full local ML development environment
+python -m pip install -e ".[ml,notebooks,dev]"
+
+# Optional desktop GUI backend
+python -m pip install -e ".[gui]"
 
 # Run tests
 pytest
@@ -35,6 +44,30 @@ Import-hygiene checks (if relevant to the task):
 python devtools/check_no_src_imports.py
 python devtools/check_no_examples_imports.py
 ```
+
+`pyproject.toml` is the authoritative Python dependency definition. The
+top-level `requirements.txt` and `requirements-dev.txt` files are thin pip
+convenience wrappers and intentionally do not duplicate package pins.
+
+PyTorch is optional and hardware-neutral in project metadata. Local macOS
+development may use the normal pip wheel and MPS where supported; CPU-only HPC
+environments may use a CPU build; CUDA cluster environments should install the
+PyTorch build appropriate for the available CUDA/runtime before or as part of
+environment setup. Headless cluster jobs generally do not need the `gui` extra.
+
+Recommended external CLI tools:
+
+```bash
+# macOS / Homebrew
+brew install ripgrep
+
+# Conda / HPC
+conda install -c conda-forge ripgrep
+```
+
+Some repository devtools and agent workflows use `git` and ripgrep (`rg`).
+`rg` is an external executable, not a Python runtime dependency, and tools may
+fall back poorly or fail when it is absent.
 
 ## Optional: generate a context snapshot (not committed)
 If a task benefits from a full “repo index” (tree + symbols + doc summaries),

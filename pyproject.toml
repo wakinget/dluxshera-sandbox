@@ -21,7 +21,6 @@ dependencies = [
   "scipy>=1.9",
   "astropy>=5.0",
   "matplotlib>=3.9",
-  "PyQt6",
   "tqdm>=4.67",
   "pandas>=1.5",
   "numpyro==0.18.0",
@@ -31,6 +30,24 @@ dependencies = [
   "jaxtyping>=0.2.36",
   "zodiax>=0.4.1,<0.5",
   "interpax==0.3.12",
+]
+
+[project.optional-dependencies]
+ml = [
+  "torch>=2.2,<3",
+  "PyYAML>=6.0",
+]
+notebooks = [
+  "ipykernel>=6.31",
+  "jupyterlab>=4.4",
+  "ipywidgets",
+  "jupyterlab_widgets",
+]
+dev = [
+  "pytest>=7.4",
+]
+gui = [
+  "PyQt6",
 ]
 
 [tool.setuptools.packages.find]

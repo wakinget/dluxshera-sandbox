@@ -848,3 +848,154 @@ Current implementation/docs to consult while turning this plan into code:
   - `SHERA_pair_grid_nuisance_comparison.ipynb`
   - `eigenmodes_test.ipynb`
   - `SHERA_eigenmode_degeneracy_comparison.ipynb`
+
+
+## 22. ML Experiment Program Status
+
+This section is the curated scientific ledger for model experiments. It should
+summarize study intent, fixed artifacts, and headline outcomes without becoming
+a run-by-run machine log. Future W&B integration should live at the Run level.
+
+### 22.1 Permanent nomenclature
+
+- **Study:** broad scientific research question, e.g. `ML-S01`.
+- **Experiment:** controlled test inside a Study, e.g. `ML-S01-E01`.
+- **Run:** one concrete training execution, e.g. `ML-S01-E01-R001`.
+- **Shared artifact:** reusable versioned object, e.g. `PREP-V3-v1`,
+  `SPLIT-ML-v1`, `PAIR-EVAL-v1`, or future `LIN-EVAL-v1`.
+
+Ordered image pairs always use:
+
+\[
+A=\text{current/reference/model state}, \qquad
+B=\text{target/observation state},
+\]
+
+with supervised target:
+
+\[
+\Delta z_{\mathrm{science}} = z_B-z_A.
+\]
+
+### 22.2 Study registry
+
+| Study | name | status | notes |
+|---|---|---|---|
+| ML-S01 | Pairwise Correction Learnability | active | First shared-CNN regression substrate and clean pair baseline. |
+| ML-S02 | Registration Nuisance Robustness | provisional/planned | Relax same-nuisance pairing and measure robustness to registration changes. |
+| ML-S03 | Observation-Noise Robustness | provisional/planned | Enable dynamic observation noise and fixed noisy eval manifests. |
+| ML-S04 | Learned vs Local-Linear Correction | provisional/planned | Compare ML corrections with Binder/Jacobian/Fisher linear evaluation. |
+| ML-S05 | Architecture / Representation Study | provisional/planned | Controlled architecture and comparator changes after S01 baseline. |
+| ML-S06 | Fisher / Eigenmode Structure | provisional/planned | Diagnose and possibly weight errors by Fisher/eigenmode structure. |
+| ML-S07 | Joint-State Generalization | provisional/planned | Move beyond sparse pair-grid structure toward joint-state samples. |
+| ML-S08 | ADORA Initialization / Capture Range | provisional/planned | Test whether learned corrections expand ADORA convergence capture range. |
+
+### 22.3 ML-S01 record
+
+**Study:** `ML-S01` — Pairwise Correction Learnability
+
+**Research question:** Can a simple shared-weight image encoder estimate
+Fisher-scaled science-state corrections from noiseless image pairs under
+controlled registration?
+
+**Initial shared artifacts:**
+
+- `PREP-V3-v1`: Wave 1 prepared sample-centric image/state store.
+- `SPLIT-ML-v1`: reusable science-state and nuisance-realization split registry.
+- `PAIR-EVAL-v1`: frozen ordered-pair evaluation manifests.
+
+**Initial experiments:**
+
+- `ML-S01-E00` — Pipeline / tiny-overfit sanity.
+- `ML-S01-E01` — Clean same-nuisance held-out science regression.
+- `ML-S01-E02` — Comparator representation ablation.
+
+| ID | research objective | pair policy | nuisance policy | noise policy | split artifact | model/config | status | headline result | notes |
+|---|---|---|---|---|---|---|---|---|---|
+| ML-S01-E00 | Verify image loading, target construction, shared encoder, gradients, checkpointing, and metrics end-to-end. | Same nuisance, different science; tiny deterministic development pairs; reverse pairs available. | Training nuisance partition only. | Off. | `SPLIT-ML-v1` | Small shared CNN, `concat_diff`, MSE on `z_B-z_A`. | implemented / pending real-data run | Pending. | Success criterion is substantial overfit of a tiny noiseless set; not a generalization result. |
+| ML-S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Shared CNN, default `concat_diff`, AdamW. | implemented / ready to run | Pending. | This is not yet a nuisance-invariance study; nuisance is fixed inside each pair. |
+| ML-S01-E02 | Compare whether absolute-state context improves correction regression. | Same as E01. | Same as E01. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Switch comparator between `concat_diff` and `difference`. | ready / not launched | Pending. | No new architecture required. |
+
+### 22.4 Split and pair artifact semantics
+
+The prepared dataset remains authoritative and sample-centric: one prepared row
+is one rendered image/state. ML pairs are references into that store, not copied
+image arrays. Pair manifests carry stable `pair_record_id`, `sample_a_id`, and
+`sample_b_id` keys so future physics baselines can join predictions to the same
+ordered pairs.
+
+PyTorch is an optional ML-layer dependency, not a core `dluxshera` import
+requirement. Use the project ML extra, e.g. `python -m pip install -e .[ml]`,
+before running the CNN model or training CLI.
+
+Science-state splitting uses the prepared physical-delta identity
+(`group_ids.physical_delta_sha256`) rather than `pair_id`, grid cell, nuisance
+ID, or filenames. Nuisance realization splitting is recorded separately and may
+use explicit assignments or deterministic fraction-based assignments. Pair
+generation happens after these state-level splits.
+
+Recommended configurable layout:
+
+```text
+<scratch>/ml_data/
+  PREP-V3-v1/
+  catalogs/
+
+<project/results>/ml_experiments/
+  splits/
+  pair_manifests/
+  ML-S01/
+    ML-S01-E00/
+    ML-S01-E01/
+```
+
+### 22.5 Future local-linear evaluation convention
+
+The future local-linear physics baseline should use the ordered pair convention
+above. For pair `(A, B)`, define `r_AB = I_B - I_A` and evaluate the image
+Jacobian at the reference state `A`:
+
+\[
+J_A = \left.\frac{dI}{d\theta}\right|_{\theta_A}.
+\]
+
+For the initial shot-noise-dominated convention, use a numerically safe variance
+model derived from the noiseless reference image `A`, matching the existing
+canonical/Fisher estimator where practical. Then:
+
+\[
+F_A = J_A^T W_A J_A, \qquad
+g_{AB} = J_A^T W_A (I_B-I_A),
+\]
+
+and:
+
+\[
+\Delta\theta_{\mathrm{linear}} = F_A^{-1}g_{AB}.
+\]
+
+Under this convention, `J_A`, `W_A`, and `F_A` depend only on the reference
+state `A`; `B` enters through the residual. Multiple `B` targets can therefore
+reuse the same `A`-state linearization/Fisher information. This should be a
+future evaluation artifact keyed by `pair_record_id`, not a model-training
+input. Do not confuse this Gauss-Newton/Fisher baseline with the exact nonlinear
+loss Hessian, which may contain residual-dependent second-order terms.
+
+### 22.6 Follow-up: nominal V3 Fisher artifact
+
+The V3 generator already computes a nominal FIM to derive Fisher-diagonal
+parameter sigmas. A small future capability patch should preserve that already
+computed nominal information without regenerating the dataset:
+
+- reference theta/state;
+- reference image or unambiguous reference-image identity;
+- full nominal FIM;
+- FIM parameter labels;
+- Fisher sigmas;
+- variance/weighting convention;
+- variance floor or low-count handling;
+- exposure/count normalization needed to reproduce the FIM.
+
+Do not add per-sample Jacobians, FIMs, or Hessians to the prepared image store.
+Those objects are large and should be generated later only as explicit
+evaluation artifacts for selected reference states.
