@@ -18,6 +18,8 @@ Working practices, priorities, and lessons learned.
 - [Code structure](dev/code_structure.md)
 - [Lessons learned](dev/lessons_learned.md)
 - [ML training dataset V2 workflow](dev/ml_training_dataset_v2.md)
+- [ML training dataset V3 workflow](dev/ml_training_dataset_v3.md)
+- [Prepared ML dataset infrastructure](dev/ml_prepared_dataset_wave1.md)
 - [Observation sub-block simulation contract (Phase 4)](dev/obs_subblock_generator_design.md)
 - [Observation sub-block inference design](dev/obs_subblock_inference_design.md)
 - [Structured sub-block preconditioning](dev/subblock_structured_preconditioning.md)

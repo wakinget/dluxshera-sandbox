@@ -371,10 +371,17 @@ def _coerce_sweep_config(raw_cfg: Any, *, fallback: SweepConfig) -> SweepConfig:
 
 def _normalize_sweep_configs(
     *,
-    sweep_keys: list[str],
+    sweep_keys: list[str] | None = None,
+    infer_keys: list[str] | None = None,
     default_cfg: SweepConfig,
     overrides: dict[str, dict[str, Any]],
 ) -> dict[str, SweepConfig]:
+    if sweep_keys is None:
+        if infer_keys is None:
+            raise ValueError("Either sweep_keys or infer_keys must be provided.")
+        sweep_keys = infer_keys
+    elif infer_keys is not None and list(sweep_keys) != list(infer_keys):
+        raise ValueError("sweep_keys and infer_keys were both provided but differ.")
     normalized: dict[str, SweepConfig] = {}
     for key in sweep_keys:
         normalized[key] = _coerce_sweep_config(overrides.get(key), fallback=default_cfg)
@@ -415,6 +422,16 @@ def compute_preview_counts(
         perturbed += 2 * per_parameter_cfg[key].n_magnitudes
     for key, n_components in zernike_component_counts.items():
         perturbed += n_components * (2 * per_parameter_cfg[key].n_magnitudes)
+    return {"nominal": 1, "perturbed": perturbed, "total": 1 + perturbed}
+
+
+def compute_expected_sample_counts(
+    *,
+    n_swept_components: int,
+    n_magnitudes: int,
+) -> dict[str, int]:
+    """Return V2 sample counts for a uniform one-parameter sweep."""
+    perturbed = int(n_swept_components) * (2 * int(n_magnitudes))
     return {"nominal": 1, "perturbed": perturbed, "total": 1 + perturbed}
 
 

@@ -36,6 +36,13 @@ The roadmap deliberately keeps the first experiments simple and interpretable. M
 
 The existing V3 training-dataset workflow is already a strong foundation. It is plan-first, uses Fisher-diagonal parameter scales, writes self-describing manifests/sample metadata, and supports pair-grid, nuisance-replicate, and sparse-mixture concepts. The current pair-grid datasets are therefore useful both as scientific sensitivity atlases and as ML training/evaluation data.
 
+Wave 1 reusable dataset infrastructure is documented in
+`docs/dev/ml_prepared_dataset_wave1.md`.  It implements derived `.npy` array
+shards, sample-centric JSONL indexes, vector-space metadata, coordinate
+transforms, fidelity validation, and deterministic grouped splitting while
+leaving model-specific pair sampling and training code to later experiment
+layers.
+
 The previous analysis used the pair-grid data primarily as a **20-way multi-label classification problem**: identify which two parameters were controlled in a rendered image. They contain several reusable ideas:
 
 - compact CNN encoders;

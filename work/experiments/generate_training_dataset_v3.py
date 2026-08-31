@@ -790,7 +790,7 @@ def _nuisance_for_controlled_axes(
 def _build_pair_grid_plan(
     *,
     parameters: Sequence[ScalarParameter],
-    nuisance_parameters_by_label: Mapping[str, ScalarParameter],
+    nuisance_parameters_by_label: Mapping[str, ScalarParameter] | None = None,
     pair_cfg: Mapping[str, Any],
     nuisance_cfg: Mapping[str, Any],
     seed: int,
@@ -799,6 +799,19 @@ def _build_pair_grid_plan(
     if not bool(pair_cfg.get("enabled", True)):
         return []
     include_self = bool(pair_cfg.get("include_self_pairs", False))
+    if nuisance_parameters_by_label is None:
+        nuisance_parameters_by_label = {param.label: param for param in parameters}
+        if bool(nuisance_cfg.get("enabled", True)):
+            missing_nuisance = [
+                str(key)
+                for key in nuisance_cfg.get("keys", REGISTRATION_NUISANCE_KEYS)
+                if str(key) not in nuisance_parameters_by_label
+            ]
+            if missing_nuisance:
+                raise ValueError(
+                    "nuisance_parameters_by_label was omitted, but requested nuisance keys "
+                    "cannot be resolved from parameters: " + ", ".join(missing_nuisance)
+                )
     nuisance_draws = _build_nuisance_draws(
         parameters_by_label=nuisance_parameters_by_label,
         nuisance_cfg=nuisance_cfg,
@@ -868,7 +881,7 @@ def _normalize_active_count_probs(raw_probs: Mapping[Any, Any]) -> tuple[np.ndar
 def _build_sparse_mixture_plan(
     *,
     parameters: Sequence[ScalarParameter],
-    nuisance_parameters_by_label: Mapping[str, ScalarParameter],
+    nuisance_parameters_by_label: Mapping[str, ScalarParameter] | None = None,
     sparse_cfg: Mapping[str, Any],
     nuisance_cfg: Mapping[str, Any],
     seed: int,
@@ -883,6 +896,19 @@ def _build_sparse_mixture_plan(
     n_samples = int(sparse_cfg.get("n_samples", 0))
     signed = bool((sparse_cfg.get("amplitude_sampling", {}) or {}).get("signed", True))
     sparse_nuisance_enabled = bool((sparse_cfg.get("nuisance", {}) or {}).get("enabled", True))
+    if nuisance_parameters_by_label is None:
+        nuisance_parameters_by_label = {param.label: param for param in parameters}
+        if sparse_nuisance_enabled and bool(nuisance_cfg.get("enabled", True)):
+            missing_nuisance = [
+                str(key)
+                for key in nuisance_cfg.get("keys", REGISTRATION_NUISANCE_KEYS)
+                if str(key) not in nuisance_parameters_by_label
+            ]
+            if missing_nuisance:
+                raise ValueError(
+                    "nuisance_parameters_by_label was omitted, but requested nuisance keys "
+                    "cannot be resolved from parameters: " + ", ".join(missing_nuisance)
+                )
     nuisance_draws = _build_nuisance_draws(
         parameters_by_label=nuisance_parameters_by_label,
         nuisance_cfg={**dict(nuisance_cfg), "n_random": max(1, int(nuisance_cfg.get("n_random", 1))), "include_nominal": False},

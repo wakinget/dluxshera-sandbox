@@ -86,6 +86,22 @@ def test_nuisance_collision_policy_skips_controlled_axis() -> None:
     assert "source.x_position_as" in controlled_x_row["skipped_nuisance_keys"]
 
 
+def test_pair_plan_fallback_rejects_unresolved_requested_nuisance_key() -> None:
+    params = [_param("source.contrast"), _param("source.y_position_as")]
+    with pytest.raises(ValueError, match="requested nuisance keys"):
+        _build_pair_grid_plan(
+            parameters=params,
+            pair_cfg={"enabled": True, "level_mode": "symmetric_grid_from_sweeps", "grid_size": 3},
+            nuisance_cfg={
+                "enabled": True,
+                "include_nominal": False,
+                "n_random": 1,
+                "keys": ["source.x_position_as"],
+            },
+            seed=123,
+        )
+
+
 def test_sparse_mixture_plan_is_deterministic() -> None:
     params = [_param("a"), _param("b"), _param("c")]
     cfg = {
@@ -100,6 +116,22 @@ def test_sparse_mixture_plan_is_deterministic() -> None:
     second = _build_sparse_mixture_plan(parameters=params, sparse_cfg=cfg, nuisance_cfg=nuisance_cfg, seed=9)
     assert [row["active_labels"] for row in first] == [row["active_labels"] for row in second]
     assert [row["theta_delta"] for row in first] == [row["theta_delta"] for row in second]
+
+
+def test_sparse_plan_fallback_rejects_unresolved_requested_nuisance_key() -> None:
+    params = [_param("source.contrast"), _param("source.y_position_as")]
+    with pytest.raises(ValueError, match="requested nuisance keys"):
+        _build_sparse_mixture_plan(
+            parameters=params,
+            sparse_cfg={
+                "enabled": True,
+                "n_samples": 1,
+                "active_count_probs": {1: 1.0},
+                "nuisance": {"enabled": True},
+            },
+            nuisance_cfg={"enabled": True, "keys": ["source.x_position_as"]},
+            seed=9,
+        )
 
 
 def test_build_nuisance_draws_includes_nominal_id_zero() -> None:

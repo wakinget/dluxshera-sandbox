@@ -36,6 +36,17 @@ def test_normalize_sweep_configs_supports_per_parameter_overrides() -> None:
     assert out["b"] == default_cfg
 
 
+def test_normalize_sweep_configs_rejects_conflicting_aliases() -> None:
+    default_cfg = SweepConfig(min_sigma=0.1, max_sigma=10.0, n_magnitudes=8, spacing="log")
+    with pytest.raises(ValueError, match="differ"):
+        _normalize_sweep_configs(
+            sweep_keys=["a"],
+            infer_keys=["b"],
+            default_cfg=default_cfg,
+            overrides={},
+        )
+
+
 def test_sigma_to_delta_conversion_semantics() -> None:
     parameter_sigma = 2.5
     sigma_offset = -3.2
