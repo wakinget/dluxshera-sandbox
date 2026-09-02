@@ -858,9 +858,9 @@ a run-by-run machine log. Future W&B integration should live at the Run level.
 
 ### 22.1 Permanent nomenclature
 
-- **Study:** broad scientific research question, e.g. `ML-S01`.
-- **Experiment:** controlled test inside a Study, e.g. `ML-S01-E01`.
-- **Run:** one concrete training execution, e.g. `ML-S01-E01-R001`.
+- **Study:** broad scientific research question, e.g. `S01`.
+- **Experiment:** controlled test inside a Study, e.g. `S01-E01`.
+- **Run:** one concrete training execution, e.g. `S01-E01-R001`.
 - **Shared artifact:** reusable versioned object, e.g. `PREP-V3-v1`,
   `SPLIT-ML-v1`, `PAIR-EVAL-v1`, or future `LIN-EVAL-v1`.
 
@@ -881,18 +881,18 @@ with supervised target:
 
 | Study | name | status | notes |
 |---|---|---|---|
-| ML-S01 | Pairwise Correction Learnability | active | First shared-CNN regression substrate and clean pair baseline. |
-| ML-S02 | Registration Nuisance Robustness | provisional/planned | Relax same-nuisance pairing and measure robustness to registration changes. |
-| ML-S03 | Observation-Noise Robustness | provisional/planned | Enable dynamic observation noise and fixed noisy eval manifests. |
-| ML-S04 | Learned vs Local-Linear Correction | provisional/planned | Compare ML corrections with Binder/Jacobian/Fisher linear evaluation. |
-| ML-S05 | Architecture / Representation Study | provisional/planned | Controlled architecture and comparator changes after S01 baseline. |
-| ML-S06 | Fisher / Eigenmode Structure | provisional/planned | Diagnose and possibly weight errors by Fisher/eigenmode structure. |
-| ML-S07 | Joint-State Generalization | provisional/planned | Move beyond sparse pair-grid structure toward joint-state samples. |
-| ML-S08 | ADORA Initialization / Capture Range | provisional/planned | Test whether learned corrections expand ADORA convergence capture range. |
+| S01 | Pairwise Correction Learnability | active | First shared-CNN regression substrate and clean pair baseline. |
+| S02 | Registration Nuisance Robustness | provisional/planned | Relax same-nuisance pairing and measure robustness to registration changes. |
+| S03 | Observation-Noise Robustness | provisional/planned | Enable dynamic observation noise and fixed noisy eval manifests. |
+| S04 | Learned vs Local-Linear Correction | provisional/planned | Compare ML corrections with Binder/Jacobian/Fisher linear evaluation. |
+| S05 | Architecture / Representation Study | provisional/planned | Controlled architecture and comparator changes after S01 baseline. |
+| S06 | Fisher / Eigenmode Structure | provisional/planned | Diagnose and possibly weight errors by Fisher/eigenmode structure. |
+| S07 | Joint-State Generalization | provisional/planned | Move beyond sparse pair-grid structure toward joint-state samples. |
+| S08 | ADORA Initialization / Capture Range | provisional/planned | Test whether learned corrections expand ADORA convergence capture range. |
 
-### 22.3 ML-S01 record
+### 22.3 S01 record
 
-**Study:** `ML-S01` — Pairwise Correction Learnability
+**Study:** `S01` — Pairwise Correction Learnability
 
 **Research question:** Can a simple shared-weight image encoder estimate
 Fisher-scaled science-state corrections from noiseless image pairs under
@@ -906,15 +906,15 @@ controlled registration?
 
 **Initial experiments:**
 
-- `ML-S01-E00` — Pipeline / tiny-overfit sanity.
-- `ML-S01-E01` — Clean same-nuisance held-out science regression.
-- `ML-S01-E02` — Comparator representation ablation.
+- `S01-E00` — Pipeline / tiny-overfit sanity.
+- `S01-E01` — Clean same-nuisance held-out science regression.
+- `S01-E02` — Comparator representation ablation.
 
 | ID | research objective | pair policy | nuisance policy | noise policy | split artifact | model/config | status | headline result | notes |
 |---|---|---|---|---|---|---|---|---|---|
-| ML-S01-E00 | Verify image loading, target construction, shared encoder, gradients, checkpointing, and metrics end-to-end. | Same nuisance, different science; tiny deterministic development pairs; reverse pairs available. | Training nuisance partition only. | Off. | `SPLIT-ML-v1` | Small shared CNN, `concat_diff`, MSE on `z_B-z_A`. | implemented / pending real-data run | Pending. | Success criterion is substantial overfit of a tiny noiseless set; not a generalization result. |
-| ML-S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Shared CNN, default `concat_diff`, AdamW. | implemented / ready to run | Pending. | This is not yet a nuisance-invariance study; nuisance is fixed inside each pair. |
-| ML-S01-E02 | Compare whether absolute-state context improves correction regression. | Same as E01. | Same as E01. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Switch comparator between `concat_diff` and `difference`. | ready / not launched | Pending. | No new architecture required. |
+| S01-E00 | Verify image loading, target construction, shared encoder, gradients, checkpointing, and metrics end-to-end. | Same nuisance, different science; tiny deterministic development pairs; reverse pairs available. | Training nuisance partition only. | Off. | `SPLIT-ML-v1` | Small shared CNN, `concat_diff`, MSE on `z_B-z_A`. | implemented / pending real-data run | Pending. | Success criterion is substantial overfit of a tiny noiseless set; not a generalization result. |
+| S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Shared CNN, default `concat_diff`, AdamW. | implemented / ready to run | Pending. | This is not yet a nuisance-invariance study; nuisance is fixed inside each pair. |
+| S01-E02 | Compare whether absolute-state context improves correction regression. | Same as E01. | Same as E01. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Switch comparator between `concat_diff` and `difference`. | ready / not launched | Pending. | No new architecture required. |
 
 ### 22.4 Split and pair artifact semantics
 
@@ -934,6 +934,15 @@ ID, or filenames. Nuisance realization splitting is recorded separately and may
 use explicit assignments or deterministic fraction-based assignments. Pair
 generation happens after these state-level splits.
 
+Dynamic training datasets interpret `pairs_per_epoch` as the total number of
+ordered examples. When `include_reverse=True`, adjacent examples are generated
+from one valid sampled base pair: index `2k` returns `(A, B)` with
+`target_delta_z = z_B - z_A`, and index `2k+1` returns `(B, A)` with the
+negated science, physical, and nuisance deltas. Thus `pairs_per_epoch=2048`
+means 1024 sampled base pairs and 2048 optimizer examples, not a doubled epoch.
+Observation-only dynamic noise is applied after ordering and remains attached
+to the B role.
+
 Recommended configurable layout:
 
 ```text
@@ -944,9 +953,9 @@ Recommended configurable layout:
 <project/results>/ml_experiments/
   splits/
   pair_manifests/
-  ML-S01/
-    ML-S01-E00/
-    ML-S01-E01/
+  S01/
+    S01-E00/
+    S01-E01/
 ```
 
 ### 22.5 Future local-linear evaluation convention

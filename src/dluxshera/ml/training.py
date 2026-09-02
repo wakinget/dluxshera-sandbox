@@ -451,7 +451,21 @@ def train_pairwise_correction(
         pin_memory=(device.type == "cuda"),
     )
 
-    resolved_config = _deep_update(dict(config), {"image_scaling_resolved": scaler.to_dict()})
+    training_pair_stream = {
+        "pairs_per_epoch_ordered": len(train_dataset),
+        "include_reverse": bool(pair_policy.include_reverse),
+        "reverse_pair_augmentation": bool(pair_policy.include_reverse),
+        "base_pairs_per_epoch": len(train_dataset) // 2
+        if pair_policy.include_reverse
+        else len(train_dataset),
+    }
+    resolved_config = _deep_update(
+        dict(config),
+        {
+            "image_scaling_resolved": scaler.to_dict(),
+            "training_pair_stream": training_pair_stream,
+        },
+    )
     write_json(output_dir / "run_config_resolved.json", resolved_config)
     run_manifest = {
         "schema_version": "dluxshera_ml_run_manifest/1",
@@ -478,6 +492,7 @@ def train_pairwise_correction(
             "parameter_count": count_parameters(model),
         },
         "training": training_cfg,
+        "training_pair_stream": training_pair_stream,
         "git": _git_info(),
         "test_evaluated": False,
     }

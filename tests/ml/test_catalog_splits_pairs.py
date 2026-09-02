@@ -17,6 +17,7 @@ from dluxshera.ml import (
     load_pair_manifest,
     load_sample_catalog,
     load_split_registry,
+    make_reverse_pair_record,
     write_pair_manifest,
     write_split_registry,
 )
@@ -243,10 +244,24 @@ def test_pair_sampler_same_nuisance_targets_reverse_and_distance(tmp_path: Path)
     )
     assert 0.5 <= record.fisher_distance_l2 <= 3.0
 
-    reverse = sampler.make_pair_record(b, a, family=record.pair_family, split="train", eval_slice=None)
-    np.testing.assert_allclose(reverse.target_delta_z, -np.asarray(record.target_delta_z))
+    reverse = make_reverse_pair_record(record)
+    assert reverse.pair_record_id != record.pair_record_id
     assert reverse.sample_a_id == record.sample_b_id
     assert reverse.sample_b_id == record.sample_a_id
+    assert reverse.sample_a_index == record.sample_b_index
+    assert reverse.sample_b_index == record.sample_a_index
+    assert reverse.science_a_id == record.science_b_id
+    assert reverse.science_b_id == record.science_a_id
+    assert reverse.nuisance_a_id == record.nuisance_b_id
+    assert reverse.nuisance_b_id == record.nuisance_a_id
+    assert reverse.pair_id_a == record.pair_id_b
+    assert reverse.pair_id_b == record.pair_id_a
+    np.testing.assert_allclose(reverse.target_delta_z, -np.asarray(record.target_delta_z))
+    np.testing.assert_allclose(reverse.target_delta_theta, -np.asarray(record.target_delta_theta))
+    np.testing.assert_allclose(reverse.nuisance_delta, -np.asarray(record.nuisance_delta))
+    assert reverse.fisher_distance_l2 == record.fisher_distance_l2
+    assert reverse.changed_science_dimensions == record.changed_science_dimensions
+    assert reverse.pair_family == record.pair_family
 
 
 def test_pair_sampler_other_family_semantics_and_split_boundaries(tmp_path: Path) -> None:

@@ -8,9 +8,11 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from dluxshera.ml import PairPolicy, generate_split_registry, load_sample_catalog, write_split_registry
+from dluxshera.datasets.schema import read_json
 from dluxshera.ml.models import build_pairwise_correction_model, count_parameters
 from dluxshera.ml.training import (
     default_s01_e00_config,
+    default_s01_e01_config,
     resolve_device,
     train_pairwise_correction,
 )
@@ -51,6 +53,24 @@ def test_resolve_device_explicit_requests_do_not_silently_fallback(
         resolve_device("cuda:1")
     with pytest.raises(RuntimeError, match="MPS.*not available"):
         resolve_device("mps")
+
+
+def test_default_training_configs_use_concise_s01_ids() -> None:
+    e00 = default_s01_e00_config()
+    assert (e00["study_id"], e00["experiment_id"], e00["run_id"]) == (
+        "S01",
+        "S01-E00",
+        "S01-E00-R001",
+    )
+    assert e00["pair_policy"]["policy_id"] == "s01_e00_tiny_same_nuisance_v1"
+
+    e01 = default_s01_e01_config()
+    assert (e01["study_id"], e01["experiment_id"], e01["run_id"]) == (
+        "S01",
+        "S01-E01",
+        "S01-E01-R001",
+    )
+    assert e01["pair_policy"]["policy_id"] == "s01_e01_clean_same_pair_grid_v1"
 
 
 def test_shared_cnn_shapes_comparators_and_gradients() -> None:
@@ -122,3 +142,14 @@ def test_tiny_training_smoke_writes_artifacts_without_test_eval(tmp_path: Path) 
     assert (run_dir / "metrics.json").exists()
     assert (run_dir / "evaluation_predictions.npz").exists()
     assert not (run_dir / "test_predictions.npz").exists()
+    manifest = read_json(run_dir / "run_manifest.json")
+    assert manifest["study_id"] == "S01"
+    assert manifest["experiment_id"] == "S01-E00"
+    assert manifest["run_id"] == "S01-E00-R001"
+    assert manifest["pair_policy"]["include_reverse"] is True
+    assert manifest["training_pair_stream"] == {
+        "pairs_per_epoch_ordered": 16,
+        "include_reverse": True,
+        "reverse_pair_augmentation": True,
+        "base_pairs_per_epoch": 8,
+    }

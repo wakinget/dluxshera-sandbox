@@ -8,9 +8,7 @@ from dluxshera.datasets.schema import json_ready
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Train the ML-S01 pairwise SHERA correction baseline."
-    )
+    parser = argparse.ArgumentParser(description="Train the S01 pairwise SHERA correction baseline.")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--preset", choices=("s01_e00", "s01_e01"), default="s01_e01")
     parser.add_argument("--prepared-root", type=Path, required=True)

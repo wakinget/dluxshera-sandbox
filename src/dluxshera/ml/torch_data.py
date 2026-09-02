@@ -15,7 +15,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in no-torch e
 
 from .catalog import SampleCatalog
 from .noise import NoiseConfig, apply_pair_noise
-from .pairs import PairManifest, PairRecord, PairSampler
+from .pairs import PairManifest, PairRecord, PairSampler, make_reverse_pair_record
 from .scaling import IntensityScaler
 
 __all__ = ["DynamicPairDataset", "PairManifestDataset"]
@@ -32,6 +32,8 @@ def _record_to_tensors(
 ) -> dict[str, Any]:
     image_a = reader.get(int(record.sample_a_index))
     image_b = reader.get(int(record.sample_b_index))
+    # Noise is applied after ordering, so observation-only noise remains tied
+    # to the B role even when a reverse PairRecord swaps physical samples.
     image_a, image_b = apply_pair_noise(
         image_a,
         image_b,
@@ -50,12 +52,17 @@ def _record_to_tensors(
         "target_delta_theta": torch.from_numpy(
             np.asarray(record.target_delta_theta, dtype=np.float32)
         ),
+        "nuisance_delta": torch.from_numpy(np.asarray(record.nuisance_delta, dtype=np.float32)),
         "pair_record_id": record.pair_record_id,
         "sample_a_id": record.sample_a_id,
         "sample_b_id": record.sample_b_id,
         "eval_slice": record.eval_slice or "",
         "pair_family": record.pair_family,
         "fisher_distance_l2": torch.tensor(record.fisher_distance_l2, dtype=torch.float32),
+        "changed_science_dimensions": torch.tensor(
+            record.changed_science_dimensions,
+            dtype=torch.int64,
+        ),
     }
 
 
@@ -102,7 +109,13 @@ class PairManifestDataset(Dataset):
 
 
 class DynamicPairDataset(Dataset):
-    """Generate deterministic dynamic training pairs for a seed and epoch."""
+    """Generate deterministic dynamic training pairs for a seed and epoch.
+
+    ``pairs_per_epoch`` is the total number of ordered examples.  When the
+    sampler policy has ``include_reverse=True``, adjacent indices are generated
+    from one sampled base pair: ``2k`` is ``(A, B)`` and ``2k+1`` is its
+    semantic reverse ``(B, A)``.
+    """
 
     def __init__(
         self,
@@ -119,6 +132,11 @@ class DynamicPairDataset(Dataset):
     ) -> None:
         if int(pairs_per_epoch) < 1:
             raise ValueError("pairs_per_epoch must be >= 1.")
+        if sampler.policy.include_reverse and int(pairs_per_epoch) % 2 != 0:
+            raise ValueError(
+                "include_reverse=True requires pairs_per_epoch to be even because "
+                "pairs_per_epoch counts ordered examples."
+            )
         self.catalog = catalog
         self.sampler = sampler
         self.pairs_per_epoch = int(pairs_per_epoch)
@@ -148,7 +166,10 @@ class DynamicPairDataset(Dataset):
         return self._reader
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        pair_seed = self.seed + self.epoch * 1_000_003 + int(index)
+        ordered_index = int(index)
+        include_reverse = bool(self.sampler.policy.include_reverse)
+        base_pair_index = ordered_index // 2 if include_reverse else ordered_index
+        pair_seed = self.seed + self.epoch * 1_000_003 + base_pair_index
         rng = np.random.default_rng(pair_seed)
         record = self.sampler.sample_pair(
             rng,
@@ -157,6 +178,8 @@ class DynamicPairDataset(Dataset):
             split="train",
             eval_slice=None,
         )
+        if include_reverse and ordered_index % 2 == 1:
+            record = make_reverse_pair_record(record)
         return _record_to_tensors(
             catalog=self.catalog,
             reader=self._get_reader(),

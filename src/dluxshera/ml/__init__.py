@@ -10,6 +10,7 @@ from .pairs import (
     PairSampler,
     generate_frozen_pair_manifest,
     load_pair_manifest,
+    make_reverse_pair_record,
     write_pair_manifest,
 )
 from .scaling import IntensityScaler, fit_intensity_scaler
@@ -32,6 +33,7 @@ __all__ = [
     "load_pair_manifest",
     "load_sample_catalog",
     "load_split_registry",
+    "make_reverse_pair_record",
     "metrics_by_group",
     "transform_z_to_physical",
     "write_pair_manifest",

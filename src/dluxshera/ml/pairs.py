@@ -21,6 +21,7 @@ __all__ = [
     "PairSampler",
     "generate_frozen_pair_manifest",
     "load_pair_manifest",
+    "make_reverse_pair_record",
     "write_pair_manifest",
 ]
 
@@ -229,6 +230,46 @@ class PairRecord:
             split_registry_id=str(payload["split_registry_id"]),
             pair_policy_id=str(payload["pair_policy_id"]),
         )
+
+
+def make_reverse_pair_record(
+    record: PairRecord,
+    *,
+    pair_record_id: str | None = None,
+    id_prefix: str = "pair",
+) -> PairRecord:
+    """Return the ordered reverse of ``record`` with antisymmetric targets."""
+    if pair_record_id is None:
+        pair_record_id = _stable_id(
+            [record.pair_record_id, "reverse", record.sample_b_id, record.sample_a_id],
+            prefix=id_prefix,
+        )
+    return PairRecord(
+        pair_record_id=str(pair_record_id),
+        sample_a_id=record.sample_b_id,
+        sample_b_id=record.sample_a_id,
+        sample_a_index=int(record.sample_b_index),
+        sample_b_index=int(record.sample_a_index),
+        target_delta_z=tuple(-float(v) for v in record.target_delta_z),
+        target_delta_theta=tuple(-float(v) for v in record.target_delta_theta),
+        nuisance_delta=tuple(-float(v) for v in record.nuisance_delta),
+        nuisance_a_id=record.nuisance_b_id,
+        nuisance_b_id=record.nuisance_a_id,
+        science_a_id=record.science_b_id,
+        science_b_id=record.science_a_id,
+        pair_family=record.pair_family,
+        split=record.split,
+        eval_slice=record.eval_slice,
+        fisher_distance_l2=float(record.fisher_distance_l2),
+        changed_science_dimensions=int(record.changed_science_dimensions),
+        dataset_family_a=record.dataset_family_b,
+        dataset_family_b=record.dataset_family_a,
+        pair_id_a=record.pair_id_b,
+        pair_id_b=record.pair_id_a,
+        prepared_dataset_hash=record.prepared_dataset_hash,
+        split_registry_id=record.split_registry_id,
+        pair_policy_id=record.pair_policy_id,
+    )
 
 
 @dataclass(frozen=True)
@@ -555,12 +596,8 @@ def generate_frozen_pair_manifest(
                     [record_id, "reverse", record.sample_b_id, record.sample_a_id],
                     prefix="eval_pair",
                 )
-                reverse = sampler.make_pair_record(
-                    sample_lookup[record.sample_b_id],
-                    sample_lookup[record.sample_a_id],
-                    family=record.pair_family,
-                    split=split,
-                    eval_slice=str(slice_name),
+                reverse = make_reverse_pair_record(
+                    record,
                     pair_record_id=reverse_id,
                 )
                 if reverse.pair_record_id not in seen_ids:

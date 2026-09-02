@@ -39,7 +39,7 @@ def _json_mapping(path_or_text: str | None) -> Mapping[str, object] | None:
 
 
 def _add_policy_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--policy-id", default="ml_s01_e01_clean_same_pair_grid_v1")
+    parser.add_argument("--policy-id", default="s01_e01_clean_same_pair_grid_v1")
     parser.add_argument("--same-pair-id", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-fisher-distance", type=float, default=0.25)
     parser.add_argument("--max-fisher-distance", type=float, default=4.0)
