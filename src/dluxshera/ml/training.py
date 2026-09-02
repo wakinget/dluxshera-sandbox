@@ -78,11 +78,11 @@ def _deep_update(base: dict[str, Any], updates: Mapping[str, Any]) -> dict[str, 
 
 
 def default_s01_e00_config() -> dict[str, Any]:
-    """Return a quick CPU-friendly ML-S01-E00 tiny-overfit preset."""
+    """Return a quick CPU-friendly S01-E00 tiny-overfit preset."""
     return {
-        "study_id": "ML-S01",
-        "experiment_id": "ML-S01-E00",
-        "run_id": "ML-S01-E00-R001",
+        "study_id": "S01",
+        "experiment_id": "S01-E00",
+        "run_id": "S01-E00-R001",
         "seed": 1,
         "device": "auto",
         "model": {
@@ -95,13 +95,13 @@ def default_s01_e00_config() -> dict[str, Any]:
             "adaptive_pool_shape": [2, 2],
         },
         "pair_policy": {
-            "policy_id": "ml_s01_e00_tiny_same_nuisance_v1",
+            "policy_id": "s01_e00_tiny_same_nuisance_v1",
             "family_weights": {"same_nuisance_different_science": 1.0},
             "same_pair_id": True,
-            "min_fisher_distance": 0.05,
-            "max_fisher_distance": 5.0,
+            "min_fisher_distance": 0.0,
+            "max_fisher_distance": 5000.0,
             "include_reverse": True,
-            "max_sampling_attempts": 2000,
+            "max_sampling_attempts": 4000,
         },
         "image_scaling": {"mode": "global_max_abs", "max_samples": 64},
         "noise": {"enabled": False, "apply_to": "observation"},
@@ -132,9 +132,9 @@ def default_s01_e00_config() -> dict[str, Any]:
 def default_s01_e01_config() -> dict[str, Any]:
     """Return the first clean same-nuisance held-out science baseline preset."""
     return {
-        "study_id": "ML-S01",
-        "experiment_id": "ML-S01-E01",
-        "run_id": "ML-S01-E01-R001",
+        "study_id": "S01",
+        "experiment_id": "S01-E01",
+        "run_id": "S01-E01-R001",
         "seed": 11,
         "device": "auto",
         "model": {
@@ -147,11 +147,11 @@ def default_s01_e01_config() -> dict[str, Any]:
             "adaptive_pool_shape": [4, 4],
         },
         "pair_policy": {
-            "policy_id": "ml_s01_e01_clean_same_pair_grid_v1",
+            "policy_id": "s01_e01_clean_same_pair_grid_v1",
             "family_weights": {"same_nuisance_different_science": 1.0},
             "same_pair_id": True,
-            "min_fisher_distance": 0.25,
-            "max_fisher_distance": 4.0,
+            "min_fisher_distance": 0.0,
+            "max_fisher_distance": 5000.0,
             "include_reverse": True,
             "max_sampling_attempts": 4000,
         },

@@ -11,6 +11,7 @@ from dluxshera.datasets import ArrayShardReader
 from dluxshera.datasets.schema import read_json, read_jsonl
 from dluxshera.datasets.shera import (
     _portable_path,
+    _sample_fits_path,
     build_shera_v3_vector_spaces,
     prepare_shera_v3_dataset,
 )
@@ -204,6 +205,76 @@ def test_portable_path_falls_back_to_absolute_when_relpath_fails(
     assert _portable_path(artifact, base=tmp_path / "prepared") == str(artifact.resolve())
 
 
+def test_sample_fits_path_resolves_posix_relative_path(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    fits_path = source / "images" / "sample_000000.fits"
+    fits_path.parent.mkdir(parents=True)
+    fits_path.touch()
+
+    resolved = _sample_fits_path(
+        source,
+        {"sample_id": "sample_000000", "fits_path": "images/sample_000000.fits"},
+    )
+
+    assert resolved == fits_path
+    assert resolved.exists()
+
+
+def test_sample_fits_path_resolves_windows_relative_path(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    fits_path = source / "images" / "sample_000000.fits"
+    fits_path.parent.mkdir(parents=True)
+    fits_path.touch()
+
+    resolved = _sample_fits_path(
+        source,
+        {"sample_id": "sample_000000", "fits_path": r"images\sample_000000.fits"},
+    )
+
+    assert resolved == fits_path
+    assert resolved.exists()
+
+
+def test_sample_fits_path_resolves_nested_windows_relative_path(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    fits_path = source / "images" / "pair_0001" / "sample_000000.fits"
+    fits_path.parent.mkdir(parents=True)
+    fits_path.touch()
+
+    resolved = _sample_fits_path(
+        source,
+        {
+            "sample_id": "sample_000000",
+            "fits_path": r"images\pair_0001\sample_000000.fits",
+        },
+    )
+
+    assert resolved == fits_path
+    assert resolved.exists()
+
+
+def test_sample_fits_path_preserves_absolute_posix_path(tmp_path: Path) -> None:
+    fits_path = tmp_path / "absolute" / "sample_000000.fits"
+    fits_path.parent.mkdir(parents=True)
+    fits_path.touch()
+
+    resolved = _sample_fits_path(
+        tmp_path / "source",
+        {"sample_id": "sample_000000", "fits_path": str(fits_path)},
+    )
+
+    assert resolved == fits_path
+    assert resolved.is_absolute()
+
+
+def test_sample_fits_path_rejects_windows_absolute_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unsupported Windows absolute"):
+        _sample_fits_path(
+            tmp_path / "source",
+            {"sample_id": "sample_000000", "fits_path": r"C:\data\sample_000000.fits"},
+        )
+
+
 def test_prepare_shera_v3_dataset_writes_self_describing_outputs(tmp_path: Path) -> None:
     source = tmp_path / "source"
     expected_images = _synthetic_v3_dataset(source)
@@ -273,6 +344,61 @@ def test_prepare_shera_v3_dataset_writes_self_describing_outputs(tmp_path: Path)
     assert all(row["readback_dtype"] == "float32" for row in precision_rows)
     assert all(row["readback_matches_expected_cast"] for row in precision_rows)
     assert all(row["source_sample_id_matches_index"] for row in precision_rows)
+
+
+def test_prepare_shera_v3_dataset_reads_windows_paths_without_mutating_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _synthetic_v3_dataset(source)
+    rows = list(read_jsonl(source / "samples.jsonl"))
+    rows[0]["fits_path"] = r"images\sample_000000.fits"
+    rows[1]["fits_path"] = r"images\sample_000001.fits"
+    _write_jsonl(source / "samples.jsonl", rows)
+    source_samples_bytes = (source / "samples.jsonl").read_bytes()
+    source_fits_bytes = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in sorted((source / "images").glob("*.fits"))
+    }
+
+    prepare_shera_v3_dataset(
+        source_root=source,
+        outdir=tmp_path / "prepared",
+        dtype="float32",
+        validation_samples=2,
+        seed=0,
+    )
+
+    assert (source / "samples.jsonl").read_bytes() == source_samples_bytes
+    assert {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in sorted((source / "images").glob("*.fits"))
+    } == source_fits_bytes
+    prepared_rows = list(read_jsonl(tmp_path / "prepared" / "index.jsonl"))
+    assert prepared_rows[0]["source_fits_path"] == r"images\sample_000000.fits"
+    assert prepared_rows[1]["source_fits_path"] == r"images\sample_000001.fits"
+
+
+def test_prepare_shera_v3_dataset_reports_missing_normalized_source_fits(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _synthetic_v3_dataset(source)
+    rows = list(read_jsonl(source / "samples.jsonl"))
+    rows[0]["fits_path"] = r"images\missing_sample.fits"
+    _write_jsonl(source / "samples.jsonl", rows)
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="Missing source FITS file for sample sample_000000",
+    ) as exc_info:
+        prepare_shera_v3_dataset(
+            source_root=source,
+            outdir=tmp_path / "prepared",
+            dry_run=True,
+        )
+
+    assert str(source / "images" / "missing_sample.fits") in str(exc_info.value)
 
 
 def test_prepare_shera_v3_dataset_dry_run_does_not_write(tmp_path: Path) -> None:

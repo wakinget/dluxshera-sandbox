@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping
 
 import numpy as np
@@ -345,8 +345,32 @@ def _sample_fits_path(source_root: Path, row: Mapping[str, Any]) -> Path:
     raw = row.get("fits_path")
     if raw in (None, ""):
         raise ValueError(f"Sample {row.get('sample_id', '<unknown>')} does not define fits_path.")
-    path = Path(str(raw))
-    return path if path.is_absolute() else source_root / path
+    raw_path = str(raw)
+    host_path = Path(raw_path)
+    windows_path = PureWindowsPath(raw_path)
+    if windows_path.drive and os.name != "nt":
+        raise ValueError(
+            f"Sample {row.get('sample_id', '<unknown>')} uses unsupported Windows "
+            f"absolute or drive-relative fits_path: {raw_path!r}."
+        )
+    if host_path.is_absolute():
+        return host_path
+    if windows_path.drive:
+        raise ValueError(
+            f"Sample {row.get('sample_id', '<unknown>')} uses unsupported Windows "
+            f"drive-relative fits_path: {raw_path!r}."
+        )
+    if PurePosixPath(raw_path).is_absolute():
+        return Path(raw_path)
+    if windows_path.root:
+        raise ValueError(
+            f"Sample {row.get('sample_id', '<unknown>')} uses unsupported rooted "
+            f"Windows fits_path: {raw_path!r}."
+        )
+    # V3 sample metadata is portable JSON; normalize relative Windows separators
+    # explicitly so datasets copied from Windows read correctly on POSIX hosts.
+    relative_path = Path(*windows_path.parts)
+    return source_root / relative_path
 
 
 def _parameter_records(source_root: Path) -> list[dict[str, Any]]:
