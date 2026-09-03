@@ -18,6 +18,8 @@ __all__ = [
     "SplitRegistry",
     "generate_split_registry",
     "load_split_registry",
+    "split_registry_content_identity",
+    "split_registry_content_sha256",
     "write_split_registry",
 ]
 
@@ -147,6 +149,37 @@ def _counts(assignments: Mapping[str, str]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+def _stable_sha256(payload: Any) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def split_registry_content_sha256(split_registry: "SplitRegistry") -> str:
+    """Return the stable scientific content hash for a split registry.
+
+    The identity includes prepared dataset identity, split assignments, grouping
+    policies, split seed, and non-volatile split metadata. It excludes machine
+    paths and timestamp/provenance fields that do not define the split.
+    """
+    payload = split_registry.to_dict()
+    payload.pop("generated_at", None)
+    payload.pop("git", None)
+    payload.pop("content_identity", None)
+    prepared = dict(payload.get("prepared_dataset", {}))
+    prepared.pop("root", None)
+    payload["prepared_dataset"] = prepared
+    return _stable_sha256(payload)
+
+
+def split_registry_content_identity(split_registry: "SplitRegistry") -> dict[str, Any]:
+    """Return structured stable split-registry content identity metadata."""
+    return {
+        "algorithm": "sha256/json-canonical/split-registry-v1",
+        "sha256": split_registry_content_sha256(split_registry),
+        "excludes": ["generated_at", "git", "prepared_dataset.root"],
+    }
+
+
 @dataclass(frozen=True)
 class SplitRegistry:
     """Represent reusable science-state and nuisance-state ML splits."""
@@ -221,6 +254,12 @@ class SplitRegistry:
 
     def validate_catalog(self, catalog: SampleCatalog) -> None:
         """Reject use with a different prepared dataset identity."""
+        expected_artifact_id = self.prepared_dataset.get("artifact_id")
+        if expected_artifact_id != catalog.artifact_id:
+            raise ValueError(
+                "Split registry was generated for a different prepared artifact "
+                f"({expected_artifact_id} != {catalog.artifact_id})."
+            )
         expected = self.prepared_dataset.get("prepared_dataset_hash")
         if expected != catalog.prepared_dataset_hash:
             raise ValueError(

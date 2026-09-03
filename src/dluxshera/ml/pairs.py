@@ -12,7 +12,7 @@ import numpy as np
 from dluxshera.datasets.schema import read_json, read_jsonl, write_json, write_jsonl
 
 from .catalog import SampleCatalog
-from .splits import SplitRegistry
+from .splits import SplitRegistry, split_registry_content_sha256
 
 __all__ = [
     "PairManifest",
@@ -22,6 +22,7 @@ __all__ = [
     "generate_frozen_pair_manifest",
     "load_pair_manifest",
     "make_reverse_pair_record",
+    "pair_manifest_content_hash",
     "write_pair_manifest",
 ]
 
@@ -39,6 +40,11 @@ PAIR_FAMILIES = {
 def _stable_id(parts: Sequence[Any], *, prefix: str = "pair") -> str:
     raw = json.dumps(list(parts), sort_keys=True, separators=(",", ":"), default=str)
     return f"{prefix}_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _stable_sha256(payload: Any) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _counts(values: Sequence[str]) -> dict[str, int]:
@@ -65,14 +71,14 @@ def _distance_summary(distances: Sequence[float]) -> dict[str, float | None]:
 class PairPolicy:
     """Describe an ordered-pair sampling policy without materializing pairs."""
 
-    policy_id: str = "s01_clean_same_pair_grid_v1"
+    policy_id: str = "generic_pair_policy_v1"
     schema_version: str = PAIR_POLICY_SCHEMA_VERSION
     family_weights: Mapping[str, float] = field(
         default_factory=lambda: {"same_nuisance_different_science": 1.0}
     )
-    same_pair_id: bool = True
-    min_fisher_distance: float = 0.1
-    max_fisher_distance: float | None = 4.0
+    same_pair_id: bool = False
+    min_fisher_distance: float = 0.0
+    max_fisher_distance: float | None = None
     max_changed_science_dimensions: int | None = None
     allow_identity_pairs: bool = False
     include_reverse: bool = False
@@ -123,22 +129,36 @@ class PairPolicy:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "PairPolicy":
         """Build a pair policy from serialized metadata."""
+        defaults = cls()
+        raw_max_fisher_distance = payload.get(
+            "max_fisher_distance",
+            defaults.max_fisher_distance,
+        )
         return cls(
-            policy_id=str(payload.get("policy_id", "s01_clean_same_pair_grid_v1")),
-            schema_version=str(payload.get("schema_version", PAIR_POLICY_SCHEMA_VERSION)),
+            policy_id=str(payload.get("policy_id", defaults.policy_id)),
+            schema_version=str(payload.get("schema_version", defaults.schema_version)),
             family_weights=dict(
-                payload.get("family_weights", {"same_nuisance_different_science": 1.0})
+                payload.get("family_weights", defaults.family_weights)
             ),
-            same_pair_id=bool(payload.get("same_pair_id", True)),
-            min_fisher_distance=float(payload.get("min_fisher_distance", 0.1)),
+            same_pair_id=bool(payload.get("same_pair_id", defaults.same_pair_id)),
+            min_fisher_distance=float(
+                payload.get("min_fisher_distance", defaults.min_fisher_distance)
+            ),
             max_fisher_distance=None
-            if payload.get("max_fisher_distance") is None
-            else float(payload.get("max_fisher_distance")),
-            max_changed_science_dimensions=payload.get("max_changed_science_dimensions"),
-            allow_identity_pairs=bool(payload.get("allow_identity_pairs", False)),
-            include_reverse=bool(payload.get("include_reverse", False)),
+            if raw_max_fisher_distance is None
+            else float(raw_max_fisher_distance),
+            max_changed_science_dimensions=payload.get(
+                "max_changed_science_dimensions",
+                defaults.max_changed_science_dimensions,
+            ),
+            allow_identity_pairs=bool(
+                payload.get("allow_identity_pairs", defaults.allow_identity_pairs)
+            ),
+            include_reverse=bool(payload.get("include_reverse", defaults.include_reverse)),
             dataset_families=tuple(str(v) for v in payload.get("dataset_families", []) or []),
-            max_sampling_attempts=int(payload.get("max_sampling_attempts", 1000)),
+            max_sampling_attempts=int(
+                payload.get("max_sampling_attempts", defaults.max_sampling_attempts)
+            ),
         )
 
 
@@ -284,6 +304,7 @@ class PairManifest:
         """Return compact pair-manifest counts and distance summaries."""
         return {
             "artifact_id": self.artifact_id,
+            "content_sha256": self.manifest.get("content_identity", {}).get("sha256"),
             "pair_count": len(self.records),
             "pair_family_counts": _counts([record.pair_family for record in self.records]),
             "eval_slice_counts": _counts(
@@ -293,6 +314,28 @@ class PairManifest:
                 [record.fisher_distance_l2 for record in self.records]
             ),
         }
+
+
+def pair_manifest_content_hash(
+    manifest: Mapping[str, Any],
+    records: Sequence[PairRecord],
+) -> str:
+    """Return a stable content hash for a frozen pair manifest.
+
+    The hash intentionally excludes timestamp-style provenance such as
+    ``generated_at`` and includes the ordered pair rows.  It is therefore stable
+    across rematerialization when the dataset, split, policy, recipe, seed, and
+    ordered scientific pair content are unchanged.
+    """
+    stable_manifest = dict(manifest)
+    stable_manifest.pop("generated_at", None)
+    stable_manifest.pop("content_identity", None)
+    return _stable_sha256(
+        {
+            "manifest": stable_manifest,
+            "records": [record.to_dict() for record in records],
+        }
+    )
 
 
 class PairSampler:
@@ -623,6 +666,7 @@ def generate_frozen_pair_manifest(
             "prepared_dataset_hash": split_registry.prepared_dataset.get(
                 "prepared_dataset_hash"
             ),
+            "content_sha256": split_registry_content_sha256(split_registry),
         },
         "split": str(split),
         "seed": int(seed),
@@ -635,12 +679,19 @@ def generate_frozen_pair_manifest(
         "distance_summary": _distance_summary([record.fisher_distance_l2 for record in records]),
         "target_convention": "target_delta_z = z_B - z_A",
     }
+    manifest["content_identity"] = {
+        "algorithm": "sha256/json-canonical/pair-manifest-v1",
+        "sha256": pair_manifest_content_hash(manifest, records),
+        "excludes": ["generated_at"],
+    }
     return PairManifest(artifact_id=str(artifact_id), manifest=manifest, records=tuple(records))
 
 
-def write_pair_manifest(path: Path, pair_manifest: PairManifest) -> None:
+def write_pair_manifest(path: Path, pair_manifest: PairManifest, *, overwrite: bool = False) -> None:
     """Write a frozen pair manifest directory with metadata and JSONL rows."""
     root = Path(path)
+    if root.exists() and any(root.iterdir()) and not overwrite:
+        raise FileExistsError(f"{root} exists and is non-empty; pass overwrite=True.")
     root.mkdir(parents=True, exist_ok=True)
     write_json(root / "manifest.json", pair_manifest.manifest)
     write_jsonl(root / "pairs.jsonl", (record.to_dict() for record in pair_manifest.records))
@@ -660,6 +711,14 @@ def load_pair_manifest(
     records = tuple(PairRecord.from_dict(row) for row in read_jsonl(root / "pairs.jsonl"))
     if len(records) != int(manifest.get("pair_count", len(records))):
         raise ValueError("Pair manifest pair_count does not match pairs.jsonl row count.")
+    content_identity = manifest.get("content_identity", {})
+    if isinstance(content_identity, Mapping) and content_identity.get("sha256"):
+        actual = pair_manifest_content_hash(manifest, records)
+        if str(content_identity["sha256"]) != actual:
+            raise ValueError(
+                "Pair manifest content hash does not match pairs.jsonl and manifest metadata "
+                f"({content_identity['sha256']} != {actual})."
+            )
     if catalog is not None:
         expected = manifest.get("prepared_dataset", {}).get("prepared_dataset_hash")
         if expected != catalog.prepared_dataset_hash:
@@ -672,6 +731,13 @@ def load_pair_manifest(
         if expected != split_registry.artifact_id:
             raise ValueError(
                 f"Pair manifest split registry {expected!r} does not match {split_registry.artifact_id!r}."
+            )
+        expected_content = manifest.get("split_registry", {}).get("content_sha256")
+        actual_content = split_registry_content_sha256(split_registry)
+        if expected_content and str(expected_content) != actual_content:
+            raise ValueError(
+                "Pair manifest split registry content hash does not match current split "
+                f"({expected_content} != {actual_content})."
             )
     return PairManifest(
         artifact_id=str(manifest["artifact_id"]),

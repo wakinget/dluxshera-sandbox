@@ -11,10 +11,28 @@ from .pairs import (
     generate_frozen_pair_manifest,
     load_pair_manifest,
     make_reverse_pair_record,
+    pair_manifest_content_hash,
     write_pair_manifest,
 )
 from .scaling import IntensityScaler, fit_intensity_scaler
-from .splits import SplitRegistry, generate_split_registry, load_split_registry, write_split_registry
+from .splits import (
+    SplitRegistry,
+    generate_split_registry,
+    load_split_registry,
+    split_registry_content_identity,
+    split_registry_content_sha256,
+    write_split_registry,
+)
+from .studies import (
+    load_study_contract_artifacts,
+    load_study_prescription,
+    resolve_study_experiment_config,
+    validate_experiment_policy_for_study,
+    validate_evaluation_artifact_against_recipe,
+    validate_prepared_dataset_for_study,
+    validate_split_registry_for_study,
+    validate_study_contract,
+)
 from .visualization import (
     ArchitectureRenderResult,
     ArchitectureVisualizationError,
@@ -50,14 +68,25 @@ __all__ = [
     "load_pair_manifest",
     "load_sample_catalog",
     "load_split_registry",
+    "load_study_contract_artifacts",
+    "load_study_prescription",
     "make_reverse_pair_record",
+    "pair_manifest_content_hash",
     "render_pairwise_correction_architecture_set",
     "metrics_by_group",
     "render_pairwise_correction_architecture",
     "render_pairwise_correction_model_overview",
     "render_shared_cnn_encoder_detail",
     "resolve_pdflatex",
+    "resolve_study_experiment_config",
+    "split_registry_content_identity",
+    "split_registry_content_sha256",
     "transform_z_to_physical",
+    "validate_experiment_policy_for_study",
+    "validate_evaluation_artifact_against_recipe",
+    "validate_prepared_dataset_for_study",
+    "validate_split_registry_for_study",
+    "validate_study_contract",
     "write_pair_manifest",
     "write_split_registry",
 ]

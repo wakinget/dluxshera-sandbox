@@ -117,6 +117,36 @@ f(A,A)\approx0.
 
 This can be included naturally in batches containing same-state nuisance/noise variants.
 
+### 4.4 S01 production workflow
+
+The active S01 production prescription is tracked under
+`work/experiments/ml/s01/`.  The generic ML package and scripts remain reusable;
+the S01 work directory resolves a compact `study.yaml` into the ordinary
+`train_pairwise_correction(...)` config.
+
+For `S01-E01-R001`, validation and test pairs are deterministic frozen
+artifacts.  Validation is used for checkpoint selection, early stopping, and
+model-development decisions.  Test is materialized and identity-checked, but is
+not evaluated during ordinary training (`evaluate_test: false`).
+
+The canonical reusable S01 pair policy is `s01_clean_same_pair_grid_v1`: same
+registration nuisance, different science state, same original V3 pair grid,
+Fisher distance in `[0, 5000]`, and explicit reverse ordered-pair augmentation.
+Batch size counts ordered pair examples, not individual images.
+
+Image scaling uses one train-derived `global_max_abs` scalar applied to all A/B
+images.  It preserves relative image amplitude and flux information and is not
+per-image normalization.
+
+S01 distance diagnostics are config-driven with default edges
+`[0, 100, 250, 500, 1000, 2000, 5000]`.  Bins are left-closed/right-open except
+for the final bin, which includes exactly the upper edge.  Samples outside the
+configured range are reported separately.
+
+Training checkpoints preserve early-stopping state.  `checkpoint_best.pt`
+updates on any strict validation-loss improvement, while the patience counter
+resets only on a configured meaningful relative improvement.
+
 ## 5. Parameter representation and Fisher scaling
 
 ### 5.1 Physical output basis
@@ -900,9 +930,14 @@ controlled registration?
 
 **Initial shared artifacts:**
 
-- `PREP-V3-v1`: Wave 1 prepared sample-centric image/state store.
-- `SPLIT-ML-v1`: reusable science-state and nuisance-realization split registry.
-- `PAIR-EVAL-v1`: frozen ordered-pair evaluation manifests.
+- `PREP-V3-v1`: Wave 1 prepared sample-centric image/state store.  The
+  `PREP-V3-nuisance-v1` path is the prepared dataset instance/root name, not
+  the catalog artifact ID.
+- `SPLIT-ML-v1`: reusable science-state and nuisance-realization split registry,
+  pinned for S01 by stable content SHA256 as well as artifact ID.
+- `PAIR-EVAL-v1`: frozen ordered-pair evaluation manifests, pinned by stable
+  content identity over prepared dataset, split content, pair policy, recipe,
+  seed, and ordered pair records.
 
 **Initial experiments:**
 
@@ -933,6 +968,20 @@ Science-state splitting uses the prepared physical-delta identity
 ID, or filenames. Nuisance realization splitting is recorded separately and may
 use explicit assignments or deterministic fraction-based assignments. Pair
 generation happens after these state-level splits.
+
+For production S01 runs, `train_from_study.py` enforces the same study contract
+as GPU preflight before training starts: prepared catalog identity, split
+artifact ID and content hash, frozen validation recipe, optional frozen test
+recipe, and resolved experiment pair policy.  Resume is same-run continuation:
+existing history is appended, prior best artifacts remain valid if the resumed
+segment does not improve, and changed scientific identities are rejected.
+
+Small study-defining S01 artifacts should survive scratch cleanup.  Keep working
+copies on `/scratch-jpl` or `/scratch-edge`, and retain durable split,
+validation-pair, test-pair, and compact provenance artifacts under
+`/projects/shera_hpc/$USER/dLuxShera-Results/ml/S01/artifacts/`.  Do not copy
+the large prepared shard store into that results artifact tree when a canonical
+prepared-data copy already exists elsewhere under `/projects`.
 
 Dynamic training datasets interpret `pairs_per_epoch` as the total number of
 ordered examples. When `include_reverse=True`, adjacent examples are generated

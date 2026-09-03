@@ -52,6 +52,21 @@ def _pair_ids(item: dict) -> tuple[str, str]:
     return str(item["sample_a_id"]), str(item["sample_b_id"])
 
 
+def _loader_pair_ids(dataset: DynamicPairDataset, *, epoch: int, num_workers: int) -> list[tuple[str, str]]:
+    dataset.set_epoch(epoch)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=False,
+    )
+    pairs: list[tuple[str, str]] = []
+    for batch in loader:
+        pairs.extend(zip((str(v) for v in batch["sample_a_id"]), (str(v) for v in batch["sample_b_id"])))
+    return pairs
+
+
 def test_dynamic_pairs_reverse_disabled_keeps_ordered_length_and_odd_lengths(tmp_path: Path) -> None:
     catalog, _, sampler = _catalog_registry_sampler(tmp_path, include_reverse=False)
     dataset = DynamicPairDataset(
@@ -181,3 +196,15 @@ def test_observation_noise_remains_attached_to_b_role_under_reversal(tmp_path: P
     assert not torch.equal(noisy_reverse["image_b"], clean_reverse["image_b"])
     assert not torch.equal(noisy_forward["image_b"], noisy_reverse["image_a"])
     assert not torch.equal(noisy_reverse["image_b"], noisy_forward["image_a"])
+
+
+def test_multi_worker_dynamic_pair_stream_observes_parent_epoch_state(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path, include_reverse=True, pairs_per_epoch=8)
+    epoch0_first = _loader_pair_ids(dataset, epoch=0, num_workers=2)
+    epoch0_again = _loader_pair_ids(dataset, epoch=0, num_workers=2)
+    epoch1 = _loader_pair_ids(dataset, epoch=1, num_workers=2)
+
+    assert epoch0_first == epoch0_again
+    assert epoch1 != epoch0_first
+    for index in range(0, len(epoch0_first), 2):
+        assert epoch0_first[index + 1] == tuple(reversed(epoch0_first[index]))

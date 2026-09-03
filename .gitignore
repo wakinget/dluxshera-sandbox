@@ -219,6 +219,10 @@ examples/notebooks/airbus*
 # ----------------------------------------------------------------------
 # Generated campaign materializations
 # ----------------------------------------------------------------------
+work/experiments/ml/s01/generated/
+work/experiments/ml/s01/materialized/
+work/experiments/ml/s01/logs/
+# ----------------------------------------------------------------------
 
 # HO-WFE field-dither family realizations.
 # Keep the compact README/family specification and regenerate concrete

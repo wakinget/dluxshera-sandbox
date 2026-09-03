@@ -12,12 +12,15 @@ from dluxshera.datasets.schema import read_json, write_json
 from dluxshera.ml import (
     PairPolicy,
     PairSampler,
+    SplitRegistry,
     generate_frozen_pair_manifest,
     generate_split_registry,
     load_pair_manifest,
     load_sample_catalog,
     load_split_registry,
     make_reverse_pair_record,
+    pair_manifest_content_hash,
+    split_registry_content_sha256,
     write_pair_manifest,
     write_split_registry,
 )
@@ -190,6 +193,7 @@ def test_split_registry_is_deterministic_serializes_and_rejects_mismatch(tmp_pat
     write_split_registry(path, first)
     loaded = load_split_registry(path, catalog=catalog)
     assert loaded.to_dict() == first.to_dict()
+    assert split_registry_content_sha256(loaded) == split_registry_content_sha256(first)
 
     wrong_payload = read_json(path)
     wrong_payload["prepared_dataset"]["prepared_dataset_hash"] = "wrong"
@@ -197,6 +201,31 @@ def test_split_registry_is_deterministic_serializes_and_rejects_mismatch(tmp_pat
     write_json(wrong_path, wrong_payload)
     with pytest.raises(ValueError, match="different prepared dataset"):
         load_split_registry(wrong_path, catalog=catalog)
+
+
+def test_split_registry_content_hash_ignores_volatile_metadata_and_tracks_assignments(
+    tmp_path: Path,
+) -> None:
+    catalog = load_sample_catalog(_write_prepared_fixture(tmp_path / "prepared"))
+    registry = _split(catalog)
+    baseline = split_registry_content_sha256(registry)
+
+    same_payload = registry.to_dict()
+    same_payload["generated_at"] = "2099-01-01T00:00:00+00:00"
+    same_payload["git"] = {"commit": "different", "dirty": True}
+    same_payload["prepared_dataset"]["root"] = "/different/mount/PREP-V3-nuisance-v1"
+    same = SplitRegistry.from_dict(same_payload)
+    assert split_registry_content_sha256(same) == baseline
+
+    changed_payload = registry.to_dict()
+    first_group = next(iter(changed_payload["science_assignments"]))
+    changed_payload["science_assignments"][first_group] = (
+        "validation"
+        if changed_payload["science_assignments"][first_group] != "validation"
+        else "test"
+    )
+    changed = SplitRegistry.from_dict(changed_payload)
+    assert split_registry_content_sha256(changed) != baseline
 
 
 def test_split_registry_supports_explicit_nuisance_assignments(tmp_path: Path) -> None:
@@ -262,6 +291,19 @@ def test_pair_sampler_same_nuisance_targets_reverse_and_distance(tmp_path: Path)
     assert reverse.fisher_distance_l2 == record.fisher_distance_l2
     assert reverse.changed_science_dimensions == record.changed_science_dimensions
     assert reverse.pair_family == record.pair_family
+
+
+def test_default_pair_policy_is_generic_and_from_dict_matches_defaults() -> None:
+    policy = PairPolicy()
+    from_dict = PairPolicy.from_dict({})
+    assert from_dict == policy
+    assert policy.policy_id == "generic_pair_policy_v1"
+    assert policy.to_dict()["family_weights"] == {"same_nuisance_different_science": 1.0}
+    assert policy.same_pair_id is False
+    assert policy.min_fisher_distance == 0.0
+    assert policy.max_fisher_distance is None
+    assert policy.include_reverse is False
+    assert policy.max_sampling_attempts == 1000
 
 
 def test_pair_sampler_other_family_semantics_and_split_boundaries(tmp_path: Path) -> None:
@@ -337,5 +379,27 @@ def test_frozen_eval_manifest_is_deterministic_and_validates(tmp_path: Path) -> 
 
     outdir = tmp_path / "pairs"
     write_pair_manifest(outdir, first)
+    with pytest.raises(FileExistsError, match="overwrite=True"):
+        write_pair_manifest(outdir, first)
     loaded = load_pair_manifest(outdir, catalog=catalog, split_registry=registry)
     assert loaded.summary()["pair_count"] == len(first.records)
+    assert loaded.manifest["content_identity"]["sha256"] == first.manifest["content_identity"]["sha256"]
+    assert first.manifest["split_registry"]["content_sha256"] == split_registry_content_sha256(registry)
+
+    changed_payload = registry.to_dict()
+    first_group = next(iter(changed_payload["science_assignments"]))
+    changed_payload["science_assignments"][first_group] = (
+        "validation"
+        if changed_payload["science_assignments"][first_group] != "validation"
+        else "test"
+    )
+    changed_registry = SplitRegistry.from_dict(changed_payload)
+    with pytest.raises(ValueError, match="split registry content hash"):
+        load_pair_manifest(outdir, catalog=catalog, split_registry=changed_registry)
+
+    timestamp_changed = dict(first.manifest)
+    timestamp_changed["generated_at"] = "2099-01-01T00:00:00+00:00"
+    assert (
+        pair_manifest_content_hash(timestamp_changed, first.records)
+        == first.manifest["content_identity"]["sha256"]
+    )

@@ -1,0 +1,92 @@
+study_id: S01
+title: Pairwise Correction Learnability
+
+dataset:
+  artifact_id: PREP-V3-v1
+  prepared_dataset_hash: 80e34bbbca72a4b2cd78df41d421f3018119de46df3ff2b92d490e50d5785c0e
+
+split_registry:
+  artifact_id: SPLIT-ML-v1
+  content_sha256: a640e2555cb2bb55ffd3a8855ff2c587ef7c65c9990535f224ff0ed80241e35e
+
+pair_policies:
+  s01_clean_same_pair_grid_v1:
+    family_weights:
+      same_nuisance_different_science: 1.0
+    same_pair_id: true
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    max_sampling_attempts: 4000
+
+evaluation_artifacts:
+  validation:
+    artifact_id: S01-VALIDATION-PAIRS-v1
+    content_sha256: 25140389d15dc4ebef35fd9cc7f9b7c368ad83c04ffdfbf96237b00188de9b55
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    split: validation
+    seed: 1101
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance:
+        science_split: validation
+        nuisance_split: train
+      heldout_science_heldout_nuisance:
+        science_split: validation
+        nuisance_split: validation
+  test:
+    artifact_id: S01-TEST-PAIRS-v1
+    content_sha256: 113993487bc0e432d0ef8d68a1f63fe5d7f20988eece6661f43774cf640d1680
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    split: test
+    seed: 1102
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance:
+        science_split: test
+        nuisance_split: train
+      heldout_science_heldout_nuisance:
+        science_split: test
+        nuisance_split: test
+
+experiments:
+  S01-E01:
+    run_id: S01-E01-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 100
+      batch_size: 32
+      learning_rate: 0.0005
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 20
+        patience: 12
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
