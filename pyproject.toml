@@ -53,6 +53,14 @@ gui = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"dluxshera.ml._vendor.plotneuralnet" = [
+  "LICENSE",
+  "NOTICE.md",
+  "layers/*.sty",
+  "layers/*.tex",
+]
+
 [tool.pytest.ini_options]
 markers = [
   "slow: marks tests as slow; deselect with '-m \"not slow\"'",
