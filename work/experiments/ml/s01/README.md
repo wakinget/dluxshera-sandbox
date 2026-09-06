@@ -73,15 +73,15 @@ identity.
 
 S01 pins the frozen pair manifests by content:
 
-- validation: `25140389d15dc4ebef35fd9cc7f9b7c368ad83c04ffdfbf96237b00188de9b55`
-- test: `113993487bc0e432d0ef8d68a1f63fe5d7f20988eece6661f43774cf640d1680`
+- validation: `68ccd41a35d286c8b060f291eef6c788a6b0d97c9660868f74e01b2b4feae499`
+- test: `375451064bd363a6afb33c6f3f1bdff7e92efe1384c1513b3491b42318c87b82`
 
 The S01 split registry is pinned by both artifact ID and content hash:
 
 ```yaml
 split_registry:
   artifact_id: SPLIT-ML-v1
-  content_sha256: a640e2555cb2bb55ffd3a8855ff2c587ef7c65c9990535f224ff0ed80241e35e
+  content_sha256: 29f0e95c3819cbeb5ce00aafb593445510723ea5fc20e2e7f3e585c1b9615314
 ```
 
 A registry with the same artifact ID but different science/nuisance assignments
