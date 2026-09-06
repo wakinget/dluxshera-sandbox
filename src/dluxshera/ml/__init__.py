@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 from .catalog import SampleCatalog, load_sample_catalog
+from .hpc import (
+    PreparedSbatchSubmission,
+    SlurmProfile,
+    build_sbatch_command,
+    parse_sbatch_job_id,
+    persist_study_contract_artifacts,
+    prepare_sbatch_submission,
+    slurm_profile,
+)
 from .metrics import compute_regression_metrics, metrics_by_group, transform_z_to_physical
 from .noise import NoiseConfig, apply_pair_noise
 from .pairs import (
@@ -57,9 +66,12 @@ __all__ = [
     "PairRecord",
     "PairSampler",
     "PairwiseCorrectionArchitecture",
+    "PreparedSbatchSubmission",
     "SampleCatalog",
     "SplitRegistry",
+    "SlurmProfile",
     "apply_pair_noise",
+    "build_sbatch_command",
     "compute_regression_metrics",
     "describe_pairwise_correction_architecture",
     "fit_intensity_scaler",
@@ -72,6 +84,9 @@ __all__ = [
     "load_study_prescription",
     "make_reverse_pair_record",
     "pair_manifest_content_hash",
+    "parse_sbatch_job_id",
+    "persist_study_contract_artifacts",
+    "prepare_sbatch_submission",
     "render_pairwise_correction_architecture_set",
     "metrics_by_group",
     "render_pairwise_correction_architecture",
@@ -81,6 +96,7 @@ __all__ = [
     "resolve_study_experiment_config",
     "split_registry_content_identity",
     "split_registry_content_sha256",
+    "slurm_profile",
     "transform_z_to_physical",
     "validate_experiment_policy_for_study",
     "validate_evaluation_artifact_against_recipe",

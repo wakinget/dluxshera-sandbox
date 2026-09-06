@@ -1,7 +1,7 @@
 # SHERA ML Inverse-Model Design and Experiment Roadmap
 
-**Status:** Working design note / first draft  
-**Date:** 2026-08-25  
+**Status:** Active ML experiment ledger and roadmap
+**Date:** 2026-09-06
 **Scope:** ML-assisted state estimation and initialization for the SHERA/ADORA differentiable optical model
 
 ## 1. Purpose
@@ -124,6 +124,14 @@ The active S01 production prescription is tracked under
 the S01 work directory resolves a compact `study.yaml` into the ordinary
 `train_pairwise_correction(...)` config.
 
+As of 2026-09-06, S01 has reached production submission on TACC Lonestar6.  The
+three submitted replicas are `S01-E01-R001` seed 11, `S01-E01-R002` seed 23,
+and `S01-E01-R003` seed 47.  They were accepted by Slurm under LS6 jobs
+3418678, 3418707, and 3418708 and were pending for priority/resources at the
+status snapshot.  R002 and R003 were derived from the canonical prescription
+with only `run_id` and `seed` changed.  The exact source snapshot used for that
+launch was `5d397eca9e206180785ce4b0d1593e19878c79b7`.
+
 For `S01-E01-R001`, validation and test pairs are deterministic frozen
 artifacts.  Validation is used for checkpoint selection, early stopping, and
 model-development decisions.  Test is materialized and identity-checked, but is
@@ -146,6 +154,12 @@ configured range are reported separately.
 Training checkpoints preserve early-stopping state.  `checkpoint_best.pt`
 updates on any strict validation-loss improvement, while the patience counter
 resets only on a configured meaningful relative improvement.
+
+Lonestar6 is now validated as a second execution site alongside Gattaca2 for
+this ML workflow.  The strict GPU preflight reproduced the canonical prepared,
+split, validation-pair, and test-pair identities.  A one-epoch real-data smoke
+test on an NVIDIA A100-PCIE-40GB completed successfully, but that smoke loss is
+infrastructure evidence only and is not an S01 scientific result.
 
 ## 5. Parameter representation and Fisher scaling
 
@@ -911,11 +925,11 @@ with supervised target:
 
 | Study | name | status | notes |
 |---|---|---|---|
-| S01 | Pairwise Correction Learnability | active | First shared-CNN regression substrate and clean pair baseline. |
+| S01 | Pairwise Correction Learnability | production submitted | First shared-CNN regression substrate and clean pair baseline; three-seed LS6 replication block submitted. |
 | S02 | Registration Nuisance Robustness | provisional/planned | Relax same-nuisance pairing and measure robustness to registration changes. |
 | S03 | Observation-Noise Robustness | provisional/planned | Enable dynamic observation noise and fixed noisy eval manifests. |
 | S04 | Learned vs Local-Linear Correction | provisional/planned | Compare ML corrections with Binder/Jacobian/Fisher linear evaluation. |
-| S05 | Architecture / Representation Study | provisional/planned | Controlled architecture and comparator changes after S01 baseline. |
+| S05 | Architecture / Representation Study | active/preparation | Wave 1 controlled comparator and capacity variants over the S01 benchmark contract. |
 | S06 | Fisher / Eigenmode Structure | provisional/planned | Diagnose and possibly weight errors by Fisher/eigenmode structure. |
 | S07 | Joint-State Generalization | provisional/planned | Move beyond sparse pair-grid structure toward joint-state samples. |
 | S08 | ADORA Initialization / Capture Range | provisional/planned | Test whether learned corrections expand ADORA convergence capture range. |
@@ -932,24 +946,60 @@ controlled registration?
 
 - `PREP-V3-v1`: Wave 1 prepared sample-centric image/state store.  The
   `PREP-V3-nuisance-v1` path is the prepared dataset instance/root name, not
-  the catalog artifact ID.
+  the catalog artifact ID.  Current prepared hash:
+  `4cdc325fbf8d4a0e07195ab075bea6f5035dfc01c9990cac03ee1f59c131e5e6`.
 - `SPLIT-ML-v1`: reusable science-state and nuisance-realization split registry,
-  pinned for S01 by stable content SHA256 as well as artifact ID.
-- `PAIR-EVAL-v1`: frozen ordered-pair evaluation manifests, pinned by stable
-  content identity over prepared dataset, split content, pair policy, recipe,
-  seed, and ordered pair records.
+  pinned for S01 by stable content SHA256 as well as artifact ID.  Current
+  content SHA256:
+  `29f0e95c3819cbeb5ce00aafb593445510723ea5fc20e2e7f3e585c1b9615314`.
+- `S01-VALIDATION-PAIRS-v1`: frozen validation ordered-pair manifest, 2048
+  ordered pairs, content SHA256
+  `68ccd41a35d286c8b060f291eef6c788a6b0d97c9660868f74e01b2b4feae499`.
+- `S01-TEST-PAIRS-v1`: frozen test ordered-pair manifest, 4096 ordered pairs,
+  content SHA256
+  `375451064bd363a6afb33c6f3f1bdff7e92efe1384c1513b3491b42318c87b82`.
 
 **Initial experiments:**
 
 - `S01-E00` — Pipeline / tiny-overfit sanity.
 - `S01-E01` — Clean same-nuisance held-out science regression.
-- `S01-E02` — Comparator representation ablation.
 
 | ID | research objective | pair policy | nuisance policy | noise policy | split artifact | model/config | status | headline result | notes |
 |---|---|---|---|---|---|---|---|---|---|
 | S01-E00 | Verify image loading, target construction, shared encoder, gradients, checkpointing, and metrics end-to-end. | Same nuisance, different science; tiny deterministic development pairs; reverse pairs available. | Training nuisance partition only. | Off. | `SPLIT-ML-v1` | Small shared CNN, `concat_diff`, MSE on `z_B-z_A`. | implemented / pending real-data run | Pending. | Success criterion is substantial overfit of a tiny noiseless set; not a generalization result. |
-| S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Shared CNN, default `concat_diff`, AdamW. | implemented / ready to run | Pending. | This is not yet a nuisance-invariance study; nuisance is fixed inside each pair. |
-| S01-E02 | Compare whether absolute-state context improves correction regression. | Same as E01. | Same as E01. | Off. | `SPLIT-ML-v1` + `PAIR-EVAL-v1` | Switch comparator between `concat_diff` and `difference`. | ready / not launched | Pending. | No new architecture required. |
+| S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + frozen S01 validation/test pairs | Shared CNN, default `concat_diff`, AdamW. | three-seed LS6 production submitted | Pending. | This is not yet a nuisance-invariance study; nuisance is fixed inside each pair. |
+
+Production replicas submitted on Lonestar6:
+
+| run | seed | LS6 job | status at 2026-09-06 snapshot |
+|---|---:|---:|---|
+| `S01-E01-R001` | 11 | 3418678 | accepted by Slurm, pending priority/resources |
+| `S01-E01-R002` | 23 | 3418707 | accepted by Slurm, pending priority/resources |
+| `S01-E01-R003` | 47 | 3418708 | accepted by Slurm, pending priority/resources |
+
+`work/experiments/ml/s01/replicas.yaml` records this block after launch.  It is
+documentation of already-submitted LS6 derived prescriptions, not a change to
+the launch snapshot or an indication that the jobs completed.
+
+### 22.3.1 S05 Wave 1 architecture study
+
+`work/experiments/ml/s05/` tracks the first architecture/representation study.
+It reuses the exact S01 prepared dataset, split registry, pair policy, frozen
+validation pairs, frozen test pairs, image scaling, no-noise condition,
+optimizer, learning rate, batch size, pairs per epoch, and early-stopping
+policy.  First-pass variants all use seed 11 so architecture differences are
+compared under one common deterministic training seed and pair stream.
+
+| ID | change from S05-E01 | model/config | status |
+|---|---|---|---|
+| `S05-E01` | Reference baseline matching S01-E01 seed-11 prescription except identity fields. | `[16, 32, 64, 128]`, embedding 128, encoder/head 256, `concat_diff`. | active/preparation |
+| `S05-E02` | Comparator only. | Same capacity as E01, `difference` comparator. | active/preparation |
+| `S05-E03` | Coordinated smaller-capacity bracket. | `[8, 16, 32, 64]`, embedding 64, encoder/head 128, `concat_diff`. | active/preparation |
+| `S05-E04` | Coordinated larger-capacity bracket. | `[32, 64, 128, 256]`, embedding 256, encoder/head 512, `concat_diff`. | active/preparation |
+
+Promising S05 variants should be confirmed across multiple seeds after the S01
+three-seed baseline results and the first S05 comparison are available.  Do not
+use the frozen test set for model selection.
 
 ### 22.4 Split and pair artifact semantics
 

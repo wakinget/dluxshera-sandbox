@@ -1,5 +1,5 @@
 # dLuxShera Working Plan & Notes (dev-facing)
-_Last updated: 2026-02-10_
+_Last updated: 2026-09-06 ML status refresh_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
@@ -20,6 +20,28 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 - Experiment workflows have advanced: prescribed Monte Carlo now has a maintained recipe entry point plus templates in `examples/recipes/prescription_templates/`.
 - Experiment metadata tracking improved: experiment-level notes and per-run notes now propagate into manifest/aggregate outputs.
 - Near-term focus remains optimizer robustness, regression depth, and doc/tutorial cleanup rather than major architecture rewrites.
+
+## ML progress refresh (2026-09-06)
+
+This edit is a focused ML-status refresh, not a full re-audit of the entire
+working plan.
+
+S01 has moved from implementation substrate to production submission: the
+canonical `S01-E01` baseline has a three-seed Lonestar6 Slurm block recorded
+under `work/experiments/ml/s01/`, with completion/results still pending in this
+repository.  Lonestar6 is now represented as a validated second ML execution
+site alongside the existing Gattaca2 workflow.
+
+S05 is now active/preparation as the first narrow architecture/representation
+study.  Its Wave 1 matrix is the S01 reference baseline, a difference-only
+comparator, a smaller coordinated capacity bracket, and a larger coordinated
+capacity bracket, all under the S01 frozen benchmark contract and seed 11.
+
+For current ML details, use:
+
+- `docs/dev/shera_ml_inverse_model_design.md`
+- `work/experiments/ml/s01/`
+- `work/experiments/ml/s05/`
 
 ---
 

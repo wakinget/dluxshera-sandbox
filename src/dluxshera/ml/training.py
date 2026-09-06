@@ -66,7 +66,13 @@ def _repo_root() -> Path:
 
 def _git_info() -> dict[str, Any]:
     root = _repo_root()
-    info: dict[str, Any] = {}
+    env = os.environ
+    info: dict[str, Any] = {
+        "source_commit": env.get("DLUXSHERA_SOURCE_COMMIT")
+        or env.get("ML_SOURCE_COMMIT"),
+        "source_archive_id": env.get("DLUXSHERA_SOURCE_ARCHIVE_ID")
+        or env.get("ML_SOURCE_ARCHIVE_ID"),
+    }
     for key, cmd in {
         "commit": ["git", "-C", str(root), "rev-parse", "HEAD"],
         "branch": ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
@@ -84,6 +90,7 @@ def _git_info() -> dict[str, Any]:
             info[key] = None
         else:
             info[key] = bool(result.stdout.strip()) if key == "dirty" else result.stdout.strip()
+    info["has_git_metadata"] = info.get("commit") is not None
     return info
 
 

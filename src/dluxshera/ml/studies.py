@@ -258,6 +258,12 @@ def validate_evaluation_artifact_against_recipe(
             f"Frozen {artifact_key} manifest content_sha256 does not match study recipe "
             f"({expected_manifest_hash} != {actual_manifest_hash})."
         )
+    expected_count = recipe.get("ordered_pair_count")
+    if expected_count is not None and int(expected_count) != len(pair_manifest.records):
+        raise ValueError(
+            f"Frozen {artifact_key} manifest ordered_pair_count does not match study recipe "
+            f"({expected_count} != {len(pair_manifest.records)})."
+        )
 
 
 def validate_experiment_policy_for_study(

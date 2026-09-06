@@ -2,13 +2,54 @@
 
 This directory is the tracked orchestration layer for the first production ML
 study.  It deliberately stays small: `study.yaml` contains the scientific
-prescription, and `hpc/` contains the Gattaca2 preflight and launch wrappers.
+prescription, `hpc/` contains S01 compatibility launch wrappers, and
+`../hpc/` contains the generic site-aware ML execution layer.
 Generated configs, frozen materializations, SLURM logs, checkpoints, and metrics
 belong on scratch and are ignored under this study directory.
 
 The canonical prepared artifact ID is `PREP-V3-v1`.  The common directory name
 `PREP-V3-nuisance-v1` is the prepared dataset instance/root, not the artifact
-ID recorded in catalog, split, pair-manifest, or study-contract identity.
+ID recorded in catalog, split, pair-manifest, or study-contract identity.  The
+canonical prepared dataset hash is
+`4cdc325fbf8d4a0e07195ab075bea6f5035dfc01c9990cac03ee1f59c131e5e6`.
+
+## Status Snapshot 2026-09-06
+
+The current S01 production launch used exact source snapshot
+`5d397eca9e206180785ce4b0d1593e19878c79b7` on Lonestar6.  The tracked
+`replicas.yaml` file was added after launch to document the already-submitted
+derived prescriptions; it does not change the LS6 source snapshot used for
+those submissions.
+
+Lonestar6 artifact transfer and strict GPU preflight passed with the canonical
+prepared dataset, split registry, frozen validation-pair, and frozen test-pair
+identities recorded in `study.yaml`.  The validated environment was Python
+3.11.16, PyTorch `2.11.0+cu128`, torch CUDA runtime 12.8, and an NVIDIA
+A100-PCIE-40GB GPU.
+
+A real-data training smoke test completed one epoch with `pairs_per_epoch:
+256`, `batch_size: 32`, `num_workers: 4`, and `cuda:0`.  The observed epoch
+time was approximately 41.4 seconds.  It wrote `checkpoint_best.pt`,
+`checkpoint_last.pt`, `evaluation_predictions.npz`, `history.csv`,
+`metrics.json`, `run_config_resolved.json`, and `run_manifest.json`.  The smoke
+loss is not an S01 scientific result; the run only validated infrastructure.
+
+Three otherwise-identical S01-E01 production seeds were accepted by Slurm on
+TACC Lonestar6 and were pending for priority/resources at this snapshot:
+
+| run | seed | LS6 job |
+|---|---:|---:|
+| `S01-E01-R001` | 11 | 3418678 |
+| `S01-E01-R002` | 23 | 3418707 |
+| `S01-E01-R003` | 47 | 3418708 |
+
+R002 and R003 were created on LS6 as derived copies of the canonical S01 study
+with exactly `run_id` and `seed` changed; a comparison guard verified no other
+field changed.  Completion and scientific results are not recorded here unless
+future result artifacts prove them.
+
+The next controlled model-development study is S05 under
+`work/experiments/ml/s05/`.
 
 ## Scientific Prescription
 
@@ -149,10 +190,10 @@ Small final products can be copied to:
 /projects/shera_hpc/$USER/dLuxShera-Results/ml/S01/S01-E01/S01-E01-R001/
 ```
 
-The launch script copies `run_manifest.json`, `run_config_resolved.json`,
-`history.csv`, `metrics.json`, `evaluation_predictions.npz`, and
-`checkpoint_best.pt`.  Large prepared datasets and transient caches should not
-be copied to `/projects`.
+The launch script copies compact run products such as `run_manifest.json`,
+`run_config_resolved.json`, `history.csv`, `metrics.json`,
+`evaluation_predictions.npz`, and checkpoints to `ML_PERSIST_DIR`.  Large
+prepared datasets and transient caches should not be copied to `/projects`.
 
 The split registry and frozen validation/test pair manifests are small
 scientific study artifacts, not transient cache.  Keep active working copies on
@@ -168,6 +209,46 @@ scratch, and also retain durable copies under:
 Do not copy the prepared `PREP-V3-nuisance-v1` shard store into that results
 artifact tree when a canonical prepared-data copy already exists elsewhere
 under `/projects`.
+
+The S01 compatibility batch wrapper maps `S01_PROJECT_ARTIFACT_ROOT` to the
+generic `ML_PERSIST_ARTIFACT_ROOT`; if unset, it defaults to
+`$S01_PROJECT_RESULTS_ROOT/S01/artifacts`.  The generic preflight persists the
+split and frozen validation/test artifacts only after the study contract passes,
+and it rejects an existing destination with the same artifact name but a
+different identity.  The compatibility wrapper treats the `S01_*` namespace as
+authoritative: before delegating to the generic runner it resets generic
+`ML_STUDY_PATH`, `ML_EXPERIMENT_ID`, `ML_RUN_ID`, data paths, run paths,
+artifact paths, and source-provenance variables from S01 values and defaults.
+Stale generic `ML_*` values from an earlier S05 submission are not preserved.
+For Conda setup, explicit `S01_CONDA_SH` wins; if it is unset and
+`/cm/shared/apps/miniforge/etc/profile.d/conda.sh` exists, the S01
+compatibility layer maps that historical Gattaca2 setup script to
+`ML_CONDA_SH`.  Otherwise the generic runner emits its normal Conda
+initialization error.
+
+## Lonestar6 Execution Notes
+
+Lonestar6 single-A100 production jobs use the generic ML HPC wrapper under
+`work/experiments/ml/hpc/` with the `tacc_ls6` site profile:
+
+- account `JPL-PUB`
+- partition `gpu-a100-small`
+- 1 node, 1 task, 8 CPUs per task
+- wall time `08:00:00`
+- no `--mem`
+- no normal GPU `--gres`
+
+The `gpu-a100-small` partition exposes virtual-node memory bookkeeping that
+rejected a normal `--mem=64G` request.  TACC's `sbatch --parsable` wrapper can
+print a banner before the numeric job ID; submit helpers must parse the final
+pure-integer line.
+
+The validated launch isolation sequence unloads `python3/3.9.7` when present,
+unsets `PYTHONPATH` and `PYTHONHOME`, sets `PYTHONNOUSERSITE=1`, and then
+activates the dedicated Conda environment.  Source trees transferred by
+`git archive` lack `.git`, so set `S01_SOURCE_COMMIT` in the compatibility
+environment or use the generic submit helper's `--source-commit` option to
+preserve exact source provenance.
 
 ## Operational Sequence
 
@@ -217,8 +298,9 @@ PYTHONPATH=src python work/experiments/ml/materialize_study_artifacts.py \
 ```
 
 After materialization, copy the compact study-defining artifacts to the durable
-`/projects` artifact tree shown above.  The batch wrapper also performs this
-copy from the scratch artifacts it preflights.
+`/projects` artifact tree shown above, or set `S01_PROJECT_ARTIFACT_ROOT` before
+batch submission.  The batch wrapper performs this copy from the scratch
+artifacts it preflights.
 
 7. Discover the site-valid GPU SLURM syntax before submission:
 

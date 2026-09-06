@@ -23,6 +23,7 @@ evaluation_artifacts:
   validation:
     artifact_id: S01-VALIDATION-PAIRS-v1
     content_sha256: 68ccd41a35d286c8b060f291eef6c788a6b0d97c9660868f74e01b2b4feae499
+    ordered_pair_count: 2048
     pair_policy_id: s01_clean_same_pair_grid_v1
     split: validation
     seed: 1101
@@ -37,6 +38,7 @@ evaluation_artifacts:
   test:
     artifact_id: S01-TEST-PAIRS-v1
     content_sha256: 375451064bd363a6afb33c6f3f1bdff7e92efe1384c1513b3491b42318c87b82
+    ordered_pair_count: 4096
     pair_policy_id: s01_clean_same_pair_grid_v1
     split: test
     seed: 1102

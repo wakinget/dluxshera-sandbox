@@ -1,0 +1,34 @@
+schema_version: dluxshera_ml_replica_status/1
+study_id: S01
+experiment_id: S01-E01
+baseline_run_id: S01-E01-R001
+recorded_at: 2026-09-06
+recorded_after_launch: true
+source_snapshot_commit_for_launch: 5d397eca9e206180785ce4b0d1593e19878c79b7
+notes:
+  - This tracked record documents already-submitted Lonestar6 derived prescriptions.
+  - The LS6 source-code snapshot for those submissions remained commit 5d397eca9e206180785ce4b0d1593e19878c79b7.
+  - R002 and R003 were derived from the canonical S01 study with only run_id and seed changed; a comparison guard verified no other prescription field changed.
+status_snapshot:
+  scheduler: Slurm
+  site: TACC Lonestar6
+  state_at_snapshot: accepted_and_pending_priority_or_resources
+replicas:
+  - run_id: S01-E01-R001
+    seed: 11
+    site: tacc_ls6
+    slurm_job_id: "3418678"
+    submitted: true
+    completion_recorded: false
+  - run_id: S01-E01-R002
+    seed: 23
+    site: tacc_ls6
+    slurm_job_id: "3418707"
+    submitted: true
+    completion_recorded: false
+  - run_id: S01-E01-R003
+    seed: 47
+    site: tacc_ls6
+    slurm_job_id: "3418708"
+    submitted: true
+    completion_recorded: false

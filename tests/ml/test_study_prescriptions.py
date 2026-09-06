@@ -277,3 +277,83 @@ def test_study_contract_rejects_wrong_validation_manifest_before_training(tmp_pa
             experiment_id="S01-E01",
             config=config,
         )
+
+
+def test_frozen_artifact_ordered_pair_count_is_contract_field(tmp_path: Path) -> None:
+    catalog = load_sample_catalog(_write_prepared_fixture(tmp_path / "prepared"))
+    registry = generate_split_registry(
+        catalog,
+        seed=7,
+        science_fractions={"train": 0.34, "validation": 0.33, "test": 0.33},
+        nuisance_fractions={"train": 0.34, "validation": 0.33, "test": 0.33},
+    )
+    study = _study(
+        catalog.prepared_dataset_hash,
+        split_content_sha256=split_registry_content_sha256(registry),
+    )
+    study["evaluation_artifacts"]["test"] = {
+        **study["evaluation_artifacts"]["validation"],
+        "artifact_id": "S01-TEST-PAIRS-v1",
+        "split": "test",
+        "seed": 1102,
+        "eval_slices": {
+            "heldout_science_seen_nuisance": {
+                "science_split": "test",
+                "nuisance_split": "train",
+            },
+            "heldout_science_heldout_nuisance": {
+                "science_split": "test",
+                "nuisance_split": "test",
+            },
+        },
+    }
+    policy = PairPolicy.from_dict(
+        {
+            "policy_id": "s01_clean_same_pair_grid_v1",
+            **study["pair_policies"]["s01_clean_same_pair_grid_v1"],
+        }
+    )
+    manifests = {}
+    for key, recipe in study["evaluation_artifacts"].items():
+        manifest = generate_frozen_pair_manifest(
+            catalog,
+            registry,
+            policy=policy,
+            artifact_id=recipe["artifact_id"],
+            split=recipe["split"],
+            seed=recipe["seed"],
+            pairs_per_slice=recipe["pairs_per_slice"],
+            eval_slices=recipe["eval_slices"],
+        )
+        recipe["ordered_pair_count"] = len(manifest.records)
+        manifests[key] = manifest
+
+    validate_evaluation_artifact_against_recipe(
+        manifests["validation"],
+        study=study,
+        artifact_key="validation",
+        split_registry=registry,
+    )
+    validate_evaluation_artifact_against_recipe(
+        manifests["test"],
+        study=study,
+        artifact_key="test",
+        split_registry=registry,
+    )
+
+    study["evaluation_artifacts"]["validation"]["ordered_pair_count"] += 1
+    with pytest.raises(ValueError, match="ordered_pair_count"):
+        validate_evaluation_artifact_against_recipe(
+            manifests["validation"],
+            study=study,
+            artifact_key="validation",
+            split_registry=registry,
+        )
+
+    del study["evaluation_artifacts"]["validation"]["ordered_pair_count"]
+    validate_evaluation_artifact_against_recipe(
+        manifests["validation"],
+        study=study,
+        artifact_key="validation",
+        split_registry=registry,
+    )
