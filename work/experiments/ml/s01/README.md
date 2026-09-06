@@ -15,6 +15,9 @@ canonical prepared dataset hash is
 
 ## Status Snapshot 2026-09-06
 
+This section is a historical launch snapshot as of September 6, 2026; it is
+not rewritten with later durable-output results.
+
 The current S01 production launch used exact source snapshot
 `5d397eca9e206180785ce4b0d1593e19878c79b7` on Lonestar6.  The tracked
 `replicas.yaml` file was added after launch to document the already-submitted
@@ -170,6 +173,91 @@ resumed segment does not produce a new best validation loss, the prior
 `checkpoint_best.pt`, `metrics.json`, and `evaluation_predictions.npz` remain
 the authoritative best artifacts.  Resume rejects changed prepared dataset,
 split-registry content, pair-policy, or frozen validation-manifest identity.
+
+Scheduler-aware runs also persist `lr_scheduler` and
+`lr_scheduler_state_dict` in checkpoints.  Resume restores the model,
+optimizer, scheduler, and early-stopping state before continuing from the next
+epoch.  An active scheduled run fails clearly if the checkpoint lacks scheduler
+state or if the scheduler prescription changes.  Legacy fixed-LR checkpoints
+without scheduler state remain resumable when the current config has no active
+scheduler.
+
+`history.csv` records learning-rate semantics explicitly:
+
+- `learning_rate`: LR actually used for optimizer steps in that epoch.
+- `learning_rate_next`: LR after the epoch-end scheduler step, used by the next
+  epoch.
+- `lr_reduced`: true only when the scheduler lowered the LR at the end of that
+  epoch.
+
+## S01 Optimization Study
+
+Subsequent analysis of completed durable `S01-E01` outputs showed that the
+three-seed baseline demonstrated learnability but did not demonstrate
+convergence.  All three runs trained to the 100-epoch maximum rather than
+early-stopping; their best epochs were 99 for seed 11, 94 for seed 23, and 93
+for seed 47.  Their final 30-epoch validation-loss trends were still
+substantially negative, so the 100-epoch limit is treated as an artificial
+truncation.
+
+`S01-E02` through `S01-E07` form the first optimizer/training-control wave.
+They keep the S01-E01 architecture, pair policy, prepared dataset, split,
+frozen validation artifact, locked test artifact, image scaling, noise
+condition, optimizer family, weight decay, batch size, pair count, workers, and
+evaluation bins fixed.  The frozen test set remains locked but unevaluated
+during optimizer selection (`evaluate_test: false`).
+
+The 300-epoch setting in these runs is a maximum safety ceiling, not a planned
+fixed duration.  All six runs share:
+
+```yaml
+early_stopping:
+  enabled: true
+  monitor: validation_loss
+  min_epochs: 40
+  patience: 30
+  min_delta_relative: 0.001
+```
+
+First-wave optimization uses only seed 11.  After identifying the most
+promising one or two prescriptions, repeat only those at seeds 23 and 47.
+
+Optimization matrix:
+
+| experiment | seed | initial LR | scheduler | max epochs | evaluate_test |
+|---|---:|---:|---|---:|---|
+| `S01-E02-R001` | 11 | 5e-4 | fixed | 300 | false |
+| `S01-E03-R001` | 11 | 1e-3 | fixed | 300 | false |
+| `S01-E04-R001` | 11 | 5e-4 | reduce-on-plateau | 300 | false |
+| `S01-E05-R001` | 11 | 1e-3 | reduce-on-plateau | 300 | false |
+| `S01-E06-R001` | 11 | 5e-4 | cosine annealing | 300 | false |
+| `S01-E07-R001` | 11 | 1e-3 | cosine annealing | 300 | false |
+
+Plateau scheduler prescription:
+
+```yaml
+lr_scheduler:
+  name: reduce_on_plateau
+  monitor: validation_loss
+  factor: 0.3
+  patience: 8
+  threshold_relative: 0.001
+  min_lr: 0.000001
+```
+
+Cosine scheduler prescription:
+
+```yaml
+lr_scheduler:
+  name: cosine_annealing
+  t_max: 300
+  min_lr: 0.000001
+```
+
+The original `S01-E01` production jobs came from source snapshot
+`5d397eca9e206180785ce4b0d1593e19878c79b7`.  The scheduler implementation and
+`S01-E02` through `S01-E07` prescriptions are later source content; record the
+exact source snapshot used when those runs are launched.
 
 ## Gattaca2 Scratch Layout
 

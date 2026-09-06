@@ -126,8 +126,111 @@ def test_s01_e01_prescription_keeps_canonical_scientific_identity() -> None:
         "adaptive_pool_shape": [4, 4],
     }
     assert config["training"]["learning_rate"] == 0.0005
+    assert "lr_scheduler" not in config["training"]
     assert config["training"]["optimizer"] == "adamw"
+    assert config["training"]["epochs"] == 100
+    assert config["training"]["early_stopping"] == {
+        "enabled": True,
+        "monitor": "validation_loss",
+        "min_epochs": 20,
+        "patience": 12,
+        "min_delta_relative": 0.001,
+    }
     assert config["evaluate_test"] is False
+
+
+def test_s01_optimization_wave_preserves_contract_and_resolves_matrix() -> None:
+    study = load_study_prescription(S01_STUDY)
+    expected_model = {
+        "channels": [16, 32, 64, 128],
+        "embedding_dim": 128,
+        "encoder_hidden_dim": 256,
+        "head_hidden_dim": 256,
+        "comparator": "concat_diff",
+        "normalization": "batch",
+        "adaptive_pool_shape": [4, 4],
+    }
+    expected_early_stopping = {
+        "enabled": True,
+        "monitor": "validation_loss",
+        "min_epochs": 40,
+        "patience": 30,
+        "min_delta_relative": 0.001,
+    }
+    expected = {
+        "S01-E02": (0.0005, {"name": "none"}),
+        "S01-E03": (0.001, {"name": "none"}),
+        "S01-E04": (
+            0.0005,
+            {
+                "name": "reduce_on_plateau",
+                "monitor": "validation_loss",
+                "factor": 0.3,
+                "patience": 8,
+                "threshold_relative": 0.001,
+                "min_lr": 0.000001,
+            },
+        ),
+        "S01-E05": (
+            0.001,
+            {
+                "name": "reduce_on_plateau",
+                "monitor": "validation_loss",
+                "factor": 0.3,
+                "patience": 8,
+                "threshold_relative": 0.001,
+                "min_lr": 0.000001,
+            },
+        ),
+        "S01-E06": (
+            0.0005,
+            {"name": "cosine_annealing", "t_max": 300, "min_lr": 0.000001},
+        ),
+        "S01-E07": (
+            0.001,
+            {"name": "cosine_annealing", "t_max": 300, "min_lr": 0.000001},
+        ),
+    }
+    for experiment_id, (learning_rate, scheduler) in expected.items():
+        config = resolve_study_experiment_config(study, experiment_id=experiment_id)
+        assert config["run_id"] == f"{experiment_id}-R001"
+        assert config["seed"] == 11
+        assert config["device"] == "cuda:0"
+        assert config["dataset"] == EXPECTED_DATASET
+        assert study["split_registry"] == EXPECTED_SPLIT
+        assert config["validation_artifact"] == "validation"
+        assert config["test_artifact"] == "test"
+        assert config["require_frozen_validation_manifest"] is True
+        assert config["evaluate_test"] is False
+        _assert_pair_policy_core(config["pair_policy"])
+        assert config["model"] == expected_model
+        assert config["image_scaling"] == {"mode": "global_max_abs", "max_samples": 512}
+        assert config["noise"] == {"enabled": False, "apply_to": "observation"}
+        training = config["training"]
+        assert training["epochs"] == 300
+        assert training["batch_size"] == 32
+        assert training["learning_rate"] == learning_rate
+        assert training["lr_scheduler"] == scheduler
+        assert training["weight_decay"] == 0.0001
+        assert training["optimizer"] == "adamw"
+        assert training["pairs_per_epoch"] == 8192
+        assert training["num_workers"] == 4
+        assert training["shard_cache_size"] == 4
+        assert training["early_stopping"] == expected_early_stopping
+        assert config["evaluation"]["fisher_distance_bin_edges"] == [
+            0,
+            100,
+            250,
+            500,
+            1000,
+            2000,
+            5000,
+        ]
+
+    for artifact_key, expected_artifact in EXPECTED_EVAL_HASHES.items():
+        artifact = study["evaluation_artifacts"][artifact_key]
+        for key, value in expected_artifact.items():
+            assert artifact[key] == value
 
 
 def test_s05_reuses_s01_benchmark_artifact_identities() -> None:

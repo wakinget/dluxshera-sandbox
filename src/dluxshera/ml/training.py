@@ -48,6 +48,7 @@ __all__ = [
     "DEFAULT_S01_FISHER_DISTANCE_BIN_EDGES",
     "EarlyStoppingConfig",
     "EarlyStoppingState",
+    "LRSchedulerConfig",
     "default_s01_e00_config",
     "default_s01_e01_config",
     "load_run_config",
@@ -248,6 +249,121 @@ class EarlyStoppingState:
         }
 
 
+@dataclass(frozen=True)
+class LRSchedulerConfig:
+    """Configuration for the epoch-level learning-rate scheduler."""
+
+    name: str = "none"
+    monitor: str = "validation_loss"
+    factor: float = 0.1
+    patience: int = 10
+    threshold_relative: float = 0.0001
+    min_lr: float = 0.0
+    t_max: int | None = None
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any] | None,
+        *,
+        initial_learning_rate: float,
+        max_epochs: int | None = None,
+    ) -> "LRSchedulerConfig":
+        if payload is None:
+            config = cls()
+        else:
+            name = str(payload.get("name", "none")).lower()
+            config = cls(
+                name=name,
+                monitor=str(payload.get("monitor", "validation_loss")),
+                factor=float(payload.get("factor", 0.1)),
+                patience=_scheduler_int(payload.get("patience", 10), "lr_scheduler.patience"),
+                threshold_relative=float(payload.get("threshold_relative", 0.0001)),
+                min_lr=float(payload.get("min_lr", 0.0)),
+                t_max=None
+                if "t_max" not in payload
+                else _scheduler_int(payload.get("t_max"), "lr_scheduler.t_max"),
+            )
+        config.validate(initial_learning_rate=initial_learning_rate, max_epochs=max_epochs)
+        return config
+
+    @property
+    def is_active(self) -> bool:
+        return self.name != "none"
+
+    def validate(
+        self,
+        *,
+        initial_learning_rate: float,
+        max_epochs: int | None = None,
+    ) -> None:
+        lr = float(initial_learning_rate)
+        if not np.isfinite(lr) or lr <= 0.0:
+            raise ValueError("training.learning_rate must be finite and > 0.")
+        if self.name not in {"none", "reduce_on_plateau", "cosine_annealing"}:
+            raise ValueError(f"Unsupported lr_scheduler.name {self.name!r}.")
+        if self.name == "none":
+            return
+        if not np.isfinite(float(self.min_lr)) or float(self.min_lr) < 0.0:
+            raise ValueError("lr_scheduler.min_lr must be finite and >= 0.")
+        if float(self.min_lr) > lr:
+            raise ValueError("lr_scheduler.min_lr must be <= training.learning_rate.")
+        if self.name == "reduce_on_plateau":
+            if self.monitor != "validation_loss":
+                raise ValueError("Only lr_scheduler.monitor='validation_loss' is supported.")
+            if not 0.0 < float(self.factor) < 1.0:
+                raise ValueError("lr_scheduler.factor must satisfy 0 < factor < 1.")
+            if int(self.patience) < 0:
+                raise ValueError("lr_scheduler.patience must be a nonnegative integer.")
+            if (
+                not np.isfinite(float(self.threshold_relative))
+                or float(self.threshold_relative) < 0.0
+            ):
+                raise ValueError("lr_scheduler.threshold_relative must be finite and >= 0.")
+            return
+        if self.name == "cosine_annealing":
+            if self.t_max is None or int(self.t_max) <= 0:
+                raise ValueError("lr_scheduler.t_max must be a finite positive integer.")
+            if max_epochs is not None and int(max_epochs) > int(self.t_max):
+                raise ValueError(
+                    "training.epochs must be <= lr_scheduler.t_max for "
+                    "cosine_annealing."
+                )
+            return
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.name == "none":
+            return {"name": "none"}
+        if self.name == "reduce_on_plateau":
+            return {
+                "name": self.name,
+                "monitor": self.monitor,
+                "factor": float(self.factor),
+                "patience": int(self.patience),
+                "threshold_relative": float(self.threshold_relative),
+                "min_lr": float(self.min_lr),
+            }
+        if self.name == "cosine_annealing":
+            return {
+                "name": self.name,
+                "t_max": int(self.t_max or 0),
+                "min_lr": float(self.min_lr),
+            }
+        raise ValueError(f"Unsupported lr_scheduler.name {self.name!r}.")
+
+
+def _scheduler_int(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite integer.") from exc
+    if not np.isfinite(number) or not number.is_integer():
+        raise ValueError(f"{field} must be a finite integer.")
+    return int(number)
+
+
 def _deep_update(base: dict[str, Any], updates: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for key, value in updates.items():
@@ -438,6 +554,58 @@ def _build_optimizer(model: torch.nn.Module, config: Mapping[str, Any]) -> torch
     raise ValueError(f"Unsupported optimizer {name!r}.")
 
 
+def _build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    config: LRSchedulerConfig,
+) -> torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None:
+    if config.name == "none":
+        return None
+    if config.name == "reduce_on_plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=float(config.factor),
+            patience=int(config.patience),
+            threshold=float(config.threshold_relative),
+            threshold_mode="rel",
+            min_lr=float(config.min_lr),
+        )
+    if config.name == "cosine_annealing":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(config.t_max or 0),
+            eta_min=float(config.min_lr),
+        )
+    raise ValueError(f"Unsupported lr_scheduler.name {config.name!r}.")
+
+
+def _optimizer_learning_rate(optimizer: torch.optim.Optimizer) -> float:
+    groups = optimizer.param_groups
+    if len(groups) != 1:
+        raise ValueError("Expected optimizer to contain exactly one parameter group.")
+    return float(groups[0]["lr"])
+
+
+def _step_lr_scheduler(
+    scheduler: (
+        torch.optim.lr_scheduler.LRScheduler
+        | torch.optim.lr_scheduler.ReduceLROnPlateau
+        | None
+    ),
+    *,
+    config: LRSchedulerConfig,
+    validation_loss: float,
+) -> None:
+    if scheduler is None:
+        return
+    if config.name == "reduce_on_plateau":
+        scheduler.step(float(validation_loss))
+    elif config.name == "cosine_annealing":
+        scheduler.step()
+    else:
+        raise ValueError(f"Unsupported lr_scheduler.name {config.name!r}.")
+
+
 def _move_batch(batch: Mapping[str, Any], device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     image_a = batch["image_a"].to(device)
     image_b = batch["image_b"].to(device)
@@ -555,6 +723,9 @@ def _write_history(path: Path, rows: list[Mapping[str, Any]]) -> None:
         "epoch_seconds",
         "is_best",
         "early_stopping_bad_epochs",
+        "learning_rate",
+        "learning_rate_next",
+        "lr_reduced",
     ]
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w", newline="", encoding="utf-8") as handle:
@@ -577,6 +748,38 @@ def _latest_history_epoch(rows: Sequence[Mapping[str, Any]]) -> int | None:
         return None
     epochs = [int(row["epoch"]) for row in rows if row.get("epoch") not in (None, "")]
     return None if not epochs else max(epochs)
+
+
+def _optimization_summary(
+    *,
+    history: Sequence[Mapping[str, Any]],
+    initial_learning_rate: float,
+    final_learning_rate: float,
+    lr_scheduler_config: LRSchedulerConfig,
+    early_stopping_state: EarlyStoppingState,
+    max_epochs: int,
+) -> dict[str, Any]:
+    reduction_epochs = [
+        int(row["epoch"])
+        for row in history
+        if str(row.get("lr_reduced", "")).lower() == "true" or row.get("lr_reduced") is True
+    ]
+    reached_max_epochs = (
+        not bool(early_stopping_state.early_stopped)
+        and int(early_stopping_state.epochs_completed) >= int(max_epochs)
+    )
+    return {
+        "initial_learning_rate": float(initial_learning_rate),
+        "final_learning_rate": float(final_learning_rate),
+        "lr_scheduler": lr_scheduler_config.to_dict(),
+        "lr_reduction_count": len(reduction_epochs),
+        "lr_reduction_epochs": reduction_epochs,
+        "epochs_completed": int(early_stopping_state.epochs_completed),
+        "best_epoch": int(early_stopping_state.best_epoch),
+        "early_stopped": bool(early_stopping_state.early_stopped),
+        "stop_epoch": early_stopping_state.stop_epoch,
+        "reached_max_epochs": reached_max_epochs,
+    }
 
 
 def _training_identity(
@@ -646,6 +849,64 @@ def _validate_resume_identity(
         raise ValueError(
             "Resume checkpoint scientific identity does not match the current run inputs: "
             f"expected={previous}, actual={current_identity}."
+        )
+
+
+def _validate_resume_lr_scheduler(
+    *,
+    checkpoint: Mapping[str, Any],
+    current_config: LRSchedulerConfig,
+    current_initial_learning_rate: float,
+) -> None:
+    previous_raw = checkpoint.get("lr_scheduler")
+    previous = previous_raw if isinstance(previous_raw, Mapping) else {"name": "none"}
+    previous_name = str(previous.get("name", "none"))
+    current = current_config.to_dict()
+    if previous_name != current_config.name:
+        raise ValueError(
+            "Resume checkpoint lr_scheduler does not match the current run "
+            f"({previous_name!r} != {current_config.name!r})."
+        )
+    if current_config.is_active:
+        checkpoint_config = checkpoint.get("config")
+        checkpoint_training = (
+            checkpoint_config.get("training")
+            if isinstance(checkpoint_config, Mapping)
+            else None
+        )
+        if not isinstance(checkpoint_training, Mapping) or "learning_rate" not in checkpoint_training:
+            raise ValueError(
+                "Resume checkpoint is missing config.training.learning_rate for "
+                "an active scheduler."
+            )
+        previous_learning_rate = float(checkpoint_training["learning_rate"])
+        if previous_learning_rate != float(current_initial_learning_rate):
+            raise ValueError(
+                "Resume checkpoint training.learning_rate does not match the "
+                "current active scheduled run "
+                f"({previous_learning_rate} != {float(current_initial_learning_rate)})."
+            )
+        if dict(previous) != current:
+            raise ValueError(
+                "Resume checkpoint lr_scheduler configuration does not match "
+                f"the current run: expected={previous}, actual={current}."
+            )
+        if "lr_scheduler_state_dict" not in checkpoint:
+            raise ValueError(
+                "Resume checkpoint is missing lr_scheduler_state_dict for an "
+                "active scheduler."
+            )
+        if not isinstance(checkpoint["lr_scheduler_state_dict"], Mapping):
+            raise ValueError(
+                "Resume checkpoint lr_scheduler_state_dict is not compatible "
+                "with an active scheduler."
+            )
+    elif "lr_scheduler_state_dict" in checkpoint and isinstance(
+        checkpoint.get("lr_scheduler_state_dict"), Mapping
+    ):
+        raise ValueError(
+            "Resume checkpoint contains active scheduler state but the current "
+            "run config requests lr_scheduler.name='none'."
         )
 
 
@@ -737,9 +998,21 @@ def train_pairwise_correction(
         explicit_path=validation_manifest_path,
     )
 
+    training_cfg = dict(config.get("training", {}))
+    epochs = int(training_cfg.get("epochs", 25))
+    initial_learning_rate = float(training_cfg.get("learning_rate", 5.0e-4))
+    lr_scheduler_config = LRSchedulerConfig.from_dict(
+        training_cfg.get("lr_scheduler"),
+        initial_learning_rate=initial_learning_rate,
+        max_epochs=epochs,
+    )
+    training_cfg["lr_scheduler"] = lr_scheduler_config.to_dict()
+    config["training"] = training_cfg
+
     model = build_pairwise_correction_model(catalog.science_dim, config.get("model")).to(device)
     criterion = nn.MSELoss()
-    optimizer = _build_optimizer(model, config.get("training", {}))
+    optimizer = _build_optimizer(model, training_cfg)
+    lr_scheduler = _build_lr_scheduler(optimizer, lr_scheduler_config)
     start_epoch = 0
     checkpoint = None
     current_identity = _training_identity(
@@ -751,11 +1024,17 @@ def train_pairwise_correction(
     if resume_checkpoint_path is not None:
         checkpoint = _load_training_checkpoint(resume_checkpoint_path, map_location=device)
         _validate_resume_identity(checkpoint=checkpoint, current_identity=current_identity)
+        _validate_resume_lr_scheduler(
+            checkpoint=checkpoint,
+            current_config=lr_scheduler_config,
+            current_initial_learning_rate=initial_learning_rate,
+        )
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if lr_scheduler is not None:
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
         start_epoch = int(checkpoint.get("epoch", -1)) + 1
 
-    training_cfg = dict(config.get("training", {}))
     batch_size = int(training_cfg.get("batch_size", 32))
     num_workers = int(training_cfg.get("num_workers", 0))
     shard_cache_size = int(training_cfg.get("shard_cache_size", 4))
@@ -869,13 +1148,13 @@ def train_pairwise_correction(
                 "Existing history.csv is inconsistent with resume checkpoint "
                 f"(latest epoch {latest_epoch} != checkpoint epoch {expected_latest})."
             )
-    epochs = int(training_cfg.get("epochs", 25))
     evaluation_cfg = dict(config.get("evaluation", {}))
     fisher_distance_bin_edges = validate_fisher_distance_bin_edges(
         evaluation_cfg.get("fisher_distance_bin_edges", DEFAULT_S01_FISHER_DISTANCE_BIN_EDGES)
     )
     for epoch in range(start_epoch, epochs):
         epoch_started = time.perf_counter()
+        learning_rate = _optimizer_learning_rate(optimizer)
         model.train()
         train_dataset.set_epoch(epoch)
         running = 0.0
@@ -904,6 +1183,13 @@ def train_pairwise_correction(
             metric=val_loss,
             config=early_stopping_config,
         )
+        _step_lr_scheduler(
+            lr_scheduler,
+            config=lr_scheduler_config,
+            validation_loss=val_loss,
+        )
+        learning_rate_next = _optimizer_learning_rate(optimizer)
+        lr_reduced = bool(learning_rate_next < learning_rate)
         epoch_seconds = time.perf_counter() - epoch_started
         history.append(
             {
@@ -914,6 +1200,9 @@ def train_pairwise_correction(
                 "epoch_seconds": epoch_seconds,
                 "is_best": is_best,
                 "early_stopping_bad_epochs": early_stopping_state.bad_epochs,
+                "learning_rate": learning_rate,
+                "learning_rate_next": learning_rate_next,
+                "lr_reduced": lr_reduced,
             }
         )
         checkpoint = {
@@ -928,9 +1217,14 @@ def train_pairwise_correction(
             "best_epoch": early_stopping_state.best_epoch,
             "early_stopping": _checkpoint_metadata_mapping(early_stopping_config.to_dict()),
             "early_stopping_state": _checkpoint_metadata_mapping(early_stopping_state.to_dict()),
+            "lr_scheduler": _checkpoint_metadata_mapping(lr_scheduler_config.to_dict()),
             "training_identity": _checkpoint_metadata_mapping(current_identity),
             "runtime_provenance": _checkpoint_metadata_mapping(runtime),
         }
+        if lr_scheduler is not None:
+            checkpoint["lr_scheduler_state_dict"] = _checkpoint_metadata_mapping(
+                lr_scheduler.state_dict()
+            )
         torch.save(checkpoint, output_dir / "checkpoint_last.pt")
         if is_best:
             torch.save(checkpoint, output_dir / "checkpoint_best.pt")
@@ -943,6 +1237,8 @@ def train_pairwise_correction(
         print(
             "epoch "
             f"{epoch + 1:03d}/{epochs:03d} "
+            f"lr={learning_rate:.2e}"
+            f"{f'->{learning_rate_next:.2e}' if lr_reduced else ''} "
             f"train={train_loss:.6g} "
             f"val={val_loss:.6g} "
             f"best={early_stopping_state.absolute_best_loss:.6g} "
@@ -954,6 +1250,15 @@ def train_pairwise_correction(
             break
 
     final_metrics = read_json(output_dir / "metrics.json")
+    final_learning_rate = _optimizer_learning_rate(optimizer)
+    optimization = _optimization_summary(
+        history=history,
+        initial_learning_rate=initial_learning_rate,
+        final_learning_rate=final_learning_rate,
+        lr_scheduler_config=lr_scheduler_config,
+        early_stopping_state=early_stopping_state,
+        max_epochs=epochs,
+    )
     final_metrics["schema_version"] = "dluxshera_ml_metrics/2"
     final_metrics["best_epoch"] = early_stopping_state.best_epoch
     final_metrics["best_validation_loss"] = early_stopping_state.absolute_best_loss
@@ -966,6 +1271,7 @@ def train_pairwise_correction(
         "reached_max_epochs": not early_stopping_state.early_stopped
         and early_stopping_state.epochs_completed >= epochs,
     }
+    final_metrics["optimization"] = optimization
 
     if bool(config.get("evaluate_test", False)):
         if test_manifest_path is None:
@@ -1002,6 +1308,7 @@ def train_pairwise_correction(
     run_manifest["best_epoch"] = early_stopping_state.best_epoch
     run_manifest["best_validation_loss"] = early_stopping_state.absolute_best_loss
     run_manifest["early_stopping"].update(final_metrics["early_stopping"])
+    run_manifest["optimization"] = optimization
     write_json(output_dir / "run_manifest.json", run_manifest)
     return {
         "output_dir": str(output_dir),

@@ -92,3 +92,269 @@ experiments:
         min_delta_relative: 0.001
     evaluation:
       fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
+  S01-E02:
+    run_id: S01-E02-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 300
+      batch_size: 32
+      learning_rate: 0.0005
+      lr_scheduler:
+        name: none
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 40
+        patience: 30
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
+  S01-E03:
+    run_id: S01-E03-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 300
+      batch_size: 32
+      learning_rate: 0.001
+      lr_scheduler:
+        name: none
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 40
+        patience: 30
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
+  S01-E04:
+    run_id: S01-E04-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 300
+      batch_size: 32
+      learning_rate: 0.0005
+      lr_scheduler:
+        name: reduce_on_plateau
+        monitor: validation_loss
+        factor: 0.3
+        patience: 8
+        threshold_relative: 0.001
+        min_lr: 0.000001
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 40
+        patience: 30
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
+  S01-E05:
+    run_id: S01-E05-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 300
+      batch_size: 32
+      learning_rate: 0.001
+      lr_scheduler:
+        name: reduce_on_plateau
+        monitor: validation_loss
+        factor: 0.3
+        patience: 8
+        threshold_relative: 0.001
+        min_lr: 0.000001
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 40
+        patience: 30
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
+  S01-E06:
+    run_id: S01-E06-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 300
+      batch_size: 32
+      learning_rate: 0.0005
+      lr_scheduler:
+        name: cosine_annealing
+        t_max: 300
+        min_lr: 0.000001
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 40
+        patience: 30
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
+  S01-E07:
+    run_id: S01-E07-R001
+    seed: 11
+    device: cuda:0
+    pair_policy_id: s01_clean_same_pair_grid_v1
+    validation_artifact: validation
+    test_artifact: test
+    require_frozen_validation_manifest: true
+    evaluate_test: false
+    model:
+      channels: [16, 32, 64, 128]
+      embedding_dim: 128
+      encoder_hidden_dim: 256
+      head_hidden_dim: 256
+      comparator: concat_diff
+      normalization: batch
+      adaptive_pool_shape: [4, 4]
+    image_scaling:
+      mode: global_max_abs
+      max_samples: 512
+    noise:
+      enabled: false
+      apply_to: observation
+    training:
+      epochs: 300
+      batch_size: 32
+      learning_rate: 0.001
+      lr_scheduler:
+        name: cosine_annealing
+        t_max: 300
+        min_lr: 0.000001
+      weight_decay: 0.0001
+      optimizer: adamw
+      pairs_per_epoch: 8192
+      num_workers: 4
+      shard_cache_size: 4
+      early_stopping:
+        enabled: true
+        monitor: validation_loss
+        min_epochs: 40
+        patience: 30
+        min_delta_relative: 0.001
+    evaluation:
+      fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]
