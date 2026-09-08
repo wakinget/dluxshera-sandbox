@@ -26,6 +26,13 @@ from dluxshera.datasets.schema import (
     write_json,
     write_jsonl,
 )
+from dluxshera.datasets.master_v4 import (
+    locate_science_global_index,
+    render_index_location,
+    render_index_to_science_nuisance,
+    render_state_id,
+    science_nuisance_to_render_index,
+)
 
 DATASET_VERSION = "shera_ml_master_v4"
 STATE_PLAN_SCHEMA = "shera_v4_science_state_plan/1"
@@ -752,12 +759,6 @@ def nuisance_state_id(vector_space_id: str, nuisance_vector: Sequence[float]) ->
     )[:32]
 
 
-def render_state_id(science_id: str, nuisance_id: str, render_contract_id: str) -> str:
-    return "render_" + content_hash(
-        {"science_state_id": science_id, "nuisance_state_id": nuisance_id, "render_model_system_contract_identity": render_contract_id}
-    )[:32]
-
-
 def build_render_system_contract(
     *,
     resolved_prescription_path: Path,
@@ -813,48 +814,6 @@ def build_render_system_contract(
         "path_policy": "Local paths are provenance. Scientific identity uses resolved system content; file references contribute by content hash when available.",
     }
     return payload
-
-
-def science_nuisance_to_render_index(science_global_index: int, nuisance_bank_index: int, nuisance_count: int) -> int:
-    if science_global_index < 0:
-        raise ValueError("science_global_index must be non-negative.")
-    if nuisance_bank_index < 0 or nuisance_bank_index >= nuisance_count:
-        raise ValueError("nuisance_bank_index must be in [0, nuisance_count).")
-    return int(science_global_index) * int(nuisance_count) + int(nuisance_bank_index)
-
-
-def render_index_to_science_nuisance(render_index: int, nuisance_count: int) -> tuple[int, int]:
-    if render_index < 0:
-        raise ValueError("render_index must be non-negative.")
-    if nuisance_count <= 0:
-        raise ValueError("nuisance_count must be positive.")
-    return divmod(int(render_index), int(nuisance_count))
-
-
-def locate_science_global_index(render_contract: Mapping[str, Any], science_global_index: int) -> dict[str, Any]:
-    idx = int(science_global_index)
-    for entry in render_contract["families"]:
-        start = int(entry["science_start_index"])
-        count = int(entry["science_count"])
-        if start <= idx < start + count:
-            return {
-                "family": entry["family"],
-                "split_role": entry["split_role"],
-                "science_global_index": idx,
-                "science_plan_row_index": idx - start,
-            }
-    raise ValueError(f"science_global_index {idx} is outside the render contract science range.")
-
-
-def render_index_location(render_contract: Mapping[str, Any], render_index: int) -> dict[str, Any]:
-    science_global_index, nuisance_bank_index = render_index_to_science_nuisance(
-        int(render_index),
-        int(render_contract["nuisance_count"]),
-    )
-    location = locate_science_global_index(render_contract, science_global_index)
-    location["render_index"] = int(render_index)
-    location["nuisance_bank_index"] = nuisance_bank_index
-    return location
 
 
 def load_science_plans(outdir: Path) -> dict[str, dict[str, list[dict[str, Any]]]]:

@@ -115,6 +115,7 @@ def build_sbatch_command(
     *,
     script: Path,
     job_name: str,
+    array: str | None = None,
     output: Path | None = None,
     error: Path | None = None,
     export: str | None = None,
@@ -131,6 +132,8 @@ def build_sbatch_command(
         f"--time={profile.time}",
         "--parsable",
     ]
+    if array is not None:
+        cmd.append(f"--array={array}")
     if export is not None:
         cmd.append(f"--export={export}")
     if profile.partition:
@@ -176,6 +179,7 @@ def prepare_sbatch_submission(
     script: Path,
     job_name: str,
     submitted_env: Mapping[str, Path | str | int | bool | None],
+    array: str | None = None,
     log_root: Path | None = None,
     output: Path | None = None,
     error: Path | None = None,
@@ -216,6 +220,7 @@ def prepare_sbatch_submission(
         profile,
         script=_resolve_path(script),
         job_name=job_name,
+        array=array,
         output=resolved_output,
         error=resolved_error,
         export="ALL",

@@ -275,3 +275,198 @@ conditioned on the fixed V4 sampling/feasibility envelope. High-radius bins,
 especially `1000-1500` and `1500-2000`, are therefore feasible-direction
 conditioned populations, not unconditioned isotropic shells.
 `boundary_stress_v4` is deferred for the first render campaign.
+
+## V4 Render Execution
+
+Frozen V4 rendering is implemented by:
+
+```bash
+python3 work/experiments/ml/datasets/render_master_v4.py \
+  --plan-root /path/to/master_v4 \
+  --output-root /path/to/raw/shera_ml_master_v4 \
+  --render-index 0
+```
+
+The renderer reads the frozen `freeze_manifest.json`, `vector_spaces.json`,
+`nuisance_bank.json`, `render_system_contract.json`, `render_contract.json`,
+and the referenced state-plan JSONL files. Production identity checks validate
+the frozen master hash, science and nuisance vector-space IDs, nuisance-bank
+hash, render-system-contract hash, render-contract hash, and state-plan file
+hashes before any image is rendered.
+
+The optical model is not reimplemented in the V4 script. Shared helpers in
+`src/dluxshera/datasets/rendering.py` apply scalar/indexed values to
+`ParameterStore`, preserve V3 derived-value refresh behavior, call the existing
+`SheraBinder.model(...)` forward path, and write V3-compatible FITS images.
+V4 science vectors are absolute physical states applied in the ordered frozen
+science vector-space. V4 nuisance vectors remain the V3 registration deltas for
+`source.x_position_as`, `source.y_position_as`, and
+`source.position_angle_deg`; they are added after the science state is applied.
+
+Render a stop-exclusive range:
+
+```bash
+python3 work/experiments/ml/datasets/render_master_v4.py \
+  --plan-root /path/to/master_v4 \
+  --output-root /path/to/raw/shera_ml_master_v4 \
+  --start-index 0 \
+  --stop-index 100
+```
+
+Dry-run one or more explicit indices without rendering:
+
+```bash
+python3 work/experiments/ml/datasets/render_master_v4.py \
+  --plan-root /path/to/master_v4 \
+  --output-root /tmp/shera_v4_smoke \
+  --render-indices 0,1,1064959 \
+  --dry-run
+```
+
+Print a compact representative smoke set selected from the frozen plan and
+contract metadata:
+
+```bash
+python3 work/experiments/ml/datasets/render_master_v4.py \
+  --plan-root /path/to/master_v4 \
+  --output-root /tmp/shera_v4_smoke \
+  --print-smoke-indices
+```
+
+Raw V4 output uses one FITS file plus one JSON sidecar per render. Paths are
+deterministic and sharded by render index:
+
+```text
+<output-root>/
+  images/<dataset_family>/<split_role>/shard_0000/render_0000000.fits
+  images/<dataset_family>/<split_role>/shard_0000/render_0000000.json
+```
+
+The default shard size is 1,000 render indices per directory. The shard path is
+filesystem layout only; it does not participate in `science_state_id`,
+`nuisance_state_id`, or `render_state_id`.
+
+Resume behavior is strict. If neither output file exists, the renderer writes
+new temp files and atomically renames them into place. If both files exist and
+the JSON sidecar identity matches the frozen expected render state, the render
+is skipped. FITS-only, JSON-only, or mismatched sidecars fail by default. Use
+`--overwrite-invalid` only for deliberate repair. `--verify-only` checks that
+both files exist, sidecar IDs match, the FITS opens, the image shape matches
+the sidecar, and all pixels are finite.
+
+## Gattaca2 Smoke
+
+After committing, pushing, and pulling this implementation on Gattaca2, request
+a JPL-side interactive CPU allocation:
+
+```bash
+srun \
+  --partition=compute \
+  --pty \
+  --ntasks=1 \
+  --cpus-per-task=<benchmark value> \
+  --mem=<benchmark value> \
+  --time=01:00:00 \
+  --account=shera_hpc \
+  /bin/bash
+```
+
+Inside the allocation:
+
+```bash
+source /cm/shared/apps/miniforge/etc/profile.d/conda.sh
+conda activate dluxshera-py311
+module load git
+
+cd /home/dmckeith/dluxshera-sandbox
+git branch --show-current
+git rev-parse HEAD
+
+python - <<'PY'
+import jax
+import dLux
+import dluxshera
+print("jax", jax.__version__)
+print("dLux", dLux.__version__)
+print("dluxshera", dluxshera.__file__)
+PY
+```
+
+Then render a scratch-only smoke set:
+
+```bash
+SMOKE_INDICES=$(python3 work/experiments/ml/datasets/render_master_v4.py \
+  --plan-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4/stateplans/master_v4 \
+  --output-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4/smoke_output \
+  --print-smoke-indices)
+
+python3 work/experiments/ml/datasets/render_master_v4.py \
+  --plan-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4/stateplans/master_v4 \
+  --output-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4/smoke_output \
+  --render-indices "${SMOKE_INDICES}"
+```
+
+## Production Array
+
+The Gattaca2 batch wrapper is:
+
+```text
+work/experiments/ml/datasets/hpc/render_master_v4.sbatch
+```
+
+The submission/dry-run helper is:
+
+```text
+work/experiments/ml/datasets/hpc/submit_master_v4_render.py
+```
+
+It reads the frozen render count from `render_contract.json`. For a zero-based
+Slurm array task:
+
+```text
+start = SLURM_ARRAY_TASK_ID * RENDERS_PER_TASK
+stop  = min(start + RENDERS_PER_TASK, RENDER_COUNT)
+```
+
+`--renders-per-task`, `--cpus-per-task`, `--mem`, `--time`, `--concurrency`,
+`--account`, and `--partition` are configurable. Prefer a render chunk size
+divisible by the frozen nuisance count so tasks align to complete nuisance
+groups; the helper warns when the chunk size is not aligned.
+
+Dry-run the full production array without invoking Slurm:
+
+```bash
+python3 work/experiments/ml/datasets/hpc/submit_master_v4_render.py \
+  --plan-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4/stateplans/master_v4 \
+  --output-root /projects/shera_hpc/data/ml_training/shera_ml_master_v4 \
+  --scratch-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4 \
+  --renders-per-task <benchmark value> \
+  --cpus-per-task <benchmark value> \
+  --mem <benchmark value> \
+  --time <benchmark value> \
+  --concurrency <selected cap> \
+  --dry-run
+```
+
+Submit only after the smoke and benchmark:
+
+```bash
+python3 work/experiments/ml/datasets/hpc/submit_master_v4_render.py \
+  --plan-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4/stateplans/master_v4 \
+  --output-root /projects/shera_hpc/data/ml_training/shera_ml_master_v4 \
+  --scratch-root /scratch-jpl/shera_hpc/dmckeith/dLuxShera-ML/render_v4 \
+  --renders-per-task <benchmark value> \
+  --cpus-per-task <benchmark value> \
+  --mem <benchmark value> \
+  --time <benchmark value> \
+  --concurrency <selected cap> \
+  --expected-repo-sha <new implementation SHA> \
+  --submit
+```
+
+The helper prints the total render count, renders per task, number of array
+tasks, final partial task size, array expression with concurrency cap, exact
+`sbatch` command, and exported environment. It can write a small campaign
+manifest under Scratch with `--write-manifest`; `--submit` writes it before
+calling `sbatch`. Slurm stdout/stderr go to Scratch log paths containing `%A`
+and `%a`, not to the canonical Projects image tree.

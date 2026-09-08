@@ -30,10 +30,10 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
-from astropy.io import fits
 
 from dluxshera.config.io import load_user_config
 from dluxshera.config.resolver import resolve_config
+from dluxshera.datasets import rendering as shared_rendering
 from dluxshera.params.packing import build_index_map
 from dluxshera.params.spec import ParamSpec
 from dluxshera.params.store import ParameterStore
@@ -259,16 +259,11 @@ def _validate_fim_diag(fim_diag: np.ndarray, *, labels: list[str]) -> None:
 
 
 def _write_fits(*, output_path: Path, image: np.ndarray, header_data: Mapping[str, Any]) -> None:
-    header = fits.Header()
-    for key, value in header_data.items():
-        if value is None:
-            continue
-        if isinstance(value, tuple) and len(value) == 2:
-            card_value, comment = value
-            header.set(str(key).upper(), card_value, comment=str(comment))
-        else:
-            header.set(str(key).upper(), value)
-    fits.PrimaryHDU(data=image, header=header).writeto(output_path, overwrite=True)
+    shared_rendering.write_fits(
+        output_path=output_path,
+        image=image,
+        header_data=header_data,
+    )
 
 
 def generate_mirrored_sigma_offsets(
@@ -533,18 +528,11 @@ def _refresh_preserving_derived_keys(
     preserved_keys: Iterable[str],
     spec: ParamSpec,
 ) -> ParameterStore:
-    preserved_values: dict[str, Any] = {}
-    for key in preserved_keys:
-        if key not in spec or spec.get(key).kind != "derived":
-            continue
-        try:
-            preserved_values[key] = store.get(key)
-        except KeyError:
-            continue
-    refreshed = store.refresh_derived(spec)
-    if preserved_values:
-        refreshed = refreshed.replace(preserved_values)
-    return refreshed
+    return shared_rendering.refresh_preserving_derived_keys(
+        store,
+        preserved_keys=preserved_keys,
+        spec=spec,
+    )
 
 
 def _compute_fisher_sigmas(
@@ -973,12 +961,7 @@ def _build_sparse_mixture_plan(
 
 
 def _set_scalar_label(store: ParameterStore, param: ScalarParameter, value: float) -> ParameterStore:
-    if param.component_index is None:
-        return store.replace({param.base_key: value})
-    current = np.asarray(store.get(param.base_key), dtype=float).copy().reshape(-1)
-    current[param.component_index] = value
-    original_shape = np.asarray(store.get(param.base_key)).shape
-    return store.replace({param.base_key: current.reshape(original_shape)})
+    return shared_rendering.set_scalar_label(store, param, value)
 
 
 def _apply_sample_to_store(
@@ -989,18 +972,16 @@ def _apply_sample_to_store(
     forward_spec: ParamSpec,
 ) -> ParameterStore:
     """Apply controlled and registration deltas from one plan row to a store."""
-    store = base_store
-    theta_delta = dict(sample.get("theta_delta", {}) or {})
-    for label, delta in theta_delta.items():
-        param = parameters_by_label[label]
-        store = _set_scalar_label(store, param, param.nominal_value + float(delta))
-    for key, delta in dict(sample.get("registration_nuisance_values", {}) or {}).items():
-        if key not in forward_spec:
-            continue
-        current = float(np.asarray(store.get(key)))
-        store = store.replace({key: current + float(delta)})
-    preserve = {param.base_key for param in parameters_by_label.values()} | set(REGISTRATION_NUISANCE_KEYS)
-    return _refresh_preserving_derived_keys(store, preserved_keys=preserve, spec=forward_spec)
+    return shared_rendering.apply_sample_deltas_to_store(
+        base_store=base_store,
+        theta_delta=dict(sample.get("theta_delta", {}) or {}),
+        registration_nuisance_values=dict(
+            sample.get("registration_nuisance_values", {}) or {}
+        ),
+        parameters_by_label=parameters_by_label,
+        forward_spec=forward_spec,
+        registration_nuisance_keys=REGISTRATION_NUISANCE_KEYS,
+    )
 
 
 def _noise_model(rng_key: jax.Array, data: jax.Array, *, add_noise: bool) -> tuple[jax.Array, str, int | None]:
@@ -1021,8 +1002,12 @@ def _render_sample(
     run_dir: Path,
     add_noise: bool,
 ) -> dict[str, Any]:
-    model = binder.model(binder.strip_structural(applied_store))
-    image, noise_mode, noise_seed = _noise_model(jr.PRNGKey(int(sample["seed"])), model, add_noise=add_noise)
+    rendered = shared_rendering.render_image(binder=binder, applied_store=applied_store)
+    image, noise_mode, noise_seed = _noise_model(
+        jr.PRNGKey(int(sample["seed"])),
+        jnp.asarray(rendered.image),
+        add_noise=add_noise,
+    )
     image_np = np.asarray(image)
     fits_path = run_dir / str(sample["fits_path"])
     meta_path = run_dir / str(sample["metadata_path"])
