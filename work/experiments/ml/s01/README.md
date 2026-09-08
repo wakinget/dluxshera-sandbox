@@ -54,6 +54,49 @@ future result artifacts prove them.
 The next controlled model-development study is S05 under
 `work/experiments/ml/s05/`.
 
+## Completion And Results Snapshot 2026-09-08
+
+This section is the later authoritative completion snapshot for the S01
+scientific runs available on September 8, 2026. It does not rewrite the
+historical September 6 launch snapshot above.
+
+The accepted `S01-E01` scientific production runs completed successfully on
+TACC Lonestar6:
+
+| run | seed | LS6 job | scheduler status | elapsed |
+|---|---:|---:|---|---:|
+| `S01-E01-R001` | 11 | 3418678 | COMPLETED | 00:33:19 |
+| `S01-E01-R002` | 23 | 3418707 | COMPLETED | 00:30:51 |
+| `S01-E01-R003` | 47 | 3418708 | COMPLETED | 00:26:23 |
+
+Historical infrastructure event 3418670 (`S01-E01-R001`) failed immediately
+before the later accepted scientific run. Do not treat that event as a failed
+scientific result.
+
+All meaningful persistent S01 production run directories contain
+`run_manifest.json`, `run_config_resolved.json`, `history.csv`, `metrics.json`,
+and `evaluation_predictions.npz`. Smoke directories can also contain complete
+artifacts, but smoke metrics are infrastructure evidence only.
+
+Ordinary S01 development runs used `evaluate_test: false`, so the
+model-selection numbers below are validation results, not locked-test results.
+The locked test artifact remained materialized and identity-checked.
+
+Zero-correction Fisher RMSE for this evaluation contract is 250.840.
+
+| run | seed | best validation RMSE | best epoch | max epochs | MSE skill |
+|---|---:|---:|---:|---:|---:|
+| `S01-E01-R001` | 11 | 72.4681 | 99 | 100 | 0.916535 |
+| `S01-E01-R002` | 23 | 75.7559 | 94 | 100 | 0.908790 |
+| `S01-E01-R003` | 47 | 74.3278 | 93 | 100 | 0.912197 |
+
+The three-seed mean best validation RMSE is 74.1839, with sample standard
+deviation 1.6486. This strongly demonstrates pairwise Fisher-scaled correction
+learnability and reproducible improvement over zero correction. It does not
+prove convergence: all three best epochs occurred near the end of the
+100-epoch budget, so the original training budget is treated as an artificial
+truncation.
+
 ## Scientific Prescription
 
 `S01-E01-R001` asks whether the shared CNN can learn Fisher-scaled corrections
@@ -233,6 +276,27 @@ Optimization matrix:
 | `S01-E06-R001` | 11 | 5e-4 | cosine annealing | 300 | false |
 | `S01-E07-R001` | 11 | 1e-3 | cosine annealing | 300 | false |
 
+Completed optimizer/training-control results:
+
+| run | LS6 job | scheduler status | elapsed | epochs completed | best epoch | best validation RMSE | MSE skill |
+|---|---:|---|---:|---:|---:|---:|---:|
+| `S01-E02-R001` | 3419825 | COMPLETED | 01:35:22 | 300 | 278 | 59.5046 | 0.943726 |
+| `S01-E03-R001` | 3419826 | COMPLETED | 01:21:38 | 300 | 273 | 57.8676 | 0.946780 |
+| `S01-E04-R001` | 3419827 | COMPLETED | 01:07:12 | 242 | 219 | 64.9824 | 0.932888 |
+| `S01-E05-R001` | 3419828 | COMPLETED | 01:08:25 | 229 | 222 | 67.0941 | 0.928455 |
+| `S01-E06-R001` | 3419829 | COMPLETED | 01:20:40 | 300 | 278 | 60.3250 | 0.942163 |
+| `S01-E07-R001` | 3419830 | COMPLETED | 01:23:02 | 300 | 275 | 60.3282 | 0.942157 |
+
+`S01-E03` is the current optimizer/training-control candidate. A fixed 1e-3
+learning rate with longer training outperformed the tested plateau and cosine
+prescriptions in this seed-11 wave. Relative to `S01-E01-R001`, `S01-E03`
+reduces best validation RMSE by 20.1475%.
+
+Do not claim convergence from these runs. `S01-E03`, `S01-E02`, `S01-E06`, and
+`S01-E07` all reached their best checkpoints late in the allowed training
+interval, while the plateau runs stopped earlier but at worse validation
+performance.
+
 Plateau scheduler prescription:
 
 ```yaml
@@ -256,8 +320,9 @@ lr_scheduler:
 
 The original `S01-E01` production jobs came from source snapshot
 `5d397eca9e206180785ce4b0d1593e19878c79b7`.  The scheduler implementation and
-`S01-E02` through `S01-E07` prescriptions are later source content; record the
-exact source snapshot used when those runs are launched.
+`S01-E02` through `S01-E07` prescriptions are later source content; use the
+persistent `run_manifest.json` files as the source-provenance authority for
+those completed runs.
 
 ## Gattaca2 Scratch Layout
 

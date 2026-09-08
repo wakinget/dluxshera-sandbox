@@ -1,7 +1,7 @@
 # SHERA ML Inverse-Model Design and Experiment Roadmap
 
 **Status:** Active ML experiment ledger and roadmap
-**Date:** 2026-09-06
+**Date:** 2026-09-08
 **Scope:** ML-assisted state estimation and initialization for the SHERA/ADORA differentiable optical model
 
 ## 1. Purpose
@@ -53,6 +53,15 @@ The previous analysis used the pair-grid data primarily as a **20-way multi-labe
 - memory-conscious FITS loading and out-of-core processing.
 
 The current classification formulation is not the intended long-term target. It ignores perturbation amplitude, can assign physically ambiguous labels at zero-amplitude grid points, and does not directly match the intended ADORA initialization task. The new work should reuse the useful implementation patterns while changing the learning objective to continuous state correction.
+
+As of 2026-09-08, the S01 and S05 V3-benchmark development runs have completed
+on TACC Lonestar6, and the V4 raw corpus has completed production rendering on
+Gattaca2. The program has therefore moved from infrastructure validation,
+learnability, first optimizer study, and first architecture study into
+large-corpus preparation, nuisance-robust training design, capture-range
+curriculum, and scalable model development. The V3 benchmark remains valuable
+as a frozen regression/comparability benchmark; V4 is the next main training
+corpus after its prepared-dataset layer is implemented.
 
 ## 4. Primary ML task: Siamese state-correction regression
 
@@ -119,18 +128,26 @@ This can be included naturally in batches containing same-state nuisance/noise v
 
 ### 4.4 S01 production workflow
 
-The active S01 production prescription is tracked under
-`work/experiments/ml/s01/`.  The generic ML package and scripts remain reusable;
-the S01 work directory resolves a compact `study.yaml` into the ordinary
+The S01 production prescription is tracked under `work/experiments/ml/s01/`.
+The generic ML package and scripts remain reusable; the S01 work directory
+resolves a compact `study.yaml` into the ordinary
 `train_pairwise_correction(...)` config.
 
-As of 2026-09-06, S01 has reached production submission on TACC Lonestar6.  The
-three submitted replicas are `S01-E01-R001` seed 11, `S01-E01-R002` seed 23,
-and `S01-E01-R003` seed 47.  They were accepted by Slurm under LS6 jobs
-3418678, 3418707, and 3418708 and were pending for priority/resources at the
-status snapshot.  R002 and R003 were derived from the canonical prescription
-with only `run_id` and `seed` changed.  The exact source snapshot used for that
-launch was `5d397eca9e206180785ce4b0d1593e19878c79b7`.
+As of 2026-09-08, the three-seed `S01-E01` baseline has completed on TACC
+Lonestar6: `S01-E01-R001` seed 11, `S01-E01-R002` seed 23, and
+`S01-E01-R003` seed 47 completed under LS6 jobs 3418678, 3418707, and 3418708.
+The zero-correction Fisher RMSE was 250.840; best validation RMSEs were
+72.4681, 75.7559, and 74.3278, giving mean 74.1839 and sample standard
+deviation 1.6486. These are validation results because ordinary S01
+development used `evaluate_test: false`.
+
+The later seed-11 optimizer/training-control wave `S01-E02` through `S01-E07`
+also completed. The best current optimizer/training-control candidate is
+`S01-E03`: fixed LR 1e-3, 300-epoch maximum, best epoch 273, best validation
+RMSE 57.8676, and MSE skill 0.946780. Relative to `S01-E01-R001`, this reduces
+best validation RMSE by approximately 20.1%. It is not a convergence proof:
+`S01-E03`, `S01-E02`, `S01-E06`, and `S01-E07` reached their best checkpoints
+late in the allowed training interval.
 
 For `S01-E01-R001`, validation and test pairs are deterministic frozen
 artifacts.  Validation is used for checkpoint selection, early stopping, and
@@ -160,6 +177,11 @@ this ML workflow.  The strict GPU preflight reproduced the canonical prepared,
 split, validation-pair, and test-pair identities.  A one-epoch real-data smoke
 test on an NVIDIA A100-PCIE-40GB completed successfully, but that smoke loss is
 infrastructure evidence only and is not an S01 scientific result.
+
+Historical infrastructure events remain separate from scientific results. LS6
+job 3418670 failed immediately for `S01-E01-R001` before the accepted
+scientific run, and `S05-E01-LS6-SMOKE` job 3419329 was cancelled before
+execution.
 
 ## 5. Parameter representation and Fisher scaling
 
@@ -496,6 +518,30 @@ The preprocessor should support:
 - shape and finite-value checks;
 - a summary of total images, bytes, dtype, shard count, and conversion statistics.
 
+### 9.6 V4 prepared-dataset layer
+
+The next major data implementation task is a V4 prepared-dataset layer. It
+should preserve the canonical raw FITS + JSON corpus as authoritative while
+deriving efficient training arrays or shards. Reuse or generalize the existing
+prepared-dataset infrastructure where practical instead of building an
+unrelated storage system.
+
+The V4 prepared layer should preserve:
+
+- `science_state_id`, `nuisance_state_id`, and `render_state_id`;
+- dataset family and split role;
+- ordered physical and Fisher-scaled science vectors;
+- ordered physical nuisance vectors;
+- reproducible, content-addressable provenance;
+- grouped science-state splits without leakage;
+- deterministic frozen validation/test pair manifests;
+- dynamic pair generation and future pair-family mixtures;
+- a path for V3 regression evaluation.
+
+This layer is future work. The raw V4 render corpus is complete, but V4
+training shards, pair curricula, and frozen V4 pair manifests are not yet
+implemented.
+
 ## 10. Train/validation/test partitioning
 
 Avoid random image-level splits when related states or nuisance replicas can leak across sets.
@@ -504,13 +550,17 @@ Maintain multiple explicit evaluation questions.
 
 ### Nuisance generalization split
 
-Hold out complete nuisance realizations from training. Example concept:
+V4 contains ten fixed nuisance states fully crossed with every science state.
+The development contract must explicitly choose whether to:
 
-- train: majority of nuisance IDs;
-- validation: one unseen nuisance ID;
-- test: one or more additional unseen nuisance IDs.
+- train on all ten nuisance states and evaluate robustness over cross-nuisance
+  combinations; or
+- reserve one or two nuisance identities globally during development to test
+  generalization to nuisance states not observed in training.
 
-The exact allocation should be recorded and may be changed depending on the available replicate count.
+Do not silently resolve this. The choice should be made before freezing the V4
+split/evaluation contract. A final production model may eventually train on all
+ten nuisance states after development decisions are frozen.
 
 ### Science-state interpolation/generalization split
 
@@ -532,6 +582,10 @@ Tag test samples by projection onto strong/weak eigen-directions and report perf
 
 After model/loss decisions stabilize, generate or reserve an independently sampled nuisance/physical-state test set that is not used for iterative model selection.
 
+The next phase should keep separate evaluation axes for science-state
+generalization, Fisher-distance/capture radius, nuisance robustness, and
+pair-family behavior.
+
 ## 11. Noise strategy
 
 Keep canonical rendered images noiseless when possible and apply detector/observation noise dynamically during training.
@@ -547,63 +601,78 @@ Evaluation should use deterministic fixed-noise seeds for reproducibility.
 
 If the noise/variance model changes substantially across observations, consider providing a variance/noise map as an auxiliary input channel in a later experiment. Do not add this initially unless needed.
 
-## 12. V4 full-dimensional dataset generation
+## 12. V4 completed raw corpus and pair curriculum direction
 
-### 12.1 Motivation
+### 12.1 Completed corpus
 
-Pair grids and sparse mixtures remain valuable controlled diagnostics but do not represent a fully joint inverse problem. V4 should add a distinct full-dimensional sampling family rather than changing V3 semantics.
+V4 is no longer only a planning target. The Gattaca2 production render for
+`shera_ml_master_v4` completed and passed audit on 2026-09-08. The canonical
+durable raw root is:
 
-### 12.2 Scrambled Sobol sampling
-
-Use a scrambled Sobol sequence as the first full-dimensional space-filling sampler. It provides reproducible low-discrepancy coverage without claiming a scientifically correct prior distribution.
-
-Conceptual V4 family:
-
-```yaml
-experiment:
-  datasets:
-    sobol_joint:
-      enabled: true
-      sampler: sobol
-      scramble: true
-      seed: ...
-      n_samples: ...
+```text
+/projects/shera_hpc/data/ml_training/shera_ml_master_v4
 ```
 
-Powers of two are convenient pilot sizes:
+The render used repository source snapshot
+`3da21e603c779377b559c9b86182f7150bd33366`. Slurm array job 19450239 rendered
+54 tasks (`0-53%32`) with 20,000 renders per full task, 4,960 renders in the
+final task, 4 CPUs per task, 4 GB requested per task, 2 hour walltime, and
+concurrency cap 32. Every task completed with `ExitCode 0:0`. Observed MaxRSS
+was approximately 0.60 GB for ordinary full tasks and approximately 0.58 GB for
+the final partial task; the 4 GB value was a request, not measured usage.
 
-- 4096: implementation/capture-range pilot;
-- 16384: intermediate training dataset;
-- 65536: substantial first production set if justified.
+The task-summary audit reported `V4_TASK_SUMMARY_AUDIT: PASS`: 54 summary
+files, task IDs 0 through 53, no missing or unexpected tasks, 1,064,960
+attempted, rendered, and accounted renders, no failures, and exact range
+coverage through final stop 1,064,960.
 
-### 12.3 Sampling regimes
+The filesystem audit found 1,064,960 FITS files and 1,064,960 JSON sidecars,
+with matching totals. The measured corpus footprint is 123 GB. After
+completion, `/projects/shera_hpc` reported 3.2 TB size, 878 GB used, 2.3 TB
+available, and 28% utilization.
 
-Do not assume one enormous hypercube is the correct distribution. Support labeled regimes such as:
+The canonical raw V4 corpus is frozen and complete. Do not delete or rewrite
+it outside an explicit audited repair task.
 
-- local;
-- intermediate;
-- commissioning.
+### 12.2 Frozen scientific structure
 
-These labels describe intended capture-range regimes, not formal priors.
+The frozen V4 structure contains 106,496 science states, ten nuisance states,
+and 1,064,960 full cross-product renders. Every science state is rendered
+against all ten fixed nuisance states.
 
-### 12.4 Commissioning-scale WFE constraints
+| family | train science | validation science | test science | total science |
+| --- | ---: | ---: | ---: | ---: |
+| `joint_full_v4` | 65,536 | 8,192 | 8,192 | 81,920 |
+| `radial_capture_v4` | 16,384 | 4,096 | 4,096 | 24,576 |
+| total | 81,920 | 12,288 | 12,288 | 106,496 |
 
-Large independent per-Zernike bounds can create aggregate WFE far larger than the nominal coefficient scale. V4 planning should therefore track and optionally constrain:
+`joint_full_v4` provides broad multivariate science-state coverage and should
+act as the general high-dimensional training distribution. `radial_capture_v4`
+provides controlled Fisher-distance/capture-radius coverage for
+distance-balanced evaluation, curriculum design, and capture-range diagnostics.
+Do not collapse these families into a single undifferentiated population
+without preserving family metadata.
 
-- individual coefficient bounds;
-- M1 low-order coefficient-vector norm/RMS;
-- M2 low-order coefficient-vector norm/RMS;
-- total mixed state radius in Fisher-scaled coordinates.
+### 12.3 Recommended V4 pair families
 
-### 12.5 Nuisance sampling in V4
+The full science-by-nuisance crossing enables future controlled pair families:
 
-For bulk V4 data, sample one independent nuisance state per science state rather than repeating every science state over a fixed nuisance grid.
+- **A: same nuisance, different science.** This is the closest V4 analogue of
+  the S01/S05 task. It preserves benchmark continuity and learns science
+  correction without nuisance mismatch.
+- **B: different nuisance, same science.** Target science correction is zero.
+  This trains explicit registration-nuisance invariance and provides a strong
+  same-science consistency constraint.
+- **C: different nuisance, different science.** This learns science correction
+  in the presence of registration mismatch and approximates the intended robust
+  initializer use case.
+- **Optional identity pairs.** Same science and same nuisance with zero target;
+  use at low or controlled weight if useful for consistency.
 
-Additionally create a smaller anchor subset with repeated nuisance/noise realizations for the same science state. These anchors are especially valuable for invariance and multitask studies.
-
-### 12.6 Eigenmode-focused companion data
-
-Alongside space-filling Sobol draws, generate focused validation/stress sweeps along selected strong and weak eigen-directions. These should be separate named dataset families so their interpretation remains clear.
+These are recommended training-design directions, not completed studies. Do
+not exhaustively materialize all combinatorial pairs. Prefer dynamic pair
+generation for training and frozen deterministic manifests for validation and
+test.
 
 ## 13. Capture-range and ADORA benchmark
 
@@ -722,7 +791,9 @@ Add dynamic observation noise and fixed-noise validation/test data.
 
 ### M6: V4 joint-state training
 
-Train/evaluate on full-dimensional Sobol samples and commissioning-scale regimes.
+Train/evaluate on the prepared V4 corpus with explicit pair-family mixtures,
+family metadata, grouped science-state splits, and nuisance-robust validation
+manifests.
 
 ### M7: ADORA-in-the-loop evaluation
 
@@ -803,45 +874,56 @@ For weak-mode-weighted experiments, always report ordinary physical/Fisher-scale
 
 ## 18. Immediate implementation sequence
 
-### Phase A: persistent design and data audit
+### Phase A: controlled V3 bridge
 
-1. Review/refine this design note.
-2. Audit the exact existing V3 nuisance dataset roots and metadata on the cluster.
-3. Freeze a parameter-order/schema identifier and reference Fisher-sigma vector.
-4. Define the preferred science eigenbasis provenance, likely nuisance-marginalized Schur after Fisher scaling, while retaining fixed/full bases as diagnostics.
+1. Define, but do not launch here, the controlled bridge experiment combining
+   the `S05-E04` larger `concat_diff` architecture with the `S01-E03`
+   fixed-1e-3 longer-training prescription on the frozen V3 benchmark.
+2. Run seed 11 first when the experiment is explicitly authorized.
+3. If seed 11 is clearly promising, repeat the same combined prescription at
+   seeds 23 and 47.
+4. Keep the frozen V3 test set locked during model selection.
 
-### Phase B: preprocessing infrastructure
+### Phase B: V4 prepared-dataset layer
 
-1. Implement a framework-agnostic V3/V4 preprocessor.
-2. Build `index.parquet` and `schema.json`.
-3. Convert source FITS into configurable `.npy` shards.
-4. Default to float32 working shards but run/record float64-to-float32 precision audits.
-5. Validate random shard samples against source FITS.
-6. Benchmark loader memory, I/O throughput, and address-space behavior using all nuisance draws.
+1. Preserve the raw V4 FITS + JSON corpus as the authoritative source.
+2. Build efficient training arrays or shards plus inspectable index/schema
+   metadata.
+3. Preserve science, nuisance, render, family, split, vector-space, and content
+   identities.
+4. Validate dtype conversion, shape, finite values, source round trips, and
+   corpus accounting.
+5. Support dynamic pair generation, pair-family mixtures, grouped science-state
+   splits, deterministic frozen validation/test pair manifests, and V3
+   regression evaluation.
 
-### Phase C: first learning experiments
+### Phase C: V4 split/evaluation contract
 
-1. Build one self-contained PyTorch Siamese-regression notebook using the colleague's compact CNN style.
-2. Train on controlled same/different nuisance pair categories.
-3. Add grouped validation/test splits and best-validation checkpoint selection.
-4. Benchmark against the local linear/Fisher correction.
-5. Add nuisance multitask head.
-6. Add representation-invariance loss only after the multitask baseline is understood.
+1. Resolve the nuisance-generalization question before freezing splits.
+2. Define separate evaluation axes for science-state generalization,
+   Fisher-distance/capture radius, nuisance robustness, and pair-family
+   behavior.
+3. Preserve per-parameter Fisher-scaled metrics, overall Fisher RMSE, MSE
+   skill, correction-vector geometry, distance-bin diagnostics, and locked
+   test-set discipline.
+4. Reuse the existing campaign analyzer conventions for normalized run tables,
+   prediction geometry, per-parameter metrics, slices, and distance bins.
 
-### Phase D: eigenmode experiments
+### Phase D: V4 training curriculum
 
-1. Compute/document the scaled fixed/full/Schur eigensystems.
-2. Add eigenmode error diagnostics to every run.
-3. Test one or two controlled eigenmode loss-weighting choices.
-4. Build focused weak-mode stress/validation sweeps if needed.
+1. Start from same-nuisance/different-science pairs for S01/S05 continuity.
+2. Add different-nuisance/same-science zero-target pairs for explicit nuisance
+   consistency.
+3. Add different-nuisance/different-science pairs for robust initializer
+   training.
+4. Use optional identity pairs at low or controlled weight only if they improve
+   consistency without dominating the task.
 
-### Phase E: capture-range and V4
+### Phase E: capture-range and ADORA
 
-1. Run cheap linearization/one-step capture-range studies to inform useful state bounds.
-2. Implement V4 scrambled-Sobol joint-state plan generation.
-3. Render a small pilot (e.g. 4096 states).
-4. Expand only if the pilot covers meaningful regimes and the learned model demonstrates value.
-5. Compare ADORA alone, linear initialization + ADORA, and ML initialization + ADORA.
+1. Use `radial_capture_v4` for distance-balanced diagnostics and curricula.
+2. Compare ADORA alone, linear initialization + ADORA, and ML initialization +
+   ADORA after model-selection decisions are frozen.
 
 ## 19. Open decisions
 
@@ -855,9 +937,12 @@ The following should remain explicit rather than silently resolved:
 - exact image normalization that preserves perturbation amplitude and photometric information;
 - default shard size and dtype after cluster benchmarks;
 - float32 precision acceptance thresholds;
-- train/validation/test nuisance-ID assignment;
-- V4 local/intermediate/commissioning bounds;
-- aggregate WFE constraints for Sobol sampling;
+- whether V4 development trains on all ten nuisance states or reserves one or
+  two nuisance identities globally for held-out nuisance generalization;
+- the exact V4 pair-family mixture and relative weights;
+- the frozen V4 validation/test pair-manifest recipes;
+- whether the `S05-E04` architecture combined with the `S01-E03` optimizer
+  prescription clears the V3 bridge at seed 11;
 - eigenvalue flooring/capping for weak-mode loss weights;
 - whether W&B/cloud artifact upload is institutionally acceptable and, if so, which artifacts may be uploaded.
 
@@ -873,13 +958,26 @@ The current preferred path is:
 }
 \]
 
-with optional nuisance prediction and later embedding-invariance losses. The output remains in interpretable Fisher-scaled physical coordinates. Eigenmodes are used primarily to diagnose and deliberately weight difficult directions rather than replacing physical outputs. The existing V3 nuisance dataset is sufficient to test the first Siamese/invariance ideas once the memory/I/O path is improved. Full-dimensional scrambled-Sobol V4 data then extend the model into the joint nonlinear/commissioning regime. The decisive scientific benchmark is whether the learned correction expands the state-space region from which ADORA reliably converges compared with the existing local linear/Fisher initializer.
+with optional nuisance prediction and later embedding-invariance losses. The
+output remains in interpretable Fisher-scaled physical coordinates. Eigenmodes
+are used primarily to diagnose and deliberately weight difficult directions
+rather than replacing physical outputs. The completed V3 benchmark results give
+the regression baseline and candidate architecture/training choices; the
+completed V4 raw corpus supplies the next main data source once prepared
+training shards and frozen pair manifests exist. The decisive scientific
+benchmark remains whether the learned correction expands the state-space region
+from which ADORA reliably converges compared with the existing local
+linear/Fisher initializer.
 
 ## 21. Relevant repository/workflow references
 
 Current implementation/docs to consult while turning this plan into code:
 
 - `docs/dev/ml_training_dataset_v2.md`
+- `docs/dev/ml_prepared_dataset_wave1.md`
+- `docs/dev/notes/ml_program_status_20260908.md`
+- `work/experiments/ml/datasets/README.md`
+- `work/experiments/ml/datasets/master_v4_spec.md`
 - `work/experiments/generate_training_dataset_v3.py`
 - `work/experiments/generate_training_dataset_v3_template.yaml`
 - `tests/test_export_training_dataset_eigenmodes.py`
@@ -925,13 +1023,13 @@ with supervised target:
 
 | Study | name | status | notes |
 |---|---|---|---|
-| S01 | Pairwise Correction Learnability | production submitted | First shared-CNN regression substrate and clean pair baseline; three-seed LS6 replication block submitted. |
+| S01 | Pairwise Correction Learnability | completed V3 baseline + optimizer wave | Three-seed baseline and seed-11 optimizer/training-control wave completed on LS6; ordinary model-selection results are validation results. |
 | S02 | Registration Nuisance Robustness | provisional/planned | Relax same-nuisance pairing and measure robustness to registration changes. |
 | S03 | Observation-Noise Robustness | provisional/planned | Enable dynamic observation noise and fixed noisy eval manifests. |
 | S04 | Learned vs Local-Linear Correction | provisional/planned | Compare ML corrections with Binder/Jacobian/Fisher linear evaluation. |
-| S05 | Architecture / Representation Study | active/preparation | Wave 1 controlled comparator and capacity variants over the S01 benchmark contract. |
+| S05 | Architecture / Representation Study | completed Wave 1 | Seed-11 architecture wave completed on LS6; `S05-E04` is the provisional architecture winner. |
 | S06 | Fisher / Eigenmode Structure | provisional/planned | Diagnose and possibly weight errors by Fisher/eigenmode structure. |
-| S07 | Joint-State Generalization | provisional/planned | Move beyond sparse pair-grid structure toward joint-state samples. |
+| S07 | Joint-State Generalization | V4 preparation/training design next | Raw V4 corpus is complete; prepared V4 shards, pair curricula, and frozen V4 pair manifests are future work. |
 | S08 | ADORA Initialization / Capture Range | provisional/planned | Test whether learned corrections expand ADORA convergence capture range. |
 
 ### 22.3 S01 record
@@ -963,45 +1061,84 @@ controlled registration?
 
 - `S01-E00` — Pipeline / tiny-overfit sanity.
 - `S01-E01` — Clean same-nuisance held-out science regression.
+- `S01-E02` through `S01-E07` — seed-11 optimizer/training-control wave.
 
 | ID | research objective | pair policy | nuisance policy | noise policy | split artifact | model/config | status | headline result | notes |
 |---|---|---|---|---|---|---|---|---|---|
 | S01-E00 | Verify image loading, target construction, shared encoder, gradients, checkpointing, and metrics end-to-end. | Same nuisance, different science; tiny deterministic development pairs; reverse pairs available. | Training nuisance partition only. | Off. | `SPLIT-ML-v1` | Small shared CNN, `concat_diff`, MSE on `z_B-z_A`. | implemented / pending real-data run | Pending. | Success criterion is substantial overfit of a tiny noiseless set; not a generalization result. |
-| S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + frozen S01 validation/test pairs | Shared CNN, default `concat_diff`, AdamW. | three-seed LS6 production submitted | Pending. | This is not yet a nuisance-invariance study; nuisance is fixed inside each pair. |
+| S01-E01 | Measure clean held-out science correction regression under fixed registration within each pair. | Same V3 pair-grid where available, same nuisance, different science, configurable Fisher-distance range. | Evaluate both held-out science with train-seen nuisance and held-out science with held-out nuisance. | Off. | `SPLIT-ML-v1` + frozen S01 validation/test pairs | Shared CNN, default `concat_diff`, AdamW. | completed on LS6 | Three-seed mean best validation RMSE 74.1839, sample SD 1.6486, versus zero-correction Fisher RMSE 250.840. | Validation result only; `evaluate_test: false`. This is not yet a nuisance-invariance study because nuisance is fixed inside each pair. |
+| S01-E02..E07 | Test optimizer/training-control changes while preserving the S01-E01 architecture and evaluation contract. | Same as S01-E01. | Same as S01-E01. | Off. | `SPLIT-ML-v1` + frozen S01 validation/test pairs | Same model; fixed, plateau, and cosine LR variants. | completed on LS6 | `S01-E03` is current training-control candidate, best validation RMSE 57.8676. | One seed only; late best checkpoints mean convergence is not proven. |
 
-Production replicas submitted on Lonestar6:
+Production baseline replicas completed on Lonestar6:
 
-| run | seed | LS6 job | status at 2026-09-06 snapshot |
-|---|---:|---:|---|
-| `S01-E01-R001` | 11 | 3418678 | accepted by Slurm, pending priority/resources |
-| `S01-E01-R002` | 23 | 3418707 | accepted by Slurm, pending priority/resources |
-| `S01-E01-R003` | 47 | 3418708 | accepted by Slurm, pending priority/resources |
+| run | seed | LS6 job | best validation RMSE | best epoch | MSE skill |
+|---|---:|---:|---:|---:|---:|
+| `S01-E01-R001` | 11 | 3418678 | 72.4681 | 99 / 100 | 0.916535 |
+| `S01-E01-R002` | 23 | 3418707 | 75.7559 | 94 / 100 | 0.908790 |
+| `S01-E01-R003` | 47 | 3418708 | 74.3278 | 93 / 100 | 0.912197 |
 
-`work/experiments/ml/s01/replicas.yaml` records this block after launch.  It is
-documentation of already-submitted LS6 derived prescriptions, not a change to
-the launch snapshot or an indication that the jobs completed.
+Optimizer/training-control wave:
 
-### 22.3.1 S05 Wave 1 architecture study
+| run | initial LR | scheduler | epochs completed | best epoch | best validation RMSE | MSE skill |
+|---|---:|---|---:|---:|---:|---:|
+| `S01-E02-R001` | 5e-4 | fixed | 300 | 278 | 59.5046 | 0.943726 |
+| `S01-E03-R001` | 1e-3 | fixed | 300 | 273 | 57.8676 | 0.946780 |
+| `S01-E04-R001` | 5e-4 | reduce-on-plateau | 242 | 219 | 64.9824 | 0.932888 |
+| `S01-E05-R001` | 1e-3 | reduce-on-plateau | 229 | 222 | 67.0941 | 0.928455 |
+| `S01-E06-R001` | 5e-4 | cosine | 300 | 278 | 60.3250 | 0.942163 |
+| `S01-E07-R001` | 1e-3 | cosine | 300 | 275 | 60.3282 | 0.942157 |
+
+`S01-E03` reduces best validation RMSE by approximately 20.1% relative to
+`S01-E01-R001`. A fixed 1e-3 learning rate with longer training outperformed
+the tested plateau and cosine prescriptions in this wave. Do not claim 300
+epochs proves convergence.
+
+### 22.4 S05 Wave 1 architecture study
 
 `work/experiments/ml/s05/` tracks the first architecture/representation study.
 It reuses the exact S01 prepared dataset, split registry, pair policy, frozen
 validation pairs, frozen test pairs, image scaling, no-noise condition,
 optimizer, learning rate, batch size, pairs per epoch, and early-stopping
-policy.  First-pass variants all use seed 11 so architecture differences are
+policy. First-pass variants all use seed 11 so architecture differences are
 compared under one common deterministic training seed and pair stream.
 
-| ID | change from S05-E01 | model/config | status |
-|---|---|---|---|
-| `S05-E01` | Reference baseline matching S01-E01 seed-11 prescription except identity fields. | `[16, 32, 64, 128]`, embedding 128, encoder/head 256, `concat_diff`. | active/preparation |
-| `S05-E02` | Comparator only. | Same capacity as E01, `difference` comparator. | active/preparation |
-| `S05-E03` | Coordinated smaller-capacity bracket. | `[8, 16, 32, 64]`, embedding 64, encoder/head 128, `concat_diff`. | active/preparation |
-| `S05-E04` | Coordinated larger-capacity bracket. | `[32, 64, 128, 256]`, embedding 256, encoder/head 512, `concat_diff`. | active/preparation |
+| ID | change from S05-E01 | model/config | best validation RMSE | status |
+|---|---|---|---:|---|
+| `S05-E01` | Reference baseline matching S01-E01 seed-11 prescription except identity fields. | `[16, 32, 64, 128]`, embedding 128, encoder/head 256, `concat_diff`, approximately 767k parameters. | 72.3262 | completed |
+| `S05-E02` | Comparator only. | Same capacity as E01, `difference` comparator. | 89.2171 | completed |
+| `S05-E03` | Coordinated smaller-capacity bracket. | `[8, 16, 32, 64]`, embedding 64, encoder/head 128, `concat_diff`. | 89.3951 | completed |
+| `S05-E04` | Coordinated larger-capacity bracket. | `[32, 64, 128, 256]`, embedding 256, encoder/head 512, `concat_diff`, approximately 3.055M parameters. | 68.4548 | completed / provisional winner |
 
-Promising S05 variants should be confirmed across multiple seeds after the S01
-three-seed baseline results and the first S05 comparison are available.  Do not
-use the frozen test set for model selection.
+`S05-E01` reproduces the `S01-E01` seed-11 baseline closely. Difference-only
+comparison and the smaller model are substantially worse than baseline. The
+larger `S05-E04` model is the best Wave 1 architecture result and improves
+best validation RMSE by approximately 5.35% relative to `S05-E01`. It remains
+provisional because it has only one production seed, used the old 5e-4 /
+100-epoch training prescription, and has not been combined with the `S01-E03`
+optimizer/training-control candidate. Do not use the frozen test set for model
+selection.
 
-### 22.4 Split and pair artifact semantics
+### 22.5 V4 raw corpus status
+
+The V4 raw corpus `shera_ml_master_v4` is complete and audited at
+`/projects/shera_hpc/data/ml_training/shera_ml_master_v4`. It was rendered on
+Gattaca2 from source snapshot `3da21e603c779377b559c9b86182f7150bd33366` under
+Slurm array job 19450239 (`0-53%32`). All 54 tasks completed with
+`ExitCode 0:0`, and the task-summary audit reported
+`V4_TASK_SUMMARY_AUDIT: PASS` with 1,064,960 attempted, rendered, and
+accounted renders.
+
+Filesystem audit found 1,064,960 FITS files and 1,064,960 JSON sidecars across
+`joint_full_v4` and `radial_capture_v4`, with matching totals and a measured
+corpus footprint of 123 GB. Every V4 science state is rendered against all ten
+fixed nuisance states, enabling future controlled pair families without
+rewriting the raw corpus.
+
+Detailed execution evidence is recorded in
+`docs/dev/notes/ml_program_status_20260908.md` and
+`work/experiments/ml/datasets/README.md`.
+
+### 22.6 Split and pair artifact semantics
 
 The prepared dataset remains authoritative and sample-centric: one prepared row
 is one rendered image/state. ML pairs are references into that store, not copied
@@ -1057,7 +1194,7 @@ Recommended configurable layout:
     S01-E01/
 ```
 
-### 22.5 Future local-linear evaluation convention
+### 22.7 Future local-linear evaluation convention
 
 The future local-linear physics baseline should use the ordered pair convention
 above. For pair `(A, B)`, define `r_AB = I_B - I_A` and evaluate the image
@@ -1089,7 +1226,7 @@ future evaluation artifact keyed by `pair_record_id`, not a model-training
 input. Do not confuse this Gauss-Newton/Fisher baseline with the exact nonlinear
 loss Hessian, which may contain residual-dependent second-order terms.
 
-### 22.6 Follow-up: nominal V3 Fisher artifact
+### 22.8 Follow-up: nominal V3 Fisher artifact
 
 The V3 generator already computes a nominal FIM to derive Fisher-diagonal
 parameter sigmas. A small future capability patch should preserve that already

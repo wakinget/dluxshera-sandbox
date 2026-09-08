@@ -1,5 +1,5 @@
 # dLuxShera Working Plan & Notes (dev-facing)
-_Last updated: 2026-09-06 ML status refresh_
+_Last updated: 2026-09-08 ML status refresh_
 
 This is a living, dev-facing document summarizing the goals, architecture, decisions, tasks, and gotchas for dLuxShera as it moves through V1.0 and beyond. It replaces the refactor-era index while keeping the running plan in one place.
 
@@ -21,27 +21,52 @@ This Working Plan is the near/medium-term map for developers. For the theme-leve
 - Experiment metadata tracking improved: experiment-level notes and per-run notes now propagate into manifest/aggregate outputs.
 - Near-term focus remains optimizer robustness, regression depth, and doc/tutorial cleanup rather than major architecture rewrites.
 
-## ML progress refresh (2026-09-06)
+## ML progress refresh (2026-09-08)
 
 This edit is a focused ML-status refresh, not a full re-audit of the entire
 working plan.
 
-S01 has moved from implementation substrate to production submission: the
-canonical `S01-E01` baseline has a three-seed Lonestar6 Slurm block recorded
-under `work/experiments/ml/s01/`, with completion/results still pending in this
-repository.  Lonestar6 is now represented as a validated second ML execution
-site alongside the existing Gattaca2 workflow.
+S01 has completed its Lonestar6 scientific runs. The three-seed `S01-E01`
+baseline demonstrated pairwise Fisher-scaled correction learnability on the
+frozen V3 benchmark, with mean best validation RMSE approximately 74.18 and
+sample standard deviation approximately 1.65 versus a zero-correction Fisher
+RMSE of 250.840. The later seed-11 optimizer/training-control wave completed
+as `S01-E02` through `S01-E07`; `S01-E03` is the current training-control
+candidate with best validation RMSE 57.8676, but the late best epochs mean
+convergence is not yet proven.
 
-S05 is now active/preparation as the first narrow architecture/representation
-study.  Its Wave 1 matrix is the S01 reference baseline, a difference-only
-comparator, a smaller coordinated capacity bracket, and a larger coordinated
-capacity bracket, all under the S01 frozen benchmark contract and seed 11.
+S05 Wave 1 has completed on Lonestar6. The larger `concat_diff` model
+`S05-E04` is the provisional architecture winner with best validation RMSE
+68.4548, about 5.35% better than the S05 baseline. It remains provisional
+because it is a one-seed result under the old 5e-4 / 100-epoch training
+prescription. The high-value bridge experiment is to combine the `S05-E04`
+architecture candidate with the `S01-E03` fixed-1e-3 longer-training
+prescription on the frozen V3 benchmark, then replicate only if seed 11 is
+clearly promising.
+
+The Gattaca2 V4 production render is complete and audited. Dataset
+`shera_ml_master_v4` was rendered from source snapshot
+`3da21e603c779377b559c9b86182f7150bd33366` under Slurm array job 19450239
+(`0-53%32`). All 54 tasks completed with `ExitCode 0:0`; the task-summary audit
+reported `V4_TASK_SUMMARY_AUDIT: PASS` with 1,064,960 attempted, rendered, and
+accounted renders. The canonical raw corpus lives at
+`/projects/shera_hpc/data/ml_training/shera_ml_master_v4`, totals 1,064,960
+FITS plus 1,064,960 JSON sidecars, and measured 123 GB.
+
+The ML program has moved from infrastructure, learnability, first optimizer
+study, and first architecture study into large-corpus preparation,
+nuisance-robust training design, capture-range curriculum, and scalable model
+development. The V3 benchmark remains the frozen regression/comparability
+benchmark; V4 is the basis for the next main training program after a
+prepared-dataset layer is designed and implemented.
 
 For current ML details, use:
 
 - `docs/dev/shera_ml_inverse_model_design.md`
+- `docs/dev/notes/ml_program_status_20260908.md`
 - `work/experiments/ml/s01/`
 - `work/experiments/ml/s05/`
+- `work/experiments/ml/datasets/`
 
 ---
 

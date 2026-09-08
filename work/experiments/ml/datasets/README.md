@@ -1,9 +1,10 @@
 # ML Dataset Planning
 
-This directory holds planning and read-only inspection tooling for SHERA ML
-rendered-state datasets. It is intentionally separate from training studies:
-the tools here audit dataset contracts and support V4 state-plan design, but do
-not launch render jobs or mutate historical artifacts.
+This directory holds planning, audit, and render-orchestration tooling for
+SHERA ML rendered-state datasets. It is intentionally separate from training
+studies: the tools here audit dataset contracts, support V4 state-plan design,
+and document the completed V4 render, but they do not train models or mutate
+historical artifacts.
 
 ## Audit Utility
 
@@ -138,7 +139,8 @@ intermediates, conceptually:
 /scratch-jpl/shera_hpc/$USER/dLuxShera-ML/render_v4/
 ```
 
-Before a V4 render launch, measure current capacity on Gattaca2:
+For future render launches, explicit repair tasks, or capacity audits, measure
+current capacity on Gattaca2:
 
 ```bash
 df -h /projects/shera_hpc
@@ -146,6 +148,124 @@ du -sh /projects/shera_hpc/data/ml_training/*
 ```
 
 Do not claim current free space from stale notes.
+
+## V4 Production Render Completion
+
+The first production render for `shera_ml_master_v4` is complete and audited.
+This section records the execution result; the launch sections below remain a
+reproducible procedure and are not an instruction to relaunch the completed
+campaign.
+
+Canonical durable root:
+
+```text
+/projects/shera_hpc/data/ml_training/shera_ml_master_v4
+```
+
+Renderer repository SHA:
+
+```text
+3da21e603c779377b559c9b86182f7150bd33366
+```
+
+Gattaca2 Slurm array:
+
+| field | value |
+| --- | --- |
+| job | 19450239 |
+| array | `0-53%32` |
+| task count | 54 |
+| configured renders per full task | 20,000 |
+| final task renders | 4,960 |
+| CPUs per task | 4 |
+| requested memory per task | 4 GB |
+| walltime | 2 hours |
+| concurrency cap | 32 |
+
+Scheduler outcome:
+
+- every array task completed;
+- every task had `ExitCode 0:0`;
+- typical full-task elapsed time was approximately 1h20m to 1h28m;
+- the final partial task elapsed approximately 21m26s;
+- observed MaxRSS was approximately 0.60 GB for ordinary full tasks and
+  approximately 0.58 GB for the final partial task.
+
+The 4 GB memory value above is the Slurm request. It is not measured usage;
+measured MaxRSS was approximately 0.60 GB.
+
+Task-summary audit:
+
+| field | value |
+| --- | ---: |
+| summary files | 54 |
+| task IDs | 0..53 |
+| missing task IDs | 0 |
+| unexpected task IDs | 0 |
+| attempted | 1,064,960 |
+| rendered | 1,064,960 |
+| skipped valid | 0 |
+| invalid existing | 0 |
+| failed | 0 |
+| accounted complete | 1,064,960 |
+| expected render count | 1,064,960 |
+| bad tasks | 0 |
+| range count | 54 |
+| final stop | 1,064,960 |
+
+`accounted_matches_expected` was true, `coverage_exact` was true, and the final
+audit result was:
+
+```text
+V4_TASK_SUMMARY_AUDIT: PASS
+```
+
+Filesystem inventory:
+
+| family | split | FITS | JSON |
+| --- | --- | ---: | ---: |
+| `joint_full_v4` | train | 655,360 | 655,360 |
+| `joint_full_v4` | validation | 81,920 | 81,920 |
+| `joint_full_v4` | test | 81,920 | 81,920 |
+| `radial_capture_v4` | train | 163,840 | 163,840 |
+| `radial_capture_v4` | validation | 40,960 | 40,960 |
+| `radial_capture_v4` | test | 40,960 | 40,960 |
+| total | all | 1,064,960 | 1,064,960 |
+
+The FITS and JSON totals match. The measured canonical corpus footprint is
+123 GB. After completion, `/projects/shera_hpc` reported 3.2 TB size, 878 GB
+used, 2.3 TB available, and 28% utilization.
+
+The frozen V4 science structure is:
+
+| family | train science | validation science | test science | total science |
+| --- | ---: | ---: | ---: | ---: |
+| `joint_full_v4` | 65,536 | 8,192 | 8,192 | 81,920 |
+| `radial_capture_v4` | 16,384 | 4,096 | 4,096 | 24,576 |
+| total | 81,920 | 12,288 | 12,288 | 106,496 |
+
+Each of the 106,496 science states is rendered against all ten fixed nuisance
+states, producing 1,064,960 raw renders. That full crossing enables future
+controlled pair families:
+
+- same nuisance, different science;
+- different nuisance, same science;
+- different nuisance, different science;
+- identity pairs.
+
+Those pair families are future training-design opportunities, not already
+completed studies. Do not exhaustively materialize all combinatorial pairs.
+Prefer dynamic pair generation for training and frozen deterministic manifests
+for validation and test.
+
+The raw corpus is frozen and complete. Do not delete or rewrite this canonical
+raw FITS + JSON corpus. The next data step is to design and implement a V4
+prepared-dataset layer that preserves the raw corpus as authoritative while
+deriving efficient training arrays/shards, stable state IDs, family/split
+metadata, ordered physical and Fisher-scaled vectors, grouped science-state
+splits without leakage, dynamic pair generation support, deterministic frozen
+validation/test pair manifests, pair-family mixtures, and a V3 regression
+evaluation path.
 
 ## V4 Materialization
 

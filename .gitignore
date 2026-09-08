@@ -23,9 +23,11 @@ devtools/context_snapshot_*/**
 !devtools/**/__init__.py
 !devtools/**/*.py
 
-# Ignore dev/notes
-docs/dev/notes
+# Ignore dev/notes by default, except curated snapshots intentionally linked
+# from tracked documentation.
 docs/dev/notes/*
+!docs/dev/notes/
+!docs/dev/notes/ml_program_status_20260908.md
 
 # My own example files to ignore
 Examples/*

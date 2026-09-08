@@ -6,8 +6,9 @@ relative to the canonical S01 baseline while keeping the benchmark data,
 pair distribution, optimizer, training budget, image scaling, no-noise
 condition, and frozen evaluation contract fixed.
 
-This is not a broad hyperparameter sweep.  Wave 1 changes only the comparator
-or a coordinated capacity bracket.
+This is not a broad hyperparameter sweep. Wave 1 changed only the comparator
+or a coordinated capacity bracket and has completed its first seed-11
+production pass.
 
 ## Fixed Benchmark Contract
 
@@ -49,17 +50,61 @@ Parameter counts were generated with `dluxshera.ml.models.count_parameters`
 for 20 science outputs.  They are trainable parameter counts, not memory or
 throughput measurements.
 
+## Wave 1 Completion Snapshot 2026-09-08
+
+All ordinary S05 Wave 1 runs completed successfully on TACC Lonestar6:
+
+| run | LS6 job | architecture | scheduler status | elapsed | best epoch | best validation RMSE | final validation RMSE | MSE skill |
+|---|---:|---|---|---:|---:|---:|---:|---:|
+| `S05-E01-R001` | 3419396 | baseline `concat_diff` | COMPLETED | 00:39:57 | 99 | 72.3262 | not recorded here | 0.916862 |
+| `S05-E02-R001` | 3419397 | difference-only comparator | COMPLETED | 00:31:20 | 99 | 89.2171 | not recorded here | 0.873496 |
+| `S05-E03-R001` | 3419398 | smaller `concat_diff` model | COMPLETED | 00:30:14 | 99 | 89.3951 | not recorded here | 0.872991 |
+| `S05-E04-R001` | 3419399 | larger `concat_diff` model | COMPLETED | 00:30:04 | 93 | 68.4548 | 70.5641 | 0.925524 |
+
+All meaningful persistent S05 production run directories contain
+`run_manifest.json`, `run_config_resolved.json`, `history.csv`, `metrics.json`,
+and `evaluation_predictions.npz`. The cancelled `S05-E01-LS6-SMOKE` job
+3419329 was an infrastructure event before execution, not a failed scientific
+result.
+
+Ordinary S05 development runs used `evaluate_test: false`, so these are
+validation results. The locked test artifact was not used for model selection.
+
+`S05-E01` reproduced the `S01-E01` seed-11 baseline closely: S05 best
+validation RMSE 72.3262 versus S01 seed-11 best validation RMSE 72.4681 under
+the same benchmark contract. This provides a useful internal comparability
+check.
+
+The difference-only comparator (`S05-E02`) and smaller capacity bracket
+(`S05-E03`) were substantially worse than the baseline. The larger
+`concat_diff` model (`S05-E04`, approximately 3.055M parameters) is the best
+Wave 1 architecture result, improving best validation RMSE by 5.3527% relative
+to `S05-E01`.
+
+Treat `S05-E04` as the provisional architecture winner, not a final
+architecture. It has only one production seed, used the old 5e-4 / 100-epoch
+training prescription, and has not yet been combined with the `S01-E03`
+fixed-1e-3 longer-training prescription.
+
+The highest-value controlled bridge experiment is therefore:
+
+1. test the `S05-E04` architecture with the `S01-E03` optimizer/training
+   prescription on the existing frozen V3 benchmark at seed 11;
+2. if clearly promising, repeat at seeds 23 and 47;
+3. keep the frozen test set locked during model selection.
+
 ## Evaluation Discipline
 
 All Wave 1 variants use seed `11` so the first-pass comparison isolates the
 architecture prescription under one common deterministic training seed and pair
-stream.  Any promising candidate should be confirmed later across multiple
-seeds after the S01 three-seed baseline results are available.
+stream. Any promising candidate should be confirmed later across multiple
+seeds, and the next specific candidate is the untested `S05-E04` architecture
+plus `S01-E03` optimizer/training prescription.
 
-`S05-E01` exists so the architecture study is self-describing.  A completed
-S01 seed-11 result may ultimately serve as the empirical baseline if the
-source, data, and run contract are judged equivalent, but S05 does not copy or
-substitute metrics at implementation time.
+`S05-E01` exists so the architecture study is self-describing. Its completed
+seed-11 result closely reproduces the S01 seed-11 baseline under the same
+scientific/evaluation contract, but S05 remains its own study and does not
+substitute S01 metrics for S05 run artifacts.
 
 ## Site-Aware Launch
 

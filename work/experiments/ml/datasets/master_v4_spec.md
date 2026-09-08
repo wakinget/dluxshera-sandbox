@@ -1,8 +1,10 @@
 # SHERA ML Master Dataset V4 Specification
 
-Status: frozen for Gattaca2 render-campaign configuration after final V4
-state-plan hardening. This document does not authorize rendering, transfer, or
-cluster submission.
+Status: frozen scientific/render contract for the completed first Gattaca2 V4
+production render. This document records state-plan and render identity; it
+does not authorize additional rendering, transfer, or cluster submission.
+Execution completion evidence is recorded in `README.md` and
+`docs/dev/notes/ml_program_status_20260908.md`.
 
 Frozen local contract root:
 `work/experiments/ml/datasets/materialized/master_v4`
@@ -283,12 +285,12 @@ plan hash, nuisance bank index, nuisance vector, and render identity inputs. It
 does not assume one flat output directory or any particular FITS/metadata shard
 layout.
 
-## Storage Estimate
+## Storage Estimate And Completed Footprint
 
 `render_scale_summary.json` hash:
 `d7ffab87e9121d6c580ec4d2c5e2695072de6dccb1e5afc040cf859b88a683db`.
 
-For 1,064,960 renders at 160 x 160:
+The pre-render planning estimate for 1,064,960 renders at 160 x 160 was:
 
 | item | bytes |
 | --- | ---: |
@@ -298,7 +300,21 @@ For 1,064,960 renders at 160 x 160:
 | potential prepared float32 payload | 109,051,904,000 |
 | total estimated persistent footprint | 337,311,170,560 |
 
-Before any Gattaca2 launch, the render-campaign task must run:
+The completed first production render measured the canonical raw corpus at
+123 GB under:
+
+```text
+/projects/shera_hpc/data/ml_training/shera_ml_master_v4
+```
+
+The filesystem audit found 1,064,960 FITS files and 1,064,960 JSON sidecars
+with matching totals. After completion, `/projects/shera_hpc` reported 3.2 TB
+size, 878 GB used, 2.3 TB available, and 28% utilization. The measured 123 GB
+corpus size supersedes the earlier conservative planning estimate for the raw
+FITS + JSON corpus. The potential prepared float32 payload remains a future
+derived-data planning value, not an existing V4 prepared dataset.
+
+For future render launches, explicit repair tasks, or capacity audits, rerun:
 
 ```bash
 df -h /projects/shera_hpc
