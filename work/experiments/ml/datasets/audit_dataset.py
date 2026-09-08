@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import math
+import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,8 @@ import numpy as np
 
 AUDIT_SCHEMA_VERSION = "dluxshera_dataset_audit/1"
 PERCENTILES = (0.0, 1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0, 100.0)
+RESERVOIR_SIZE = 4096
+MISSING_NUISANCE_SENTINELS = frozenset({"", "none", "null", "nan", "unavailable", "missing"})
 
 
 def _read_json(path: Path) -> Any:
@@ -95,54 +98,113 @@ def _vector_from_value(value: Any) -> np.ndarray | None:
     return arr
 
 
-def _summary(values: list[float]) -> dict[str, Any]:
-    if not values:
-        return {"status": "unavailable", "count": 0}
-    arr = np.asarray(values, dtype=np.float64)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return {"status": "confirmed", "count": int(arr.size), "finite_count": 0}
-    return {
-        "status": "confirmed",
-        "count": int(arr.size),
-        "finite_count": int(finite.size),
-        "min": float(np.min(finite)),
-        "max": float(np.max(finite)),
-        "mean": float(np.mean(finite)),
-        "std": float(np.std(finite)),
-        "percentiles": {str(p): float(np.percentile(finite, p)) for p in PERCENTILES},
-    }
+class _ScalarStats:
+    def __init__(self, *, reservoir_size: int = RESERVOIR_SIZE, seed: int = 0) -> None:
+        self.count = 0
+        self.finite_count = 0
+        self.min = math.inf
+        self.max = -math.inf
+        self.mean = 0.0
+        self.m2 = 0.0
+        self._reservoir_size = reservoir_size
+        self._rng = random.Random(seed)
+        self._sample: list[float] = []
 
+    def add(self, value: float) -> None:
+        self.count += 1
+        if not math.isfinite(value):
+            return
+        self.finite_count += 1
+        self.min = min(self.min, value)
+        self.max = max(self.max, value)
+        delta = value - self.mean
+        self.mean += delta / self.finite_count
+        self.m2 += delta * (value - self.mean)
+        if len(self._sample) < self._reservoir_size:
+            self._sample.append(value)
+        else:
+            idx = self._rng.randrange(self.finite_count)
+            if idx < self._reservoir_size:
+                self._sample[idx] = value
 
-def _vector_summary(matrix: list[np.ndarray], labels: tuple[str, ...]) -> list[dict[str, Any]]:
-    if not matrix or not labels:
-        return []
-    arr = np.vstack(matrix)
-    rows: list[dict[str, Any]] = []
-    for idx, label in enumerate(labels):
-        col = arr[:, idx]
-        finite = col[np.isfinite(col)]
-        rows.append(
+    def as_summary(self) -> dict[str, Any]:
+        if self.count == 0:
+            return {"status": "unavailable", "count": 0}
+        out: dict[str, Any] = {
+            "status": "confirmed",
+            "count": int(self.count),
+            "finite_count": int(self.finite_count),
+        }
+        if self.finite_count == 0:
+            return out
+        sample = np.asarray(self._sample, dtype=np.float64)
+        out.update(
             {
-                "index": idx,
-                "label": label,
-                "count": int(col.size),
-                "finite_count": int(finite.size),
-                "nonfinite_count": int(col.size - finite.size),
-                "min": None if finite.size == 0 else float(np.min(finite)),
-                "max": None if finite.size == 0 else float(np.max(finite)),
-                "mean": None if finite.size == 0 else float(np.mean(finite)),
-                "std": None if finite.size == 0 else float(np.std(finite)),
-                "p01": None if finite.size == 0 else float(np.percentile(finite, 1.0)),
-                "p50": None if finite.size == 0 else float(np.percentile(finite, 50.0)),
-                "p99": None if finite.size == 0 else float(np.percentile(finite, 99.0)),
+                "min": float(self.min),
+                "max": float(self.max),
+                "mean": float(self.mean),
+                "std": float(math.sqrt(self.m2 / self.finite_count)),
+                "percentiles": {str(p): float(np.percentile(sample, p)) for p in PERCENTILES},
+                "percentile_method": "exact" if self.finite_count <= self._reservoir_size else "bounded_reservoir_sample",
             }
         )
-    return rows
+        return out
+
+
+class _VectorStats:
+    def __init__(self, labels: tuple[str, ...], *, seed: int) -> None:
+        self.labels = labels
+        self.columns = [_ScalarStats(seed=seed + idx) for idx in range(len(labels))]
+
+    def add(self, vector: np.ndarray | None) -> None:
+        if vector is None or vector.shape != (len(self.labels),):
+            return
+        for idx, value in enumerate(vector):
+            self.columns[idx].add(float(value))
+
+    def as_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for idx, label in enumerate(self.labels):
+            summary = self.columns[idx].as_summary()
+            if summary.get("status") == "unavailable":
+                continue
+            percentiles = summary.get("percentiles", {})
+            rows.append(
+                {
+                    "index": idx,
+                    "label": label,
+                    "count": summary.get("count", 0),
+                    "finite_count": summary.get("finite_count", 0),
+                    "nonfinite_count": int(summary.get("count", 0) - summary.get("finite_count", 0)),
+                    "min": summary.get("min"),
+                    "max": summary.get("max"),
+                    "mean": summary.get("mean"),
+                    "std": summary.get("std"),
+                    "p01": percentiles.get("1.0"),
+                    "p50": percentiles.get("50.0"),
+                    "p99": percentiles.get("99.0"),
+                    "percentile_method": summary.get("percentile_method"),
+                }
+            )
+        return rows
 
 
 def _counter_dict(counter: Counter[Any]) -> dict[str, int]:
     return {str(key): int(counter[key]) for key in sorted(counter, key=lambda item: str(item))}
+
+
+def _is_missing_nuisance_id(value: Any) -> bool:
+    if value is None:
+        return True
+    return str(value).strip().lower() in MISSING_NUISANCE_SENTINELS
+
+
+def _existing_path(root: Path, value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+    text = str(value).replace("\\", "/")
+    path = Path(text)
+    return path if path.is_absolute() else root / path
 
 
 def _labels_from_parameter_space(path: Path) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
@@ -210,34 +272,66 @@ class _Accumulator:
     pair_counts: Counter[tuple[str, str]] = field(default_factory=Counter)
     triple_counts: Counter[tuple[str, str, str]] = field(default_factory=Counter)
     nuisance_ids: Counter[str] = field(default_factory=Counter)
+    missing_nuisance_metadata_count: int = 0
     nuisance_vectors_by_id: dict[str, set[tuple[float, ...]]] = field(default_factory=lambda: defaultdict(set))
     science_ids: Counter[str] = field(default_factory=Counter)
     science_nuisance_ids: Counter[tuple[str, str]] = field(default_factory=Counter)
-    physical_vectors: list[np.ndarray] = field(default_factory=list)
-    fisher_vectors: list[np.ndarray] = field(default_factory=list)
-    nuisance_vectors: list[np.ndarray] = field(default_factory=list)
+    physical_stats: _VectorStats = field(init=False)
+    fisher_stats: _VectorStats = field(init=False)
+    nuisance_stats: _VectorStats = field(init=False)
+    fisher_radius_stats: _ScalarStats = field(init=False)
     image_shapes: Counter[tuple[int, ...]] = field(default_factory=Counter)
     vector_dimension_mismatches: list[dict[str, Any]] = field(default_factory=list)
     nonfinite_records: list[dict[str, Any]] = field(default_factory=list)
     missing_render_refs: int = 0
     missing_metadata_refs: int = 0
+    render_path_recorded_count: int = 0
+    render_file_present_count: int = 0
+    render_file_missing_count: int = 0
+    metadata_path_recorded_count: int = 0
+    metadata_file_present_count: int = 0
+    metadata_file_missing_count: int = 0
+    active_consistency_mismatches: list[dict[str, Any]] = field(default_factory=list)
 
-    def add_record(self, row: Mapping[str, Any], row_number: int, root: Path, *, prepared: bool) -> None:
+    def __post_init__(self) -> None:
+        self.physical_stats = _VectorStats(self.science_labels, seed=101)
+        self.fisher_stats = _VectorStats(self.science_labels, seed=201)
+        self.nuisance_stats = _VectorStats(self.nuisance_labels, seed=301)
+        self.fisher_radius_stats = _ScalarStats(seed=401)
+
+    def add_record(self, row: Mapping[str, Any], row_number: int, root: Path, *, prepared: bool, verify_files: bool) -> None:
         self.sample_count += 1
         sample_id = str(row.get("sample_id", f"__missing_row_{row_number}"))
         self.sample_ids[sample_id] += 1
-        if row.get("sample_index") is not None:
+        sample_index_value = row.get("sample_index", row.get("global_sequence_index"))
+        if sample_index_value is not None:
             try:
-                self.sample_indices.append(int(row["sample_index"]))
+                self.sample_indices.append(int(sample_index_value))
             except (TypeError, ValueError):
-                self.vector_dimension_mismatches.append({"row": row_number, "field": "sample_index", "value": row.get("sample_index")})
+                self.vector_dimension_mismatches.append({"row": row_number, "field": "sample_index", "value": sample_index_value})
         self.families[str(row.get("dataset_family", "unavailable"))] += 1
         self.roles[str(row.get("sample_role", "unavailable"))] += 1
-        self.splits[str(row.get("split", "unavailable"))] += 1
-        if row.get("fits_path") in (None, "") and row.get("source_fits_path") in (None, "") and not prepared:
+        self.splits[str(row.get("split", row.get("split_role", "unavailable")))] += 1
+        render_path = row.get("fits_path") or row.get("source_fits_path")
+        metadata_path = row.get("metadata_path") or row.get("source_metadata_path")
+        if render_path in (None, "") and not prepared:
             self.missing_render_refs += 1
-        if row.get("metadata_path") in (None, "") and row.get("source_metadata_path") in (None, "") and not prepared:
+        elif render_path not in (None, ""):
+            self.render_path_recorded_count += 1
+            if verify_files:
+                if (_existing_path(root, render_path) or Path()).exists():
+                    self.render_file_present_count += 1
+                else:
+                    self.render_file_missing_count += 1
+        if metadata_path in (None, "") and not prepared:
             self.missing_metadata_refs += 1
+        elif metadata_path not in (None, ""):
+            self.metadata_path_recorded_count += 1
+            if verify_files:
+                if (_existing_path(root, metadata_path) or Path()).exists():
+                    self.metadata_file_present_count += 1
+                else:
+                    self.metadata_file_missing_count += 1
 
         physical = self._physical_vector(row, prepared=prepared)
         fisher = self._fisher_vector(row, physical=physical, prepared=prepared)
@@ -246,27 +340,32 @@ class _Accumulator:
         self._record_vector("fisher_scaled", fisher, len(self.science_labels), row_number)
         self._record_vector("nuisance", nuisance, len(self.nuisance_labels), row_number)
         if physical is not None and physical.shape == (len(self.science_labels),):
-            self.physical_vectors.append(physical)
-            science_id = _field(row, "group_ids.physical_delta_sha256")
+            self.physical_stats.add(physical)
+            science_id = row.get("science_state_id", _field(row, "group_ids.physical_delta_sha256"))
             if science_id in (None, ""):
                 science_id = _stable_id(physical)
             self.science_ids[str(science_id)] += 1
         else:
             science_id = None
         if fisher is not None and fisher.shape == (len(self.science_labels),):
-            self.fisher_vectors.append(fisher)
+            self.fisher_stats.add(fisher)
+            self.fisher_radius_stats.add(float(np.linalg.norm(fisher)))
         if nuisance is not None and nuisance.shape == (len(self.nuisance_labels),):
-            self.nuisance_vectors.append(nuisance)
+            self.nuisance_stats.add(nuisance)
 
         nuisance_id = row.get("nuisance_id", _field(row, "group_ids.nuisance"))
-        nuisance_id_text = "unavailable" if nuisance_id in (None, "") else str(nuisance_id)
-        self.nuisance_ids[nuisance_id_text] += 1
-        if nuisance is not None and nuisance.shape == (len(self.nuisance_labels),):
+        if _is_missing_nuisance_id(nuisance_id):
+            nuisance_id_text = "unavailable"
+            self.missing_nuisance_metadata_count += 1
+        else:
+            nuisance_id_text = str(nuisance_id)
+            self.nuisance_ids[nuisance_id_text] += 1
+        if nuisance_id_text != "unavailable" and nuisance is not None and nuisance.shape == (len(self.nuisance_labels),):
             self.nuisance_vectors_by_id[nuisance_id_text].add(tuple(float(v) for v in nuisance))
-        if science_id is not None:
+        if science_id is not None and nuisance_id_text != "unavailable":
             self.science_nuisance_ids[(str(science_id), nuisance_id_text)] += 1
 
-        active_labels = self._active_labels(row)
+        active_labels = self._active_labels(row, row_number)
         if active_labels is not None:
             self.active_counts[len(active_labels)] += 1
             for label in active_labels:
@@ -299,12 +398,12 @@ class _Accumulator:
 
     def _physical_vector(self, row: Mapping[str, Any], *, prepared: bool) -> np.ndarray | None:
         if prepared:
-            return _vector_from_value(row.get("physical_delta"))
+            return _vector_from_value(row.get("physical_delta", row.get("ordered_physical_science_vector")))
         return _vector_from_mapping(row.get("theta_delta", {}) or {}, self.science_labels)
 
     def _fisher_vector(self, row: Mapping[str, Any], *, physical: np.ndarray | None, prepared: bool) -> np.ndarray | None:
         if prepared:
-            return _vector_from_value(row.get("fisher_scaled_delta"))
+            return _vector_from_value(row.get("fisher_scaled_delta", row.get("ordered_fisher_scaled_delta")))
         sigma_map = row.get("theta_sigma")
         if isinstance(sigma_map, Mapping):
             return _vector_from_mapping(sigma_map, self.science_labels)
@@ -317,13 +416,46 @@ class _Accumulator:
             return _vector_from_value(row.get("nuisance_vector"))
         return _vector_from_mapping(row.get("registration_nuisance_values", {}) or {}, self.nuisance_labels)
 
-    def _active_labels(self, row: Mapping[str, Any]) -> tuple[str, ...] | None:
+    def _active_labels(self, row: Mapping[str, Any], row_number: int) -> tuple[str, ...] | None:
+        representations: dict[str, tuple[str, ...]] = {}
         labels = row.get("active_labels")
         if isinstance(labels, list):
-            return tuple(str(label) for label in labels)
+            representations["active_labels"] = tuple(str(label) for label in labels)
         mask = row.get("active_mask")
         if isinstance(mask, list) and self.science_labels and len(mask) == len(self.science_labels):
-            return tuple(label for label, flag in zip(self.science_labels, mask) if bool(flag))
+            representations["active_mask"] = tuple(label for label, flag in zip(self.science_labels, mask) if bool(flag))
+        count_value = row.get("active_count")
+        count: int | None = None
+        if count_value is not None:
+            try:
+                count = int(count_value)
+            except (TypeError, ValueError):
+                self.active_consistency_mismatches.append({"row": row_number, "field": "active_count", "value": count_value, "reason": "not_integer"})
+        if len(set(representations.values())) > 1:
+            self.active_consistency_mismatches.append(
+                {
+                    "row": row_number,
+                    "reason": "active_labels_active_mask_disagree",
+                    "representations": {key: list(value) for key, value in representations.items()},
+                }
+            )
+        for key, active in representations.items():
+            if count is not None and len(active) != count:
+                self.active_consistency_mismatches.append(
+                    {
+                        "row": row_number,
+                        "reason": "active_count_disagrees",
+                        "active_count": count,
+                        "representation": key,
+                        "representation_count": len(active),
+                    }
+                )
+        if "active_labels" in representations:
+            return representations["active_labels"]
+        if "active_mask" in representations:
+            return representations["active_mask"]
+        if count is not None:
+            return tuple()
         return None
 
     @staticmethod
@@ -338,7 +470,7 @@ def _classify_nuisance(acc: _Accumulator) -> dict[str, Any]:
     if not acc.science_nuisance_ids or not acc.nuisance_ids or not acc.science_ids:
         return {"status": "unavailable", "classification": "unknown"}
     science_count = len(acc.science_ids)
-    nuisance_count = len([key for key in acc.nuisance_ids if key != "unavailable"])
+    nuisance_count = len(acc.nuisance_ids)
     expected = science_count * nuisance_count
     observed_pairs = len(acc.science_nuisance_ids)
     all_once = all(count == 1 for count in acc.science_nuisance_ids.values())
@@ -359,6 +491,7 @@ def _classify_nuisance(acc: _Accumulator) -> dict[str, Any]:
         "classification": classification,
         "unique_science_states": science_count,
         "unique_nuisance_ids": nuisance_count,
+        "missing_nuisance_metadata_count": acc.missing_nuisance_metadata_count,
         "observed_science_nuisance_pairs": observed_pairs,
         "expected_full_cross_product_pairs": expected,
     }
@@ -428,6 +561,17 @@ def _parameter_metadata(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "max_sigma": record.get("max_sigma"),
                 "min_abs_delta": record.get("min_abs_delta"),
                 "max_abs_delta": record.get("max_abs_delta"),
+                "sampling_envelope": {
+                    "kind": "historical_sweep_extent",
+                    "min_sigma": record.get("min_sigma"),
+                    "max_sigma": record.get("max_sigma"),
+                    "min_abs_delta": record.get("min_abs_delta"),
+                    "max_abs_delta": record.get("max_abs_delta"),
+                },
+                "physical_validity_constraints": {
+                    "status": "unavailable",
+                    "reason": "historical V3 sweep extrema are sampling envelopes, not physical/model constraints",
+                },
                 "group": record.get("group"),
                 "noll_index": record.get("noll_index"),
             }
@@ -475,7 +619,7 @@ def _summarize_accumulator(
         "size_structure": {
             "sample_count": _status(acc.sample_count, "confirmed", "metadata rows"),
             "unique_science_state_count": _status(len(acc.science_ids), "confirmed" if acc.science_ids else "unavailable", "science vector identity"),
-            "unique_nuisance_state_count": _status(len(acc.nuisance_ids), "confirmed" if acc.nuisance_ids else "unavailable", "nuisance_id"),
+            "unique_nuisance_state_count": _status(len(acc.nuisance_ids), "confirmed" if acc.nuisance_ids else "unavailable", "known nuisance_id"),
             "science_dimension": _status(len(acc.science_labels), "confirmed" if acc.science_labels else "unavailable", "parameter/vector metadata"),
             "nuisance_dimension": _status(len(acc.nuisance_labels), "confirmed" if acc.nuisance_labels else "unavailable", "nuisance metadata"),
             "image_shape": _status(_counter_dict(Counter({str(list(key)): value for key, value in acc.image_shapes.items()})), "confirmed" if acc.image_shapes else "unavailable", "sample rows"),
@@ -494,9 +638,9 @@ def _summarize_accumulator(
             "fisher_scales": None if acc.sigmas is None else acc.sigmas.tolist(),
         },
         "science_space_coverage": {
-            "physical_delta": _vector_summary(acc.physical_vectors, acc.science_labels),
-            "fisher_scaled_delta": _vector_summary(acc.fisher_vectors, acc.science_labels),
-            "fisher_radius_l2": _summary([float(np.linalg.norm(row)) for row in acc.fisher_vectors]),
+            "physical_delta": acc.physical_stats.as_rows(),
+            "fisher_scaled_delta": acc.fisher_stats.as_rows(),
+            "fisher_radius_l2": acc.fisher_radius_stats.as_summary(),
         },
         "sparse_behavior": {
             "active_count_distribution": _counter_dict(acc.active_counts),
@@ -513,12 +657,17 @@ def _summarize_accumulator(
                 "min_count": None if not acc.triple_counts else int(min(acc.triple_counts.values())),
                 "max_count": None if not acc.triple_counts else int(max(acc.triple_counts.values())),
             },
+            "active_consistency_mismatches": acc.active_consistency_mismatches[:100],
+            "active_consistency_mismatch_count": len(acc.active_consistency_mismatches),
         },
         "nuisance_coverage": {
+            "known_nuisance_id_distribution": _counter_dict(acc.nuisance_ids),
+            "missing_nuisance_metadata_count": acc.missing_nuisance_metadata_count,
             "nuisance_id_distribution": _counter_dict(acc.nuisance_ids),
             "nuisance_vectors_by_id": nuisance_bank,
+            "samples_per_known_nuisance_id": _counter_dict(acc.nuisance_ids),
             "samples_per_nuisance_id": _counter_dict(acc.nuisance_ids),
-            "nuisance_vector_summary": _vector_summary(acc.nuisance_vectors, acc.nuisance_labels),
+            "nuisance_vector_summary": acc.nuisance_stats.as_rows(),
             "fixed_bank": _status(fixed_bank, "confirmed" if nuisance_bank else "unavailable", "nuisance_id to vector mapping"),
             "replication_classification": _classify_nuisance(acc),
         },
@@ -533,6 +682,13 @@ def _summarize_accumulator(
             "nonfinite_record_count": len(acc.nonfinite_records),
             "missing_render_reference_count": acc.missing_render_refs,
             "missing_metadata_reference_count": acc.missing_metadata_refs,
+            "render_path_recorded_count": acc.render_path_recorded_count,
+            "render_file_present_count": acc.render_file_present_count,
+            "render_file_missing_count": acc.render_file_missing_count,
+            "metadata_path_recorded_count": acc.metadata_path_recorded_count,
+            "metadata_file_present_count": acc.metadata_file_present_count,
+            "metadata_file_missing_count": acc.metadata_file_missing_count,
+            "active_consistency_mismatch_count": len(acc.active_consistency_mismatches),
             "missing_sample_index_ranges": missing_ranges[:20],
             "manifest_count_mismatch": _manifest_count_mismatch(manifest, acc.sample_count, prepared=prepared),
             "plan_count_mismatch": None if plan_row_count is None else plan_row_count != acc.sample_count,
@@ -565,7 +721,86 @@ def _count_csv_rows(path: Path) -> int:
         return sum(1 for _ in csv.DictReader(handle))
 
 
-def audit_dataset(root: Path) -> dict[str, Any]:
+def _iter_v4_state_plan_rows(root: Path) -> Iterable[dict[str, Any]]:
+    manifest = _read_json(root / "freeze_manifest.json")
+    family_order = tuple(manifest.get("science_counts", {}).keys())
+    split_order = ("train", "validation", "test")
+    if not family_order:
+        family_order = tuple(
+            path.name
+            for path in sorted((root / "state_plans").iterdir())
+            if path.is_dir()
+        )
+    for family in family_order:
+        for split in split_order:
+            path = root / "state_plans" / str(family) / f"{split}.jsonl"
+            if not path.exists():
+                continue
+            yield from _iter_jsonl(path)
+
+
+def _audit_v4_materialization(root: Path) -> dict[str, Any]:
+    manifest = _read_json(root / "freeze_manifest.json")
+    labels = _labels_from_vector_spaces(root / "vector_spaces.json", "fisher_scaled_delta")
+    nuisance_bank = _read_json(root / "nuisance_bank.json")
+    nuisance_labels = tuple(str(label) for label in nuisance_bank.get("ordered_labels", []))
+    sigmas = _sigmas_from_vector_spaces(root / "vector_spaces.json", len(labels))
+    acc = _Accumulator(science_labels=labels, nuisance_labels=nuisance_labels, sigmas=sigmas)
+    for row_number, row in enumerate(_iter_v4_state_plan_rows(root), start=1):
+        acc.add_record(row, row_number, root, prepared=True, verify_files=False)
+    payload = _summarize_accumulator(
+        root,
+        manifest if isinstance(manifest, Mapping) else {},
+        acc,
+        [],
+        prepared=True,
+        shard_manifest=None,
+        plan_row_count=None,
+    )
+    render_contract = _read_json(root / "render_contract.json") if (root / "render_contract.json").exists() else {}
+    split_integrity = (
+        _read_json(root / "qa" / "split_integrity_summary.json")
+        if (root / "qa" / "split_integrity_summary.json").exists()
+        else {}
+    )
+    nuisance_states = nuisance_bank.get("states", []) if isinstance(nuisance_bank, Mapping) else []
+    payload["identity"]["dataset_kind"] = _status("v4_state_plan", "confirmed", "freeze_manifest.json")
+    payload["size_structure"]["unique_nuisance_state_count"] = _status(
+        len(nuisance_states),
+        "confirmed",
+        "nuisance_bank.json",
+    )
+    payload["size_structure"]["nuisance_dimension"] = _status(
+        len(nuisance_labels),
+        "confirmed" if nuisance_labels else "unavailable",
+        "nuisance_bank.json",
+    )
+    payload["nuisance_coverage"]["fixed_bank"] = _status(True, "confirmed", "nuisance_bank.json")
+    payload["nuisance_coverage"]["replication_classification"] = {
+        "status": "confirmed",
+        "classification": "compact_full_cross_product",
+        "unique_science_states": len(acc.science_ids),
+        "unique_nuisance_ids": len(nuisance_states),
+        "expected_render_pairs": render_contract.get("render_count"),
+    }
+    payload["v4_state_plan"] = {
+        "master_scientific_content_hash": manifest.get("master_scientific_content_hash"),
+        "science_vector_space_id": manifest.get("science_vector_space_id"),
+        "nuisance_vector_space_id": manifest.get("nuisance_vector_space_id"),
+        "render_count": render_contract.get("render_count"),
+        "render_index_range": render_contract.get("render_index_range"),
+        "split_integrity_status": split_integrity.get("status"),
+    }
+    payload["schema_version"] = AUDIT_SCHEMA_VERSION
+    payload["status"] = "ok"
+    payload["file_verification"] = {
+        "enabled": False,
+        "scope": "compact V4 state-plan rows only",
+    }
+    return payload
+
+
+def audit_dataset(root: Path, *, verify_files: bool = False) -> dict[str, Any]:
     root = Path(root)
     if not root.exists():
         raise FileNotFoundError(root)
@@ -574,6 +809,8 @@ def audit_dataset(root: Path) -> dict[str, Any]:
     if isinstance(manifest, dict) and (root / "prescription_resolved.json").exists():
         manifest = dict(manifest)
         manifest["prescription_resolved"] = _read_json(root / "prescription_resolved.json")
+    if (root / "freeze_manifest.json").exists() and (root / "state_plans").exists():
+        return _audit_v4_materialization(root)
     prepared = (root / "index.jsonl").exists() and (root / "array_shards_manifest.json").exists()
     index_path = root / "index.jsonl" if prepared else root / "samples.jsonl"
     if not index_path.exists():
@@ -600,7 +837,7 @@ def audit_dataset(root: Path) -> dict[str, Any]:
         plan_count = _count_csv_rows(plan_path) + _count_csv_rows(pair_path)
     acc = _Accumulator(science_labels=labels, nuisance_labels=nuisance_labels, sigmas=sigmas)
     for row_number, row in enumerate(_iter_jsonl(index_path), start=1):
-        acc.add_record(row, row_number, root, prepared=prepared)
+        acc.add_record(row, row_number, root, prepared=prepared, verify_files=verify_files)
     payload = _summarize_accumulator(
         root,
         manifest if isinstance(manifest, Mapping) else {},
@@ -612,6 +849,10 @@ def audit_dataset(root: Path) -> dict[str, Any]:
     )
     payload["schema_version"] = AUDIT_SCHEMA_VERSION
     payload["status"] = "ok"
+    payload["file_verification"] = {
+        "enabled": bool(verify_files),
+        "scope": "recorded render/metadata paths only",
+    }
     return payload
 
 
@@ -680,9 +921,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("path", type=Path, help="Raw dataset root, compact context package, or prepared dataset root.")
     parser.add_argument("--output-json", type=Path, default=None, help="Write the full audit payload to this JSON path.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Write summary JSON/CSV artifacts to this directory.")
+    parser.add_argument("--verify-files", action="store_true", help="Check whether recorded render and metadata paths exist on disk.")
     args = parser.parse_args(argv)
 
-    audit = audit_dataset(args.path)
+    audit = audit_dataset(args.path, verify_files=args.verify_files)
     print_summary(audit)
     if args.output_json is not None:
         _write_json(args.output_json, audit)

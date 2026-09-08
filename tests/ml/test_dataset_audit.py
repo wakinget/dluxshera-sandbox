@@ -282,3 +282,143 @@ def test_cli_writes_machine_readable_outputs(tmp_path: Path) -> None:
     assert payload["schema_version"] == "dluxshera_dataset_audit/1"
     assert (output_dir / "audit_summary.json").exists()
     assert (output_dir / "parameter_summary.csv").exists()
+
+
+def test_verify_files_distinguishes_recorded_paths_from_present_files(tmp_path: Path) -> None:
+    _manifest(tmp_path, count=2)
+    _parameter_space(tmp_path)
+    rows = [
+        _raw_row(0, active_labels=["science.a"]),
+        _raw_row(1, active_labels=["science.b"]),
+    ]
+    _write_jsonl(tmp_path / "samples.jsonl", rows)
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "sample_000000.fits").write_bytes(b"fits")
+    (tmp_path / "images" / "sample_000000.json").write_text("{}", encoding="utf-8")
+
+    without_check = audit_dataset(tmp_path)
+    with_check = audit_dataset(tmp_path, verify_files=True)
+
+    assert without_check["file_verification"]["enabled"] is False
+    assert without_check["integrity"]["render_path_recorded_count"] == 2
+    assert without_check["integrity"]["render_file_present_count"] == 0
+    assert with_check["file_verification"]["enabled"] is True
+    assert with_check["integrity"]["render_path_recorded_count"] == 2
+    assert with_check["integrity"]["render_file_present_count"] == 1
+    assert with_check["integrity"]["render_file_missing_count"] == 1
+    assert with_check["integrity"]["metadata_file_present_count"] == 1
+    assert with_check["integrity"]["metadata_file_missing_count"] == 1
+
+
+def test_active_count_labels_and_mask_mismatches_are_reported(tmp_path: Path) -> None:
+    _manifest(tmp_path, count=1)
+    _parameter_space(tmp_path)
+    row = _raw_row(0, active_labels=["science.a"])
+    row["active_count"] = 2
+    row["active_mask"] = [0, 1]
+    _write_jsonl(tmp_path / "samples.jsonl", [row])
+
+    audit = audit_dataset(tmp_path)
+
+    assert audit["sparse_behavior"]["active_consistency_mismatch_count"] >= 2
+    reasons = {item["reason"] for item in audit["sparse_behavior"]["active_consistency_mismatches"]}
+    assert "active_labels_active_mask_disagree" in reasons
+    assert "active_count_disagrees" in reasons
+
+
+def test_unavailable_nuisance_id_is_missing_metadata_not_real_state(tmp_path: Path) -> None:
+    _manifest(tmp_path, count=2)
+    _parameter_space(tmp_path)
+    rows = [
+        _raw_row(0, active_labels=["science.a"], nuisance_id=1, nuisance=(0.1, 0.2)),
+        {**_raw_row(1, active_labels=["science.b"], nuisance_id=0, nuisance=(0.0, 0.0)), "nuisance_id": "unavailable"},
+    ]
+    _write_jsonl(tmp_path / "samples.jsonl", rows)
+
+    audit = audit_dataset(tmp_path)
+
+    assert audit["size_structure"]["unique_nuisance_state_count"]["value"] == 1
+    assert audit["nuisance_coverage"]["known_nuisance_id_distribution"] == {"1": 1}
+    assert audit["nuisance_coverage"]["missing_nuisance_metadata_count"] == 1
+    assert "unavailable" not in audit["nuisance_coverage"]["known_nuisance_id_distribution"]
+
+
+def test_parameter_metadata_separates_sampling_envelope_from_physical_constraints(tmp_path: Path) -> None:
+    _manifest(tmp_path, count=1)
+    _parameter_space(tmp_path)
+    _write_jsonl(tmp_path / "samples.jsonl", [_raw_row(0, active_labels=["science.a"])])
+
+    audit = audit_dataset(tmp_path)
+    first = audit["ordered_vector_metadata"]["parameters"][0]
+
+    assert first["sampling_envelope"]["kind"] == "historical_sweep_extent"
+    assert first["sampling_envelope"]["max_sigma"] == 3.0
+    assert first["physical_validity_constraints"]["status"] == "unavailable"
+
+
+def test_v4_compact_state_plan_audit_reports_render_contract_and_split_status(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "freeze_manifest.json",
+        {
+            "schema_version": "shera_v4_master_contract/1",
+            "dataset_version": "shera_ml_master_v4",
+            "master_scientific_content_hash": "master",
+            "science_vector_space_id": "science-space",
+            "nuisance_vector_space_id": "nuisance-space",
+        },
+    )
+    _write_json(
+        tmp_path / "vector_spaces.json",
+        {
+            "spaces": {
+                "fisher_scaled_delta": {"components": [{"label": "science.a", "index": 0}]}
+            },
+            "transforms": {"fisher_diagonal_scale": {"scales": [2.0]}},
+        },
+    )
+    _write_json(
+        tmp_path / "nuisance_bank.json",
+        {
+            "ordered_labels": ["nuis.x"],
+            "states": [
+                {"nuisance_state_id": "n0", "ordered_physical_nuisance_vector": [0.0]},
+                {"nuisance_state_id": "n1", "ordered_physical_nuisance_vector": [1.0]},
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "render_contract.json",
+        {"render_count": 4, "render_index_range": [0, 3]},
+    )
+    _write_json(tmp_path / "qa" / "split_integrity_summary.json", {"status": "PASS"})
+    _write_jsonl(
+        tmp_path / "state_plans" / "joint_full_v4" / "train.jsonl",
+        [
+            {
+                "science_state_id": "science-0",
+                "dataset_family": "joint_full_v4",
+                "split_role": "train",
+                "global_sequence_index": 0,
+                "ordered_physical_science_vector": [10.0],
+                "ordered_fisher_scaled_delta": [0.0],
+            },
+            {
+                "science_state_id": "science-1",
+                "dataset_family": "joint_full_v4",
+                "split_role": "train",
+                "global_sequence_index": 1,
+                "ordered_physical_science_vector": [12.0],
+                "ordered_fisher_scaled_delta": [1.0],
+            },
+        ],
+    )
+
+    audit = audit_dataset(tmp_path)
+
+    assert audit["status"] == "ok"
+    assert audit["identity"]["dataset_kind"]["value"] == "v4_state_plan"
+    assert audit["size_structure"]["sample_count"]["value"] == 2
+    assert audit["size_structure"]["unique_nuisance_state_count"]["value"] == 2
+    assert audit["nuisance_coverage"]["replication_classification"]["classification"] == "compact_full_cross_product"
+    assert audit["v4_state_plan"]["render_count"] == 4
+    assert audit["v4_state_plan"]["split_integrity_status"] == "PASS"

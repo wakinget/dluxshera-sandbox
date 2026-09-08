@@ -33,7 +33,18 @@ python3 work/experiments/ml/datasets/audit_dataset.py \
 - `integrity_summary.json`
 
 The audit is metadata-driven and streams JSONL rows. It does not load the full
-image corpus unless future versions explicitly add that option.
+image corpus. Use `--verify-files` only for full raw dataset audits when the
+rendered FITS and per-sample JSON files are expected to be present:
+
+```bash
+python3 work/experiments/ml/datasets/audit_dataset.py \
+  /path/to/full/raw/dataset \
+  --verify-files \
+  --output-json /tmp/full_dataset_audit.json
+```
+
+Compact historical context packages intentionally omit most rendered files, so
+file-existence verification is opt-in.
 
 ## Raw Dataset Audit
 
@@ -136,10 +147,131 @@ du -sh /projects/shera_hpc/data/ml_training/*
 
 Do not claim current free space from stale notes.
 
-## Next Task
+## V4 Materialization
 
-The next task should implement deterministic V4 state-plan materialization and
-QA from `master_v4_spec.md`: ordered vector-space metadata, nested Sobol
-`joint_full` plans, controlled-radius `radial_capture` plans, nuisance-bank
-materialization, cross-product expansion, pre-render QA, and immutable state
-plan manifests.
+Deterministic V4 state-plan materialization and QA are implemented by:
+
+```bash
+python3 work/experiments/ml/datasets/materialize_master_v4.py \
+  --outdir work/experiments/ml/datasets/materialized/master_v4
+```
+
+For a small development smoke run:
+
+```bash
+python3 work/experiments/ml/datasets/materialize_master_v4.py \
+  --tiny \
+  --outdir work/experiments/ml/datasets/materialized/master_v4_tiny
+```
+
+The materializer writes state plans, vector contracts, nuisance-bank
+comparisons, QA summaries, a compact render-index contract, and handoff notes.
+It does not render images or submit cluster jobs.
+
+V4 science ordering is not inferred from raw `parameter_space.json` row order,
+mapping order, or JSON serialization order. The canonical science order is the
+stored `spaces.fisher_scaled_delta.components` order in the prepared S01/S05
+V3 `vector_spaces.json`; raw parameter records are reconciled by label into
+that order before any nominal vectors, Fisher scales, envelopes, state vectors,
+compatibility tables, QA summaries, or IDs are generated. Missing, duplicate,
+or unexpected science labels fail materialization.
+
+V4 nuisance ordering is a separate explicit contract:
+`source.x_position_as`, `source.y_position_as`,
+`source.position_angle_deg`. The selected V3 nuisance-bank artifact must
+contain exactly those labels, but its source-key order is not used as the
+authoritative vector order. Nuisance values are written by label into the
+canonical order.
+
+Generated materializations under `work/experiments/ml/datasets/materialized/`
+are intentionally ignored by Git. Track the materializer source, audit source,
+tests, this README, and `master_v4_spec.md`; do not track generated JSONL state
+plans, QA outputs, freeze manifests, render contracts, notebooks, or transfer
+packages. If a tiny fixture is needed for a unit test, create a minimal fixture
+under `tests/` rather than committing `master_v4_tiny`.
+
+The materializer will not silently replace a populated output directory. A new
+directory or an existing empty directory is allowed. A populated directory fails
+unless replacement is explicit:
+
+```bash
+python3 work/experiments/ml/datasets/materialize_master_v4.py \
+  --outdir work/experiments/ml/datasets/materialized/master_v4 \
+  --overwrite
+```
+
+`--overwrite` removes and recreates the generated artifact tree before writing,
+so a frozen materialization is not partially mixed with newly generated files.
+Use `--dry-run` to check the output-root policy without writing artifacts.
+
+The generated `qa/split_integrity_summary.json` validates science IDs and
+canonical ordered physical science vectors across `joint_full_v4` and
+`radial_capture_v4`, across train/validation/test, and across family
+boundaries. V4 materialization fails on duplicate new-V4 science IDs, duplicate
+new-V4 physical science vectors, same-family cross-split leakage, cross-family
+overlaps, or any new-V4 train/test physical-vector collision. Recoverable
+overlap with historical V3/legacy datasets is reported separately when audited
+and is not a V4 materialization failure.
+
+Scientific hashes are path-independent. Ordered vectors, independent science
+and nuisance vector-space identities, sampling envelopes, seeds, counts,
+nuisance vectors, render-system content, render indexing, and review decisions
+participate in scientific identity. Local source paths, output roots,
+timestamps, hostnames, and temporary staging paths are provenance only.
+
+`science_state_id` depends on the dataset/family identity, split role, the
+science vector-space ID, the canonical ordered physical science vector, the
+canonical ordered Fisher vector, and the sampling-family contract. It is not a
+seed, sequence-index, or file-position identity. `nuisance_state_id` depends on
+the nuisance vector-space ID and canonical ordered physical nuisance vector.
+`render_state_id` depends only on `science_state_id`, `nuisance_state_id`, and
+`render_system_contract_hash`.
+
+`render_system_contract.json` is built from the authoritative resolved S01/S05
+compatible `system` subtree and noise policy. Scientifically relevant file
+references are identified by content hash when available; local file paths do
+not affect the render-system scientific hash. `render_contract.json` defines the
+compact full-cross-product mapping:
+
+```text
+render_index = science_global_index * nuisance_count + nuisance_bank_index
+```
+
+Family order is `joint_full_v4`, then `radial_capture_v4`; split order is
+`train`, `validation`, then `test`. The compact contract maps each render index
+to the family, split, science-plan row/global index, science state ID, nuisance
+bank index, nuisance state ID, and render state ID formula without expanding the
+canonical plan to one row per render.
+
+Nuisance-bank rows include stable `nuisance_state_id` values derived from the
+nuisance vector-space scientific identity and canonical ordered physical
+nuisance vector. `render_state_id` is derived from `science_state_id`,
+`nuisance_state_id`, and `render_system_contract_hash`.
+
+Create the compact production-plan transfer package after materialization:
+
+```bash
+python3 work/experiments/ml/datasets/materialize_master_v4.py \
+  --outdir work/experiments/ml/datasets/materialized/master_v4 \
+  --package-only
+```
+
+The package contains the frozen V4 state-plan and handoff inputs needed by the
+cluster renderer: master prescription, vector spaces, unit contract, joint
+base envelope, nuisance bank, render-system contract, render contract, subset
+registry, freeze manifest, review decisions, state-plan JSONLs, QA summaries, and
+`RENDER_HANDOFF.md`. It excludes tiny development materialization, notebook
+caches, local audit scratch, historical dataset context, and rendered FITS
+images. Verify the package after transfer with `shasum -a 256 <package>` on
+macOS or `sha256sum <package>` on Linux.
+
+Accepted V4 QA findings are recorded in `qa/review_decisions.json`. The
+`joint_full_v4` population uses four balanced multiscale strata and the
+accepted anisotropic Fisher envelope. M1 contributes a relatively large share
+of aggregate squared Fisher radius because it has eight coordinates and a wider
+accepted envelope than M2; no single coordinate is marked as an unintended
+dominant driver. `radial_capture_v4` directions are isotropic proposals
+conditioned on the fixed V4 sampling/feasibility envelope. High-radius bins,
+especially `1000-1500` and `1500-2000`, are therefore feasible-direction
+conditioned populations, not unconditioned isotropic shells.
+`boundary_stress_v4` is deferred for the first render campaign.
