@@ -22,6 +22,27 @@ COMPACT_OUTPUTS = (
 )
 
 
+def _parse_key_path(values: list[str], *, option: str) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for value in values:
+        if "=" not in str(value):
+            raise ValueError(f"{option} expects KEY=PATH, got {value!r}.")
+        key, path = str(value).split("=", 1)
+        if not key.strip() or not path.strip():
+            raise ValueError(f"{option} expects non-empty KEY=PATH, got {value!r}.")
+        out[key.strip()] = Path(path.strip())
+    return out
+
+
+def _parse_key_path_json(value: str | None, *, option: str) -> dict[str, Path]:
+    if value in (None, ""):
+        return {}
+    payload = json.loads(str(value))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{option} expects a JSON object mapping artifact keys to paths.")
+    return {str(key): Path(str(path)) for key, path in payload.items()}
+
+
 def _copy_compact_outputs(run_dir: Path, destination: Path) -> list[str]:
     destination.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
@@ -42,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split-registry", type=Path, required=True)
     parser.add_argument("--validation-manifest", type=Path, default=None)
     parser.add_argument("--test-manifest", type=Path, default=None)
+    parser.add_argument("--audit-manifest", action="append", default=[])
+    parser.add_argument("--audit-manifest-json", default=None)
+    parser.add_argument("--scaler", type=Path, default=None)
+    parser.add_argument("--artifact-lock", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
@@ -61,6 +86,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.experiment_id} requires --validation-manifest; production S01 runs "
             "must not auto-generate validation pairs."
         )
+    audit_manifest_paths = _parse_key_path_json(
+        args.audit_manifest_json,
+        option="--audit-manifest-json",
+    )
+    audit_manifest_paths.update(_parse_key_path(args.audit_manifest, option="--audit-manifest"))
     if args.resume_checkpoint is not None:
         config["resume_checkpoint"] = str(args.resume_checkpoint)
     load_study_contract_artifacts(
@@ -69,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         split_registry_path=args.split_registry,
         validation_manifest_path=args.validation_manifest,
         test_manifest_path=args.test_manifest,
+        artifact_lock_path=args.artifact_lock,
+        scaler_path=args.scaler,
+        audit_manifest_paths=audit_manifest_paths,
         experiment_id=args.experiment_id,
         config=config,
     )
@@ -82,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         validation_manifest_path=args.validation_manifest,
         test_manifest_path=args.test_manifest,
+        scaler_path=args.scaler,
         overwrite=args.overwrite,
     )
     if args.copy_final_to is not None:

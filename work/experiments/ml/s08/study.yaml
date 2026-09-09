@@ -1,0 +1,156 @@
+study_id: S08
+title: V4 Pair-Family and Nuisance Study
+
+dataset: {artifact_id: PREP-V4-v1}
+split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+artifact_lock: {required: true}
+
+artifact_profiles:
+  standard:
+    split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+    scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+    artifact_lock: {required: true, lock_id: S08-STANDARD-ARTIFACT-LOCK-v1}
+  nuisance_holdout:
+    split_registry: {artifact_id: SPLIT-V4-S08-NUISANCE-HOLDOUT-v1}
+    scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+    artifact_lock: {required: true, lock_id: S08-HOLDOUT-ARTIFACT-LOCK-v1}
+
+pair_policies:
+  s08_v4_family_c:
+    family_weights: {C: 1.0}
+    same_pair_id: false
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    dataset_families: [joint_full_v4]
+    max_sampling_attempts: 4000
+  s08_v4_mix_abc:
+    family_weights: {A: 0.5, B: 0.25, C: 0.25}
+    same_pair_id: false
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    dataset_families: [joint_full_v4]
+    max_sampling_attempts: 4000
+
+evaluation_artifacts:
+  validation_c:
+    artifact_id: S08-C-VALIDATION-PAIRS-v1
+    artifact_profile: standard
+    pair_policy_id: s08_v4_family_c
+    split: validation
+    seed: 8000
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  validation_abc:
+    artifact_id: S08-ABC-VALIDATION-PAIRS-v1
+    artifact_profile: standard
+    pair_policy_id: s08_v4_mix_abc
+    split: validation
+    seed: 8001
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  validation_abc_seen:
+    artifact_id: S08-ABC-SEEN-VALIDATION-PAIRS-v1
+    artifact_profile: nuisance_holdout
+    pair_policy_id: s08_v4_mix_abc
+    split: validation
+    seed: 8004
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  unseen_nuisance_audit:
+    artifact_id: S08-UNSEEN-NUISANCE-AUDIT-PAIRS-v1
+    artifact_profile: nuisance_holdout
+    pair_policy_id: s08_v4_mix_abc
+    split: validation
+    seed: 8003
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_unseen_nuisance: {science_split: validation, nuisance_split: unseen_nuisance}
+  test:
+    artifact_id: S08-TEST-PAIRS-v1
+    artifact_profile: standard
+    pair_policy_id: s08_v4_mix_abc
+    split: test
+    seed: 8002
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: test, nuisance_split: train}
+  test_seen:
+    artifact_id: S08-SEEN-TEST-PAIRS-v1
+    artifact_profile: nuisance_holdout
+    pair_policy_id: s08_v4_mix_abc
+    split: test
+    seed: 8005
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: test, nuisance_split: train}
+
+defaults: &defaults
+  device: cuda:0
+  validation_artifact: validation
+  test_artifact: test
+  require_frozen_validation_manifest: true
+  evaluate_test: false
+  model: {channels: [32, 64, 128, 256], embedding_dim: 256, encoder_hidden_dim: 512, head_hidden_dim: 512, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+  image_scaling: {mode: global_max_abs, artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+  noise: {enabled: false, apply_to: observation}
+  training:
+    epochs: 600
+    batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: adamw
+    pairs_per_epoch: 16384
+    num_workers: 4
+    shard_cache_size: 4
+    lr_scheduler: {name: none}
+    early_stopping:
+      enabled: true
+      monitor: validation_loss
+      min_epochs: 120
+      patience: 80
+      min_delta_relative: 0.0005
+  evaluation: {fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]}
+
+experiments:
+  S08-E01:
+    <<: *defaults
+    artifact_profile: standard
+    validation_artifact: validation_c
+    pair_policy_id: s08_v4_family_c
+    seeds: [11, 23, 47]
+  S08-E02:
+    <<: *defaults
+    artifact_profile: standard
+    validation_artifact: validation_abc
+    pair_policy_id: s08_v4_mix_abc
+    seeds: [11, 23, 47]
+  S08-E03:
+    <<: *defaults
+    artifact_profile: standard
+    validation_artifact: validation_abc
+    pair_policy_id: s08_v4_mix_abc
+    nuisance_task:
+      enabled: true
+      lambda_nuisance: 1.0
+      scale: null
+      primary_selection_metric: validation_science_loss
+    seeds: [11, 23, 47]
+  S08-E04:
+    <<: *defaults
+    artifact_profile: nuisance_holdout
+    validation_artifact: validation_abc_seen
+    test_artifact: test_seen
+    audit_artifacts: [unseen_nuisance_audit]
+    pair_policy_id: s08_v4_mix_abc
+    nuisance_holdout:
+      train_nuisance_bank_indices: [0, 1, 2, 3, 4, 5, 6, 7]
+      unseen_nuisance_bank_indices: [8, 9]
+      checkpoint_selection_uses: seen_nuisance_validation_only
+      post_training_audit_artifact: unseen_nuisance_audit
+    seeds: [11, 23, 47]

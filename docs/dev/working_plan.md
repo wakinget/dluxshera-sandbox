@@ -942,3 +942,24 @@ Use this section as a quick in-doc ledger for active issues that are worth track
 - **Source parameters are treated as structural.** The `wavelength_m`, `bandwidth_m`, and `n_lambda` source settings are currently carried in the config object and are treated as structural in the structural parameter set. Because the AlphaCen source is built at model evaluation time and is not cached, the `forward_store` can carry these instead, which simplifies the call signature to `build_alpha_cen_source()`. If we eventually move to a more complicated source model, we may end up caching the source object and then re-defining a structural subset anyway, in which case we might end up where we started. Until then, though, I think it makes sense to consolidate these source settings into the forward_store with the other source settings ("binary.x_position_as", "binary.y_position_as", etc.) to reduce some mental overhead.
 - **`imaging.throughput` might not be modelled** We set a value in the store, but it's unclear if anything in the model actually applies the throughput.
 - **Profiles/IO consistency across workflows is incomplete.** Prescription/override flows are strong for experiment runners, but a unified YAML/JSON profile experience across all entry points is still pending.
+
+## 28) S06-S09 ML Campaign Bring-Up
+
+Status: planned and repository-prepared, not cluster-executed.
+
+- Added tracked S06-S09 study prescriptions under `work/experiments/ml/s06`
+  through `work/experiments/ml/s09`.
+- Added repository expansion/audit support through
+  `work/experiments/ml/materialize_study_artifacts.py audit-study`; expected
+  total is 40 production configs and all retain `evaluate_test: false`.
+- Added V4 prepared-data content identity over the index, vector spaces, shard
+  manifest, shard hashes, representation settings, and frozen V4 source/plan
+  identities while excluding physical roots.
+- Added restart-safe V4 preparation at atomic shard boundaries plus source
+  sidecar consistency checks.
+- Added shared scaler, split, pair manifest, artifact-lock, and validation
+  commands to the materialization CLI.
+- Added S08-E03 multitask training support while keeping science validation
+  loss as the checkpoint-selection objective.
+
+Detailed plan and command surface: `docs/dev/notes/ml_s06_s09_campaign_plan.md`.

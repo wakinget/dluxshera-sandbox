@@ -1,0 +1,120 @@
+study_id: S09
+title: V4 Distance-Balanced Radial Capture Study
+
+dataset: {artifact_id: PREP-V4-v1}
+split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+artifact_lock: {required: true, lock_id: S09-ARTIFACT-LOCK-v1}
+
+pair_policies:
+  s09_v4_75_joint_25_radial:
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    include_reverse: true
+    require_same_dataset_family: true
+    fisher_distance_bin_edges: &bins [0, 100, 250, 500, 1000, 2000, 5000]
+    dataset_family_sampling:
+      joint_full_v4:
+        weight: 0.75
+      radial_capture_v4:
+        weight: 0.25
+        distance_bin_weights: &balanced {0-100: 1, 100-250: 1, 250-500: 1, 500-1000: 1, 1000-2000: 1, 2000-5000: 1}
+    max_sampling_attempts: 8000
+  s09_v4_50_joint_50_radial:
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    include_reverse: true
+    require_same_dataset_family: true
+    fisher_distance_bin_edges: *bins
+    dataset_family_sampling:
+      joint_full_v4:
+        weight: 0.5
+      radial_capture_v4:
+        weight: 0.5
+        distance_bin_weights: *balanced
+    max_sampling_attempts: 8000
+  s09_v4_curriculum:
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    include_reverse: true
+    require_same_dataset_family: true
+    fisher_distance_bin_edges: *bins
+    dataset_family_sampling:
+      joint_full_v4:
+        weight: 0.5
+      radial_capture_v4:
+        weight: 0.5
+        distance_bin_weights: {0-100: 1, 100-250: 1, 250-500: 1}
+    max_sampling_attempts: 8000
+    curriculum_stages:
+      - start_epoch: 0
+        dataset_family_sampling:
+          radial_capture_v4:
+            distance_bin_weights: {0-100: 1, 100-250: 1, 250-500: 1}
+      - start_epoch: 100
+        dataset_family_sampling:
+          radial_capture_v4:
+            distance_bin_weights: {0-100: 1, 100-250: 1, 250-500: 1, 500-1000: 1, 1000-2000: 1}
+      - start_epoch: 250
+        dataset_family_sampling:
+          radial_capture_v4:
+            distance_bin_weights: *balanced
+
+evaluation_artifacts:
+  validation:
+    artifact_id: S09-VALIDATION-PAIRS-v1
+    pair_policy_id: s09_v4_50_joint_50_radial
+    split: validation
+    seed: 9001
+    pairs_per_slice: 512
+    eval_slices:
+      radial_validation_seen_nuisance: {science_split: validation, nuisance_split: train}
+  test:
+    artifact_id: S09-TEST-PAIRS-v1
+    pair_policy_id: s09_v4_50_joint_50_radial
+    split: test
+    seed: 9002
+    pairs_per_slice: 1024
+    eval_slices:
+      radial_test_seen_nuisance: {science_split: test, nuisance_split: train}
+
+defaults: &defaults
+  device: cuda:0
+  validation_artifact: validation
+  test_artifact: test
+  require_frozen_validation_manifest: true
+  evaluate_test: false
+  model: {channels: [32, 64, 128, 256], embedding_dim: 256, encoder_hidden_dim: 512, head_hidden_dim: 512, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+  image_scaling: {mode: global_max_abs, artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+  noise: {enabled: false, apply_to: observation}
+  training:
+    epochs: 600
+    batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: adamw
+    pairs_per_epoch: 16384
+    num_workers: 4
+    shard_cache_size: 4
+    lr_scheduler: {name: none}
+    early_stopping:
+      enabled: true
+      monitor: validation_loss
+      min_epochs: 120
+      patience: 80
+      min_delta_relative: 0.0005
+  evaluation: {fisher_distance_bin_edges: *bins}
+
+experiments:
+  S09-E01:
+    <<: *defaults
+    pair_policy_id: s09_v4_75_joint_25_radial
+    seeds: [11, 23, 47]
+  S09-E02:
+    <<: *defaults
+    pair_policy_id: s09_v4_50_joint_50_radial
+    seeds: [11, 23, 47]
+  S09-E03:
+    <<: *defaults
+    pair_policy_id: s09_v4_curriculum
+    seeds: [11, 23, 47]

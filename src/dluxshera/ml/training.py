@@ -28,7 +28,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in no-torch e
 from dluxshera.datasets.schema import read_json, write_json
 
 from .catalog import SampleCatalog, load_sample_catalog
-from .metrics import compute_regression_metrics, metrics_by_group
+from .metrics import compute_capture_metrics, compute_regression_metrics, metrics_by_group
 from .models import build_pairwise_correction_model, count_parameters
 from .noise import NoiseConfig
 from .pairs import (
@@ -39,7 +39,7 @@ from .pairs import (
     load_pair_manifest,
     write_pair_manifest,
 )
-from .scaling import IntensityScaler, fit_intensity_scaler
+from .scaling import IntensityScaler, fit_intensity_scaler, load_intensity_scaler
 from .splits import SplitRegistry, load_split_registry, split_registry_content_sha256
 from .torch_data import DynamicPairDataset, PairManifestDataset
 
@@ -613,6 +613,66 @@ def _move_batch(batch: Mapping[str, Any], device: torch.device) -> tuple[torch.T
     return image_a, image_b, target
 
 
+def _nuisance_task_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    cfg = dict(config.get("nuisance_task", config.get("multitask", {})) or {})
+    cfg.setdefault("enabled", False)
+    cfg.setdefault("lambda_nuisance", 1.0)
+    cfg.setdefault("scale", None)
+    return cfg
+
+
+def _derive_nuisance_scale(
+    catalog: SampleCatalog,
+    split_registry: SplitRegistry,
+    cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    explicit = cfg.get("scale")
+    if explicit not in (None, ""):
+        values = np.asarray(explicit, dtype=np.float32)
+        if values.shape != (catalog.nuisance_dim,):
+            raise ValueError(
+                f"nuisance_task.scale has shape {values.shape}, expected ({catalog.nuisance_dim},)."
+            )
+        if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError("nuisance_task.scale values must be finite and > 0.")
+        return {
+            "schema_version": "dluxshera_ml_nuisance_scale/1",
+            "mode": "explicit_component_scale",
+            "component_scale": values.astype(float).tolist(),
+            "invertible": True,
+        }
+    train_groups = split_registry.nuisance_groups("train")
+    seen: dict[str, np.ndarray] = {}
+    for idx, group in enumerate(catalog.nuisance_group_ids):
+        key = str(group)
+        if key in train_groups and key not in seen:
+            seen[key] = np.asarray(catalog.nuisance_vectors[idx], dtype=np.float64)
+    if not seen:
+        raise ValueError("Cannot derive nuisance scale without training nuisance states.")
+    values = np.stack(list(seen.values()), axis=0)
+    scale = np.sqrt(np.mean(values**2, axis=0))
+    scale = np.where(scale > 1.0e-12, scale, 1.0).astype(np.float32)
+    return {
+        "schema_version": "dluxshera_ml_nuisance_scale/1",
+        "mode": "train_nuisance_bank_component_rms",
+        "component_scale": scale.astype(float).tolist(),
+        "sample_count": int(values.shape[0]),
+        "source_population": {
+            "nuisance_split": "train",
+            "nuisance_state_ids": sorted(seen),
+        },
+        "invertible": True,
+    }
+
+
+def _scale_nuisance_target(target: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    if target.shape[1] != scale.shape[0]:
+        raise ValueError(
+            f"nuisance_delta target dimension {target.shape[1]} does not match scale {scale.shape[0]}."
+        )
+    return target / scale.reshape(1, -1)
+
+
 def _evaluate(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -620,6 +680,7 @@ def _evaluate(
     device: torch.device,
     catalog: SampleCatalog,
     fisher_distance_bin_edges: Sequence[float] | None = None,
+    nuisance_scale: torch.Tensor | None = None,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     model.eval()
     preds: list[np.ndarray] = []
@@ -627,22 +688,65 @@ def _evaluate(
     pair_ids: list[str] = []
     eval_slices: list[str] = []
     pair_families: list[str] = []
+    dataset_families: list[str] = []
+    distance_bin_labels: list[str] = []
     distances: list[float] = []
+    nuisance_preds: list[np.ndarray] = []
+    nuisance_truths: list[np.ndarray] = []
     with torch.inference_mode():
         for batch in loader:
             image_a, image_b, target = _move_batch(batch, device)
-            pred = model(image_a, image_b)
+            if nuisance_scale is not None and getattr(model, "nuisance_head", None) is not None:
+                outputs = model.forward_multitask(image_a, image_b)
+                pred = outputs["science"]
+                nuisance_target = batch["nuisance_delta"].to(device)
+                nuisance_preds.append(
+                    (outputs["nuisance"] * nuisance_scale.reshape(1, -1)).detach().cpu().numpy()
+                )
+                nuisance_truths.append(nuisance_target.detach().cpu().numpy())
+            else:
+                pred = model(image_a, image_b)
             preds.append(pred.detach().cpu().numpy())
             truths.append(target.detach().cpu().numpy())
             pair_ids.extend(str(v) for v in batch["pair_record_id"])
             eval_slices.extend(str(v) for v in batch["eval_slice"])
             pair_families.extend(str(v) for v in batch["pair_family"])
+            dataset_families.extend(str(v) for v in batch.get("dataset_family", []))
+            distance_bin_labels.extend(str(v) for v in batch.get("distance_bin_label", []))
             distances.extend(float(v) for v in batch["fisher_distance_l2"].cpu().numpy())
     y_pred = np.concatenate(preds, axis=0) if preds else np.zeros((0, catalog.science_dim))
     y_true = np.concatenate(truths, axis=0) if truths else np.zeros((0, catalog.science_dim))
     metrics = compute_regression_metrics(y_pred, y_true, catalog=catalog)
+    metrics["capture"] = compute_capture_metrics(y_pred, y_true)
     metrics["by_eval_slice"] = metrics_by_group(y_pred, y_true, eval_slices, catalog=catalog)
     metrics["by_pair_family"] = metrics_by_group(y_pred, y_true, pair_families, catalog=catalog)
+    if dataset_families:
+        metrics["by_dataset_family"] = metrics_by_group(
+            y_pred,
+            y_true,
+            dataset_families,
+            catalog=catalog,
+        )
+        metrics["capture_by_dataset_family"] = _capture_metrics_by_group(
+            y_pred,
+            y_true,
+            dataset_families,
+        )
+        if distance_bin_labels:
+            metrics["capture_by_dataset_family_and_distance_bin"] = {
+                family: _capture_metrics_by_group(
+                    y_pred[np.asarray(dataset_families) == family],
+                    y_true[np.asarray(dataset_families) == family],
+                    np.asarray(distance_bin_labels)[np.asarray(dataset_families) == family],
+                )
+                for family in sorted(set(dataset_families))
+            }
+    if distance_bin_labels:
+        metrics["capture_by_distance_bin_label"] = _capture_metrics_by_group(
+            y_pred,
+            y_true,
+            distance_bin_labels,
+        )
     metrics["by_distance_bin"] = _distance_binned_metrics(
         y_pred,
         y_true,
@@ -650,14 +754,30 @@ def _evaluate(
         catalog=catalog,
         bin_edges=fisher_distance_bin_edges,
     )
+    if nuisance_preds:
+        n_pred = np.concatenate(nuisance_preds, axis=0)
+        n_true = np.concatenate(nuisance_truths, axis=0)
+        err = n_pred - n_true
+        labels = catalog.nuisance_labels or tuple(f"nuisance[{idx}]" for idx in range(n_pred.shape[1]))
+        rmse = np.sqrt(np.mean(err**2, axis=0))
+        metrics["nuisance"] = {
+            "sample_count": int(n_pred.shape[0]),
+            "overall_rmse": float(np.sqrt(np.mean(err**2))),
+            "component_rmse": {str(label): float(value) for label, value in zip(labels, rmse)},
+        }
     predictions = {
         "pair_record_id": np.asarray(pair_ids, dtype=str),
         "eval_slice": np.asarray(eval_slices, dtype=str),
         "pair_family": np.asarray(pair_families, dtype=str),
+        "dataset_family": np.asarray(dataset_families, dtype=str),
+        "distance_bin_label": np.asarray(distance_bin_labels, dtype=str),
         "fisher_distance_l2": np.asarray(distances, dtype=np.float32),
         "y_pred_z": y_pred.astype(np.float32),
         "y_true_z": y_true.astype(np.float32),
     }
+    if nuisance_preds:
+        predictions["nuisance_pred"] = np.concatenate(nuisance_preds, axis=0).astype(np.float32)
+        predictions["nuisance_true"] = np.concatenate(nuisance_truths, axis=0).astype(np.float32)
     return metrics, predictions
 
 
@@ -694,6 +814,29 @@ def _distance_binned_metrics(
     }
 
 
+def _capture_metrics_by_group(
+    y_pred: np.ndarray,
+    y_true: np.ndarray,
+    groups: Sequence[str],
+) -> dict[str, Any]:
+    if y_pred.shape[0] != len(groups):
+        raise ValueError("groups length must match prediction row count.")
+    group_arr = np.asarray([str(value) for value in groups])
+    out: dict[str, Any] = {}
+    for group in sorted(set(group_arr)):
+        mask = group_arr == group
+        metrics = compute_capture_metrics(y_pred[mask], y_true[mask])
+        out[group] = {
+            "sample_count": metrics["sample_count"],
+            "rho_median": metrics["rho_median"],
+            "fraction_rho_lt_1": metrics["fraction_rho_lt_1"],
+            "remaining_distance_threshold_fractions": metrics[
+                "remaining_distance_threshold_fractions"
+            ],
+        }
+    return out
+
+
 def validate_fisher_distance_bin_edges(edges: Sequence[float]) -> tuple[float, ...]:
     """Validate finite, strictly increasing Fisher-distance bin edges."""
     values = tuple(float(v) for v in edges)
@@ -718,7 +861,12 @@ def _write_history(path: Path, rows: list[Mapping[str, Any]]) -> None:
     fieldnames = [
         "epoch",
         "train_loss",
+        "train_science_loss",
+        "train_nuisance_loss",
         "validation_loss",
+        "validation_science_loss",
+        "validation_nuisance_loss",
+        "validation_total_loss",
         "validation_overall_rmse",
         "epoch_seconds",
         "is_best",
@@ -947,6 +1095,7 @@ def train_pairwise_correction(
     output_dir: Path,
     validation_manifest_path: Path | None = None,
     test_manifest_path: Path | None = None,
+    scaler_path: Path | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Run a noninteractive pairwise-correction training job."""
@@ -982,13 +1131,22 @@ def train_pairwise_correction(
     noise_config = NoiseConfig.from_dict(config.get("noise"))
     train_indices = _train_indices(catalog, split_registry)
     scaling_cfg = dict(config.get("image_scaling", {}))
-    scaler = fit_intensity_scaler(
-        catalog,
-        train_indices,
-        mode=str(scaling_cfg.get("mode", "global_max_abs")),
-        max_samples=scaling_cfg.get("max_samples", 512),
-        cache_size=int(config.get("training", {}).get("shard_cache_size", 4)),
-    )
+    if scaler_path is not None:
+        expected_scaler_hash = scaling_cfg.get("content_sha256")
+        scaler = load_intensity_scaler(
+            scaler_path,
+            expected_content_sha256=None
+            if expected_scaler_hash in (None, "")
+            else str(expected_scaler_hash),
+        )
+    else:
+        scaler = fit_intensity_scaler(
+            catalog,
+            train_indices,
+            mode=str(scaling_cfg.get("mode", "global_max_abs")),
+            max_samples=scaling_cfg.get("max_samples", 512),
+            cache_size=int(config.get("training", {}).get("shard_cache_size", 4)),
+        )
     validation_manifest = _prepare_validation_manifest(
         catalog=catalog,
         split_registry=split_registry,
@@ -1009,7 +1167,31 @@ def train_pairwise_correction(
     training_cfg["lr_scheduler"] = lr_scheduler_config.to_dict()
     config["training"] = training_cfg
 
-    model = build_pairwise_correction_model(catalog.science_dim, config.get("model")).to(device)
+    nuisance_cfg = _nuisance_task_config(config)
+    nuisance_enabled = bool(nuisance_cfg.get("enabled", False))
+    if nuisance_enabled and catalog.nuisance_dim <= 0:
+        raise ValueError("nuisance_task.enabled requires nuisance vectors in the prepared catalog.")
+    nuisance_scale_payload = (
+        _derive_nuisance_scale(catalog, split_registry, nuisance_cfg)
+        if nuisance_enabled
+        else {"enabled": False}
+    )
+    nuisance_scale_tensor = None
+    if nuisance_enabled:
+        nuisance_scale_tensor = torch.as_tensor(
+            nuisance_scale_payload["component_scale"],
+            dtype=torch.float32,
+            device=device,
+        )
+    lambda_nuisance = float(nuisance_cfg.get("lambda_nuisance", 1.0))
+    if not np.isfinite(lambda_nuisance) or lambda_nuisance < 0.0:
+        raise ValueError("nuisance_task.lambda_nuisance must be finite and >= 0.")
+
+    model = build_pairwise_correction_model(
+        catalog.science_dim,
+        config.get("model"),
+        nuisance_output_dim=catalog.nuisance_dim if nuisance_enabled else 0,
+    ).to(device)
     criterion = nn.MSELoss()
     optimizer = _build_optimizer(model, training_cfg)
     lr_scheduler = _build_lr_scheduler(optimizer, lr_scheduler_config)
@@ -1021,6 +1203,11 @@ def train_pairwise_correction(
         pair_policy=pair_policy,
         validation_manifest=validation_manifest,
     )
+    current_identity["nuisance_task"] = {
+        "enabled": nuisance_enabled,
+        "lambda_nuisance": lambda_nuisance,
+        "scale": nuisance_scale_payload,
+    }
     if resume_checkpoint_path is not None:
         checkpoint = _load_training_checkpoint(resume_checkpoint_path, map_location=device)
         _validate_resume_identity(checkpoint=checkpoint, current_identity=current_identity)
@@ -1087,6 +1274,7 @@ def train_pairwise_correction(
         dict(config),
         {
             "image_scaling_resolved": scaler.to_dict(),
+            "nuisance_task_resolved": current_identity["nuisance_task"],
             "training_pair_stream": training_pair_stream,
             "runtime": runtime,
         },
@@ -1115,8 +1303,10 @@ def train_pairwise_correction(
         "pair_policy": pair_policy.to_dict(),
         "noise": noise_config.to_dict(),
         "image_scaling": scaler.to_dict(),
+        "nuisance_task": current_identity["nuisance_task"],
         "model": {
             **dict(config.get("model", {})),
+            "nuisance_output_dim": catalog.nuisance_dim if nuisance_enabled else 0,
             "parameter_count": count_parameters(model),
         },
         "training": training_cfg,
@@ -1158,26 +1348,51 @@ def train_pairwise_correction(
         model.train()
         train_dataset.set_epoch(epoch)
         running = 0.0
+        running_science = 0.0
+        running_nuisance = 0.0
         seen = 0
         for batch in train_loader:
             image_a, image_b, target = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
-            pred = model(image_a, image_b)
-            loss = criterion(pred, target)
+            if nuisance_enabled:
+                assert nuisance_scale_tensor is not None
+                outputs = model.forward_multitask(image_a, image_b)
+                science_loss = criterion(outputs["science"], target)
+                nuisance_target = _scale_nuisance_target(
+                    batch["nuisance_delta"].to(device),
+                    nuisance_scale_tensor,
+                )
+                nuisance_loss = criterion(outputs["nuisance"], nuisance_target)
+                loss = science_loss + lambda_nuisance * nuisance_loss
+            else:
+                pred = model(image_a, image_b)
+                science_loss = criterion(pred, target)
+                nuisance_loss = torch.zeros((), dtype=science_loss.dtype, device=device)
+                loss = science_loss
             loss.backward()
             optimizer.step()
             batch_n = int(target.shape[0])
             running += float(loss.detach().cpu()) * batch_n
+            running_science += float(science_loss.detach().cpu()) * batch_n
+            running_nuisance += float(nuisance_loss.detach().cpu()) * batch_n
             seen += batch_n
         train_loss = running / max(seen, 1)
-        val_metrics, val_predictions = _evaluate(
-            model,
-            val_loader,
-            device=device,
-            catalog=catalog,
-            fisher_distance_bin_edges=fisher_distance_bin_edges,
-        )
-        val_loss = float(val_metrics["fisher_overall_rmse"]) ** 2
+        train_science_loss = running_science / max(seen, 1)
+        train_nuisance_loss = running_nuisance / max(seen, 1)
+        evaluate_kwargs = {
+            "device": device,
+            "catalog": catalog,
+            "fisher_distance_bin_edges": fisher_distance_bin_edges,
+        }
+        if nuisance_scale_tensor is not None:
+            evaluate_kwargs["nuisance_scale"] = nuisance_scale_tensor
+        val_metrics, val_predictions = _evaluate(model, val_loader, **evaluate_kwargs)
+        val_science_loss = float(val_metrics["fisher_overall_rmse"]) ** 2
+        val_nuisance_loss = 0.0
+        if nuisance_enabled and "nuisance" in val_metrics:
+            val_nuisance_loss = float(val_metrics["nuisance"]["overall_rmse"]) ** 2
+        val_total_loss = val_science_loss + lambda_nuisance * val_nuisance_loss
+        val_loss = val_science_loss
         is_best, should_stop = early_stopping_state.update(
             epoch=epoch,
             metric=val_loss,
@@ -1195,7 +1410,12 @@ def train_pairwise_correction(
             {
                 "epoch": epoch,
                 "train_loss": train_loss,
+                "train_science_loss": train_science_loss,
+                "train_nuisance_loss": train_nuisance_loss if nuisance_enabled else None,
                 "validation_loss": val_loss,
+                "validation_science_loss": val_science_loss,
+                "validation_nuisance_loss": val_nuisance_loss if nuisance_enabled else None,
+                "validation_total_loss": val_total_loss,
                 "validation_overall_rmse": val_metrics["fisher_overall_rmse"],
                 "epoch_seconds": epoch_seconds,
                 "is_best": is_best,
@@ -1212,6 +1432,7 @@ def train_pairwise_correction(
             "optimizer_state_dict": optimizer.state_dict(),
             "config": _checkpoint_metadata_mapping(resolved_config),
             "image_scaling": _checkpoint_metadata_mapping(scaler.to_dict()),
+            "nuisance_task": _checkpoint_metadata_mapping(current_identity["nuisance_task"]),
             "validation_metrics": _checkpoint_metadata_mapping(val_metrics),
             "best_validation_loss": early_stopping_state.absolute_best_loss,
             "best_epoch": early_stopping_state.best_epoch,
@@ -1240,7 +1461,8 @@ def train_pairwise_correction(
             f"lr={learning_rate:.2e}"
             f"{f'->{learning_rate_next:.2e}' if lr_reduced else ''} "
             f"train={train_loss:.6g} "
-            f"val={val_loss:.6g} "
+            f"val_science={val_loss:.6g} "
+            f"val_total={val_total_loss:.6g} "
             f"best={early_stopping_state.absolute_best_loss:.6g} "
             f"patience={early_stopping_state.bad_epochs}/{early_stopping_config.patience} "
             f"time={epoch_seconds:.1f}s",
@@ -1298,7 +1520,10 @@ def train_pairwise_correction(
         )
         checkpoint = _load_training_checkpoint(output_dir / "checkpoint_best.pt", map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
-        test_metrics, test_predictions = _evaluate(model, test_loader, device=device, catalog=catalog)
+        test_kwargs = {"device": device, "catalog": catalog}
+        if nuisance_scale_tensor is not None:
+            test_kwargs["nuisance_scale"] = nuisance_scale_tensor
+        test_metrics, test_predictions = _evaluate(model, test_loader, **test_kwargs)
         final_metrics["test"] = test_metrics
         np.savez(output_dir / "test_predictions.npz", **test_predictions)
         run_manifest["test_evaluated"] = True

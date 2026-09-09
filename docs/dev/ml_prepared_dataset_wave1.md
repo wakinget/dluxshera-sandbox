@@ -200,3 +200,30 @@ extra dependency if training throughput demands it.
 Wave 1 intentionally does not include PyTorch/JAX dataset classes, dynamic pair
 sampling, Siamese or JEPA models, W&B integration, V4/Sobol generation,
 eigenvalue-weighted losses, noise augmentation, or ADORA inference wiring.
+# S06-S09 V4 Prepared Identity Addendum
+
+For V4 prepared artifacts, `manifest.json.content_identity` is a portable
+scientific identity. It depends on a `content_tree` containing:
+
+- `index.jsonl` hash and row count;
+- `vector_spaces.json` hash;
+- shard-manifest scientific hash;
+- every prepared shard path relative to the prepared root plus file size and
+  SHA256;
+- frozen V4 master/render/vector-space/nuisance-bank identities;
+- storage dtype, sample shape, sample count, and shard sizing policy.
+
+Absolute source, plan, and prepared roots are intentionally excluded. Ordinary
+training and GPU preflight validation recompute the small-file content tree and
+check the recorded shard identities in the shard manifest. They do not rehash
+the full prepared shard byte content by default. A deep audit explicitly
+rehashes every shard and is recommended after copying the prepared tree between
+clusters or before declaring a staged copy production-ready.
+
+Interrupted V4 preparation writes `preparation_state.json` atomically after
+each completed shard. Resume first checks that the stored request identity
+matches the requested V4 master/render/nuisance/source selection contract,
+storage dtype, sample shape, and shard sizing policy. It then rehashes recorded
+completed shards and reuses only verified shards. Missing, incomplete, or
+mismatched shards are regenerated atomically; a resume with an incompatible
+preparation state is rejected instead of mixing shards from different requests.

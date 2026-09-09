@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from bisect import bisect_right
 from collections import OrderedDict
@@ -29,6 +30,7 @@ class ShardRecord:
     source_dtypes: tuple[str, ...]
     storage_dtype: str
     file_size_bytes: int
+    sha256: str | None = None
 
     @property
     def stop_index(self) -> int:
@@ -47,6 +49,7 @@ class ShardRecord:
             "source_dtypes": list(self.source_dtypes),
             "storage_dtype": self.storage_dtype,
             "file_size_bytes": self.file_size_bytes,
+            "sha256": self.sha256,
         }
 
     @classmethod
@@ -61,6 +64,7 @@ class ShardRecord:
             source_dtypes=tuple(str(v) for v in payload.get("source_dtypes", [])),
             storage_dtype=str(payload["storage_dtype"]),
             file_size_bytes=int(payload.get("file_size_bytes", 0)),
+            sha256=None if payload.get("sha256") is None else str(payload.get("sha256")),
         )
 
 
@@ -98,6 +102,14 @@ def _atomic_save_npy(path: Path, array: np.ndarray) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     tmp_path.replace(path)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class ArrayShardStore:
@@ -314,6 +326,7 @@ class ArrayShardStore:
             source_dtypes=tuple(sorted(source_dtypes)),
             storage_dtype=str(self.storage_dtype),
             file_size_bytes=int(path.stat().st_size),
+            sha256=_sha256_file(path),
         )
 
     def _write_index_rows(

@@ -106,6 +106,82 @@ python3 work/experiments/ml/datasets/audit_dataset.py \
   --output-json /tmp/prep_v3_nuisance_audit.json
 ```
 
+## Prepared V4 Materialization
+
+The V4 prepared artifact is a portable working representation derived from
+frozen V4 state plans plus rendered FITS/JSON sidecars. Its scientific identity
+includes the prepared `index.jsonl`, `vector_spaces.json`, shard manifest,
+per-shard hashes, representation settings, and frozen V4 source identities; it
+excludes absolute filesystem roots.
+
+Ordinary training and GPU preflight recompute the small-file content tree and
+check the shard identities recorded in the manifest; they do not rehash the
+full prepared shard byte content by default. Use the deep audit after staging
+or before production training to rehash every shard file.
+
+`--v4-plan-root` is the materialized V4 state-plan root containing
+`freeze_manifest.json`, `render_contract.json`, `render_system_contract.json`,
+`nuisance_bank.json`, `vector_spaces.json`, and `state_plans/`. The local
+default is `work/experiments/ml/datasets/materialized/master_v4`; the Gattaca2
+production root used during rendering was the transferred/materialized
+state-plan directory, not a sibling named `shera_ml_master_v4_plan`.
+
+Dry-run:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/prepare_ml_dataset.py \
+  --dataset-kind v4 \
+  --source-root <gattaca2-projects>/shera_ml_master_v4 \
+  --v4-plan-root <v4-plan-root> \
+  --outdir <scratch>/prepared/PREP-V4-v1 \
+  --dtype float32 \
+  --v4-source-audit sample \
+  --dry-run
+```
+
+Production preparation:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/prepare_ml_dataset.py \
+  --dataset-kind v4 \
+  --source-root <gattaca2-projects>/shera_ml_master_v4 \
+  --v4-plan-root <v4-plan-root> \
+  --outdir <scratch>/prepared/PREP-V4-v1 \
+  --dtype float32 \
+  --v4-source-audit sample
+```
+
+Resume from verified shard boundaries:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/prepare_ml_dataset.py \
+  --dataset-kind v4 \
+  --source-root <gattaca2-projects>/shera_ml_master_v4 \
+  --v4-plan-root <v4-plan-root> \
+  --outdir <scratch>/prepared/PREP-V4-v1 \
+  --dtype float32 \
+  --v4-source-audit sample \
+  --resume
+```
+
+Resume uses `preparation_state.json` to authenticate completed shards against
+the requested master/render/nuisance/source selection contract, dtype, sample
+shape, and shard sizing policy. Verified completed shards are reused; missing
+or stale same-shape shards are regenerated. Incompatible preparation state is
+rejected.
+
+Before production preparation, run the normal sampled sidecar audit. After
+staging to a training cluster, run a deep prepared-data audit with:
+
+```bash
+PYTHONPATH=src python3 - <<'PY'
+from pathlib import Path
+from dluxshera.datasets.prepared_v4 import validate_prepared_v4_dataset_identity
+validate_prepared_v4_dataset_identity(Path("<prepared-root>"), deep=True)
+print("PREPARED_V4_DEEP_AUDIT: PASS")
+PY
+```
+
 ## Dataset-Family Policy
 
 V3 structured pair-grid and nuisance-pair datasets remain useful for controlled

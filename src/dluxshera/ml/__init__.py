@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from .artifacts import (
+    ArtifactLock,
+    artifact_lock_content_sha256,
+    build_artifact_lock,
+    load_artifact_lock,
+    validate_artifact_lock,
+    write_artifact_lock,
+)
 from .catalog import SampleCatalog, load_sample_catalog
 from .hpc import (
     PreparedSbatchSubmission,
@@ -10,22 +18,35 @@ from .hpc import (
     prepare_sbatch_submission,
     slurm_profile,
 )
-from .metrics import compute_regression_metrics, metrics_by_group, transform_z_to_physical
+from .metrics import (
+    compute_capture_metrics,
+    compute_regression_metrics,
+    metrics_by_group,
+    transform_z_to_physical,
+)
 from .noise import NoiseConfig, apply_pair_noise
 from .pairs import (
+    DEFAULT_FISHER_DISTANCE_BIN_EDGES,
     PairManifest,
     PairPolicy,
     PairRecord,
     PairSampler,
+    fisher_distance_bin_label,
     generate_frozen_pair_manifest,
     load_pair_manifest,
     make_reverse_pair_record,
     pair_manifest_content_hash,
     write_pair_manifest,
 )
-from .scaling import IntensityScaler, fit_intensity_scaler
+from .scaling import (
+    IntensityScaler,
+    fit_intensity_scaler,
+    load_intensity_scaler,
+    write_intensity_scaler,
+)
 from .splits import (
     SplitRegistry,
+    generate_role_preserving_split_registry,
     generate_split_registry,
     load_split_registry,
     split_registry_content_identity,
@@ -33,14 +54,17 @@ from .splits import (
     write_split_registry,
 )
 from .studies import (
+    expand_study_run_plan,
     load_study_contract_artifacts,
     load_study_prescription,
+    resolve_study_artifact_contract,
     resolve_study_experiment_config,
     validate_experiment_policy_for_study,
     validate_evaluation_artifact_against_recipe,
     validate_prepared_dataset_for_study,
     validate_split_registry_for_study,
     validate_study_contract,
+    write_study_run_plan,
 )
 from .visualization import (
     ArchitectureRenderResult,
@@ -58,6 +82,8 @@ from .visualization import (
 __all__ = [
     "ArchitectureRenderResult",
     "ArchitectureVisualizationError",
+    "ArtifactLock",
+    "DEFAULT_FISHER_DISTANCE_BIN_EDGES",
     "IntensityScaler",
     "NoiseConfig",
     "PairwiseArchitectureRenderSet",
@@ -71,14 +97,22 @@ __all__ = [
     "SplitRegistry",
     "SlurmProfile",
     "apply_pair_noise",
+    "artifact_lock_content_sha256",
+    "build_artifact_lock",
     "build_sbatch_command",
+    "compute_capture_metrics",
     "compute_regression_metrics",
     "describe_pairwise_correction_architecture",
+    "fisher_distance_bin_label",
+    "expand_study_run_plan",
     "fit_intensity_scaler",
     "generate_frozen_pair_manifest",
+    "generate_role_preserving_split_registry",
     "generate_split_registry",
     "load_pair_manifest",
+    "load_intensity_scaler",
     "load_sample_catalog",
+    "load_artifact_lock",
     "load_split_registry",
     "load_study_contract_artifacts",
     "load_study_prescription",
@@ -94,15 +128,20 @@ __all__ = [
     "render_shared_cnn_encoder_detail",
     "resolve_pdflatex",
     "resolve_study_experiment_config",
+    "resolve_study_artifact_contract",
     "split_registry_content_identity",
     "split_registry_content_sha256",
     "slurm_profile",
     "transform_z_to_physical",
     "validate_experiment_policy_for_study",
     "validate_evaluation_artifact_against_recipe",
+    "validate_artifact_lock",
     "validate_prepared_dataset_for_study",
     "validate_split_registry_for_study",
     "validate_study_contract",
     "write_pair_manifest",
+    "write_artifact_lock",
+    "write_intensity_scaler",
+    "write_study_run_plan",
     "write_split_registry",
 ]

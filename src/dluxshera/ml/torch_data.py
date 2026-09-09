@@ -58,6 +58,10 @@ def _record_to_tensors(
         "sample_b_id": record.sample_b_id,
         "eval_slice": record.eval_slice or "",
         "pair_family": record.pair_family,
+        "dataset_family": record.dataset_family_a
+        if record.dataset_family_a == record.dataset_family_b
+        else f"{record.dataset_family_a}->{record.dataset_family_b}",
+        "distance_bin_label": record.distance_bin_label or "",
         "fisher_distance_l2": torch.tensor(record.fisher_distance_l2, dtype=torch.float32),
         "changed_science_dimensions": torch.tensor(
             record.changed_science_dimensions,
@@ -177,6 +181,7 @@ class DynamicPairDataset(Dataset):
             nuisance_split=self.nuisance_split,
             split="train",
             eval_slice=None,
+            epoch=self.epoch,
         )
         if include_reverse and ordered_index % 2 == 1:
             record = make_reverse_pair_record(record)

@@ -13,6 +13,7 @@ import pytest
 
 from dluxshera.datasets.schema import write_json
 from dluxshera.ml import (
+    IntensityScaler,
     PairPolicy,
     generate_frozen_pair_manifest,
     generate_split_registry,
@@ -20,6 +21,7 @@ from dluxshera.ml import (
     load_study_prescription,
     resolve_study_experiment_config,
     split_registry_content_sha256,
+    write_intensity_scaler,
     write_pair_manifest,
     write_split_registry,
 )
@@ -79,6 +81,15 @@ S05_PARAM_COUNTS = {
 def _submit_module():
     path = ROOT / "work" / "experiments" / "ml" / "hpc" / "submit_study_run.py"
     spec = importlib.util.spec_from_file_location("submit_study_run_for_tests", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _materialize_module():
+    path = ROOT / "work" / "experiments" / "ml" / "materialize_study_artifacts.py"
+    spec = importlib.util.spec_from_file_location("materialize_study_artifacts_for_tests", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -494,6 +505,73 @@ def test_submit_helper_resolves_repo_relative_paths_from_repo_root(
     assert unrelated_cwd.as_posix() not in payload["command"][-1]
 
 
+def test_submit_helper_plan_preview_never_submits_and_submit_plan_writes_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    module = _submit_module()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{7000 + len(calls)}\n", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    common = [
+        "--site",
+        "tacc_ls6",
+        "--study",
+        str(ROOT / "work" / "experiments" / "ml" / "s06" / "study.yaml"),
+        "--experiment",
+        "S06-E01",
+        "--repo-root",
+        str(ROOT),
+        "--conda-prefix",
+        str(tmp_path / "env"),
+        "--prepared-root",
+        str(tmp_path / "prepared"),
+        "--split-registry",
+        str(tmp_path / "split.json"),
+        "--validation-manifest",
+        str(tmp_path / "validation"),
+        "--test-manifest",
+        str(tmp_path / "test"),
+        "--artifact-lock",
+        str(tmp_path / "lock.json"),
+        "--run-dir",
+        str(tmp_path / "runs"),
+        "--launch-packet",
+        str(tmp_path / "launch"),
+        "--source-commit",
+        "source-sha",
+    ]
+    assert module.main([*common, "--plan-preview"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["submission_performed"] is False
+    assert preview["run_count"] == 3
+    assert calls == []
+
+    assert module.main([*common, "--submit-plan"]) == 0
+    submitted = json.loads(capsys.readouterr().out)
+    assert submitted["submission_performed"] is True
+    assert submitted["submitted_count"] == 3
+    assert [item["run_id"] for item in submitted["submissions"]] == [
+        "S06-E01-R001",
+        "S06-E01-R002",
+        "S06-E01-R003",
+    ]
+    assert [item["slurm_job_id"] for item in submitted["submissions"]] == [
+        "7001",
+        "7002",
+        "7003",
+    ]
+    assert len(calls) == 3
+    manifest = tmp_path / "launch" / "launch_manifest.json"
+    assert manifest.exists()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["submitted_count"] == 3
+
+
 def test_s01_compatibility_submit_ignores_stale_generic_ml_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -604,6 +682,158 @@ Validating project allocation
         parse_sbatch_job_id("Welcome only\\n")
     with pytest.raises(ValueError, match="Slurm job ID"):
         parse_sbatch_job_id("576430;edge;extra\\n")
+
+
+def test_materialize_make_pairs_accepts_any_named_evaluation_artifact(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    module = _materialize_module()
+    catalog = load_sample_catalog(_write_prepared_fixture(tmp_path / "prepared"))
+    registry = generate_split_registry(
+        catalog,
+        seed=7,
+        science_fractions={"train": 0.34, "validation": 0.33, "test": 0.33},
+        nuisance_fractions={"train": 0.34, "validation": 0.33, "test": 0.33},
+    )
+    split_path = tmp_path / "split.json"
+    write_split_registry(split_path, registry)
+    study = _study(
+        catalog.prepared_dataset_hash,
+        split_content_sha256=split_registry_content_sha256(registry),
+    )
+    study["evaluation_artifacts"]["validation_c"] = {
+        **study["evaluation_artifacts"]["validation"],
+        "artifact_id": "VALIDATION-C-v1",
+        "pairs_per_slice": 2,
+    }
+    study["evaluation_artifacts"].pop("validation")
+    study_path = tmp_path / "study.json"
+    study_path.write_text(json.dumps(study), encoding="utf-8")
+
+    rc = module.main(
+        [
+            "make-pairs",
+            "--study",
+            str(study_path),
+            "--prepared-root",
+            str(catalog.root),
+            "--split-registry",
+            str(split_path),
+            "--output-root",
+            str(tmp_path / "artifacts"),
+            "--artifact",
+            "validation_c",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["artifacts"][0]["artifact_key"] == "validation_c"
+    assert (
+        tmp_path
+        / "artifacts"
+        / "S01"
+        / "validation_c_pairs"
+        / "VALIDATION-C-v1"
+        / "manifest.json"
+    ).exists()
+
+    with pytest.raises(ValueError, match="Valid keys: validation_c"):
+        module.main(
+            [
+                "make-pairs",
+                "--study",
+                str(study_path),
+                "--prepared-root",
+                str(catalog.root),
+                "--split-registry",
+                str(split_path),
+                "--output-root",
+                str(tmp_path / "artifacts"),
+                "--artifact",
+                "missing",
+            ]
+        )
+
+
+def test_materialize_make_lock_rejects_profile_mismatched_pair_manifest(tmp_path: Path) -> None:
+    module = _materialize_module()
+    catalog = load_sample_catalog(_write_prepared_fixture(tmp_path / "prepared"))
+    registry = generate_split_registry(
+        catalog,
+        seed=7,
+        science_fractions={"train": 0.34, "validation": 0.33, "test": 0.33},
+        nuisance_fractions={"train": 0.34, "validation": 0.33, "test": 0.33},
+    )
+    split_path = tmp_path / "split.json"
+    write_split_registry(split_path, registry)
+    study = _study(
+        catalog.prepared_dataset_hash,
+        split_content_sha256=split_registry_content_sha256(registry),
+    )
+    study["artifact_profiles"] = {
+        "standard": {
+            "split_registry": {"artifact_id": registry.artifact_id},
+            "artifact_lock": {"required": True, "lock_id": "STANDARD-LOCK"},
+        },
+        "holdout": {
+            "split_registry": {"artifact_id": "HOLDOUT"},
+            "artifact_lock": {"required": True, "lock_id": "HOLDOUT-LOCK"},
+        },
+    }
+    study["evaluation_artifacts"]["validation_c"] = {
+        **study["evaluation_artifacts"]["validation"],
+        "artifact_profile": "holdout",
+        "artifact_id": "VALIDATION-C-v1",
+        "pairs_per_slice": 2,
+    }
+    study_path = tmp_path / "study.json"
+    study_path.write_text(json.dumps(study), encoding="utf-8")
+    policy = PairPolicy.from_dict(
+        {
+            "policy_id": "s01_clean_same_pair_grid_v1",
+            **study["pair_policies"]["s01_clean_same_pair_grid_v1"],
+        }
+    )
+    manifest = generate_frozen_pair_manifest(
+        catalog,
+        registry,
+        policy=policy,
+        artifact_id="VALIDATION-C-v1",
+        split="validation",
+        seed=1101,
+        pairs_per_slice=2,
+        eval_slices=study["evaluation_artifacts"]["validation_c"]["eval_slices"],
+    )
+    manifest_path = tmp_path / "validation_c"
+    write_pair_manifest(manifest_path, manifest)
+    scaler_path = tmp_path / "scaler.json"
+    write_intensity_scaler(
+        scaler_path,
+        IntensityScaler(mode="global_max_abs", scale=1.0, sample_count=1),
+        overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="belongs to artifact profile 'holdout'"):
+        module.main(
+            [
+                "make-lock",
+                "--study",
+                str(study_path),
+                "--prepared-root",
+                str(catalog.root),
+                "--split-registry",
+                str(split_path),
+                "--artifact-profile",
+                "standard",
+                "--scaler",
+                str(scaler_path),
+                "--pair-manifest",
+                f"validation_c={manifest_path}",
+                "--out",
+                str(tmp_path / "lock.json"),
+            ]
+        )
 
 
 def test_persist_study_contract_artifacts_is_idempotent_and_compact(tmp_path: Path) -> None:

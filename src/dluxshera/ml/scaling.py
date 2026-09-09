@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import numpy as np
 
+from dluxshera.datasets.schema import json_ready, read_json, write_json
+
 from .catalog import SampleCatalog
 
-__all__ = ["IntensityScaler", "fit_intensity_scaler"]
+__all__ = [
+    "IntensityScaler",
+    "fit_intensity_scaler",
+    "intensity_scaler_content_sha256",
+    "load_intensity_scaler",
+    "write_intensity_scaler",
+]
 
 
 @dataclass(frozen=True)
@@ -18,6 +30,7 @@ class IntensityScaler:
     scale: float = 1.0
     sample_count: int = 0
     statistic: str | None = None
+    source_population: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"raw", "global_max_abs", "global_p99_abs"}:
@@ -39,6 +52,7 @@ class IntensityScaler:
             "scale": float(self.scale),
             "sample_count": int(self.sample_count),
             "statistic": self.statistic,
+            "source_population": json_ready(dict(self.source_population or {})),
             "amplitude_preserving": True,
             "per_image_normalization": False,
         }
@@ -53,6 +67,7 @@ class IntensityScaler:
             scale=float(payload.get("scale", 1.0)),
             sample_count=int(payload.get("sample_count", 0)),
             statistic=payload.get("statistic"),
+            source_population=dict(payload.get("source_population", {}) or {}),
         )
 
 
@@ -95,4 +110,73 @@ def fit_intensity_scaler(
         scale=float(scale),
         sample_count=len(indices),
         statistic=statistic,
+        source_population={
+            "selection": "all_provided_sample_indices"
+            if max_samples is None
+            else "provided_sample_indices_prefix_after_optional_max_samples",
+            "max_samples": max_samples,
+            "catalog_artifact_id": catalog.artifact_id,
+            "prepared_dataset_hash": catalog.prepared_dataset_hash,
+        },
     )
+
+
+def intensity_scaler_content_sha256(scaler: IntensityScaler | Mapping[str, Any]) -> str:
+    """Return a stable content hash for a serialized intensity scaler."""
+    payload = scaler.to_dict() if isinstance(scaler, IntensityScaler) else dict(scaler)
+    stable = dict(payload)
+    stable.pop("generated_at", None)
+    stable.pop("content_identity", None)
+    raw = json.dumps(json_ready(stable), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def write_intensity_scaler(
+    path: Path,
+    scaler: IntensityScaler,
+    *,
+    artifact_id: str = "SCALER-ML-v1",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Write a compact scaler artifact with a stable content identity."""
+    path = Path(path)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} exists; pass overwrite=True to replace it.")
+    payload = {
+        "schema_version": "dluxshera_ml_intensity_scaler/1",
+        "artifact_id": str(artifact_id),
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        **scaler.to_dict(),
+    }
+    payload["content_identity"] = {
+        "algorithm": "sha256/json-canonical/intensity-scaler-v1",
+        "sha256": intensity_scaler_content_sha256(payload),
+        "excludes": ["generated_at", "content_identity"],
+    }
+    write_json(path, payload)
+    return payload
+
+
+def load_intensity_scaler(
+    path: Path,
+    *,
+    expected_content_sha256: str | None = None,
+) -> IntensityScaler:
+    """Load and validate a frozen intensity scaler artifact."""
+    payload = read_json(Path(path))
+    if payload.get("schema_version") != "dluxshera_ml_intensity_scaler/1":
+        raise ValueError(f"Unsupported intensity scaler schema {payload.get('schema_version')!r}.")
+    content_identity = payload.get("content_identity", {})
+    actual = intensity_scaler_content_sha256(payload)
+    if isinstance(content_identity, Mapping) and content_identity.get("sha256"):
+        if str(content_identity["sha256"]) != actual:
+            raise ValueError(
+                "Intensity scaler content_identity.sha256 does not match scaler content "
+                f"({content_identity['sha256']} != {actual})."
+            )
+    if expected_content_sha256 and str(expected_content_sha256) != actual:
+        raise ValueError(
+            "Intensity scaler hash does not match expected content identity "
+            f"({expected_content_sha256} != {actual})."
+        )
+    return IntensityScaler.from_dict(payload)

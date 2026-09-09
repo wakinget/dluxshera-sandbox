@@ -26,7 +26,7 @@ from tests.ml.test_catalog_splits_pairs import _write_prepared_fixture
 def _fake_evaluate_losses(monkeypatch: pytest.MonkeyPatch, losses: list[float]) -> None:
     remaining = iter(losses)
 
-    def fake_evaluate(model, loader, *, device, catalog, fisher_distance_bin_edges=None):
+    def fake_evaluate(model, loader, *, device, catalog, fisher_distance_bin_edges=None, nuisance_scale=None):
         loss = float(next(remaining))
         rmse = float(np.sqrt(loss))
         metrics = {
@@ -176,6 +176,28 @@ def test_shared_cnn_shapes_comparators_and_gradients() -> None:
     assert diff_model.encoder is diff_model.encoder
 
 
+def test_multitask_model_outputs_science_and_nuisance_shapes() -> None:
+    model = build_pairwise_correction_model(
+        2,
+        {
+            "channels": [4, 8],
+            "embedding_dim": 8,
+            "encoder_hidden_dim": 16,
+            "head_hidden_dim": 16,
+            "adaptive_pool_shape": [2, 2],
+            "normalization": "none",
+            "comparator": "concat_diff",
+        },
+        nuisance_output_dim=3,
+    )
+    image_a = torch.randn(3, 1, 16, 16)
+    image_b = torch.randn(3, 1, 16, 16)
+    assert model(image_a, image_b).shape == (3, 2)
+    outputs = model.forward_multitask(image_a, image_b)
+    assert outputs["science"].shape == (3, 2)
+    assert outputs["nuisance"].shape == (3, 3)
+
+
 def test_tiny_training_smoke_writes_artifacts_without_test_eval(tmp_path: Path) -> None:
     prepared = _write_prepared_fixture(tmp_path / "prepared")
     catalog = load_sample_catalog(prepared)
@@ -220,6 +242,42 @@ def test_tiny_training_smoke_writes_artifacts_without_test_eval(tmp_path: Path) 
         "reverse_pair_augmentation": True,
         "base_pairs_per_epoch": 8,
     }
+
+
+def test_multitask_training_records_nuisance_losses_and_checkpoint(tmp_path: Path) -> None:
+    prepared = _write_prepared_fixture(tmp_path / "prepared")
+    catalog = load_sample_catalog(prepared)
+    registry = generate_split_registry(
+        catalog,
+        seed=7,
+        science_fractions={"train": 1.0},
+        nuisance_fractions={"train": 1.0},
+    )
+    split_path = tmp_path / "split.json"
+    write_split_registry(split_path, registry)
+    config = default_s01_e00_config()
+    config["device"] = "cpu"
+    config["nuisance_task"] = {"enabled": True, "lambda_nuisance": 0.5}
+    config["training"]["epochs"] = 1
+    config["training"]["pairs_per_epoch"] = 8
+    config["training"]["batch_size"] = 4
+    config["validation"]["pairs_per_slice"] = 4
+
+    summary = train_pairwise_correction(
+        config=config,
+        prepared_root=prepared,
+        split_registry_path=split_path,
+        output_dir=tmp_path / "multitask",
+    )
+    run_dir = Path(summary["output_dir"])
+    manifest = read_json(run_dir / "run_manifest.json")
+    assert manifest["nuisance_task"]["enabled"] is True
+    assert manifest["nuisance_task"]["scale"]["invertible"] is True
+    assert manifest["model"]["nuisance_output_dim"] == catalog.nuisance_dim
+    metrics = read_json(run_dir / "metrics.json")
+    assert "nuisance" in metrics["validation"]
+    checkpoint = torch.load(run_dir / "checkpoint_best.pt", map_location="cpu", weights_only=True)
+    assert checkpoint["nuisance_task"]["enabled"] is True
 
 
 def test_training_checkpoint_loads_with_explicit_weights_only_true(

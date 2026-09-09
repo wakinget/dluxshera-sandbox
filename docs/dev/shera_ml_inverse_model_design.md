@@ -1028,9 +1028,21 @@ with supervised target:
 | S03 | Observation-Noise Robustness | provisional/planned | Enable dynamic observation noise and fixed noisy eval manifests. |
 | S04 | Learned vs Local-Linear Correction | provisional/planned | Compare ML corrections with Binder/Jacobian/Fisher linear evaluation. |
 | S05 | Architecture / Representation Study | completed Wave 1 | Seed-11 architecture wave completed on LS6; `S05-E04` is the provisional architecture winner. |
-| S06 | Fisher / Eigenmode Structure | provisional/planned | Diagnose and possibly weight errors by Fisher/eigenmode structure. |
-| S07 | Joint-State Generalization | V4 preparation/training design next | Raw V4 corpus is complete; prepared V4 shards, pair curricula, and frozen V4 pair manifests are future work. |
-| S08 | ADORA Initialization / Capture Range | provisional/planned | Test whether learned corrections expand ADORA convergence capture range. |
+| S06 | V3 Architecture / Training Closure | repository-prepared | Combines the S05 architecture winner with the S01-E03 training-control candidate on the frozen V3 contract; 9 planned runs. |
+| S07 | V4 Entry and Data Scaling | repository-prepared | Brings up `joint_full_v4` A-pair training, shared V4 scaler use, and joint-train prefix scaling; 10 planned runs. |
+| S08 | V4 Nuisance Robustness | repository-prepared | Tests C-only, ABC, multitask nuisance prediction, and an unseen-nuisance holdout profile; 12 planned runs. |
+| S09 | V4 Capture / Radial Curriculum | repository-prepared | Mixes broad `joint_full_v4` A pairs with distance-balanced `radial_capture_v4` A pairs and radial-only curriculum; 9 planned runs. |
+
+Deferred roadmap ideas that previously occupied the S06-S08 labels are retained
+under non-conflicting future labels:
+
+- `F01` Fisher / Eigenmode Structure: diagnose and possibly weight errors by
+  Fisher/eigenmode structure.
+- `F02` Learned vs Local-Linear Generalization Extensions: broaden the
+  Binder/Jacobian/Fisher baseline comparisons after V4 training results exist.
+- `F03` ADORA Initialization / Capture Range: use trained correction models as
+  initializers inside ADORA-style nonlinear optimization and measure convergence
+  behavior directly.
 
 ### 22.3 S01 record
 
@@ -1244,3 +1256,27 @@ computed nominal information without regenerating the dataset:
 Do not add per-sample Jacobians, FIMs, or Hessians to the prepared image store.
 Those objects are large and should be generated later only as explicit
 evaluation artifacts for selected reference states.
+# S06-S09 Training Addendum
+
+The S08-E03 multitask path keeps the existing shared Siamese encoder and
+science-correction head. It adds an optional nuisance-delta head for
+registration x, registration y, and roll. Science remains the primary task.
+
+When enabled, the nuisance target is divided by a fixed component scale derived
+from the training nuisance bank unless an explicit positive scale vector is
+provided. The recorded loss is:
+
+```text
+loss_total = loss_science + lambda_nuisance * loss_nuisance
+```
+
+`lambda_nuisance` defaults to 1.0. Checkpoint selection for S08-E03 uses
+science validation loss, not total multitask loss. Prediction products retain
+`pair_record_id` and include nuisance prediction arrays for multitask runs.
+
+S09 capture diagnostics report Fisher RMSE, MSE skill, correction-vector
+alignment, initial and remaining Fisher distances, `rho = d1 / max(d0, eps)`,
+fractions with `rho < 1`, rho quantiles, metrics by initial-distance bin, by
+dataset family, and remaining-distance threshold fractions at 100, 250, 500,
+1000, and 2000. These thresholds are generic diagnostics and are not labeled
+as an ADORA capture radius.

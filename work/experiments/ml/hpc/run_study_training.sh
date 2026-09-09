@@ -52,6 +52,15 @@ preflight_args=()
 if [[ -n "${ML_PERSIST_ARTIFACT_ROOT:-}" ]]; then
   preflight_args+=(--persist-artifact-root "$ML_PERSIST_ARTIFACT_ROOT")
 fi
+if [[ -n "${ML_ARTIFACT_LOCK:-}" ]]; then
+  preflight_args+=(--artifact-lock "$ML_ARTIFACT_LOCK")
+fi
+if [[ -n "${ML_SCALER:-}" ]]; then
+  preflight_args+=(--scaler "$ML_SCALER")
+fi
+if [[ -n "${ML_AUDIT_MANIFESTS:-}" ]]; then
+  preflight_args+=(--audit-manifest-json "$ML_AUDIT_MANIFESTS")
+fi
 
 copy_compact_outputs() {
   if [[ -z "${ML_PERSIST_DIR:-}" || ! -d "$ML_RUN_DIR" ]]; then
@@ -96,6 +105,15 @@ if [[ -n "${ML_RESUME_CHECKPOINT:-}" ]]; then
 fi
 if [[ "${ML_OVERWRITE:-0}" == "1" ]]; then
   train_args+=(--overwrite)
+fi
+if [[ -n "${ML_ARTIFACT_LOCK:-}" ]]; then
+  train_args+=(--artifact-lock "$ML_ARTIFACT_LOCK")
+fi
+if [[ -n "${ML_SCALER:-}" ]]; then
+  train_args+=(--scaler "$ML_SCALER")
+fi
+if [[ -n "${ML_AUDIT_MANIFESTS:-}" ]]; then
+  train_args+=(--audit-manifest-json "$ML_AUDIT_MANIFESTS")
 fi
 
 python work/experiments/ml/train_from_study.py \

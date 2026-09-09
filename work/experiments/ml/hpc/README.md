@@ -171,3 +171,340 @@ export S01_CONDA_ENV=<cuda-pytorch-env>
 export S01_GPU_SBATCH_ARGS="--partition=<gpu_partition> --gres=<gpu_resource>"
 work/experiments/ml/s01/hpc/submit_s01_e01.sh
 ```
+
+## S06-S09 Human Runbook
+
+Do not execute cluster preparation or submission commands from a local
+development task. The sequence below is the implemented command surface for a
+human operator.
+
+### Local / Before Cluster
+
+```bash
+PYTHONPATH=src pytest -q \
+  tests/ml/test_prepared_v4.py \
+  tests/ml/test_catalog_splits_pairs.py \
+  tests/ml/test_study_prescriptions.py \
+  tests/ml/test_s06_s09_studies.py \
+  tests/ml/test_models_training.py \
+  tests/ml/test_dynamic_pair_dataset.py \
+  tests/ml/test_s05_study_and_hpc.py
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py audit-study \
+  --study work/experiments/ml/s06/study.yaml \
+  --study work/experiments/ml/s07/study.yaml \
+  --study work/experiments/ml/s08/study.yaml \
+  --study work/experiments/ml/s09/study.yaml
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py expand \
+  --study work/experiments/ml/s09/study.yaml \
+  --output-dir /tmp/s09_run_plan \
+  --overwrite
+```
+
+### Gattaca2 Preparation
+
+Set site roots explicitly. `V4_PLAN_ROOT` must be the materialized V4
+state-plan directory containing `freeze_manifest.json` and
+`render_contract.json`, for example the transferred
+`render_v4/stateplans/master_v4` directory used by the renderer.
+
+```bash
+export REPO_ROOT=<repo-root-on-gattaca2>
+export GATTACA_SCRATCH=<scratch>
+export V4_SOURCE_ROOT=<gattaca2-projects>/shera_ml_master_v4
+export V4_PLAN_ROOT=<materialized-v4-state-plan-root>
+```
+
+Audit raw V4 metadata/files:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/datasets/audit_dataset.py \
+  "$V4_SOURCE_ROOT" \
+  --verify-files \
+  --output-json "$GATTACA_SCRATCH/audits/v4_raw_audit.json"
+```
+
+Dry-run prepared V4:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/prepare_ml_dataset.py \
+  --dataset-kind v4 \
+  --source-root "$V4_SOURCE_ROOT" \
+  --v4-plan-root "$V4_PLAN_ROOT" \
+  --outdir "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --dtype float32 \
+  --v4-source-audit sample \
+  --dry-run
+```
+
+Production prepare V4:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/prepare_ml_dataset.py \
+  --dataset-kind v4 \
+  --source-root "$V4_SOURCE_ROOT" \
+  --v4-plan-root "$V4_PLAN_ROOT" \
+  --outdir "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --dtype float32 \
+  --v4-source-audit sample
+```
+
+Resume preparation:
+
+```bash
+PYTHONPATH=src python3 examples/scripts/prepare_ml_dataset.py \
+  --dataset-kind v4 \
+  --source-root "$V4_SOURCE_ROOT" \
+  --v4-plan-root "$V4_PLAN_ROOT" \
+  --outdir "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --dtype float32 \
+  --v4-source-audit sample \
+  --resume
+```
+
+Deep prepared-data audit:
+
+```bash
+PYTHONPATH=src python3 - <<'PY'
+from pathlib import Path
+from dluxshera.datasets.prepared_v4 import validate_prepared_v4_dataset_identity
+validate_prepared_v4_dataset_identity(Path("<prepared-root>"), deep=True)
+print("PREPARED_V4_DEEP_AUDIT: PASS")
+PY
+```
+
+Materialize compact artifacts:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-split \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --out "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --artifact-id SPLIT-V4-ROLE-PRESERVING-v1 \
+  --role-preserving-v4
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-split \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --out "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-S08-NUISANCE-HOLDOUT-v1.json" \
+  --artifact-id SPLIT-V4-S08-NUISANCE-HOLDOUT-v1 \
+  --role-preserving-v4 \
+  --nuisance-holdout-indices 8,9
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-scaler \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --out "$GATTACA_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --artifact-id SCALER-V4-GLOBAL-MAX-ABS-v1 \
+  --dataset-family joint_full_v4 \
+  --dataset-family radial_capture_v4 \
+  --mode global_max_abs
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-pairs \
+  --study work/experiments/ml/s08/study.yaml \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --split-profile nuisance_holdout="$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-S08-NUISANCE-HOLDOUT-v1.json" \
+  --output-root "$GATTACA_SCRATCH/artifacts" \
+  --artifact all
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-pairs \
+  --study work/experiments/ml/s09/study.yaml \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --output-root "$GATTACA_SCRATCH/artifacts" \
+  --artifact all
+```
+
+S08 standard profile lock for E01/E02/E03:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-lock \
+  --study work/experiments/ml/s08/study.yaml \
+  --artifact-profile standard \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --scaler "$GATTACA_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --pair-manifest validation_c="$GATTACA_SCRATCH/artifacts/S08/validation_c_pairs/S08-C-VALIDATION-PAIRS-v1" \
+  --pair-manifest validation_abc="$GATTACA_SCRATCH/artifacts/S08/validation_abc_pairs/S08-ABC-VALIDATION-PAIRS-v1" \
+  --pair-manifest test="$GATTACA_SCRATCH/artifacts/S08/test_pairs/S08-TEST-PAIRS-v1" \
+  --out "$GATTACA_SCRATCH/artifacts/S08/S08-STANDARD-ARTIFACT-LOCK-v1.json"
+```
+
+S08 holdout profile lock for E04:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-lock \
+  --study work/experiments/ml/s08/study.yaml \
+  --artifact-profile nuisance_holdout \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-S08-NUISANCE-HOLDOUT-v1.json" \
+  --scaler "$GATTACA_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --pair-manifest validation_abc_seen="$GATTACA_SCRATCH/artifacts/S08/validation_abc_seen_pairs/S08-ABC-SEEN-VALIDATION-PAIRS-v1" \
+  --pair-manifest test_seen="$GATTACA_SCRATCH/artifacts/S08/test_seen_pairs/S08-SEEN-TEST-PAIRS-v1" \
+  --pair-manifest unseen_nuisance_audit="$GATTACA_SCRATCH/artifacts/S08/unseen_nuisance_audit_pairs/S08-UNSEEN-NUISANCE-AUDIT-PAIRS-v1" \
+  --out "$GATTACA_SCRATCH/artifacts/S08/S08-HOLDOUT-ARTIFACT-LOCK-v1.json"
+```
+
+S09 lock:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-lock \
+  --study work/experiments/ml/s09/study.yaml \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --scaler "$GATTACA_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --pair-manifest validation="$GATTACA_SCRATCH/artifacts/S09/validation_pairs/S09-VALIDATION-PAIRS-v1" \
+  --pair-manifest test="$GATTACA_SCRATCH/artifacts/S09/test_pairs/S09-TEST-PAIRS-v1" \
+  --out "$GATTACA_SCRATCH/artifacts/S09/S09-ARTIFACT-LOCK-v1.json"
+```
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py validate-lock \
+  --study work/experiments/ml/s09/study.yaml \
+  --prepared-root <scratch>/prepared/PREP-V4-v1 \
+  --split-registry <scratch>/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json \
+  --scaler <scratch>/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json \
+  --validation-manifest <scratch>/artifacts/S09/validation_pairs/S09-VALIDATION-PAIRS-v1 \
+  --test-manifest <scratch>/artifacts/S09/test_pairs/S09-TEST-PAIRS-v1 \
+  --artifact-lock <scratch>/artifacts/S09/S09-ARTIFACT-LOCK-v1.json
+```
+
+Large staged product: prepared shards and `index.jsonl`. Compact staged
+products: manifests, scaler, split registries, pair manifests, and artifact
+locks. Prepared identity is root-independent and should survive moving from
+Gattaca2 to Lonestar6.
+
+### Lonestar6
+
+Set site roots:
+
+```bash
+export REPO_ROOT=<repo-root-on-ls6>
+export LS6_SCRATCH=<ls6-scratch>
+```
+
+GPU preflight:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/hpc/preflight_ml_gpu.py \
+  --study work/experiments/ml/s09/study.yaml \
+  --experiment-id S09-E01 \
+  --run-id S09-E01-R001 \
+  --prepared-root <ls6-scratch>/prepared/PREP-V4-v1 \
+  --split-registry <ls6-scratch>/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json \
+  --scaler <ls6-scratch>/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json \
+  --validation-manifest <ls6-scratch>/artifacts/S09/validation_pairs/S09-VALIDATION-PAIRS-v1 \
+  --test-manifest <ls6-scratch>/artifacts/S09/test_pairs/S09-TEST-PAIRS-v1 \
+  --artifact-lock <ls6-scratch>/artifacts/S09/S09-ARTIFACT-LOCK-v1.json \
+  --device cuda:0
+```
+
+S08-E04 holdout preflight must include both the seen primary validation
+manifest and the unseen-nuisance audit manifest:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/hpc/preflight_ml_gpu.py \
+  --study work/experiments/ml/s08/study.yaml \
+  --experiment-id S08-E04 \
+  --run-id S08-E04-R001 \
+  --prepared-root "$LS6_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$LS6_SCRATCH/artifacts/v4/SPLIT-V4-S08-NUISANCE-HOLDOUT-v1.json" \
+  --scaler "$LS6_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --validation-manifest "$LS6_SCRATCH/artifacts/S08/validation_abc_seen_pairs/S08-ABC-SEEN-VALIDATION-PAIRS-v1" \
+  --test-manifest "$LS6_SCRATCH/artifacts/S08/test_seen_pairs/S08-SEEN-TEST-PAIRS-v1" \
+  --audit-manifest unseen_nuisance_audit="$LS6_SCRATCH/artifacts/S08/unseen_nuisance_audit_pairs/S08-UNSEEN-NUISANCE-AUDIT-PAIRS-v1" \
+  --artifact-lock "$LS6_SCRATCH/artifacts/S08/S08-HOLDOUT-ARTIFACT-LOCK-v1.json" \
+  --device cuda:0
+```
+
+One V3 S06 smoke:
+
+```bash
+python work/experiments/ml/hpc/submit_study_run.py \
+  --site tacc_ls6 \
+  --study work/experiments/ml/s06/study.yaml \
+  --experiment-id S06-E01 \
+  --run-id S06-E01-R001 \
+  --repo-root <repo-root-on-ls6> \
+  --conda-prefix <cuda-pytorch-env> \
+  --prepared-root <ls6-scratch>/prepared/PREP-V3-nuisance-v1 \
+  --split-registry <ls6-scratch>/artifacts/S01/split/SPLIT-ML-v1.json \
+  --validation-manifest <ls6-scratch>/artifacts/S01/validation_pairs/S01-VALIDATION-PAIRS-v1 \
+  --test-manifest <ls6-scratch>/artifacts/S01/test_pairs/S01-TEST-PAIRS-v1 \
+  --run-dir <ls6-scratch>/runs/S06/S06-E01/S06-E01-R001 \
+  --dry-run
+```
+
+One V4 real-data smoke preview and full plan preview:
+
+```bash
+python work/experiments/ml/hpc/submit_study_run.py \
+  --site tacc_ls6 \
+  --study work/experiments/ml/s09/study.yaml \
+  --experiment-id S09-E01 \
+  --run-id S09-E01-R001 \
+  --repo-root <repo-root-on-ls6> \
+  --conda-prefix <cuda-pytorch-env> \
+  --prepared-root <ls6-scratch>/prepared/PREP-V4-v1 \
+  --split-registry <ls6-scratch>/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json \
+  --scaler <ls6-scratch>/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json \
+  --validation-manifest <ls6-scratch>/artifacts/S09/validation_pairs/S09-VALIDATION-PAIRS-v1 \
+  --test-manifest <ls6-scratch>/artifacts/S09/test_pairs/S09-TEST-PAIRS-v1 \
+  --artifact-lock <ls6-scratch>/artifacts/S09/S09-ARTIFACT-LOCK-v1.json \
+  --run-dir <ls6-scratch>/runs/S09/S09-E01/S09-E01-R001 \
+  --dry-run
+```
+
+```bash
+python work/experiments/ml/hpc/submit_study_run.py \
+  --site tacc_ls6 \
+  --study work/experiments/ml/s06/study.yaml \
+  --repo-root <repo-root-on-ls6> \
+  --prepared-root <ls6-scratch>/prepared/PREP-V3-nuisance-v1 \
+  --split-registry <ls6-scratch>/artifacts/S01/split/SPLIT-ML-v1.json \
+  --validation-manifest <ls6-scratch>/artifacts/S01/validation_pairs/S01-VALIDATION-PAIRS-v1 \
+  --test-manifest <ls6-scratch>/artifacts/S01/test_pairs/S01-TEST-PAIRS-v1 \
+  --run-dir <ls6-scratch>/runs \
+  --plan-preview
+```
+
+For S07-S09, use the same `--plan-preview` command with the V4 prepared root,
+split registry, scaler, manifests, and artifact lock. S08-E04 uses the holdout
+split, seen-validation manifest, unseen audit manifest, and holdout artifact
+lock; S08-E01/E02/E03 use the standard split and standard lock.
+
+Explicit multi-run submission uses `--submit-plan`; preview never submits:
+
+```bash
+python work/experiments/ml/hpc/submit_study_run.py \
+  --site tacc_ls6 \
+  --study work/experiments/ml/s09/study.yaml \
+  --repo-root "$REPO_ROOT" \
+  --conda-prefix <cuda-pytorch-env> \
+  --prepared-root "$LS6_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$LS6_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --scaler "$LS6_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --validation-manifest "$LS6_SCRATCH/artifacts/S09/validation_pairs/S09-VALIDATION-PAIRS-v1" \
+  --test-manifest "$LS6_SCRATCH/artifacts/S09/test_pairs/S09-TEST-PAIRS-v1" \
+  --artifact-lock "$LS6_SCRATCH/artifacts/S09/S09-ARTIFACT-LOCK-v1.json" \
+  --run-dir "$LS6_SCRATCH/runs" \
+  --launch-packet "$LS6_SCRATCH/launches/S09" \
+  --submit-plan
+```
+
+To submit one selected row, use the same command plus
+`--experiment-id <ID> --run-id <ID-RNNN> --submit-plan`. To retry or resume one
+row, use the same selected-row command with either `--overwrite` or
+`--resume-checkpoint <run-dir>/checkpoint_last.pt`.

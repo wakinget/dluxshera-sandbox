@@ -155,18 +155,21 @@ class PairwiseCorrectionCNN(nn.Module):
     """Predict ``z_B - z_A`` from two images using one shared encoder instance."""
 
     output_dim: int
+    nuisance_output_dim: int
     comparator: str
 
     def __init__(
         self,
         *,
         output_dim: int,
+        nuisance_output_dim: int = 0,
         config: SharedCNNModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = SharedCNNModelConfig() if config is None else config
         self.encoder = SharedCNNEncoder(self.config)
         self.output_dim = int(output_dim)
+        self.nuisance_output_dim = int(nuisance_output_dim)
         self.comparator = self.config.comparator
         comparator_dim = (
             self.config.embedding_dim
@@ -181,6 +184,18 @@ class PairwiseCorrectionCNN(nn.Module):
             head_layers.append(nn.Dropout(float(self.config.dropout)))
         head_layers.append(nn.Linear(int(self.config.head_hidden_dim), self.output_dim))
         self.regression_head = nn.Sequential(*head_layers)
+        self.nuisance_head: nn.Module | None = None
+        if self.nuisance_output_dim > 0:
+            nuisance_layers: list[nn.Module] = [
+                nn.Linear(int(comparator_dim), int(self.config.head_hidden_dim)),
+                nn.ReLU(inplace=True),
+            ]
+            if self.config.dropout > 0.0:
+                nuisance_layers.append(nn.Dropout(float(self.config.dropout)))
+            nuisance_layers.append(
+                nn.Linear(int(self.config.head_hidden_dim), self.nuisance_output_dim)
+            )
+            self.nuisance_head = nn.Sequential(*nuisance_layers)
 
     def compare(self, h_a: torch.Tensor, h_b: torch.Tensor) -> torch.Tensor:
         """Return the configured comparator representation."""
@@ -206,14 +221,36 @@ class PairwiseCorrectionCNN(nn.Module):
             return pred, h_a, h_b
         return pred
 
+    def forward_multitask(
+        self,
+        image_a: torch.Tensor,
+        image_b: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Return science correction plus optional nuisance-delta prediction."""
+        h_a = self.encoder(image_a)
+        h_b = self.encoder(image_b)
+        comparison = self.compare(h_a, h_b)
+        out = {"science": self.regression_head(comparison)}
+        if self.nuisance_head is not None:
+            out["nuisance"] = self.nuisance_head(comparison)
+        return out
+
 
 def build_pairwise_correction_model(
     output_dim: int,
     config: Mapping[str, Any] | SharedCNNModelConfig | None = None,
+    *,
+    nuisance_output_dim: int | None = None,
 ) -> PairwiseCorrectionCNN:
     """Build the baseline shared-CNN pairwise correction model."""
     cfg = config if isinstance(config, SharedCNNModelConfig) else SharedCNNModelConfig.from_dict(config)
-    return PairwiseCorrectionCNN(output_dim=int(output_dim), config=cfg)
+    if nuisance_output_dim is None and isinstance(config, Mapping):
+        nuisance_output_dim = int(config.get("nuisance_output_dim", 0) or 0)
+    return PairwiseCorrectionCNN(
+        output_dim=int(output_dim),
+        nuisance_output_dim=int(nuisance_output_dim or 0),
+        config=cfg,
+    )
 
 
 def count_parameters(model: nn.Module, *, trainable_only: bool = True) -> int:

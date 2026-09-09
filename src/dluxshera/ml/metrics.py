@@ -6,7 +6,12 @@ import numpy as np
 
 from .catalog import SampleCatalog
 
-__all__ = ["compute_regression_metrics", "metrics_by_group", "transform_z_to_physical"]
+__all__ = [
+    "compute_capture_metrics",
+    "compute_regression_metrics",
+    "metrics_by_group",
+    "transform_z_to_physical",
+]
 
 
 def transform_z_to_physical(z_delta: np.ndarray, fisher_sigmas: Sequence[float]) -> np.ndarray:
@@ -99,6 +104,52 @@ def compute_regression_metrics(
             )
         )
     return metrics
+
+
+def _quantiles(values: np.ndarray, probs: Sequence[float]) -> dict[str, float | None]:
+    if values.size == 0:
+        return {f"q{int(p * 100):02d}": None for p in probs}
+    return {f"q{int(p * 100):02d}": float(np.quantile(values, p)) for p in probs}
+
+
+def compute_capture_metrics(
+    y_pred_z: np.ndarray,
+    y_true_z: np.ndarray,
+    *,
+    epsilon: float = 1.0e-12,
+) -> dict[str, Any]:
+    """Compute correction/capture diagnostics for radial-distance studies."""
+    pred = np.asarray(y_pred_z, dtype=np.float64)
+    truth = np.asarray(y_true_z, dtype=np.float64)
+    if pred.shape != truth.shape or pred.ndim != 2:
+        raise ValueError("Predictions and truth must be same-shape 2D arrays.")
+    residual = truth - pred
+    d0 = np.linalg.norm(truth, axis=1)
+    d1 = np.linalg.norm(residual, axis=1)
+    rho = d1 / np.maximum(d0, float(epsilon))
+    alignment = _safe_cosine(pred, truth)
+    mse = float(np.mean((pred - truth) ** 2)) if pred.size else 0.0
+    baseline_mse = float(np.mean(truth**2)) if truth.size else 0.0
+    thresholds = (100.0, 250.0, 500.0, 1000.0, 2000.0)
+    return {
+        "schema_version": "dluxshera_ml_capture_metrics/1",
+        "sample_count": int(pred.shape[0]),
+        "fisher_rmse": float(np.sqrt(mse)),
+        "mse_skill": None if baseline_mse <= 0.0 else float(1.0 - mse / baseline_mse),
+        "correction_vector_alignment_mean": _nanmean(alignment),
+        "d0_mean": float(np.mean(d0)) if d0.size else None,
+        "d0_median": float(np.median(d0)) if d0.size else None,
+        "d1_mean": float(np.mean(d1)) if d1.size else None,
+        "d1_median": float(np.median(d1)) if d1.size else None,
+        "rho_mean": float(np.mean(rho)) if rho.size else None,
+        "rho_median": float(np.median(rho)) if rho.size else None,
+        "rho_quantiles": _quantiles(rho, (0.1, 0.25, 0.5, 0.75, 0.9)),
+        "fraction_rho_lt_1": float(np.mean(rho < 1.0)) if rho.size else None,
+        "remaining_distance_threshold_fractions": {
+            str(int(threshold)): float(np.mean(d1 <= threshold)) if d1.size else None
+            for threshold in thresholds
+        },
+    }
 
 
 def metrics_by_group(

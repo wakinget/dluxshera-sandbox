@@ -16,6 +16,7 @@ from .catalog import SampleCatalog
 
 __all__ = [
     "SplitRegistry",
+    "generate_role_preserving_split_registry",
     "generate_split_registry",
     "load_split_registry",
     "split_registry_content_identity",
@@ -356,6 +357,112 @@ def generate_split_registry(
                 "fractions": nuisance_fractions,
                 "explicit_assignments_provided": explicit_nuisance_assignments is not None,
                 "require_nonempty_requested": bool(require_nonempty_nuisance_partitions),
+            },
+        },
+        counts={
+            "science_groups": _counts(science_assignments),
+            "nuisance_groups": _counts(nuisance_assignments),
+            "sample_count": catalog.sample_count,
+        },
+        generated_at=generated_at,
+        git=_git_info(),
+    )
+
+
+def _role_value(role: str) -> str:
+    value = str(role)
+    if value in {"train", "training"}:
+        return "train"
+    if value in {"validation", "valid", "val"}:
+        return "validation"
+    if value == "test":
+        return "test"
+    if not value:
+        raise ValueError("Catalog sample role/split role must be non-empty.")
+    return value
+
+
+def generate_role_preserving_split_registry(
+    catalog: SampleCatalog,
+    *,
+    artifact_id: str = "SPLIT-V4-SCIENCE-v1",
+    seed: int = 0,
+    explicit_nuisance_assignments: Mapping[str, str] | None = None,
+    default_nuisance_split: str = "train",
+) -> SplitRegistry:
+    """Generate a split registry that preserves catalog science split roles.
+
+    This is the V4 path: science-state train/validation/test membership is a
+    frozen design choice from the state plan, so the registry records those
+    assignments instead of drawing a new random grouped split.  All rendered
+    nuisance replicas of a science state must agree on the same role.
+    """
+    science_assignments: dict[str, str] = {}
+    science_family_roles: dict[str, set[str]] = {}
+    for idx, group_id in enumerate(catalog.science_group_ids):
+        group = str(group_id)
+        role = _role_value(str(catalog.sample_roles[idx]))
+        previous = science_assignments.get(group)
+        if previous is not None and previous != role:
+            raise ValueError(
+                f"Science group {group!r} appears in multiple catalog split roles "
+                f"({previous!r}, {role!r})."
+            )
+        science_assignments[group] = role
+        science_family_roles.setdefault(group, set()).add(
+            f"{catalog.dataset_families[idx]}:{role}"
+        )
+    for group, family_roles in science_family_roles.items():
+        if len(family_roles) != 1:
+            raise ValueError(
+                f"Science group {group!r} appears in multiple family/split contexts: "
+                f"{sorted(family_roles)}."
+            )
+
+    nuisance_ids = sorted(set(str(v) for v in catalog.nuisance_group_ids))
+    if explicit_nuisance_assignments is None:
+        nuisance_assignments = {
+            group: str(default_nuisance_split) for group in nuisance_ids
+        }
+        nuisance_policy_type = "single_partition"
+    else:
+        nuisance_assignments = {str(k): str(v) for k, v in explicit_nuisance_assignments.items()}
+        missing = sorted(set(nuisance_ids) - set(nuisance_assignments))
+        extra = sorted(set(nuisance_assignments) - set(nuisance_ids))
+        if missing or extra:
+            raise ValueError(
+                "Explicit nuisance assignments must cover exactly the catalog nuisance ids; "
+                f"missing={missing}, extra={extra}."
+            )
+        nuisance_policy_type = "explicit"
+
+    generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    return SplitRegistry(
+        artifact_id=str(artifact_id),
+        schema_version=SPLIT_SCHEMA_VERSION,
+        prepared_dataset={
+            "artifact_id": catalog.artifact_id,
+            "prepared_dataset_hash": catalog.prepared_dataset_hash,
+            "root": str(catalog.root),
+            "sample_count": catalog.sample_count,
+            "science_dim": catalog.science_dim,
+            "sample_shape": list(catalog.sample_shape),
+        },
+        seed=int(seed),
+        science_group_policy="catalog.sample_role grouped by science_state_id",
+        nuisance_group_policy=catalog.nuisance_group_policy,
+        science_assignments=science_assignments,
+        nuisance_assignments=nuisance_assignments,
+        policy={
+            "science": {
+                "type": "preserve_catalog_sample_role",
+                "requires_unique_role_per_science_group": True,
+                "allowed_roles": ["train", "validation", "test"],
+            },
+            "nuisance": {
+                "type": nuisance_policy_type,
+                "default_split": str(default_nuisance_split),
+                "explicit_assignments_provided": explicit_nuisance_assignments is not None,
             },
         },
         counts={

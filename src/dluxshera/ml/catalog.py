@@ -42,6 +42,12 @@ def _field(row: Mapping[str, Any], dotted: str, default: Any = None) -> Any:
 
 
 def _science_group_id(row: Mapping[str, Any], physical_vector: np.ndarray) -> str:
+    explicit = row.get("science_state_id")
+    if explicit not in (None, ""):
+        return str(explicit)
+    explicit = _field(row, "group_ids.science")
+    if explicit not in (None, ""):
+        return str(explicit)
     explicit = _field(row, SCIENCE_GROUP_FIELD)
     if explicit not in (None, ""):
         return str(explicit)
@@ -54,6 +60,9 @@ def _science_group_id(row: Mapping[str, Any], physical_vector: np.ndarray) -> st
 
 
 def _nuisance_group_id(row: Mapping[str, Any], nuisance_vector: np.ndarray | None) -> str:
+    explicit = row.get("nuisance_state_id")
+    if explicit not in (None, ""):
+        return str(explicit)
     explicit = row.get(NUISANCE_GROUP_FIELD)
     if explicit not in (None, ""):
         return str(explicit)
@@ -112,6 +121,14 @@ def _as_int(value: Any, *, missing: int = -1) -> int:
     return missing if value is None else int(value)
 
 
+def _optional_int(row: Mapping[str, Any], *keys: str, missing: int = -1) -> int:
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            return int(value)
+    return int(missing)
+
+
 def _vector_space_labels(vector_spaces: Mapping[str, Any], space_key: str) -> tuple[str, ...]:
     space = vector_spaces.get("spaces", {}).get(space_key)
     if not isinstance(space, Mapping):
@@ -149,6 +166,10 @@ class SampleCatalog:
     vector_spaces: Mapping[str, Any]
     sample_ids: np.ndarray
     array_indices: np.ndarray
+    dataset_versions: np.ndarray
+    render_state_ids: np.ndarray
+    science_state_ids: np.ndarray
+    nuisance_state_ids: np.ndarray
     science_group_ids: np.ndarray
     nuisance_group_ids: np.ndarray
     dataset_families: np.ndarray
@@ -156,8 +177,13 @@ class SampleCatalog:
     pair_ids: np.ndarray
     grid_i_indices: np.ndarray
     grid_j_indices: np.ndarray
+    science_sequence_indices: np.ndarray
+    joint_train_sequence_indices: np.ndarray
+    nuisance_bank_indices: np.ndarray
+    radial_bin_labels: np.ndarray
     fisher_scaled_deltas: np.ndarray
     physical_deltas: np.ndarray
+    native_science_vectors: np.ndarray
     nuisance_vectors: np.ndarray
     nuisance_sigma_vectors: np.ndarray
     sample_shape: tuple[int, ...]
@@ -173,12 +199,22 @@ class SampleCatalog:
             raise ValueError("SampleCatalog requires at least one sample.")
         for name, values in {
             "array_indices": self.array_indices,
+            "dataset_versions": self.dataset_versions,
+            "render_state_ids": self.render_state_ids,
+            "science_state_ids": self.science_state_ids,
+            "nuisance_state_ids": self.nuisance_state_ids,
             "science_group_ids": self.science_group_ids,
             "nuisance_group_ids": self.nuisance_group_ids,
             "dataset_families": self.dataset_families,
+            "sample_roles": self.sample_roles,
             "pair_ids": self.pair_ids,
+            "science_sequence_indices": self.science_sequence_indices,
+            "joint_train_sequence_indices": self.joint_train_sequence_indices,
+            "nuisance_bank_indices": self.nuisance_bank_indices,
+            "radial_bin_labels": self.radial_bin_labels,
             "fisher_scaled_deltas": self.fisher_scaled_deltas,
             "physical_deltas": self.physical_deltas,
+            "native_science_vectors": self.native_science_vectors,
         }.items():
             if len(values) != n:
                 raise ValueError(f"{name} length {len(values)} does not match sample count {n}.")
@@ -186,6 +222,8 @@ class SampleCatalog:
             raise ValueError("fisher_scaled_deltas must be a 2D array.")
         if self.physical_deltas.shape != self.fisher_scaled_deltas.shape:
             raise ValueError("physical_deltas shape must match fisher_scaled_deltas.")
+        if self.native_science_vectors.shape != self.fisher_scaled_deltas.shape:
+            raise ValueError("native_science_vectors shape must match fisher_scaled_deltas.")
         if self.fisher_sigmas.shape != (self.science_dim,):
             raise ValueError("fisher_sigmas dimension must match science_dim.")
 
@@ -261,12 +299,43 @@ class SampleCatalog:
                 str(value): int(np.count_nonzero(self.dataset_families == value))
                 for value in sorted(set(self.dataset_families.tolist()))
             },
+            "dataset_versions": {
+                str(value): int(np.count_nonzero(self.dataset_versions == value))
+                for value in sorted(set(self.dataset_versions.tolist()))
+                if str(value)
+            },
+            "sample_roles": {
+                str(value): int(np.count_nonzero(self.sample_roles == value))
+                for value in sorted(set(self.sample_roles.tolist()))
+                if str(value)
+            },
             "science_group_policy": self.science_group_policy,
             "nuisance_group_policy": self.nuisance_group_policy,
         }
 
 
-def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTIFACT_ID) -> SampleCatalog:
+def _prepared_dataset_hash(root: Path, manifest: Mapping[str, Any]) -> str:
+    content_identity = manifest.get("content_identity", {})
+    if isinstance(content_identity, Mapping) and content_identity.get("sha256"):
+        if manifest.get("schema_version") == "shera_prepared_dataset/1" and manifest.get("artifact_id") == "PREP-V4-v1":
+            from dluxshera.datasets.prepared_v4 import validate_prepared_v4_dataset_identity
+
+            validate_prepared_v4_dataset_identity(root)
+        return str(content_identity["sha256"])
+    manifest_path = root / "manifest.json"
+    vector_spaces_path = root / "vector_spaces.json"
+    return _stable_digest(
+        {
+            "manifest_sha256": _sha256_file(manifest_path),
+            "vector_spaces_sha256": _sha256_file(vector_spaces_path),
+            "source_dataset": manifest.get("source_dataset", {}),
+            "array_storage": manifest.get("array_storage", {}),
+            "sample_count": manifest.get("array_storage", {}).get("sample_count"),
+        }
+    )
+
+
+def load_sample_catalog(prepared_root: Path, *, artifact_id: str | None = None) -> SampleCatalog:
     """Stream a prepared SHERA dataset index into compact ML catalog arrays."""
     root = Path(prepared_root).resolve()
     manifest_path = root / "manifest.json"
@@ -279,6 +348,10 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
 
     sample_ids: list[str] = []
     array_indices: list[int] = []
+    dataset_versions: list[str] = []
+    render_state_ids: list[str] = []
+    science_state_ids: list[str] = []
+    nuisance_state_ids: list[str] = []
     science_group_ids: list[str] = []
     nuisance_group_ids: list[str] = []
     dataset_families: list[str] = []
@@ -286,8 +359,13 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
     pair_ids: list[str] = []
     grid_i_indices: list[int] = []
     grid_j_indices: list[int] = []
+    science_sequence_indices: list[int] = []
+    joint_train_sequence_indices: list[int] = []
+    nuisance_bank_indices: list[int] = []
+    radial_bin_labels: list[str] = []
     z_rows: list[np.ndarray] = []
     theta_rows: list[np.ndarray] = []
+    native_rows: list[np.ndarray] = []
     nuisance_rows: list[np.ndarray] = []
     nuisance_sigma_rows: list[np.ndarray] = []
     nuisance_dim: int | None = None
@@ -304,6 +382,21 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
                 f"{index_path} row {row_number} physical_delta shape {theta.shape} "
                 f"does not match fisher_scaled_delta shape {z.shape}."
             )
+        native_science = _optional_vector(
+            row,
+            "native_science_vector",
+            expected_dim=z.shape[0],
+            dtype=np.float32,
+        )
+        if native_science is None:
+            native_science = _optional_vector(
+                row,
+                "ordered_physical_science_vector",
+                expected_dim=z.shape[0],
+                dtype=np.float32,
+            )
+        if native_science is None:
+            native_science = theta
         nuisance = _optional_vector(
             row,
             "nuisance_vector",
@@ -325,15 +418,30 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
 
         sample_ids.append(str(sample_id))
         array_indices.append(array_index)
-        science_group_ids.append(_science_group_id(row, theta))
-        nuisance_group_ids.append(_nuisance_group_id(row, nuisance))
+        science_group = _science_group_id(row, theta)
+        nuisance_group = _nuisance_group_id(row, nuisance)
+        science_group_ids.append(science_group)
+        nuisance_group_ids.append(nuisance_group)
+        dataset_versions.append(_as_string(row.get("dataset_version")))
+        render_state_ids.append(_as_string(row.get("render_state_id", sample_id)))
+        science_state_ids.append(_as_string(row.get("science_state_id", science_group)))
+        nuisance_state_ids.append(_as_string(row.get("nuisance_state_id", nuisance_group)))
         dataset_families.append(_as_string(row.get("dataset_family")))
-        sample_roles.append(_as_string(row.get("sample_role")))
+        sample_roles.append(_as_string(row.get("sample_role", row.get("split_role"))))
         pair_ids.append(_as_string(row.get("pair_id")))
         grid_i_indices.append(_as_int(row.get("grid_i_index")))
         grid_j_indices.append(_as_int(row.get("grid_j_index")))
+        science_sequence_indices.append(
+            _optional_int(row, "science_plan_row_index", "global_sequence_index")
+        )
+        joint_train_sequence_indices.append(
+            _optional_int(row, "joint_train_sequence_index", "v4_joint_train_sequence_index")
+        )
+        nuisance_bank_indices.append(_optional_int(row, "nuisance_bank_index"))
+        radial_bin_labels.append(_as_string(row.get("radial_bin")))
         z_rows.append(z)
         theta_rows.append(theta)
+        native_rows.append(native_science)
         nuisance_rows.append(nuisance)
         nuisance_sigma_rows.append(nuisance_sigma)
 
@@ -341,6 +449,7 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
         raise ValueError(f"{index_path} contains no samples.")
     z_array = np.vstack(z_rows).astype(np.float32, copy=False)
     theta_array = np.vstack(theta_rows).astype(np.float32, copy=False)
+    native_array = np.vstack(native_rows).astype(np.float32, copy=False)
     if nuisance_dim is None:
         nuisance_dim = 0
     nuisance_array = (
@@ -365,15 +474,7 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
             int(v)
             for v in read_json(root / "array_shards_manifest.json").get("sample_shape", ())
         )
-    prepared_dataset_hash = _stable_digest(
-        {
-            "manifest_sha256": _sha256_file(manifest_path),
-            "vector_spaces_sha256": _sha256_file(vector_spaces_path),
-            "source_dataset": manifest.get("source_dataset", {}),
-            "array_storage": manifest.get("array_storage", {}),
-            "sample_count": len(sample_ids),
-        }
-    )
+    prepared_dataset_hash = _prepared_dataset_hash(root, manifest)
     parameter_labels = _vector_space_labels(vector_spaces, "fisher_scaled_delta")
     if parameter_labels and len(parameter_labels) != z_array.shape[1]:
         raise ValueError(
@@ -386,12 +487,21 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
 
     return SampleCatalog(
         root=root,
-        artifact_id=str(artifact_id),
+        artifact_id=str(
+            manifest.get("artifact_id")
+            or (manifest.get("prepared_dataset", {}) or {}).get("artifact_id")
+            or artifact_id
+            or PREPARED_ARTIFACT_ID
+        ),
         prepared_dataset_hash=prepared_dataset_hash,
         manifest=manifest,
         vector_spaces=vector_spaces,
         sample_ids=np.asarray(sample_ids, dtype=object),
         array_indices=np.asarray(array_indices, dtype=np.int64),
+        dataset_versions=np.asarray(dataset_versions, dtype=object),
+        render_state_ids=np.asarray(render_state_ids, dtype=object),
+        science_state_ids=np.asarray(science_state_ids, dtype=object),
+        nuisance_state_ids=np.asarray(nuisance_state_ids, dtype=object),
         science_group_ids=np.asarray(science_group_ids, dtype=object),
         nuisance_group_ids=np.asarray(nuisance_group_ids, dtype=object),
         dataset_families=np.asarray(dataset_families, dtype=object),
@@ -399,8 +509,13 @@ def load_sample_catalog(prepared_root: Path, *, artifact_id: str = PREPARED_ARTI
         pair_ids=np.asarray(pair_ids, dtype=object),
         grid_i_indices=np.asarray(grid_i_indices, dtype=np.int32),
         grid_j_indices=np.asarray(grid_j_indices, dtype=np.int32),
+        science_sequence_indices=np.asarray(science_sequence_indices, dtype=np.int64),
+        joint_train_sequence_indices=np.asarray(joint_train_sequence_indices, dtype=np.int64),
+        nuisance_bank_indices=np.asarray(nuisance_bank_indices, dtype=np.int32),
+        radial_bin_labels=np.asarray(radial_bin_labels, dtype=object),
         fisher_scaled_deltas=z_array,
         physical_deltas=theta_array,
+        native_science_vectors=native_array,
         nuisance_vectors=nuisance_array,
         nuisance_sigma_vectors=nuisance_sigma_array,
         sample_shape=sample_shape,

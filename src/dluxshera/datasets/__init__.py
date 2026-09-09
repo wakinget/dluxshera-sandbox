@@ -16,6 +16,7 @@ from .master_v4 import (
     science_nuisance_to_render_index,
     shard_name_for_render_index,
 )
+from .prepared_v4 import PREPARED_V4_ARTIFACT_ID, PreparedV4Summary, prepare_shera_v4_dataset
 from .schema import VectorComponentSpec, VectorSpaceSpec
 from .splitting import GroupedSplitResult, assign_grouped_split
 from .transforms import (
@@ -46,6 +47,8 @@ __all__ = [
     "FrozenV4Identities",
     "GroupedSplitResult",
     "LinearTransform",
+    "PREPARED_V4_ARTIFACT_ID",
+    "PreparedV4Summary",
     "RenderResult",
     "ResolvedRenderState",
     "ShardRecord",
@@ -65,6 +68,7 @@ __all__ = [
     "render_index_to_science_nuisance",
     "render_output_paths",
     "render_state_id",
+    "prepare_shera_v4_dataset",
     "science_nuisance_to_render_index",
     "set_scalar_label",
     "shard_name_for_render_index",

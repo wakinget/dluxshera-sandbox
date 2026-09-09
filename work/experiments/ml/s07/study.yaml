@@ -1,0 +1,102 @@
+study_id: S07
+title: V4 Joint-Full Bring-Up
+
+dataset: {artifact_id: PREP-V4-v1}
+split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+artifact_lock: {required: true, lock_id: S07-ARTIFACT-LOCK-v1}
+
+evaluation_artifacts:
+  validation:
+    artifact_id: S07-VALIDATION-PAIRS-v1
+    pair_policy_id: s07_v4_family_a
+    split: validation
+    seed: 7001
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  test:
+    artifact_id: S07-TEST-PAIRS-v1
+    pair_policy_id: s07_v4_family_a
+    split: test
+    seed: 7002
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: test, nuisance_split: train}
+
+defaults: &v4defaults
+  device: cuda:0
+  pair_policy_id: s07_v4_family_a
+  validation_artifact: validation
+  test_artifact: test
+  require_frozen_validation_manifest: true
+  evaluate_test: false
+  image_scaling: {mode: global_max_abs, artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+  noise: {enabled: false, apply_to: observation}
+  training:
+    epochs: 600
+    batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: adamw
+    pairs_per_epoch: 16384
+    num_workers: 4
+    shard_cache_size: 4
+    lr_scheduler: {name: none}
+    early_stopping:
+      enabled: true
+      monitor: validation_loss
+      min_epochs: 120
+      patience: 80
+      min_delta_relative: 0.0005
+  evaluation: {fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]}
+
+presets:
+  baseline_model:
+    model: {channels: [16, 32, 64, 128], embedding_dim: 128, encoder_hidden_dim: 256, head_hidden_dim: 256, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+  large_model:
+    model: {channels: [32, 64, 128, 256], embedding_dim: 256, encoder_hidden_dim: 512, head_hidden_dim: 512, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+
+experiments:
+  S07-E01:
+    <<: *v4defaults
+    inherits: baseline_model
+    seeds: [11, 23, 47]
+  S07-E02:
+    <<: *v4defaults
+    inherits: large_model
+    seeds: [11, 23, 47]
+  S07-E03:
+    <<: *v4defaults
+    inherits: large_model
+    pair_policy_id: s07_v4_family_a_4096
+    seed: 11
+  S07-E04:
+    <<: *v4defaults
+    inherits: large_model
+    pair_policy_id: s07_v4_family_a_8192
+    seed: 11
+  S07-E05:
+    <<: *v4defaults
+    inherits: large_model
+    pair_policy_id: s07_v4_family_a_16384
+    seed: 11
+  S07-E06:
+    <<: *v4defaults
+    inherits: large_model
+    pair_policy_id: s07_v4_family_a_32768
+    seed: 11
+
+pair_policies:
+  s07_v4_family_a: &s07a
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    dataset_families: [joint_full_v4]
+    max_sampling_attempts: 4000
+  s07_v4_family_a_4096: {<<: *s07a, joint_train_prefix_size: 4096}
+  s07_v4_family_a_8192: {<<: *s07a, joint_train_prefix_size: 8192}
+  s07_v4_family_a_16384: {<<: *s07a, joint_train_prefix_size: 16384}
+  s07_v4_family_a_32768: {<<: *s07a, joint_train_prefix_size: 32768}

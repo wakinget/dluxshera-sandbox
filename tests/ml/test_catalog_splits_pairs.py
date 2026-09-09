@@ -14,6 +14,7 @@ from dluxshera.ml import (
     PairSampler,
     SplitRegistry,
     generate_frozen_pair_manifest,
+    generate_role_preserving_split_registry,
     generate_split_registry,
     load_pair_manifest,
     load_sample_catalog,
@@ -144,6 +145,28 @@ def _write_prepared_fixture(root: Path) -> Path:
             "index_format": {"path": "index.jsonl", "format": "jsonl"},
         },
     )
+    return root
+
+
+def _write_v4_like_prepared_fixture(root: Path) -> Path:
+    _write_prepared_fixture(root)
+    manifest = read_json(root / "manifest.json")
+    manifest["artifact_id"] = "PREP-V4-v1"
+    manifest["source_dataset"] = {"dataset_version": "shera_ml_master_v4"}
+    write_json(root / "manifest.json", manifest)
+    rows = []
+    for line in (root / "index.jsonl").read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        row["pair_id"] = ""
+        row["dataset_version"] = "shera_ml_master_v4"
+        row["dataset_family"] = "joint_full_v4"
+        row["sample_role"] = "train"
+        row["science_state_id"] = row["group_ids"]["physical_delta_sha256"]
+        row["nuisance_state_id"] = str(row["nuisance_id"])
+        rows.append(row)
+    with (root / "index.jsonl").open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
     return root
 
 
@@ -285,6 +308,9 @@ def test_pair_sampler_same_nuisance_targets_reverse_and_distance(tmp_path: Path)
     assert reverse.nuisance_b_id == record.nuisance_a_id
     assert reverse.pair_id_a == record.pair_id_b
     assert reverse.pair_id_b == record.pair_id_a
+    assert reverse.dataset_family_a == record.dataset_family_b
+    assert reverse.dataset_family_b == record.dataset_family_a
+    assert reverse.distance_bin_label == record.distance_bin_label
     np.testing.assert_allclose(reverse.target_delta_z, -np.asarray(record.target_delta_z))
     np.testing.assert_allclose(reverse.target_delta_theta, -np.asarray(record.target_delta_theta))
     np.testing.assert_allclose(reverse.nuisance_delta, -np.asarray(record.nuisance_delta))
@@ -403,3 +429,61 @@ def test_frozen_eval_manifest_is_deterministic_and_validates(tmp_path: Path) -> 
         pair_manifest_content_hash(timestamp_changed, first.records)
         == first.manifest["content_identity"]["sha256"]
     )
+
+
+def test_v4_style_empty_pair_id_supports_abc_families(tmp_path: Path) -> None:
+    catalog = load_sample_catalog(_write_v4_like_prepared_fixture(tmp_path / "prepared"))
+    registry = generate_role_preserving_split_registry(catalog)
+    for family in ("A", "B", "C"):
+        policy = PairPolicy(
+            family_weights={family: 1.0},
+            same_pair_id=False,
+            min_fisher_distance=0.0,
+            max_fisher_distance=3.0,
+            max_sampling_attempts=4000,
+        )
+        record = PairSampler(catalog, registry, policy).sample_pair(np.random.default_rng(12))
+        if family == "A":
+            assert record.nuisance_a_id == record.nuisance_b_id
+            assert record.science_a_id != record.science_b_id
+        elif family == "B":
+            assert record.science_a_id == record.science_b_id
+            assert record.nuisance_a_id != record.nuisance_b_id
+            np.testing.assert_allclose(record.target_delta_z, [0.0, 0.0])
+        else:
+            assert record.science_a_id != record.science_b_id
+            assert record.nuisance_a_id != record.nuisance_b_id
+            assert np.linalg.norm(record.nuisance_delta) > 0.0
+
+
+def test_v4_same_pair_id_true_rejects_empty_legacy_pair_ids(tmp_path: Path) -> None:
+    catalog = load_sample_catalog(_write_v4_like_prepared_fixture(tmp_path / "prepared"))
+    registry = generate_role_preserving_split_registry(catalog)
+    with pytest.raises(ValueError, match="same_pair_id=True"):
+        PairSampler(catalog, registry, PairPolicy(family_weights={"A": 1.0}, same_pair_id=True))
+
+
+def test_pair_policy_validates_distance_bins_and_zero_mixtures() -> None:
+    with pytest.raises(ValueError, match="distance_bin_weights"):
+        PairPolicy(distance_bin_weights={"typo": 1.0})
+    with pytest.raises(ValueError, match="fisher distance bin"):
+        PairPolicy(fisher_distance_bins=("typo",))
+    with pytest.raises(ValueError, match="pair-family weight"):
+        PairPolicy(family_weights={"A": 0.0})
+    with pytest.raises(ValueError, match="Dataset-family"):
+        PairPolicy(dataset_family_weights={"joint_full_v4": 0.0})
+
+
+def test_curriculum_resolves_distance_bins_by_epoch() -> None:
+    policy = PairPolicy(
+        policy_id="curriculum",
+        distance_bin_weights={"0-100": 1.0},
+        curriculum_stages=(
+            {"start_epoch": 0, "distance_bin_weights": {"0-100": 1.0}},
+            {"start_epoch": 100, "distance_bin_weights": {"100-250": 1.0}},
+            {"start_epoch": 250, "distance_bin_weights": {"250-500": 1.0}},
+        ),
+    )
+    assert policy.resolved_for_epoch(0).distance_bin_weights == {"0-100": 1.0}
+    assert policy.resolved_for_epoch(100).distance_bin_weights == {"100-250": 1.0}
+    assert policy.resolved_for_epoch(250).distance_bin_weights == {"250-500": 1.0}
