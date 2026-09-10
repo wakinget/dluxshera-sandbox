@@ -10,7 +10,7 @@ split_registry:
   content_sha256: 29f0e95c3819cbeb5ce00aafb593445510723ea5fc20e2e7f3e585c1b9615314
 
 pair_policies:
-  s06_v3_same_nuisance_no_noise:
+  s01_clean_same_pair_grid_v1:
     family_weights: {A: 1.0}
     same_pair_id: true
     min_fisher_distance: 0.0
@@ -44,7 +44,7 @@ evaluation_artifacts:
 
 defaults: &defaults
   device: cuda:0
-  pair_policy_id: s06_v3_same_nuisance_no_noise
+  pair_policy_id: s01_clean_same_pair_grid_v1
   validation_artifact: validation
   test_artifact: test
   require_frozen_validation_manifest: true
