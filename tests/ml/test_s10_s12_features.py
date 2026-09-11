@@ -373,6 +373,12 @@ def test_s12_frozen_noisy_validation_is_reproducible(tmp_path: Path, monkeypatch
     from dluxshera.ml.torch_data import PairManifestDataset
 
     catalog, registry, sampler = _catalog_registry_sampler(tmp_path)
+    registry = generate_split_registry(
+        catalog,
+        seed=7,
+        science_fractions={"train": 0.67, "validation": 0.33, "test": 0.0},
+        nuisance_fractions={"train": 0.67, "validation": 0.33, "test": 0.0},
+    )
     manifest = generate_frozen_pair_manifest(
         catalog,
         registry,

@@ -458,7 +458,7 @@ def _validate_fisher_scales(
 
 
 def _compute_s10_nominal_full_physical_fim(catalog: SampleCatalog) -> dict[str, Any]:
-    from work.experiments.generate_training_dataset_v3 import (
+    from dluxshera.ml.nominal_fim import (
         compute_s10_nominal_science_fim_source_inputs,
     )
 
