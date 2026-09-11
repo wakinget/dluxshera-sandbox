@@ -2,7 +2,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
+
+
+def _ensure_s10_fim_source_process_start_x64(argv: list[str]) -> None:
+    if not argv or argv[0] != "make-s10-fim-source":
+        return
+    if os.environ.get("JAX_ENABLE_X64") == "1":
+        return
+    env = dict(os.environ)
+    env["JAX_ENABLE_X64"] = "1"
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+_ensure_s10_fim_source_process_start_x64(sys.argv[1:])
 
 from dluxshera.datasets.schema import json_ready, write_json
 from dluxshera.ml import (

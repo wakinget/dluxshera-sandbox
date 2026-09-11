@@ -19,16 +19,24 @@ from dluxshera.ml import (
     load_study_prescription,
     resolve_study_experiment_config,
     science_eigenbasis_content_sha256,
+    validate_noisy_eval_artifact_for_study,
     validate_science_eigenbasis_expectations,
     write_pair_manifest,
     write_split_registry,
 )
 import dluxshera.ml.eigenbasis as eigenbasis_module
+from dluxshera.ml.studies import (
+    validate_noisy_eval_artifact_for_study as studies_validate_noisy_eval_artifact_for_study,
+)
 from dluxshera.ml.eigenbasis import DEFAULT_COORDINATE_CONVENTION
 from dluxshera.ml.noise import NoiseConfig, apply_pair_noise, noise_config_identity, pair_noise_side_seeds
 from tests.ml.test_catalog_splits_pairs import _write_prepared_fixture
 
 ROOT = Path("work/experiments/ml")
+
+
+def test_noisy_eval_validator_is_exported_from_ml_package() -> None:
+    assert validate_noisy_eval_artifact_for_study is studies_validate_noisy_eval_artifact_for_study
 
 
 def test_s10_s12_audit_expands_to_21_runs_with_one_clean_reference_cohort() -> None:
@@ -223,6 +231,29 @@ def test_s10_nominal_fim_source_reproduces_prepared_fisher_scales(
             strength=0.5,
         )
         assert not np.allclose(weights, np.ones_like(weights))
+
+
+def test_make_s10_fim_source_reexecs_with_process_start_x64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from work.experiments.ml import materialize_study_artifacts as materializer
+
+    calls = []
+
+    def fake_execvpe(file, args, env):
+        calls.append((file, args, env))
+        raise RuntimeError("reexec")
+
+    monkeypatch.delenv("JAX_ENABLE_X64", raising=False)
+    monkeypatch.setattr(materializer.os, "execvpe", fake_execvpe)
+    monkeypatch.setattr(materializer.sys, "argv", ["materialize_study_artifacts.py", "make-s10-fim-source"])
+
+    with pytest.raises(RuntimeError, match="reexec"):
+        materializer._ensure_s10_fim_source_process_start_x64(["make-s10-fim-source"])
+
+    assert calls
+    assert calls[0][1] == [materializer.sys.executable, "materialize_study_artifacts.py", "make-s10-fim-source"]
+    assert calls[0][2]["JAX_ENABLE_X64"] == "1"
 
 
 def test_s12_noise_config_identity_records_physical_ordering() -> None:
