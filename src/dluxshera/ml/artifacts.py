@@ -37,6 +37,7 @@ class ArtifactLock:
     split_registry: Mapping[str, Any]
     scaler: Mapping[str, Any]
     pair_manifests: Mapping[str, Mapping[str, Any]]
+    auxiliary_artifacts: Mapping[str, Mapping[str, Any]]
     nuisance_assignment: Mapping[str, Any]
     source_identity: Mapping[str, Any]
     recipe_identities: Mapping[str, Any]
@@ -53,6 +54,9 @@ class ArtifactLock:
             "scaler": dict(self.scaler),
             "pair_manifests": {
                 str(key): dict(value) for key, value in self.pair_manifests.items()
+            },
+            "auxiliary_artifacts": {
+                str(key): dict(value) for key, value in self.auxiliary_artifacts.items()
             },
             "nuisance_assignment": dict(self.nuisance_assignment),
             "source_identity": dict(self.source_identity),
@@ -77,6 +81,10 @@ class ArtifactLock:
             pair_manifests={
                 str(key): dict(value)
                 for key, value in dict(payload.get("pair_manifests", {})).items()
+            },
+            auxiliary_artifacts={
+                str(key): dict(value)
+                for key, value in dict(payload.get("auxiliary_artifacts", {})).items()
             },
             nuisance_assignment=dict(payload.get("nuisance_assignment", {})),
             source_identity=dict(payload.get("source_identity", {})),
@@ -163,6 +171,10 @@ def build_artifact_lock(
         },
         scaler=scaler_identity,
         pair_manifests=pair_identities,
+        auxiliary_artifacts={
+            str(key): dict(value)
+            for key, value in dict(study.get("auxiliary_artifacts", {}) or {}).items()
+        },
         nuisance_assignment={
             "nuisance_group_policy": split_registry.nuisance_group_policy,
             "nuisance_assignments": dict(sorted(split_registry.nuisance_assignments.items())),

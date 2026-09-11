@@ -1,0 +1,87 @@
+study_id: S11
+title: V4 Pairwise Physics Consistency
+
+dataset: {artifact_id: PREP-V4-v1}
+split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+artifact_lock: {required: true, lock_id: S11-ARTIFACT-LOCK-v1}
+
+shared_reference:
+  study_id: S10
+  experiment_id: S10-E01
+  run_ids: [S10-E01-R001, S10-E01-R002, S10-E01-R003]
+  role: clean_reference_cohort
+  retrain_in_this_study: false
+
+pair_policies:
+  s11_v4_family_a:
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    dataset_families: [joint_full_v4]
+    max_sampling_attempts: 4000
+
+evaluation_artifacts:
+  validation:
+    artifact_id: S11-VALIDATION-PAIRS-v1
+    pair_policy_id: s11_v4_family_a
+    split: validation
+    seed: 11001
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  test:
+    artifact_id: S11-TEST-PAIRS-v1
+    pair_policy_id: s11_v4_family_a
+    split: test
+    seed: 11002
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: test, nuisance_split: train}
+
+defaults: &defaults
+  device: cuda:0
+  pair_policy_id: s11_v4_family_a
+  validation_artifact: validation
+  test_artifact: test
+  require_frozen_validation_manifest: true
+  evaluate_test: false
+  shared_reference_runs: [S10-E01-R001, S10-E01-R002, S10-E01-R003]
+  model: {channels: [32, 64, 128, 256], embedding_dim: 256, encoder_hidden_dim: 512, head_hidden_dim: 512, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+  image_scaling: {mode: global_max_abs, artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+  noise: {enabled: false, apply_to: observation}
+  validation_noise: {enabled: false, apply_to: observation}
+  science_loss: {mode: ordinary, strength: 0.0, eigenvalue_floor: 1.0e-6, weight_cap: 10.0}
+  training:
+    epochs: 600
+    batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: adamw
+    pairs_per_epoch: 16384
+    num_workers: 4
+    shard_cache_size: 4
+    lr_scheduler: {name: none}
+    early_stopping:
+      enabled: true
+      monitor: validation_loss
+      min_epochs: 120
+      patience: 80
+      min_delta_relative: 0.0005
+  evaluation: {fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]}
+  hpc:
+    profile: gattaca2_long
+
+experiments:
+  S11-E01:
+    <<: *defaults
+    description: Supervised science loss plus explicit reverse-pair antisymmetry.
+    pair_consistency: {antisymmetry_weight: 0.1, identity_weight: 0.0, noise_consistency_weight: 0.0}
+    seeds: [11, 23, 47]
+  S11-E02:
+    <<: *defaults
+    description: Antisymmetry plus low-weight identity constraint f(A,A)=0 and f(B,B)=0.
+    pair_consistency: {antisymmetry_weight: 0.1, identity_weight: 0.02, noise_consistency_weight: 0.0}
+    seeds: [11, 23, 47]

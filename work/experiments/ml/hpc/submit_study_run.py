@@ -94,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--test-manifest", type=Path, default=None)
     parser.add_argument("--audit-manifest", action="append", default=[])
     parser.add_argument("--artifact-lock", type=Path, default=None)
+    parser.add_argument("--eigenbasis-artifact", type=Path, default=None)
+    parser.add_argument("--noisy-eval-artifact", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--persist-dir", type=Path, default=None)
     parser.add_argument("--persist-artifact-root", type=Path, default=None)
@@ -154,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
                 "ML_TEST_MANIFEST": _path_arg(args.test_manifest),
                 "ML_AUDIT_MANIFESTS": audit_env,
                 "ML_ARTIFACT_LOCK": _path_arg(args.artifact_lock),
+                "ML_EIGENBASIS_ARTIFACT": _path_arg(args.eigenbasis_artifact),
+                "ML_NOISY_EVAL_ARTIFACT": _path_arg(args.noisy_eval_artifact),
                 "ML_RUN_DIR": _path_arg(run_dir),
                 "ML_PERSIST_DIR": None if args.persist_dir is None else str((args.persist_dir / row.study_id / row.experiment_id / row.run_id).expanduser().resolve()),
                 "ML_PERSIST_ARTIFACT_ROOT": _path_arg(args.persist_artifact_root),
@@ -189,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
                         "test_artifact": row.test_artifact,
                         "artifact_lock_id": row.artifact_lock_id,
                         "audit_artifacts": list(row.audit_artifacts),
+                        "auxiliary_artifacts": dict(row.auxiliary_artifacts),
+                        "shared_reference_runs": list(row.shared_reference_runs),
                     },
                 }
             )
@@ -285,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         "ML_TEST_MANIFEST": _path_arg(args.test_manifest),
         "ML_AUDIT_MANIFESTS": audit_env,
         "ML_ARTIFACT_LOCK": _path_arg(args.artifact_lock),
+        "ML_EIGENBASIS_ARTIFACT": _path_arg(args.eigenbasis_artifact),
+        "ML_NOISY_EVAL_ARTIFACT": _path_arg(args.noisy_eval_artifact),
         "ML_RUN_DIR": _path_arg(args.run_dir),
         "ML_PERSIST_DIR": _path_arg(args.persist_dir),
         "ML_PERSIST_ARTIFACT_ROOT": _path_arg(args.persist_artifact_root),

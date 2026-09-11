@@ -8,6 +8,7 @@ from .catalog import SampleCatalog
 
 __all__ = [
     "compute_capture_metrics",
+    "compute_eigenmode_metrics",
     "compute_regression_metrics",
     "metrics_by_group",
     "transform_z_to_physical",
@@ -148,6 +149,62 @@ def compute_capture_metrics(
         "remaining_distance_threshold_fractions": {
             str(int(threshold)): float(np.mean(d1 <= threshold)) if d1.size else None
             for threshold in thresholds
+        },
+    }
+
+
+def compute_eigenmode_metrics(
+    y_pred_z: np.ndarray,
+    y_true_z: np.ndarray,
+    *,
+    eigenvectors: np.ndarray,
+    eigenvalues: Sequence[float],
+) -> dict[str, Any]:
+    """Compute validation diagnostics after projecting z-coordinate errors into eigenmodes."""
+    pred = np.asarray(y_pred_z, dtype=np.float64)
+    truth = np.asarray(y_true_z, dtype=np.float64)
+    vectors = np.asarray(eigenvectors, dtype=np.float64)
+    values = np.asarray(eigenvalues, dtype=np.float64)
+    if pred.shape != truth.shape or pred.ndim != 2:
+        raise ValueError("Predictions and truth must be same-shape 2D arrays.")
+    if vectors.shape != (pred.shape[1], pred.shape[1]):
+        raise ValueError("eigenvectors must have shape (science_dim, science_dim).")
+    if values.shape != (pred.shape[1],):
+        raise ValueError("eigenvalues length must match science dimension.")
+    coeff = (pred - truth) @ vectors
+    per_mode_mse = np.mean(coeff**2, axis=0) if coeff.size else np.zeros((pred.shape[1],), dtype=float)
+    per_mode_rmse = np.sqrt(per_mode_mse)
+    n = int(per_mode_rmse.shape[0])
+    third = max(n // 3, 1)
+
+    def group_payload(indices: np.ndarray) -> dict[str, Any]:
+        if indices.size == 0:
+            return {"mode_count": 0, "rmse": None, "mse": None}
+        mse = float(np.mean(per_mode_mse[indices]))
+        return {
+            "mode_count": int(indices.size),
+            "first_mode_index": int(indices[0]),
+            "last_mode_index": int(indices[-1]),
+            "mse": mse,
+            "rmse": float(np.sqrt(mse)),
+            "eigenvalue_min": float(np.min(values[indices])),
+            "eigenvalue_max": float(np.max(values[indices])),
+        }
+
+    strong = np.arange(0, third, dtype=int)
+    weak = np.arange(max(n - third, 0), n, dtype=int)
+    middle = np.arange(third, max(n - third, third), dtype=int)
+    if middle.size == 0:
+        middle = np.arange(0, n, dtype=int)
+    return {
+        "schema_version": "dluxshera_ml_eigenmode_metrics/1",
+        "sample_count": int(pred.shape[0]),
+        "coordinate_convention": "error_z_eigen = Q^T (pred_z - true_z), with eigenvectors stored as columns",
+        "per_mode_rmse": {str(idx): float(value) for idx, value in enumerate(per_mode_rmse)},
+        "mode_groups": {
+            "strong": group_payload(strong),
+            "middle": group_payload(middle),
+            "weak": group_payload(weak),
         },
     }
 

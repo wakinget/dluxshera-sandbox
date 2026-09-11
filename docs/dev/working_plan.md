@@ -963,3 +963,26 @@ Status: planned and repository-prepared, not cluster-executed.
   loss as the checkpoint-selection objective.
 
 Detailed plan and command surface: `docs/dev/notes/ml_s06_s09_campaign_plan.md`.
+
+## 29) S10-S12 ML Campaign Bring-Up
+
+Status: planned and repository-prepared, not cluster-executed.
+
+- Added tracked S10-S12 study prescriptions under `work/experiments/ml/s10`
+  through `work/experiments/ml/s12`.
+- The new wave expands to 21 runs: 3 shared clean S10 reference runs, 6 S10
+  weighted-loss runs, 6 S11 consistency runs, and 6 S12 noise-robustness runs.
+- S11 and S12 reference S10-E01 rather than retraining duplicate clean
+  baselines.
+- Added fixed science-eigenbasis artifact support for S10. S10-v1 uses the
+  PREP-V4 Fisher-scaled science coordinate: a declared physical-theta source
+  FIM is transformed as `F_z = D @ F_theta @ D` before eigendecomposition, with
+  registration nuisance parameters held fixed. A nuisance-Schur basis remains a
+  future comparison.
+- Added fixed noisy-validation recipe identity for S12. S12-v1 is the SHERA
+  photon-noise observation condition only: photon noise is enabled, read noise
+  and dark current are disabled, and full detector noise remains future work.
+- Gattaca2 remains a launch target with longer tracked walltime than LS6; GPU
+  partition/GRES arguments remain launch-time scheduler options.
+
+Detailed plan and command surface: `docs/dev/notes/ml_s10_s12_campaign_plan.md`.

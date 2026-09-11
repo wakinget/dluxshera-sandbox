@@ -1,0 +1,125 @@
+study_id: S12
+title: V4 Photon-Noise Observation Robustness
+
+dataset: {artifact_id: PREP-V4-v1}
+split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+artifact_lock: {required: true, lock_id: S12-ARTIFACT-LOCK-v1}
+
+shared_reference:
+  study_id: S10
+  experiment_id: S10-E01
+  run_ids: [S10-E01-R001, S10-E01-R002, S10-E01-R003]
+  role: clean_reference_cohort
+  retrain_in_this_study: false
+
+auxiliary_artifacts:
+  noisy_validation_recipe:
+    artifact_id: S12-PHOTON-NOISE-VALIDATION-v1
+    schema_version: dluxshera_ml_noisy_eval_recipe/1
+    underlying_validation_artifact: S12-VALIDATION-PAIRS-v1
+    noise_model_identity: SHERA-PHOTON-NOISE-OBSERVATION-v1
+    condition: SHERA photon-noise observation condition
+    path_supplied_at_launch_by: --noisy-eval-artifact
+    deterministic_seed: 12031
+
+pair_policies:
+  s12_v4_family_a:
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    dataset_families: [joint_full_v4]
+    max_sampling_attempts: 4000
+
+evaluation_artifacts:
+  validation:
+    artifact_id: S12-VALIDATION-PAIRS-v1
+    pair_policy_id: s12_v4_family_a
+    split: validation
+    seed: 12001
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  test:
+    artifact_id: S12-TEST-PAIRS-v1
+    pair_policy_id: s12_v4_family_a
+    split: test
+    seed: 12002
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: test, nuisance_split: train}
+
+photon_noise_observation: &photon_noise_observation
+  enabled: true
+  apply_to: observation
+  noise_model: shera_observation
+  photon_noise: true
+  read_noise: false
+  dark_current: false
+  detector_model: null
+  exposure_time_s: null
+  bright_threshold: 100.0
+  seed: 12030
+  training_dynamic: true
+  negative_policy: clip
+
+fixed_noisy_validation: &fixed_noisy_validation
+  enabled: true
+  apply_to: observation
+  noise_model: shera_observation
+  photon_noise: true
+  read_noise: false
+  dark_current: false
+  detector_model: null
+  exposure_time_s: null
+  bright_threshold: 100.0
+  seed: 12031
+  training_dynamic: false
+  negative_policy: clip
+
+defaults: &defaults
+  device: cuda:0
+  pair_policy_id: s12_v4_family_a
+  validation_artifact: validation
+  test_artifact: test
+  require_frozen_validation_manifest: true
+  evaluate_test: false
+  shared_reference_runs: [S10-E01-R001, S10-E01-R002, S10-E01-R003]
+  model: {channels: [32, 64, 128, 256], embedding_dim: 256, encoder_hidden_dim: 512, head_hidden_dim: 512, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+  image_scaling: {mode: global_max_abs, artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+  noise: *photon_noise_observation
+  validation_noise: *fixed_noisy_validation
+  science_loss: {mode: ordinary, strength: 0.0, eigenvalue_floor: 1.0e-6, weight_cap: 10.0}
+  training:
+    epochs: 600
+    batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: adamw
+    pairs_per_epoch: 16384
+    num_workers: 4
+    shard_cache_size: 4
+    lr_scheduler: {name: none}
+    early_stopping:
+      enabled: true
+      monitor: validation_loss
+      min_epochs: 120
+      patience: 80
+      min_delta_relative: 0.0005
+  evaluation: {fisher_distance_bin_edges: [0, 100, 250, 500, 1000, 2000, 5000]}
+  hpc:
+    profile: gattaca2_long
+
+experiments:
+  S12-E01:
+    <<: *defaults
+    description: Dynamic physical photon noise during training; fixed photon-noise validation.
+    pair_consistency: {antisymmetry_weight: 0.0, identity_weight: 0.0, noise_consistency_weight: 0.0}
+    seeds: [11, 23, 47]
+  S12-E02:
+    <<: *defaults
+    description: Dynamic physical photon noise plus modest independent-realization prediction consistency.
+    pair_consistency: {antisymmetry_weight: 0.0, identity_weight: 0.0, noise_consistency_weight: 0.05}
+    seeds: [11, 23, 47]

@@ -28,9 +28,26 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in no-torch e
 from dluxshera.datasets.schema import read_json, write_json
 
 from .catalog import SampleCatalog, load_sample_catalog
-from .metrics import compute_capture_metrics, compute_regression_metrics, metrics_by_group
+from .eigenbasis import (
+    ScienceEigenbasis,
+    load_science_eigenbasis,
+    validate_science_eigenbasis_expectations,
+)
+from .losses import (
+    PairConsistencyConfig,
+    ScienceLossConfig,
+    ScienceLossHelper,
+    pair_consistency_losses,
+)
+from .metrics import (
+    compute_capture_metrics,
+    compute_eigenmode_metrics,
+    compute_regression_metrics,
+    metrics_by_group,
+)
 from .models import build_pairwise_correction_model, count_parameters
-from .noise import NoiseConfig
+from .noise import NoiseConfig, noise_config_identity
+from .noisy_eval import load_noisy_eval_recipe, validate_noisy_eval_recipe
 from .pairs import (
     PairManifest,
     PairPolicy,
@@ -52,6 +69,7 @@ __all__ = [
     "default_s01_e00_config",
     "default_s01_e01_config",
     "load_run_config",
+    "prepare_science_loss_helper",
     "resolve_device",
     "train_pairwise_correction",
     "validate_fisher_distance_bin_edges",
@@ -613,6 +631,11 @@ def _move_batch(batch: Mapping[str, Any], device: torch.device) -> tuple[torch.T
     return image_a, image_b, target
 
 
+def _optional_batch_tensor(batch: Mapping[str, Any], key: str, device: torch.device) -> torch.Tensor | None:
+    value = batch.get(key)
+    return None if value is None else value.to(device)
+
+
 def _nuisance_task_config(config: Mapping[str, Any]) -> dict[str, Any]:
     cfg = dict(config.get("nuisance_task", config.get("multitask", {})) or {})
     cfg.setdefault("enabled", False)
@@ -681,6 +704,8 @@ def _evaluate(
     catalog: SampleCatalog,
     fisher_distance_bin_edges: Sequence[float] | None = None,
     nuisance_scale: torch.Tensor | None = None,
+    eigenbasis: ScienceEigenbasis | None = None,
+    consistency_config: PairConsistencyConfig | None = None,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     model.eval()
     preds: list[np.ndarray] = []
@@ -693,6 +718,9 @@ def _evaluate(
     distances: list[float] = []
     nuisance_preds: list[np.ndarray] = []
     nuisance_truths: list[np.ndarray] = []
+    antisymmetry_loss_sum = 0.0
+    identity_loss_sum = 0.0
+    consistency_seen = 0
     with torch.inference_mode():
         for batch in loader:
             image_a, image_b, target = _move_batch(batch, device)
@@ -708,6 +736,29 @@ def _evaluate(
                 pred = model(image_a, image_b)
             preds.append(pred.detach().cpu().numpy())
             truths.append(target.detach().cpu().numpy())
+            batch_n = int(target.shape[0])
+            if consistency_config is not None and (
+                consistency_config.antisymmetry_weight > 0.0
+                or consistency_config.identity_weight > 0.0
+            ):
+                aux_losses = pair_consistency_losses(
+                    model,
+                    image_a,
+                    image_b,
+                    pred_ab=pred,
+                    config=PairConsistencyConfig(
+                        antisymmetry_weight=1.0
+                        if consistency_config.antisymmetry_weight > 0.0
+                        else 0.0,
+                        identity_weight=1.0
+                        if consistency_config.identity_weight > 0.0
+                        else 0.0,
+                        noise_consistency_weight=0.0,
+                    ),
+                )
+                antisymmetry_loss_sum += float(aux_losses["antisymmetry"].detach().cpu()) * batch_n
+                identity_loss_sum += float(aux_losses["identity"].detach().cpu()) * batch_n
+                consistency_seen += batch_n
             pair_ids.extend(str(v) for v in batch["pair_record_id"])
             eval_slices.extend(str(v) for v in batch["eval_slice"])
             pair_families.extend(str(v) for v in batch["pair_family"])
@@ -754,6 +805,27 @@ def _evaluate(
         catalog=catalog,
         bin_edges=fisher_distance_bin_edges,
     )
+    if eigenbasis is not None:
+        metrics["by_eigenmode"] = compute_eigenmode_metrics(
+            y_pred,
+            y_true,
+            eigenvectors=eigenbasis.eigenvectors,
+            eigenvalues=eigenbasis.eigenvalues,
+        )
+        metrics["eigenbasis_identity"] = {
+            "artifact_id": eigenbasis.artifact_id,
+            "content_sha256": eigenbasis.content_identity.get("sha256"),
+            "coordinate_convention": eigenbasis.coordinate_convention,
+            "source_matrix_coordinate_space": eigenbasis.source_matrix_coordinate_space,
+            "eigenbasis_coordinate_space": eigenbasis.eigenbasis_coordinate_space,
+        }
+    if consistency_seen > 0:
+        metrics["consistency"] = {
+            "schema_version": "dluxshera_ml_consistency_metrics/1",
+            "sample_count": int(consistency_seen),
+            "antisymmetry_mse": antisymmetry_loss_sum / max(consistency_seen, 1),
+            "identity_mse": identity_loss_sum / max(consistency_seen, 1),
+        }
     if nuisance_preds:
         n_pred = np.concatenate(nuisance_preds, axis=0)
         n_true = np.concatenate(nuisance_truths, axis=0)
@@ -837,6 +909,65 @@ def _capture_metrics_by_group(
     return out
 
 
+def _science_validation_losses(
+    predictions: Mapping[str, np.ndarray],
+    *,
+    science_loss_helper: ScienceLossHelper,
+    eigenbasis: ScienceEigenbasis | None,
+    unweighted_metric_loss: float,
+) -> dict[str, float]:
+    unweighted = float(unweighted_metric_loss)
+    if not science_loss_helper.uses_eigenbasis:
+        return {"selection": unweighted, "unweighted": unweighted, "weighted": unweighted}
+    if eigenbasis is None:
+        raise ValueError("Weighted science validation loss requires eigenbasis.")
+    y_pred = np.asarray(predictions["y_pred_z"], dtype=np.float64)
+    y_true = np.asarray(predictions["y_true_z"], dtype=np.float64)
+    coeff = (y_pred - y_true) @ eigenbasis.eigenvectors
+    per_mode = np.mean(coeff**2, axis=0) if coeff.size else np.zeros((eigenbasis.eigenvalues.size,), dtype=float)
+    weights = science_loss_helper.mode_weights.detach().cpu().numpy().astype(np.float64)
+    weighted = float(np.mean(per_mode * weights)) if per_mode.size else 0.0
+    return {"selection": weighted, "unweighted": unweighted, "weighted": weighted}
+
+
+def prepare_science_loss_helper(
+    *,
+    config: Mapping[str, Any],
+    catalog: SampleCatalog,
+    device: torch.device | str | None,
+    eigenbasis_path: Path | None = None,
+) -> tuple[ScienceLossHelper, ScienceEigenbasis | None]:
+    """Resolve and validate the science loss before model/training setup."""
+    science_loss_payload = dict(config.get("science_loss", {}) or {})
+    science_loss_config = ScienceLossConfig.from_dict(science_loss_payload)
+    if science_loss_config.mode == "ordinary":
+        return ScienceLossHelper(science_loss_config, device=device), None
+
+    configured_path = science_loss_payload.get("eigenbasis_path")
+    basis_path = eigenbasis_path or (
+        None if configured_path in (None, "") else Path(str(configured_path))
+    )
+    if basis_path is None:
+        raise ValueError("Weighted science_loss modes require an explicit eigenbasis artifact path.")
+    eigenbasis = load_science_eigenbasis(basis_path, catalog=catalog)
+
+    aux = config.get("auxiliary_artifacts", {})
+    expected = (
+        dict(aux.get("science_eigenbasis", {}) or {})
+        if isinstance(aux, Mapping)
+        else {}
+    )
+    direct_expected = science_loss_payload.get("eigenbasis", {})
+    if isinstance(direct_expected, Mapping):
+        expected = {**expected, **dict(direct_expected)}
+    validate_science_eigenbasis_expectations(eigenbasis, expected=expected)
+
+    return (
+        ScienceLossHelper(science_loss_config, eigenbasis=eigenbasis, device=device),
+        eigenbasis,
+    )
+
+
 def validate_fisher_distance_bin_edges(edges: Sequence[float]) -> tuple[float, ...]:
     """Validate finite, strictly increasing Fisher-distance bin edges."""
     values = tuple(float(v) for v in edges)
@@ -862,12 +993,21 @@ def _write_history(path: Path, rows: list[Mapping[str, Any]]) -> None:
         "epoch",
         "train_loss",
         "train_science_loss",
+        "train_science_weighted_loss",
+        "train_science_unweighted_loss",
         "train_nuisance_loss",
+        "train_antisymmetry_loss",
+        "train_identity_loss",
+        "train_noise_consistency_loss",
         "validation_loss",
         "validation_science_loss",
+        "validation_science_weighted_loss",
+        "validation_science_unweighted_loss",
         "validation_nuisance_loss",
         "validation_total_loss",
         "validation_overall_rmse",
+        "validation_antisymmetry_loss",
+        "validation_identity_loss",
         "epoch_seconds",
         "is_best",
         "early_stopping_bad_epochs",
@@ -1096,6 +1236,8 @@ def train_pairwise_correction(
     validation_manifest_path: Path | None = None,
     test_manifest_path: Path | None = None,
     scaler_path: Path | None = None,
+    eigenbasis_path: Path | None = None,
+    noisy_eval_artifact_path: Path | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Run a noninteractive pairwise-correction training job."""
@@ -1129,6 +1271,7 @@ def train_pairwise_correction(
     split_registry = load_split_registry(split_registry_path, catalog=catalog)
     pair_policy = PairPolicy.from_dict(config.get("pair_policy", {}))
     noise_config = NoiseConfig.from_dict(config.get("noise"))
+    validation_noise_config = NoiseConfig.from_dict(config.get("validation_noise"))
     train_indices = _train_indices(catalog, split_registry)
     scaling_cfg = dict(config.get("image_scaling", {}))
     if scaler_path is not None:
@@ -1155,6 +1298,26 @@ def train_pairwise_correction(
         output_dir=output_dir,
         explicit_path=validation_manifest_path,
     )
+    noisy_eval_identity = None
+    aux_artifacts = config.get("auxiliary_artifacts", {})
+    expected_noisy_eval = (
+        dict(aux_artifacts.get("noisy_validation_recipe", {}) or {})
+        if isinstance(aux_artifacts, Mapping)
+        else {}
+    )
+    if expected_noisy_eval:
+        if noisy_eval_artifact_path is None:
+            raise ValueError("Fixed noisy validation requires --noisy-eval-artifact.")
+        noisy_recipe = load_noisy_eval_recipe(noisy_eval_artifact_path)
+        noisy_eval_identity = validate_noisy_eval_recipe(
+            noisy_recipe,
+            study={"study_id": config.get("study_id")},
+            config=config,
+            catalog=catalog,
+            split_registry=split_registry,
+            validation_manifest=validation_manifest,
+            expected=expected_noisy_eval,
+        )
 
     training_cfg = dict(config.get("training", {}))
     epochs = int(training_cfg.get("epochs", 25))
@@ -1187,6 +1350,14 @@ def train_pairwise_correction(
     if not np.isfinite(lambda_nuisance) or lambda_nuisance < 0.0:
         raise ValueError("nuisance_task.lambda_nuisance must be finite and >= 0.")
 
+    science_loss_helper, eigenbasis = prepare_science_loss_helper(
+        config=config,
+        catalog=catalog,
+        device=device,
+        eigenbasis_path=eigenbasis_path,
+    )
+    consistency_config = PairConsistencyConfig.from_dict(config.get("pair_consistency"))
+
     model = build_pairwise_correction_model(
         catalog.science_dim,
         config.get("model"),
@@ -1208,6 +1379,12 @@ def train_pairwise_correction(
         "lambda_nuisance": lambda_nuisance,
         "scale": nuisance_scale_payload,
     }
+    current_identity["science_loss"] = science_loss_helper.metadata()
+    current_identity["pair_consistency"] = consistency_config.to_dict()
+    current_identity["noise"] = noise_config_identity(noise_config)
+    current_identity["validation_noise"] = noise_config_identity(validation_noise_config)
+    if noisy_eval_identity is not None:
+        current_identity["noisy_validation_recipe"] = noisy_eval_identity
     if resume_checkpoint_path is not None:
         checkpoint = _load_training_checkpoint(resume_checkpoint_path, map_location=device)
         _validate_resume_identity(checkpoint=checkpoint, current_identity=current_identity)
@@ -1236,13 +1413,14 @@ def train_pairwise_correction(
         nuisance_split="train",
         scaler=scaler,
         noise_config=noise_config,
+        second_noise_view=consistency_config.noise_consistency_weight > 0.0,
         shard_cache_size=shard_cache_size,
     )
     val_dataset = PairManifestDataset(
         catalog=catalog,
         pair_manifest=validation_manifest,
         scaler=scaler,
-        noise_config=NoiseConfig(enabled=False),
+        noise_config=validation_noise_config,
         shard_cache_size=shard_cache_size,
     )
     train_loader = DataLoader(
@@ -1275,6 +1453,10 @@ def train_pairwise_correction(
         {
             "image_scaling_resolved": scaler.to_dict(),
             "nuisance_task_resolved": current_identity["nuisance_task"],
+            "science_loss_resolved": current_identity["science_loss"],
+            "pair_consistency_resolved": current_identity["pair_consistency"],
+            "validation_noise_resolved": current_identity["validation_noise"],
+            "noisy_validation_recipe_resolved": noisy_eval_identity,
             "training_pair_stream": training_pair_stream,
             "runtime": runtime,
         },
@@ -1302,8 +1484,12 @@ def train_pairwise_correction(
         "training_identity": current_identity,
         "pair_policy": pair_policy.to_dict(),
         "noise": noise_config.to_dict(),
+        "validation_noise": validation_noise_config.to_dict(),
+        "noisy_validation_recipe": noisy_eval_identity,
         "image_scaling": scaler.to_dict(),
         "nuisance_task": current_identity["nuisance_task"],
+        "science_loss": current_identity["science_loss"],
+        "pair_consistency": current_identity["pair_consistency"],
         "model": {
             **dict(config.get("model", {})),
             "nuisance_output_dim": catalog.nuisance_dim if nuisance_enabled else 0,
@@ -1349,7 +1535,11 @@ def train_pairwise_correction(
         train_dataset.set_epoch(epoch)
         running = 0.0
         running_science = 0.0
+        running_science_unweighted = 0.0
         running_nuisance = 0.0
+        running_antisymmetry = 0.0
+        running_identity = 0.0
+        running_noise_consistency = 0.0
         seen = 0
         for batch in train_loader:
             image_a, image_b, target = _move_batch(batch, device)
@@ -1357,37 +1547,79 @@ def train_pairwise_correction(
             if nuisance_enabled:
                 assert nuisance_scale_tensor is not None
                 outputs = model.forward_multitask(image_a, image_b)
-                science_loss = criterion(outputs["science"], target)
+                pred_science = outputs["science"]
+                science_loss, science_diag = science_loss_helper(pred_science, target)
                 nuisance_target = _scale_nuisance_target(
                     batch["nuisance_delta"].to(device),
                     nuisance_scale_tensor,
                 )
                 nuisance_loss = criterion(outputs["nuisance"], nuisance_target)
-                loss = science_loss + lambda_nuisance * nuisance_loss
             else:
-                pred = model(image_a, image_b)
-                science_loss = criterion(pred, target)
+                pred_science = model(image_a, image_b)
+                science_loss, science_diag = science_loss_helper(pred_science, target)
                 nuisance_loss = torch.zeros((), dtype=science_loss.dtype, device=device)
-                loss = science_loss
+            aux_losses = pair_consistency_losses(
+                model,
+                image_a,
+                image_b,
+                image_a_noise_view2=_optional_batch_tensor(batch, "image_a_noise_view2", device),
+                image_b_noise_view2=_optional_batch_tensor(batch, "image_b_noise_view2", device),
+                pred_ab=pred_science,
+                config=consistency_config,
+            )
+            antisymmetry_loss = aux_losses["antisymmetry"]
+            identity_loss = aux_losses["identity"]
+            noise_consistency_loss = aux_losses["noise_consistency"]
+            loss = (
+                science_loss
+                + lambda_nuisance * nuisance_loss
+                + consistency_config.antisymmetry_weight * antisymmetry_loss
+                + consistency_config.identity_weight * identity_loss
+                + consistency_config.noise_consistency_weight * noise_consistency_loss
+            )
             loss.backward()
             optimizer.step()
             batch_n = int(target.shape[0])
             running += float(loss.detach().cpu()) * batch_n
             running_science += float(science_loss.detach().cpu()) * batch_n
+            running_science_unweighted += float(science_diag["ordinary_mse"].detach().cpu()) * batch_n
             running_nuisance += float(nuisance_loss.detach().cpu()) * batch_n
+            running_antisymmetry += float(antisymmetry_loss.detach().cpu()) * batch_n
+            running_identity += float(identity_loss.detach().cpu()) * batch_n
+            running_noise_consistency += float(noise_consistency_loss.detach().cpu()) * batch_n
             seen += batch_n
         train_loss = running / max(seen, 1)
         train_science_loss = running_science / max(seen, 1)
+        train_science_unweighted_loss = running_science_unweighted / max(seen, 1)
         train_nuisance_loss = running_nuisance / max(seen, 1)
+        train_antisymmetry_loss = running_antisymmetry / max(seen, 1)
+        train_identity_loss = running_identity / max(seen, 1)
+        train_noise_consistency_loss = running_noise_consistency / max(seen, 1)
         evaluate_kwargs = {
             "device": device,
             "catalog": catalog,
             "fisher_distance_bin_edges": fisher_distance_bin_edges,
         }
+        if eigenbasis is not None:
+            evaluate_kwargs["eigenbasis"] = eigenbasis
+        if consistency_config.antisymmetry_weight > 0.0 or consistency_config.identity_weight > 0.0:
+            evaluate_kwargs["consistency_config"] = consistency_config
         if nuisance_scale_tensor is not None:
             evaluate_kwargs["nuisance_scale"] = nuisance_scale_tensor
         val_metrics, val_predictions = _evaluate(model, val_loader, **evaluate_kwargs)
-        val_science_loss = float(val_metrics["fisher_overall_rmse"]) ** 2
+        val_science_losses = _science_validation_losses(
+            val_predictions,
+            science_loss_helper=science_loss_helper,
+            eigenbasis=eigenbasis,
+            unweighted_metric_loss=float(val_metrics["fisher_overall_rmse"]) ** 2,
+        )
+        val_science_loss = val_science_losses["selection"]
+        val_metrics["selection_loss"] = {
+            "science_loss": val_science_loss,
+            "science_weighted_loss": val_science_losses["weighted"],
+            "science_unweighted_loss": val_science_losses["unweighted"],
+            "selection_policy": "configured science_loss mode",
+        }
         val_nuisance_loss = 0.0
         if nuisance_enabled and "nuisance" in val_metrics:
             val_nuisance_loss = float(val_metrics["nuisance"]["overall_rmse"]) ** 2
@@ -1411,12 +1643,21 @@ def train_pairwise_correction(
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "train_science_loss": train_science_loss,
+                "train_science_weighted_loss": train_science_loss,
+                "train_science_unweighted_loss": train_science_unweighted_loss,
                 "train_nuisance_loss": train_nuisance_loss if nuisance_enabled else None,
+                "train_antisymmetry_loss": train_antisymmetry_loss,
+                "train_identity_loss": train_identity_loss,
+                "train_noise_consistency_loss": train_noise_consistency_loss,
                 "validation_loss": val_loss,
                 "validation_science_loss": val_science_loss,
+                "validation_science_weighted_loss": val_science_losses["weighted"],
+                "validation_science_unweighted_loss": val_science_losses["unweighted"],
                 "validation_nuisance_loss": val_nuisance_loss if nuisance_enabled else None,
                 "validation_total_loss": val_total_loss,
                 "validation_overall_rmse": val_metrics["fisher_overall_rmse"],
+                "validation_antisymmetry_loss": val_metrics.get("consistency", {}).get("antisymmetry_mse"),
+                "validation_identity_loss": val_metrics.get("consistency", {}).get("identity_mse"),
                 "epoch_seconds": epoch_seconds,
                 "is_best": is_best,
                 "early_stopping_bad_epochs": early_stopping_state.bad_epochs,
@@ -1433,6 +1674,8 @@ def train_pairwise_correction(
             "config": _checkpoint_metadata_mapping(resolved_config),
             "image_scaling": _checkpoint_metadata_mapping(scaler.to_dict()),
             "nuisance_task": _checkpoint_metadata_mapping(current_identity["nuisance_task"]),
+            "science_loss": _checkpoint_metadata_mapping(current_identity["science_loss"]),
+            "pair_consistency": _checkpoint_metadata_mapping(current_identity["pair_consistency"]),
             "validation_metrics": _checkpoint_metadata_mapping(val_metrics),
             "best_validation_loss": early_stopping_state.absolute_best_loss,
             "best_epoch": early_stopping_state.best_epoch,

@@ -97,7 +97,11 @@ cluster-qualified strings with extra fields, fails instead of guessing.
 ## Site Notes
 
 Gattaca2 keeps account `shera_hpc`, side-local scratch conventions, and
-externally selectable GPU scheduler arguments.
+externally selectable GPU scheduler arguments. The tracked Gattaca2 profile
+uses 24 hours, which is intentionally longer than the 8-hour LS6 profile. If a
+specific Gattaca2 GPU partition has a different walltime limit, adjust the
+launch-time scheduler option/profile for that submission; do not change
+scientific artifact IDs or prepared-data locks to encode a scheduler limit.
 
 Lonestar6 uses account `JPL-PUB`, partition `gpu-a100-small`, 1 node, 1 task,
 8 CPUs per task, and 8 hours.  Do not request `--mem` or a normal GPU `--gres`
@@ -508,3 +512,99 @@ To submit one selected row, use the same command plus
 `--experiment-id <ID> --run-id <ID-RNNN> --submit-plan`. To retry or resume one
 row, use the same selected-row command with either `--overwrite` or
 `--resume-checkpoint <run-dir>/checkpoint_last.pt`.
+
+## S10-S12 Gattaca2 Preview Surface
+
+S10-S12 use the same generic materialization, preflight, preview, and
+submission machinery as S06-S09. Do not run `--submit-plan` until the preview
+and preflight outputs have been inspected by the launch operator.
+
+Repository audit:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py audit-study \
+  --study work/experiments/ml/s10/study.yaml \
+  --study work/experiments/ml/s11/study.yaml \
+  --study work/experiments/ml/s12/study.yaml
+```
+
+Expected output: S10 = 9, S11 = 6, S12 = 6, total = 21, and
+`all_evaluate_test_false: true`.
+
+Materialize the S10-v1 nominal physical-theta science FIM source by recomputing
+the full nominal science FIM with the V3/V4 Fisher-scale loss convention. This
+writes the science-only physical FIM with `coordinate_space: physical_theta`,
+derives its diagonal Fisher sigmas, compares those sigmas to the authoritative
+PREP-V4 scales, and records the transformed Fisher-scaled-z sanity summary:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-s10-fim-source \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --out "$GATTACA_SCRATCH/artifacts/S10/s10_science_fim_source.json"
+```
+
+Materialize S10 eigenbasis from the coordinate-declared science FIM source:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-eigenbasis \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --matrix-json "$GATTACA_SCRATCH/artifacts/S10/s10_science_fim_source.json" \
+  --artifact-id S10-V4-SCIENCE-FIM-EIGENBASIS-v1 \
+  --out "$GATTACA_SCRATCH/artifacts/S10/S10-V4-SCIENCE-FIM-EIGENBASIS-v1.json"
+```
+
+Materialize pair manifests for each new study:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-pairs \
+  --study work/experiments/ml/s10/study.yaml \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --output-root "$GATTACA_SCRATCH/artifacts" \
+  --artifact all
+```
+
+Repeat the same `make-pairs` command with `s11/study.yaml` and
+`s12/study.yaml`.
+
+Freeze the S12 noisy-validation recipe after the clean S12 validation pairs are
+materialized:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/materialize_study_artifacts.py make-noisy-eval \
+  --study work/experiments/ml/s12/study.yaml \
+  --experiment-id S12-E01 \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --pair-manifest "$GATTACA_SCRATCH/artifacts/S12/validation_pairs/S12-VALIDATION-PAIRS-v1" \
+  --artifact-id S12-PHOTON-NOISE-VALIDATION-v1 \
+  --out "$GATTACA_SCRATCH/artifacts/S12/S12-PHOTON-NOISE-VALIDATION-v1.json"
+```
+
+S10 plan preview on Gattaca2:
+
+```bash
+python work/experiments/ml/hpc/submit_study_run.py \
+  --site gattaca2 \
+  --study work/experiments/ml/s10/study.yaml \
+  --repo-root "$REPO_ROOT" \
+  --conda-prefix <cuda-pytorch-env> \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --scaler "$GATTACA_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --validation-manifest "$GATTACA_SCRATCH/artifacts/S10/validation_pairs/S10-VALIDATION-PAIRS-v1" \
+  --test-manifest "$GATTACA_SCRATCH/artifacts/S10/test_pairs/S10-TEST-PAIRS-v1" \
+  --artifact-lock "$GATTACA_SCRATCH/artifacts/S10/S10-ARTIFACT-LOCK-v1.json" \
+  --eigenbasis-artifact "$GATTACA_SCRATCH/artifacts/S10/S10-V4-SCIENCE-FIM-EIGENBASIS-v1.json" \
+  --run-dir "$GATTACA_SCRATCH/runs" \
+  --extra-sbatch-arg=--partition=<gpu_partition> \
+  --extra-sbatch-arg=--gres=<gpu_resource> \
+  --plan-preview
+```
+
+For S11 and S12 previews, use their study paths and their own validation/test
+manifests and locks. S11 does not need `--eigenbasis-artifact`; S12 must include
+`--noisy-eval-artifact "$GATTACA_SCRATCH/artifacts/S12/S12-PHOTON-NOISE-VALIDATION-v1.json"`.
+S12 is the SHERA photon-noise observation condition: photon noise is enabled,
+read noise and dark current remain disabled, and noise is applied in count
+space before `IntensityScaler`.

@@ -55,6 +55,12 @@ fi
 if [[ -n "${ML_ARTIFACT_LOCK:-}" ]]; then
   preflight_args+=(--artifact-lock "$ML_ARTIFACT_LOCK")
 fi
+if [[ -n "${ML_EIGENBASIS_ARTIFACT:-}" ]]; then
+  preflight_args+=(--eigenbasis-artifact "$ML_EIGENBASIS_ARTIFACT")
+fi
+if [[ -n "${ML_NOISY_EVAL_ARTIFACT:-}" ]]; then
+  preflight_args+=(--noisy-eval-artifact "$ML_NOISY_EVAL_ARTIFACT")
+fi
 if [[ -n "${ML_SCALER:-}" ]]; then
   preflight_args+=(--scaler "$ML_SCALER")
 fi
@@ -108,6 +114,12 @@ if [[ "${ML_OVERWRITE:-0}" == "1" ]]; then
 fi
 if [[ -n "${ML_ARTIFACT_LOCK:-}" ]]; then
   train_args+=(--artifact-lock "$ML_ARTIFACT_LOCK")
+fi
+if [[ -n "${ML_EIGENBASIS_ARTIFACT:-}" ]]; then
+  train_args+=(--eigenbasis-artifact "$ML_EIGENBASIS_ARTIFACT")
+fi
+if [[ -n "${ML_NOISY_EVAL_ARTIFACT:-}" ]]; then
+  train_args+=(--noisy-eval-artifact "$ML_NOISY_EVAL_ARTIFACT")
 fi
 if [[ -n "${ML_SCALER:-}" ]]; then
   train_args+=(--scaler "$ML_SCALER")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from dluxshera.ml import PairPolicy, generate_split_registry, load_sample_catalog, write_split_registry
+from dluxshera.ml import (
+    PairPolicy,
+    build_science_eigenbasis,
+    generate_split_registry,
+    load_sample_catalog,
+    write_science_eigenbasis,
+    write_split_registry,
+)
 from dluxshera.datasets.schema import read_json
 import dluxshera.ml.training as training_module
 from dluxshera.ml.models import build_pairwise_correction_model, count_parameters
@@ -17,6 +25,7 @@ from dluxshera.ml.training import (
     CHECKPOINT_SCHEMA_VERSION,
     default_s01_e00_config,
     default_s01_e01_config,
+    prepare_science_loss_helper,
     resolve_device,
     train_pairwise_correction,
 )
@@ -74,6 +83,66 @@ def _tiny_training_inputs(tmp_path: Path) -> tuple[Path, Path, dict]:
     config["training"]["num_workers"] = 0
     config["validation"]["pairs_per_slice"] = 4
     return prepared, split_path, config
+
+
+def test_science_loss_runtime_setup_loads_weighted_eigenbasis_before_helper(tmp_path: Path) -> None:
+    prepared, _, config = _tiny_training_inputs(tmp_path)
+    catalog = load_sample_catalog(prepared)
+
+    ordinary_helper, ordinary_basis = prepare_science_loss_helper(
+        config=config,
+        catalog=catalog,
+        device="cpu",
+    )
+    assert ordinary_helper.uses_eigenbasis is False
+    assert ordinary_basis is None
+
+    basis = build_science_eigenbasis(
+        artifact_id="S10-V4-SCIENCE-FIM-EIGENBASIS-v1",
+        parameter_labels=catalog.parameter_labels,
+        curvature_matrix=[[1.0, 0.25], [0.25, 1.0]],
+        source_matrix_coordinate_space="physical_theta",
+        fisher_scales=catalog.fisher_sigmas,
+        source_provenance={"source_artifact_id": "s10_science_fim_source"},
+    )
+    basis_path = tmp_path / "basis.json"
+    write_science_eigenbasis(basis_path, basis)
+
+    weighted_config = copy.deepcopy(config)
+    weighted_config["science_loss"] = {
+        "mode": "strong_mode_weighted",
+        "strength": 0.5,
+        "eigenvalue_floor": 1.0e-6,
+        "weight_cap": 10.0,
+        "eigenbasis": {"artifact_id": basis.artifact_id},
+    }
+    weighted_config["auxiliary_artifacts"] = {
+        "science_eigenbasis": {
+            "artifact_id": basis.artifact_id,
+            "schema_version": "dluxshera_ml_science_eigenbasis/1",
+            "source_matrix_coordinate_space": "physical_theta",
+            "eigenbasis_coordinate_space": "prepared_v4_fisher_scaled_science_delta",
+            "coordinate_convention": "delta_z_science = z_B - z_A in prepared-catalog parameter order",
+            "source_fim_artifact_id": "s10_science_fim_source",
+        }
+    }
+    weighted_helper, weighted_basis = prepare_science_loss_helper(
+        config=weighted_config,
+        catalog=catalog,
+        device="cpu",
+        eigenbasis_path=basis_path,
+    )
+    assert weighted_helper.uses_eigenbasis is True
+    assert weighted_basis is not None
+    assert weighted_helper.mode_weights.std().item() > 0.0
+
+    with pytest.raises(ValueError, match="explicit eigenbasis artifact path"):
+        prepare_science_loss_helper(
+            config=weighted_config,
+            catalog=catalog,
+            device="cpu",
+            eigenbasis_path=None,
+        )
 
 
 def _history_epochs(path: Path) -> list[int]:

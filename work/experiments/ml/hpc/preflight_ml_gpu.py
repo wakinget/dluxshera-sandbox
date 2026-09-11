@@ -12,13 +12,18 @@ from dluxshera.datasets.schema import json_ready
 from dluxshera.ml import (
     PairPolicy,
     PairSampler,
+    build_science_mode_weights,
     load_artifact_lock,
     load_intensity_scaler,
+    load_science_eigenbasis,
+    validate_noisy_eval_artifact_for_study,
     load_study_contract_artifacts,
     load_study_prescription,
     persist_study_contract_artifacts,
     resolve_study_experiment_config,
     split_registry_content_sha256,
+    validate_science_eigenbasis_expectations,
+    validate_science_mode_weights_nonuniform,
 )
 from dluxshera.ml.scaling import intensity_scaler_content_sha256
 
@@ -79,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audit-manifest", action="append", default=[])
     parser.add_argument("--audit-manifest-json", default=None)
     parser.add_argument("--artifact-lock", type=Path, default=None)
+    parser.add_argument("--eigenbasis-artifact", type=Path, default=None)
+    parser.add_argument("--noisy-eval-artifact", type=Path, default=None)
     parser.add_argument("--persist-artifact-root", type=Path, default=None)
     parser.add_argument("--device", default=None)
     args = parser.parse_args(argv)
@@ -106,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         validation_manifest_path=args.validation_manifest,
         test_manifest_path=args.test_manifest,
         artifact_lock_path=args.artifact_lock,
+        noisy_eval_artifact_path=args.noisy_eval_artifact,
         experiment_id=args.experiment_id,
         config=config,
         audit_manifest_paths=audit_manifest_paths,
@@ -116,6 +124,64 @@ def main(argv: list[str] | None = None) -> int:
     test_manifest = loaded["test_manifest"]
     audit_manifests = loaded["audit_manifests"]
     pair_policy = PairPolicy.from_dict(config.get("pair_policy", {}))
+    noisy_eval_identity = validate_noisy_eval_artifact_for_study(
+        study=study,
+        config=config,
+        catalog=catalog,
+        split_registry=split_registry,
+        validation_manifest=validation_manifest,
+        noisy_eval_artifact_path=args.noisy_eval_artifact,
+    )
+    eigenbasis_identity = None
+    science_loss_cfg = dict(config.get("science_loss", {}) or {})
+    if str(science_loss_cfg.get("mode", "ordinary")) != "ordinary":
+        if args.eigenbasis_artifact is None:
+            raise ValueError("Weighted science_loss preflight requires --eigenbasis-artifact.")
+        eigenbasis = load_science_eigenbasis(args.eigenbasis_artifact, catalog=catalog)
+        aux = config.get("auxiliary_artifacts", {})
+        expected_aux = (
+            dict(aux.get("science_eigenbasis", {}) or {})
+            if isinstance(aux, dict)
+            else {}
+        )
+        expected = science_loss_cfg.get("eigenbasis", {})
+        if isinstance(expected, dict):
+            validate_science_eigenbasis_expectations(
+                eigenbasis,
+                expected={**expected_aux, **dict(expected)},
+            )
+            expected_id = expected.get("artifact_id")
+            expected_hash = expected.get("content_sha256")
+            if expected_id and str(expected_id) != eigenbasis.artifact_id:
+                raise ValueError(
+                    f"Eigenbasis artifact_id {eigenbasis.artifact_id!r} does not match {expected_id!r}."
+                )
+            actual_hash = eigenbasis.content_identity.get("sha256")
+            if expected_hash and str(expected_hash) != str(actual_hash):
+                raise ValueError(
+                    f"Eigenbasis content_sha256 {actual_hash!r} does not match {expected_hash!r}."
+                )
+        else:
+            validate_science_eigenbasis_expectations(eigenbasis, expected=expected_aux)
+        mode_weights = build_science_mode_weights(
+            eigenbasis.eigenvalues,
+            mode=str(science_loss_cfg["mode"]),
+            strength=float(science_loss_cfg.get("strength", 0.5)),
+            eigenvalue_floor=float(science_loss_cfg.get("eigenvalue_floor", 1.0e-6)),
+            weight_cap=float(science_loss_cfg.get("weight_cap", 10.0)),
+        )
+        validate_science_mode_weights_nonuniform(mode_weights, mode=str(science_loss_cfg["mode"]))
+        eigenbasis_identity = {
+            "path": str(args.eigenbasis_artifact),
+            "artifact_id": eigenbasis.artifact_id,
+            "content_sha256": eigenbasis.content_identity.get("sha256"),
+            "coordinate_convention": eigenbasis.coordinate_convention,
+            "source_matrix_coordinate_space": eigenbasis.source_matrix_coordinate_space,
+            "eigenbasis_coordinate_space": eigenbasis.eigenbasis_coordinate_space,
+            "mode_weight_min": float(mode_weights.min()),
+            "mode_weight_max": float(mode_weights.max()),
+            "mode_weight_std": float(mode_weights.std()),
+        }
     sampler = PairSampler(catalog, split_registry, pair_policy)
     train_eligible = sampler.eligible_indices("train", "train", policy=pair_policy)
     if train_eligible.size == 0:
@@ -170,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
                 for key, manifest in audit_manifests.items()
             },
             "artifact_lock": lock_identity,
+            "eigenbasis": eigenbasis_identity,
+            "noisy_eval": noisy_eval_identity,
             "device": torch_info["resolved_training_device"],
             "output_root": os.environ.get("ML_RUN_DIR"),
         },

@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audit-manifest-json", default=None)
     parser.add_argument("--scaler", type=Path, default=None)
     parser.add_argument("--artifact-lock", type=Path, default=None)
+    parser.add_argument("--eigenbasis-artifact", type=Path, default=None)
+    parser.add_argument("--noisy-eval-artifact", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
@@ -101,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         test_manifest_path=args.test_manifest,
         artifact_lock_path=args.artifact_lock,
         scaler_path=args.scaler,
+        noisy_eval_artifact_path=args.noisy_eval_artifact,
         audit_manifest_paths=audit_manifest_paths,
         experiment_id=args.experiment_id,
         config=config,
@@ -116,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         validation_manifest_path=args.validation_manifest,
         test_manifest_path=args.test_manifest,
         scaler_path=args.scaler,
+        eigenbasis_path=args.eigenbasis_artifact,
+        noisy_eval_artifact_path=args.noisy_eval_artifact,
         overwrite=args.overwrite,
     )
     if args.copy_final_to is not None:

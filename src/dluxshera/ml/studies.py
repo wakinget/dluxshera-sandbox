@@ -16,6 +16,7 @@ from .pairs import (
     load_pair_manifest,
     pair_manifest_content_hash,
 )
+from .noisy_eval import load_noisy_eval_recipe, validate_noisy_eval_recipe
 from .splits import SplitRegistry, load_split_registry, split_registry_content_sha256
 from .scaling import load_intensity_scaler
 
@@ -29,6 +30,7 @@ __all__ = [
     "write_study_run_plan",
     "validate_experiment_policy_for_study",
     "validate_evaluation_artifact_against_recipe",
+    "validate_noisy_eval_artifact_for_study",
     "validate_prepared_dataset_for_study",
     "validate_split_registry_for_study",
     "validate_study_contract",
@@ -60,6 +62,12 @@ class StudyRunPlanRow:
     split_registry_artifact_id: str | None
     scaler_artifact_id: str | None
     audit_artifacts: tuple[str, ...]
+    auxiliary_artifacts: Mapping[str, Any]
+    shared_reference_runs: tuple[str, ...]
+    science_loss_identity: str
+    pair_consistency_identity: str
+    noise_identity: str
+    validation_noise_identity: str
     artifact_lock_id: str | None
     output_root: str | None
     hpc_profile: str | None
@@ -83,6 +91,12 @@ class StudyRunPlanRow:
             "split_registry_artifact_id": self.split_registry_artifact_id,
             "scaler_artifact_id": self.scaler_artifact_id,
             "audit_artifacts": list(self.audit_artifacts),
+            "auxiliary_artifacts": dict(self.auxiliary_artifacts),
+            "shared_reference_runs": list(self.shared_reference_runs),
+            "science_loss_identity": self.science_loss_identity,
+            "pair_consistency_identity": self.pair_consistency_identity,
+            "noise_identity": self.noise_identity,
+            "validation_noise_identity": self.validation_noise_identity,
             "artifact_lock_id": self.artifact_lock_id,
             "output_root": self.output_root,
             "hpc_profile": self.hpc_profile,
@@ -294,6 +308,12 @@ def resolve_study_experiment_config(
     config["seed"] = int(config.get("seed", 0))
     config["pair_policy"] = _policy_mapping(study, policy_id)
     config["dataset"] = copy.deepcopy(study.get("dataset", {}))
+    config["auxiliary_artifacts"] = _deep_update(
+        dict(study.get("auxiliary_artifacts", {}) or {}),
+        dict(config.get("auxiliary_artifacts", {}) or {}),
+    )
+    if "shared_reference" in study and "shared_reference" not in config:
+        config["shared_reference"] = copy.deepcopy(study.get("shared_reference"))
     contract = _resolved_artifact_contract(study, config)
     config["artifact_profile"] = contract["profile_id"]
     config["artifact_contract"] = contract
@@ -397,6 +417,10 @@ def expand_study_run_plan(
             split_cfg = artifact_contract.get("split_registry", {})
             scaler_cfg = artifact_contract.get("scaler", {})
             hpc_cfg = config.get("hpc", {})
+            auxiliary_artifacts = _deep_update(
+                dict(study.get("auxiliary_artifacts", {}) or {}),
+                dict(config.get("auxiliary_artifacts", {}) or {}),
+            )
             rows.append(
                 StudyRunPlanRow(
                     study_id=str(study["study_id"]),
@@ -419,6 +443,14 @@ def expand_study_run_plan(
                     if isinstance(scaler_cfg, Mapping)
                     else None,
                     audit_artifacts=tuple(str(v) for v in config.get("audit_artifacts", []) or []),
+                    auxiliary_artifacts=auxiliary_artifacts,
+                    shared_reference_runs=tuple(
+                        str(v) for v in config.get("shared_reference_runs", []) or []
+                    ),
+                    science_loss_identity=_stable_sha256(config.get("science_loss", {})),
+                    pair_consistency_identity=_stable_sha256(config.get("pair_consistency", {})),
+                    noise_identity=_stable_sha256(config.get("noise", {})),
+                    validation_noise_identity=_stable_sha256(config.get("validation_noise", {})),
                     artifact_lock_id=lock_cfg.get("lock_id")
                     if isinstance(lock_cfg, Mapping)
                     else None,
@@ -674,6 +706,7 @@ def validate_study_contract(
     test_manifest: PairManifest | None = None,
     artifact_lock_path: Path | None = None,
     scaler_path: Path | None = None,
+    noisy_eval_artifact_path: Path | None = None,
     audit_manifests: Mapping[str, PairManifest] | None = None,
     experiment_id: str | None = None,
     config: Mapping[str, Any] | None = None,
@@ -704,6 +737,14 @@ def validate_study_contract(
             split_registry=split_registry,
             config=experiment,
         )
+    validate_noisy_eval_artifact_for_study(
+        study=study,
+        config=experiment,
+        catalog=catalog,
+        split_registry=split_registry,
+        validation_manifest=validation_manifest,
+        noisy_eval_artifact_path=noisy_eval_artifact_path,
+    )
     if test_manifest is not None:
         validate_evaluation_artifact_against_recipe(
             test_manifest,
@@ -755,6 +796,38 @@ def validate_study_contract(
         )
 
 
+def validate_noisy_eval_artifact_for_study(
+    *,
+    study: Mapping[str, Any],
+    config: Mapping[str, Any],
+    catalog: SampleCatalog,
+    split_registry: SplitRegistry,
+    validation_manifest: PairManifest | None,
+    noisy_eval_artifact_path: Path | None,
+) -> dict[str, Any] | None:
+    """Validate an optional fixed noisy-validation runtime recipe."""
+    aux = config.get("auxiliary_artifacts", study.get("auxiliary_artifacts", {}))
+    expected = {}
+    if isinstance(aux, Mapping):
+        expected = dict(aux.get("noisy_validation_recipe", {}) or {})
+    if not expected:
+        return None
+    if validation_manifest is None:
+        raise ValueError("Noisy-validation recipe validation requires a frozen validation manifest.")
+    if noisy_eval_artifact_path is None:
+        raise ValueError("Study contract requires --noisy-eval-artifact for fixed noisy validation.")
+    recipe = load_noisy_eval_recipe(noisy_eval_artifact_path)
+    return validate_noisy_eval_recipe(
+        recipe,
+        study=study,
+        config=config,
+        catalog=catalog,
+        split_registry=split_registry,
+        validation_manifest=validation_manifest,
+        expected=expected,
+    )
+
+
 def load_study_contract_artifacts(
     *,
     study: Mapping[str, Any],
@@ -764,6 +837,7 @@ def load_study_contract_artifacts(
     test_manifest_path: Path | None = None,
     artifact_lock_path: Path | None = None,
     scaler_path: Path | None = None,
+    noisy_eval_artifact_path: Path | None = None,
     audit_manifest_paths: Mapping[str, Path] | None = None,
     experiment_id: str | None = None,
     config: Mapping[str, Any] | None = None,
@@ -805,6 +879,7 @@ def load_study_contract_artifacts(
         test_manifest=test_manifest,
         artifact_lock_path=artifact_lock_path,
         scaler_path=scaler_path,
+        noisy_eval_artifact_path=noisy_eval_artifact_path,
         audit_manifests=audit_manifests,
         experiment_id=experiment_id,
         config=config,
@@ -815,4 +890,7 @@ def load_study_contract_artifacts(
         "validation_manifest": validation_manifest,
         "test_manifest": test_manifest,
         "audit_manifests": audit_manifests,
+        "noisy_eval_artifact": None
+        if noisy_eval_artifact_path is None
+        else load_noisy_eval_recipe(noisy_eval_artifact_path),
     }

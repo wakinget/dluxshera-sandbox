@@ -237,6 +237,16 @@ Previous SHERA eigenmode exports include three meaningful FIM constructions:
 
 These are not contradictory eigensystems; they answer different questions. Every ML experiment using an eigenbasis must record which construction it uses.
 
+For S10-v1, freeze the basis choice to the nominal 20-dimensional science FIM
+in the same science-parameter ordering and Fisher-sigma convention used by
+PREP-V4-v1. Registration nuisance parameters are held fixed. The physical
+science FIM \(F_\theta\) is transformed before eigendecomposition with
+\(F_z=D F_\theta D\), where \(D=\mathrm{diag}(\sigma_{\mathrm{FIM}})\) and
+\(\Delta\theta=D\Delta z\). The training-consumed `ScienceEigenbasis` is
+therefore a basis of the prepared Fisher-scaled science coordinate, not a
+physical-theta basis. A nuisance-marginalized Schur-complement basis remains a
+later comparison, not part of the S10-v1 launch campaign.
+
 ### 6.2 Diagonal Fisher scaling is not eigen-whitening
 
 There are three distinct operations that should not be conflated.
@@ -1032,6 +1042,9 @@ with supervised target:
 | S07 | V4 Entry and Data Scaling | repository-prepared | Brings up `joint_full_v4` A-pair training, shared V4 scaler use, and joint-train prefix scaling; 10 planned runs. |
 | S08 | V4 Nuisance Robustness | repository-prepared | Tests C-only, ABC, multitask nuisance prediction, and an unseen-nuisance holdout profile; 12 planned runs. |
 | S09 | V4 Capture / Radial Curriculum | repository-prepared | Mixes broad `joint_full_v4` A pairs with distance-balanced `radial_capture_v4` A pairs and radial-only curriculum; 9 planned runs. |
+| S10 | V4 Fisher/Eigenmode-Aware Loss | repository-prepared | Compares the S07 large clean objective with fixed-eigenbasis strong- and weak-mode weighted losses; 9 planned runs including the shared clean reference cohort. |
+| S11 | V4 Pairwise Physics Consistency | repository-prepared | Adds explicit antisymmetry and low-weight identity auxiliary losses while referencing the S10-E01 clean cohort; 6 new planned runs. |
+| S12 | V4 Photon-Noise Observation Robustness | repository-prepared | Uses dynamic physical photon noise before ML scaling, fixed photon-noise validation, and optional noise-consistency loss while referencing S10-E01; read noise and dark current are future extensions; 6 new planned runs. |
 
 Deferred roadmap ideas that previously occupied the S06-S08 labels are retained
 under non-conflicting future labels:
@@ -1280,3 +1293,22 @@ fractions with `rho < 1`, rho quantiles, metrics by initial-distance bin, by
 dataset family, and remaining-distance threshold fractions at 100, 250, 500,
 1000, and 2000. These thresholds are generic diagnostics and are not labeled
 as an ADORA capture radius.
+
+# S10-S12 Training Addendum
+
+The S10-S12 launch plan is tracked in
+`docs/dev/notes/ml_s10_s12_campaign_plan.md`. The wave uses one fixed S07-large
+V4 backbone so the changed variables are loss weighting, pairwise physical
+consistency, and observation-noise robustness rather than architecture.
+
+S10 keeps network outputs in canonical Fisher-scaled science coordinates and
+projects prediction errors into a fixed, materialized science eigenbasis only
+inside the loss and diagnostics. The S10-v1 eigenbasis artifact records the
+source coordinate space, the prepared Fisher-scaled eigenbasis coordinate
+space, parameter labels, PREP-V4 Fisher scales, physical-FIM identity,
+transformed \(F_z\) identity, nominal provenance, and the weighting/variance
+convention. S11 computes reversed and identity predictions from the current
+loaded batch. S12 applies physical photon noise to count-space images before ML
+scaling and uses an authenticated fixed photon-noise validation recipe for
+deterministic model selection. Read noise, dark current, and a full detector
+noise sweep remain future extensions.

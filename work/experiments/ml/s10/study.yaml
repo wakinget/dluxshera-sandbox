@@ -1,0 +1,113 @@
+study_id: S10
+title: V4 Fisher Eigenmode-Aware Training Loss
+
+dataset: {artifact_id: PREP-V4-v1}
+split_registry: {artifact_id: SPLIT-V4-ROLE-PRESERVING-v1}
+scaler: {artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+artifact_lock: {required: true, lock_id: S10-ARTIFACT-LOCK-v1}
+
+auxiliary_artifacts:
+  science_eigenbasis:
+    artifact_id: S10-V4-SCIENCE-FIM-EIGENBASIS-v1
+    schema_version: dluxshera_ml_science_eigenbasis/1
+    source_matrix_coordinate_space: physical_theta
+    eigenbasis_coordinate_space: prepared_v4_fisher_scaled_science_delta
+    coordinate_convention: delta_z_science = z_B - z_A in prepared-catalog parameter order
+    source_fim_artifact_id: s10_science_fim_source
+    source_fim_schema_version: dluxshera_ml_science_fim_source/1
+    nuisance_policy: registration nuisance parameters held fixed for S10-v1
+    basis_scope: 20-dimensional science block only; no nuisance Schur marginalization
+    path_supplied_at_launch_by: --eigenbasis-artifact
+
+pair_policies:
+  s10_v4_family_a: &s10a
+    family_weights: {A: 1.0}
+    same_pair_id: false
+    min_fisher_distance: 0.0
+    max_fisher_distance: 5000.0
+    include_reverse: true
+    dataset_families: [joint_full_v4]
+    max_sampling_attempts: 4000
+
+evaluation_artifacts:
+  validation:
+    artifact_id: S10-VALIDATION-PAIRS-v1
+    pair_policy_id: s10_v4_family_a
+    split: validation
+    seed: 10001
+    pairs_per_slice: 512
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: validation, nuisance_split: train}
+  test:
+    artifact_id: S10-TEST-PAIRS-v1
+    pair_policy_id: s10_v4_family_a
+    split: test
+    seed: 10002
+    pairs_per_slice: 1024
+    eval_slices:
+      heldout_science_seen_nuisance: {science_split: test, nuisance_split: train}
+
+defaults: &defaults
+  device: cuda:0
+  pair_policy_id: s10_v4_family_a
+  validation_artifact: validation
+  test_artifact: test
+  require_frozen_validation_manifest: true
+  evaluate_test: false
+  model: {channels: [32, 64, 128, 256], embedding_dim: 256, encoder_hidden_dim: 512, head_hidden_dim: 512, comparator: concat_diff, normalization: batch, adaptive_pool_shape: [4, 4]}
+  image_scaling: {mode: global_max_abs, artifact_id: SCALER-V4-GLOBAL-MAX-ABS-v1}
+  noise: {enabled: false, apply_to: observation}
+  validation_noise: {enabled: false, apply_to: observation}
+  pair_consistency: {antisymmetry_weight: 0.0, identity_weight: 0.0, noise_consistency_weight: 0.0}
+  science_loss: &ordinary_loss
+    mode: ordinary
+    strength: 0.0
+    eigenvalue_floor: 1.0e-6
+    weight_cap: 10.0
+  training:
+    epochs: 600
+    batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: adamw
+    pairs_per_epoch: 16384
+    num_workers: 4
+    shard_cache_size: 4
+    lr_scheduler: {name: none}
+    early_stopping:
+      enabled: true
+      monitor: validation_loss
+      min_epochs: 120
+      patience: 80
+      min_delta_relative: 0.0005
+  evaluation:
+    fisher_distance_bin_edges: &bins [0, 100, 250, 500, 1000, 2000, 5000]
+    eigenmode_diagnostics: {enabled: true, groups: [strong, middle, weak]}
+  hpc:
+    profile: gattaca2_long
+
+experiments:
+  S10-E01:
+    <<: *defaults
+    description: Shared clean reference cohort for S10-S12.
+    seeds: [11, 23, 47]
+  S10-E02:
+    <<: *defaults
+    description: Moderate emphasis on high-curvature/strong science eigenmodes.
+    science_loss:
+      mode: strong_mode_weighted
+      strength: 0.5
+      eigenvalue_floor: 1.0e-6
+      weight_cap: 10.0
+      eigenbasis: {artifact_id: S10-V4-SCIENCE-FIM-EIGENBASIS-v1}
+    seeds: [11, 23, 47]
+  S10-E03:
+    <<: *defaults
+    description: Moderate emphasis on low-curvature/weak science eigenmodes with floor/cap.
+    science_loss:
+      mode: weak_mode_weighted
+      strength: 0.5
+      eigenvalue_floor: 1.0e-4
+      weight_cap: 5.0
+      eigenbasis: {artifact_id: S10-V4-SCIENCE-FIM-EIGENBASIS-v1}
+    seeds: [11, 23, 47]

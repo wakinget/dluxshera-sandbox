@@ -29,21 +29,22 @@ def _record_to_tensors(
     scaler: IntensityScaler,
     noise_config: NoiseConfig,
     dynamic_seed_offset: int,
+    second_noise_view: bool = False,
 ) -> dict[str, Any]:
-    image_a = reader.get(int(record.sample_a_index))
-    image_b = reader.get(int(record.sample_b_index))
+    clean_a = reader.get(int(record.sample_a_index))
+    clean_b = reader.get(int(record.sample_b_index))
     # Noise is applied after ordering, so observation-only noise remains tied
     # to the B role even when a reverse PairRecord swaps physical samples.
     image_a, image_b = apply_pair_noise(
-        image_a,
-        image_b,
+        clean_a,
+        clean_b,
         noise_config,
         pair_record_id=record.pair_record_id,
         dynamic_seed_offset=dynamic_seed_offset,
     )
     image_a = scaler.transform(image_a)
     image_b = scaler.transform(image_b)
-    return {
+    item = {
         "image_a": torch.from_numpy(np.asarray(image_a, dtype=np.float32)).unsqueeze(0),
         "image_b": torch.from_numpy(np.asarray(image_b, dtype=np.float32)).unsqueeze(0),
         "target_delta_z": torch.from_numpy(
@@ -68,6 +69,21 @@ def _record_to_tensors(
             dtype=torch.int64,
         ),
     }
+    if second_noise_view:
+        image_a2, image_b2 = apply_pair_noise(
+            clean_a,
+            clean_b,
+            noise_config,
+            pair_record_id=record.pair_record_id,
+            dynamic_seed_offset=dynamic_seed_offset + 1_000_000_007,
+        )
+        item["image_a_noise_view2"] = torch.from_numpy(
+            np.asarray(scaler.transform(image_a2), dtype=np.float32)
+        ).unsqueeze(0)
+        item["image_b_noise_view2"] = torch.from_numpy(
+            np.asarray(scaler.transform(image_b2), dtype=np.float32)
+        ).unsqueeze(0)
+    return item
 
 
 class PairManifestDataset(Dataset):
@@ -80,6 +96,7 @@ class PairManifestDataset(Dataset):
         pair_manifest: PairManifest,
         scaler: IntensityScaler | None = None,
         noise_config: NoiseConfig | Mapping[str, Any] | None = None,
+        second_noise_view: bool = False,
         shard_cache_size: int = 4,
     ) -> None:
         self.catalog = catalog
@@ -90,6 +107,7 @@ class PairManifestDataset(Dataset):
             if isinstance(noise_config, NoiseConfig)
             else NoiseConfig.from_dict(noise_config)
         )
+        self.second_noise_view = bool(second_noise_view)
         self.shard_cache_size = int(shard_cache_size)
         self._reader = None
 
@@ -109,6 +127,7 @@ class PairManifestDataset(Dataset):
             scaler=self.scaler,
             noise_config=self.noise_config,
             dynamic_seed_offset=int(index),
+            second_noise_view=self.second_noise_view,
         )
 
 
@@ -132,6 +151,7 @@ class DynamicPairDataset(Dataset):
         nuisance_split: str = "train",
         scaler: IntensityScaler | None = None,
         noise_config: NoiseConfig | Mapping[str, Any] | None = None,
+        second_noise_view: bool = False,
         shard_cache_size: int = 4,
     ) -> None:
         if int(pairs_per_epoch) < 1:
@@ -153,6 +173,7 @@ class DynamicPairDataset(Dataset):
             if isinstance(noise_config, NoiseConfig)
             else NoiseConfig.from_dict(noise_config)
         )
+        self.second_noise_view = bool(second_noise_view)
         self.shard_cache_size = int(shard_cache_size)
         self.epoch = 0
         self._reader = None
@@ -192,4 +213,5 @@ class DynamicPairDataset(Dataset):
             scaler=self.scaler,
             noise_config=self.noise_config,
             dynamic_seed_offset=pair_seed if self.noise_config.training_dynamic else 0,
+            second_noise_view=self.second_noise_view,
         )

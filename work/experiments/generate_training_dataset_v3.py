@@ -546,6 +546,56 @@ def _compute_fisher_sigmas(
     add_noise: bool,
 ) -> tuple[dict[tuple[str, int | None], float], tuple[int, ...]]:
     """Compute Fisher-diagonal parameter sigmas for each packed component."""
+    result = compute_nominal_fisher_matrix(
+        binder=binder,
+        system_cfg=system_cfg,
+        forward_spec=forward_spec,
+        base_store=base_store,
+        sweep_keys=sweep_keys,
+        seed=seed,
+        add_noise=add_noise,
+    )
+    fim_diag = np.diag(np.asarray(result["fim_theta"], dtype=np.float64))
+    index_map = result["index_map"]
+    sigmas: dict[tuple[str, int | None], float] = {}
+    for entry in index_map["entries"]:
+        key = str(entry["name"])
+        start = int(entry["start"])
+        stop = int(entry["stop"])
+        size = stop - start
+        if size == 1:
+            sigmas[(key, None)] = float(1.0 / math.sqrt(fim_diag[start]))
+        else:
+            for idx in range(size):
+                sigmas[(key, idx)] = float(1.0 / math.sqrt(fim_diag[start + idx]))
+    return sigmas, tuple(int(v) for v in result["image_shape"])
+
+
+def _index_map_scalar_labels(index_map: Mapping[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for entry in index_map.get("entries", []):
+        key = str(entry["name"])
+        start = int(entry["start"])
+        stop = int(entry["stop"])
+        size = stop - start
+        if size == 1:
+            labels.append(key)
+        else:
+            labels.extend([f"{key}[{idx}]" for idx in range(size)])
+    return labels
+
+
+def compute_nominal_fisher_matrix(
+    *,
+    binder: SheraBinder,
+    system_cfg: Mapping[str, Any],
+    forward_spec: ParamSpec,
+    base_store: ParameterStore,
+    sweep_keys: Sequence[str],
+    seed: int,
+    add_noise: bool,
+) -> dict[str, Any]:
+    """Compute the full nominal V3 physical-theta FIM using the canonical loss path."""
     rng_key = jr.PRNGKey(seed)
     data = binder.model()
     if add_noise:
@@ -568,18 +618,77 @@ def _compute_fisher_sigmas(
     fim_labels = generate_fim_labels(list(sweep_keys), cfg=system_cfg, store=base_store)
     _validate_fim_diag(fim_diag, labels=fim_labels)
     index_map = build_index_map(forward_spec.subset(list(sweep_keys)), base_store, theta=theta_ref)
-    sigmas: dict[tuple[str, int | None], float] = {}
-    for entry in index_map["entries"]:
-        key = str(entry["name"])
-        start = int(entry["start"])
-        stop = int(entry["stop"])
-        size = stop - start
-        if size == 1:
-            sigmas[(key, None)] = float(1.0 / math.sqrt(fim_diag[start]))
-        else:
-            for idx in range(size):
-                sigmas[(key, idx)] = float(1.0 / math.sqrt(fim_diag[start + idx]))
-    return sigmas, image_shape
+    return {
+        "fim_theta": np.asarray(F, dtype=np.float64),
+        "theta_ref": np.asarray(theta_ref, dtype=np.float64),
+        "image_shape": image_shape,
+        "sweep_keys": list(sweep_keys),
+        "index_map": index_map,
+        "parameter_labels": _index_map_scalar_labels(index_map),
+        "fim_display_labels": fim_labels,
+        "loss_convention": {
+            "maker": "dluxshera.inference.optimization.make_binder_nll_fn",
+            "fim": "dluxshera.inference.optimization.fim_theta",
+            "data": "binder.model() nominal SheraBinder image",
+            "var": "data",
+            "noise_model": "gaussian",
+            "reduce": "sum",
+            "theta0_store": "base_store",
+            "add_noise": bool(add_noise),
+            "seed": int(seed),
+        },
+    }
+
+
+def compute_s10_nominal_science_fim_source_inputs(
+    *,
+    catalog_labels: Sequence[str],
+    prescription_path: Path | None = None,
+) -> dict[str, Any]:
+    """Reconstruct the V4 Fisher-scale nominal system and compute its full science FIM."""
+    path = (
+        Path(__file__).with_name("ml_dataset_v3_template.yaml")
+        if prescription_path is None
+        else Path(prescription_path)
+    )
+    user_cfg, system_cfg, experiment_raw = _load_and_resolve_prescription(
+        prescription_path=path,
+        system_preset=None,
+        experiment_preset=None,
+    )
+    experiment_cfg = _validate_experiment_config(experiment_raw)
+    forward_spec, base_store, binder = _build_nominal_store(
+        system_cfg=system_cfg,
+        experiment_cfg=experiment_cfg,
+    )
+    sweep_keys = list(experiment_cfg["sweep_keys"])
+    result = compute_nominal_fisher_matrix(
+        binder=binder,
+        system_cfg=system_cfg,
+        forward_spec=forward_spec,
+        base_store=base_store,
+        sweep_keys=sweep_keys,
+        seed=int(experiment_cfg["seed"]),
+        add_noise=bool(experiment_cfg["add_noise"]),
+    )
+    labels = tuple(str(v) for v in result["parameter_labels"])
+    expected = tuple(str(v) for v in catalog_labels)
+    if labels != expected:
+        raise ValueError(
+            "S10 nominal FIM packed parameter labels do not match the prepared "
+            f"catalog science ordering ({labels} != {expected})."
+        )
+    return {
+        **result,
+        "system_cfg": system_cfg,
+        "experiment_cfg": experiment_cfg,
+        "user_cfg": user_cfg,
+        "prescription_path": str(path),
+        "prescription_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "script_version": SCRIPT_VERSION,
+        "source_implementation": "work.experiments.generate_training_dataset_v3.compute_s10_nominal_science_fim_source_inputs",
+        "git_info": _git_info(),
+    }
 
 
 def _scalar_label(base_key: str, component_index: int | None) -> str:
