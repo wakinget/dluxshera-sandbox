@@ -196,6 +196,41 @@ def test_catalog_streams_prepared_index_into_compact_arrays(tmp_path: Path) -> N
     np.testing.assert_allclose(catalog.physical_from_z([[1.0, -1.0]]), [[0.5, -2.0]])
 
 
+def test_catalog_group_helpers_and_sample_metadata_are_reader_friendly(tmp_path: Path) -> None:
+    catalog = load_sample_catalog(_write_prepared_fixture(tmp_path))
+    assert len(catalog.science_groups) == catalog.science_group_count
+    assert len(catalog.nuisance_groups) == catalog.nuisance_group_count
+
+    science_group = str(catalog.science_group_ids[0])
+    nuisance_group = str(catalog.nuisance_group_ids[1])
+    science_rows = catalog.indices_for_groups(science_groups=[science_group])
+    assert science_rows.tolist() == [0, 1, 2]
+    fixed_nuisance_rows = catalog.indices_for_groups(nuisance_groups=[nuisance_group])
+    assert fixed_nuisance_rows.tolist() == [1, 4, 7, 10, 13, 16]
+
+    array_indices = catalog.array_indices_for_groups(
+        science_groups=[science_group],
+        nuisance_groups=[nuisance_group],
+    )
+    assert array_indices.tolist() == [1]
+    with catalog.image_reader(cache_size=1) as reader:
+        image = reader[int(array_indices[0])]
+    assert image.shape == catalog.sample_shape
+
+    metadata = catalog.sample_metadata(1)
+    assert metadata["sample_id"] == "sample_0001"
+    assert metadata["catalog_index"] == 1
+    assert metadata["array_index"] == 1
+    assert metadata["science_group_id"] == science_group
+    assert metadata["nuisance_group_id"] == nuisance_group
+    assert metadata["fisher_scaled_delta"] == [-1.0, 0.0]
+    assert catalog.sample_index("sample_0001") == 1
+    with pytest.raises(KeyError, match="Unknown prepared sample_id"):
+        catalog.sample_index("missing")
+    with pytest.raises(IndexError, match="catalog index"):
+        catalog.sample_metadata(catalog.sample_count)
+
+
 def test_split_registry_is_deterministic_serializes_and_rejects_mismatch(tmp_path: Path) -> None:
     catalog = load_sample_catalog(_write_prepared_fixture(tmp_path / "prepared"))
     first = _split(catalog)

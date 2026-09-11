@@ -151,12 +151,38 @@ def _fisher_sigmas(vector_spaces: Mapping[str, Any], dim: int) -> np.ndarray:
 
 @dataclass(frozen=True)
 class SampleCatalog:
-    """Hold compact metadata needed to build ML image pairs.
+    """Describe and query one prepared SHERA ML image dataset.
 
-    The catalog streams the prepared ``index.jsonl`` once and retains NumPy
-    arrays plus small string-index mappings.  It deliberately does not keep the
-    original JSON dictionaries, and it does not know anything about PyTorch or
-    Siamese training loops.
+    ``SampleCatalog`` is the preferred high-level entry point for ML data
+    consumers.  It streams the prepared dataset ``index.jsonl`` once and keeps
+    compact NumPy arrays plus stable string identities for each rendered sample.
+    It is intentionally model-architecture neutral: use it from notebooks,
+    custom training loops, pair samplers, PyTorch datasets, or any other code
+    that needs controlled access to SHERA prepared images and metadata.
+
+    A prepared sample combines two independent identities.  The *science group*
+    identifies the physical science state, such as the Fisher-scaled or native
+    physical perturbation vector.  The *nuisance group* identifies a rendering
+    or registration nuisance realization for that same science state.  Keeping
+    these identities separate lets callers ask for all nuisance realizations of
+    one science state, or compare different science states under a fixed
+    nuisance realization.
+
+    Key indexing conventions
+    ------------------------
+    - Catalog row indices address arrays stored on this object, for example
+      ``catalog.fisher_scaled_deltas[catalog_index]``.
+    - ``array_indices`` are global prepared-sample indices into the sharded
+      image store.  Pass those values to :class:`dluxshera.datasets.ArrayShardReader`.
+    - ``sample_ids`` are stable string identifiers from the prepared index and
+      should be preferred when saving selections outside a Python session.
+
+    Notes
+    -----
+    The catalog does not retain the original per-row JSON dictionaries.  Use
+    :meth:`sample_metadata` for a compact notebook-friendly metadata record, or
+    inspect ``manifest`` and ``vector_spaces`` for full prepared-artifact
+    provenance.
     """
 
     root: Path
@@ -250,17 +276,69 @@ class SampleCatalog:
         return {str(sample_id): int(idx) for idx, sample_id in enumerate(self.sample_ids)}
 
     @property
+    def science_groups(self) -> tuple[str, ...]:
+        """Return sorted science-group identifiers present in the catalog.
+
+        Returns
+        -------
+        tuple of str
+            Unique science-state/group identities.  Each value can be supplied
+            to :meth:`indices_for_groups` as a ``science_groups`` filter.
+        """
+        return tuple(sorted(set(str(v) for v in self.science_group_ids)))
+
+    @property
+    def nuisance_groups(self) -> tuple[str, ...]:
+        """Return sorted nuisance-group identifiers present in the catalog.
+
+        Returns
+        -------
+        tuple of str
+            Unique nuisance-state/group identities.  Each value can be supplied
+            to :meth:`indices_for_groups` as a ``nuisance_groups`` filter.
+        """
+        return tuple(sorted(set(str(v) for v in self.nuisance_group_ids)))
+
+    @property
     def science_group_count(self) -> int:
         """Return the number of unique science-state identities."""
-        return int(len(set(str(v) for v in self.science_group_ids)))
+        return int(len(self.science_groups))
 
     @property
     def nuisance_group_count(self) -> int:
         """Return the number of unique nuisance identities."""
-        return int(len(set(str(v) for v in self.nuisance_group_ids)))
+        return int(len(self.nuisance_groups))
 
     def image_reader(self, *, cache_size: int = 4) -> ArrayShardReader:
-        """Return an ``ArrayShardReader`` for the catalog's prepared root."""
+        """Open a sharded image reader for this prepared dataset.
+
+        Parameters
+        ----------
+        cache_size:
+            Maximum number of shard memory maps retained by the reader.
+
+        Returns
+        -------
+        ArrayShardReader
+            Reader rooted at ``catalog.root``.  Use it as a context manager when
+            possible so cached memory maps are released promptly.
+
+        Examples
+        --------
+        Read the image corresponding to catalog row ``catalog_index``::
+
+            catalog_index = 0
+            array_index = int(catalog.array_indices[catalog_index])
+            with catalog.image_reader() as reader:
+                image = reader[array_index]
+
+        Notes
+        -----
+        :class:`ArrayShardReader` expects global prepared-sample indices, not
+        catalog row indices.  In current prepared artifacts those values often
+        match, but callers should use ``catalog.array_indices`` for portable
+        code.
+        """
         return ArrayShardReader(self.root, cache_size=cache_size)
 
     def indices_for_groups(
@@ -269,7 +347,37 @@ class SampleCatalog:
         science_groups: Iterable[str] | None = None,
         nuisance_groups: Iterable[str] | None = None,
     ) -> np.ndarray:
-        """Return sample indices matching optional science and nuisance groups."""
+        """Return catalog row indices matching science/nuisance filters.
+
+        Parameters
+        ----------
+        science_groups:
+            Optional science group ids to keep.  ``None`` keeps all science
+            groups.
+        nuisance_groups:
+            Optional nuisance group ids to keep.  ``None`` keeps all nuisance
+            groups.
+
+        Returns
+        -------
+        numpy.ndarray
+            One-dimensional ``int64`` array of catalog row indices.  Use these
+            indices to select metadata arrays on ``SampleCatalog``.  Convert to
+            image-store indices with :meth:`array_indices_for_groups` or
+            ``catalog.array_indices[indices]`` before reading images.
+
+        Examples
+        --------
+        All nuisance realizations for one science state::
+
+            science_id = catalog.science_groups[0]
+            rows = catalog.indices_for_groups(science_groups=[science_id])
+
+        All science states rendered at one fixed nuisance realization::
+
+            nuisance_id = catalog.nuisance_groups[0]
+            rows = catalog.indices_for_groups(nuisance_groups=[nuisance_id])
+        """
         mask = np.ones((self.sample_count,), dtype=bool)
         if science_groups is not None:
             allowed = {str(v) for v in science_groups}
@@ -279,12 +387,135 @@ class SampleCatalog:
             mask &= np.asarray([str(v) in allowed for v in self.nuisance_group_ids])
         return np.flatnonzero(mask).astype(np.int64)
 
+    def array_indices_for_groups(
+        self,
+        *,
+        science_groups: Iterable[str] | None = None,
+        nuisance_groups: Iterable[str] | None = None,
+    ) -> np.ndarray:
+        """Return global image-store indices matching science/nuisance filters.
+
+        This is a convenience wrapper around :meth:`indices_for_groups` for the
+        common notebook workflow where the next operation is ``reader[index]``.
+
+        Parameters
+        ----------
+        science_groups:
+            Optional science group ids to keep.
+        nuisance_groups:
+            Optional nuisance group ids to keep.
+
+        Returns
+        -------
+        numpy.ndarray
+            One-dimensional ``int64`` array of global prepared-sample indices
+            suitable for :class:`dluxshera.datasets.ArrayShardReader`.
+        """
+        rows = self.indices_for_groups(
+            science_groups=science_groups,
+            nuisance_groups=nuisance_groups,
+        )
+        return self.array_indices[rows].astype(np.int64, copy=False)
+
+    def sample_index(self, sample_id: str) -> int:
+        """Return the catalog row index for a stable prepared ``sample_id``.
+
+        Parameters
+        ----------
+        sample_id:
+            Stable sample identifier from ``catalog.sample_ids``.
+
+        Returns
+        -------
+        int
+            Catalog row index for selecting metadata arrays on this object.
+
+        Raises
+        ------
+        KeyError
+            If ``sample_id`` is not present in this catalog.
+        """
+        lookup = self.sample_id_to_index
+        try:
+            return lookup[str(sample_id)]
+        except KeyError as exc:
+            raise KeyError(f"Unknown prepared sample_id {sample_id!r}.") from exc
+
+    def sample_metadata(self, index: int) -> dict[str, Any]:
+        """Return compact metadata for one catalog row.
+
+        Parameters
+        ----------
+        index:
+            Catalog row index, not a shard-reader index.
+
+        Returns
+        -------
+        dict
+            JSON-friendly metadata containing stable sample ids, science and
+            nuisance group ids, dataset-family fields, vector values, and the
+            corresponding ``array_index`` to use with an image reader.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is outside ``[0, sample_count)``.
+        """
+        i = int(index)
+        if i < 0 or i >= self.sample_count:
+            raise IndexError(f"catalog index {index} out of range for {self.sample_count} samples.")
+        return {
+            "sample_id": str(self.sample_ids[i]),
+            "catalog_index": i,
+            "array_index": int(self.array_indices[i]),
+            "science_group_id": str(self.science_group_ids[i]),
+            "nuisance_group_id": str(self.nuisance_group_ids[i]),
+            "science_state_id": str(self.science_state_ids[i]),
+            "nuisance_state_id": str(self.nuisance_state_ids[i]),
+            "dataset_version": str(self.dataset_versions[i]),
+            "dataset_family": str(self.dataset_families[i]),
+            "sample_role": str(self.sample_roles[i]),
+            "pair_id": str(self.pair_ids[i]),
+            "grid_i_index": int(self.grid_i_indices[i]),
+            "grid_j_index": int(self.grid_j_indices[i]),
+            "science_sequence_index": int(self.science_sequence_indices[i]),
+            "joint_train_sequence_index": int(self.joint_train_sequence_indices[i]),
+            "nuisance_bank_index": int(self.nuisance_bank_indices[i]),
+            "radial_bin": str(self.radial_bin_labels[i]),
+            "fisher_scaled_delta": self.fisher_scaled_deltas[i].astype(float).tolist(),
+            "physical_delta": self.physical_deltas[i].astype(float).tolist(),
+            "native_science_vector": self.native_science_vectors[i].astype(float).tolist(),
+            "nuisance_vector": self.nuisance_vectors[i].astype(float).tolist(),
+            "nuisance_sigma_vector": self.nuisance_sigma_vectors[i].astype(float).tolist(),
+        }
+
     def physical_from_z(self, z_delta: np.ndarray) -> np.ndarray:
-        """Transform Fisher-scaled deltas back to native physical coordinates."""
+        """Transform Fisher-scaled science deltas to native physical coordinates.
+
+        Parameters
+        ----------
+        z_delta:
+            Fisher-scaled science vector or array of vectors.  The last
+            dimension must match ``catalog.science_dim``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Native physical-coordinate deltas with the same shape as
+            ``z_delta``.
+        """
         return np.asarray(z_delta, dtype=np.float64) * self.fisher_sigmas
 
     def summary(self) -> dict[str, Any]:
-        """Return compact human-readable catalog metadata."""
+        """Return compact human-readable dataset metadata.
+
+        Returns
+        -------
+        dict
+            Summary of prepared artifact identity, root path, sample/image
+            shape, science/nuisance dimensionality, group counts, dataset
+            families, sample roles, and grouping policies.
+        """
         return {
             "artifact_id": self.artifact_id,
             "prepared_dataset_hash": self.prepared_dataset_hash,
@@ -336,7 +567,37 @@ def _prepared_dataset_hash(root: Path, manifest: Mapping[str, Any]) -> str:
 
 
 def load_sample_catalog(prepared_root: Path, *, artifact_id: str | None = None) -> SampleCatalog:
-    """Stream a prepared SHERA dataset index into compact ML catalog arrays."""
+    """Load a prepared SHERA ML dataset catalog.
+
+    Parameters
+    ----------
+    prepared_root:
+        Directory containing ``manifest.json``, ``vector_spaces.json``,
+        ``index.jsonl``, ``array_shards_manifest.json``, and ``shards/``.
+    artifact_id:
+        Optional fallback artifact id used only when the prepared manifest does
+        not provide one.
+
+    Returns
+    -------
+    SampleCatalog
+        Compact, architecture-neutral metadata catalog for sample selection,
+        grouping, image access, pair construction, and split validation.
+
+    Raises
+    ------
+    FileNotFoundError
+        If required prepared-dataset files are missing.
+    ValueError
+        If required vector fields are missing, malformed, non-finite, or
+        inconsistent with ``vector_spaces.json``.
+
+    Notes
+    -----
+    The loader streams ``index.jsonl`` but returns in-memory metadata arrays.
+    Image arrays remain in sharded ``.npy`` files and are accessed lazily via
+    :meth:`SampleCatalog.image_reader`.
+    """
     root = Path(prepared_root).resolve()
     manifest_path = root / "manifest.json"
     vector_spaces_path = root / "vector_spaces.json"

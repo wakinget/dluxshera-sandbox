@@ -24,7 +24,29 @@ __all__ = [
 
 @dataclass(frozen=True)
 class IntensityScaler:
-    """Apply one train-derived amplitude-preserving image scale."""
+    """Apply one train-derived amplitude-preserving image scale.
+
+    ``IntensityScaler`` stores a single scalar normalization derived from a
+    selected population, usually training images.  It deliberately avoids
+    per-image normalization so absolute image amplitudes and image differences
+    remain meaningful for downstream models.
+
+    Parameters
+    ----------
+    mode:
+        Scaling mode.  ``"raw"`` returns copied images unchanged,
+        ``"global_max_abs"`` divides by the maximum absolute selected pixel, and
+        ``"global_p99_abs"`` divides by the 99th percentile absolute selected
+        pixel value.
+    scale:
+        Positive scalar divisor.
+    sample_count:
+        Number of selected samples used to fit the scale, if known.
+    statistic:
+        Human-readable description of the fitted statistic.
+    source_population:
+        Optional provenance describing the selected fitting population.
+    """
 
     mode: str = "raw"
     scale: float = 1.0
@@ -39,7 +61,19 @@ class IntensityScaler:
             raise ValueError("scale must be finite and > 0.")
 
     def transform(self, image: np.ndarray) -> np.ndarray:
-        """Return ``image`` divided by the fixed scalar scale."""
+        """Return ``image`` divided by the fixed scalar scale.
+
+        Parameters
+        ----------
+        image:
+            Array-like image.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``float32`` image copy for ``mode="raw"`` or scaled ``float32``
+            image for fitted modes.
+        """
         arr = np.asarray(image, dtype=np.float32)
         if self.mode == "raw":
             return np.array(arr, copy=True)
@@ -79,7 +113,34 @@ def fit_intensity_scaler(
     max_samples: int | None = 512,
     cache_size: int = 4,
 ) -> IntensityScaler:
-    """Fit one scalar image normalization using only selected training samples."""
+    """Fit one scalar image normalization from selected catalog samples.
+
+    Parameters
+    ----------
+    catalog:
+        Prepared sample catalog used to open the sharded image reader.
+    sample_indices:
+        Catalog row indices selected for fitting.  For leakage control this
+        should usually be training-only.
+    mode:
+        Scaling mode.  ``"raw"`` returns an identity scaler without reading
+        images.
+    max_samples:
+        Optional prefix cap applied to ``sample_indices`` before reading images.
+    cache_size:
+        Shard-reader cache size used while fitting.
+
+    Returns
+    -------
+    IntensityScaler
+        Fitted amplitude-preserving scaler.
+
+    Raises
+    ------
+    ValueError
+        If no selected samples are available for a fitted mode or the derived
+        scale is not finite and positive.
+    """
     if mode == "raw":
         return IntensityScaler(mode="raw", scale=1.0, sample_count=0, statistic=None)
     indices = [int(idx) for idx in sample_indices]

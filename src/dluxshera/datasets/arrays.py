@@ -20,7 +20,13 @@ DEFAULT_TARGET_SHARD_BYTES = 128 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ShardRecord:
-    """Describe one fixed-shape array shard on disk."""
+    """Describe one fixed-shape array shard on disk.
+
+    A shard record is one row of ``array_shards_manifest.json``.  It maps a
+    contiguous range of global prepared-sample indices to one ``.npy`` file and
+    records the per-sample shape and storage dtype expected by
+    :class:`ArrayShardReader`.
+    """
 
     shard_id: str
     path: str
@@ -120,6 +126,33 @@ class ArrayShardStore:
     storage dtype, shard sizing policy, and sample-to-shard mappings in JSON
     artifacts.  It is generic array infrastructure and does not assume FITS,
     images, or ML training semantics.
+
+    Parameters
+    ----------
+    output_dir:
+        Directory where the manifest, index, and ``shards/`` subdirectory will
+        be created.  Existing final manifest/index files and non-empty shard
+        directories are refused to avoid accidental overwrite.
+    storage_dtype:
+        NumPy dtype used for stored shard arrays.  Input samples are converted
+        explicitly to this dtype.
+    target_shard_bytes:
+        Approximate target size for each ``.npy`` shard.  The actual shard size
+        also depends on sample shape and ``max_samples_per_shard``.
+    max_samples_per_shard:
+        Optional hard cap on samples per shard.  This is useful for tests and
+        small smoke artifacts.
+    manifest_name:
+        File name for the JSON shard manifest written under ``output_dir``.
+    index_name:
+        File name for the JSONL sample index written under ``output_dir``.
+
+    Notes
+    -----
+    The writer only buffers one shard at a time.  Failed writes remove temporary
+    files and final artifacts created by the current invocation, but callers
+    remain responsible for choosing whether to delete or archive an old output
+    directory before retrying.
     """
 
     output_dir: Path
@@ -157,9 +190,31 @@ class ArrayShardStore:
     ) -> dict[str, Any]:
         """Write samples and return the shard manifest.
 
-        ``sample_metadata`` is optional streaming metadata.  When supplied, one
-        metadata row must be available for each sample; rows are copied into the
-        generic index with shard id and offset fields appended.
+        Parameters
+        ----------
+        samples:
+            Iterable yielding fixed-shape array-like samples.  Every sample must
+            have the same shape and a non-object dtype.
+        sample_metadata:
+            Optional iterable yielding one JSON-ready metadata row per sample.
+            Rows are copied into the generic index with ``array_index``,
+            ``shard_id``, ``shard_path``, ``shard_offset``, source dtype, storage
+            dtype, and sample-shape fields appended.
+        extra_manifest:
+            Optional JSON-ready metadata stored under ``manifest["extra"]``.
+
+        Returns
+        -------
+        dict
+            JSON-ready shard manifest matching ``array_shards_manifest.json``.
+
+        Raises
+        ------
+        FileExistsError
+            If final artifacts already exist or ``shards/`` is non-empty.
+        ValueError
+            If no samples are supplied, sample shapes differ, metadata length
+            differs from sample count, or shard sizing parameters are invalid.
         """
         self.output_dir.mkdir(parents=True, exist_ok=True)
         shards_dir = self.output_dir / "shards"
@@ -368,10 +423,22 @@ class ArrayShardStore:
 class ArrayShardReader:
     """Read samples from an ``ArrayShardStore`` with bounded shard caching.
 
+    ``ArrayShardReader`` opens a prepared shard directory containing
+    ``array_shards_manifest.json`` and a ``shards/`` subdirectory of ``.npy``
+    files.  Sample indices are global prepared-sample indices from the shard
+    manifest, not necessarily row positions in a higher-level catalog.  For a
+    :class:`dluxshera.ml.SampleCatalog`, use ``catalog.array_indices`` when
+    translating catalog selections into reader indices.
+
+    Shards are loaded with NumPy memory mapping on first access and retained in
+    a bounded LRU cache.  Random access therefore opens only the shards actually
+    touched; it does not load the full prepared dataset into RAM.  Evicted
+    memory maps are closed automatically.
+
     The ordinary public API is lifetime-safe: :meth:`get` and ``reader[index]``
     return independent sample copies whose lifetime does not depend on the
     backing shard remaining in the LRU cache.  Use ``get(index, copy=False)``
-    only for explicit short-lived zero-copy access into the cached memmap.
+    only for explicit short-lived zero-copy access into the cached memory map.
 
     Parameters
     ----------
@@ -380,7 +447,13 @@ class ArrayShardReader:
     manifest_name:
         Name of the JSON shard manifest under ``root_dir``.
     cache_size:
-        Maximum number of shard memmaps to retain at once.
+        Maximum number of shard memory maps to retain at once.
+
+    Notes
+    -----
+    Use the reader as a context manager when possible.  Calling :meth:`close`
+    releases all cached memory maps and resets the cache; the reader may still
+    be used afterwards, in which case shards will be reopened lazily.
     """
 
     root_dir: Path
@@ -424,12 +497,12 @@ class ArrayShardReader:
 
     @property
     def sample_count(self) -> int:
-        """Return the total sample count."""
+        """Return the total number of globally indexed samples."""
         return int(self.manifest["sample_count"])
 
     @property
     def sample_shape(self) -> tuple[int, ...]:
-        """Return the per-sample shape."""
+        """Return the shape of one sample excluding the sample axis."""
         return tuple(int(v) for v in self.manifest["sample_shape"])
 
     @property
@@ -447,7 +520,14 @@ class ArrayShardReader:
         self.close()
 
     def close(self) -> None:
-        """Close all cached memory maps."""
+        """Close all cached shard memory maps.
+
+        Notes
+        -----
+        Arrays returned by :meth:`get` with ``copy=True`` remain valid after
+        close.  Arrays returned with ``copy=False`` are views into cached memory
+        maps and should not be used after :meth:`close` or after cache eviction.
+        """
         for array in list(self._cache.values()):
             mmap = getattr(array, "_mmap", None)
             if mmap is not None:
@@ -497,6 +577,10 @@ class ArrayShardReader:
     def get(self, index: int, *, copy: bool = True) -> np.ndarray:
         """Return one sample by global index.
 
+        The index is resolved through the manifest's shard ranges, then the
+        relevant ``.npy`` file is opened with ``mmap_mode="r"`` if it is not
+        already cached.
+
         Parameters
         ----------
         index:
@@ -505,10 +589,26 @@ class ArrayShardReader:
             When ``True`` (default), return an independent array.  When
             ``False``, return a view into the cached shard memmap; callers must
             consume it before LRU eviction or :meth:`close`.
+
+        Returns
+        -------
+        numpy.ndarray
+            One sample with shape ``reader.sample_shape`` and the manifest
+            storage dtype.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is outside the global sample range.
+        FileNotFoundError
+            If the selected shard file is missing.
+        ValueError
+            If the shard file cannot be read or no manifest mapping exists.
         """
         shard, offset = self._locate(index)
         array = self._load_shard(shard)
         return np.array(array[offset], copy=True) if copy else np.asarray(array[offset])
 
     def __getitem__(self, index: int) -> np.ndarray:
+        """Return ``get(index)`` for bracket-based random access."""
         return self.get(index)

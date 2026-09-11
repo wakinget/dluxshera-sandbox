@@ -35,6 +35,7 @@ Working practices, priorities, and lessons learned.
 
 ## Tutorials
 Hands-on guides for common workflows.
+- [SHERA ML data access](tutorials/ml_data_access.md)
 - [Canonical astrometry demo](tutorials/canonical_astrometry_demo.md)
 - [Modeling overview](tutorials/modeling_overview.md)
 

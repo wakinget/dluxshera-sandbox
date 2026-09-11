@@ -10,6 +10,7 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 
 ## Documentation
 
+- ML collaborator entry point: [SHERA ML data access](docs/tutorials/ml_data_access.md)
 - Conceptual entry point: [docs/tutorials/modeling_overview.md](docs/tutorials/modeling_overview.md)
 - Tutorial: [docs/tutorials/canonical_astrometry_demo.md](docs/tutorials/canonical_astrometry_demo.md) alongside `examples/recipes/canonical_astrometry.py` (recipe) and `examples/runners/run_canonical_astrometry.py` (runner)
 - Two-plane recipe: `examples/recipes/twoplane_astrometry.py` (read-first variant of the canonical flow)
@@ -21,10 +22,10 @@ High-precision, differentiable astrometric instrument model using dLux (JAX) for
 
 ## Install
 
-This repository is not yet an installable Python package. Installation is done by:
+This repository is an installable Python package. Installation is done by:
 
 1. Creating a virtual environment
-2. Installing dependencies from `requirements.txt`
+2. Installing the package in editable mode
 3. Running notebooks/scripts from within that environment
 
 This will automatically install a temporary **Fresnel-enabled fork of dLux** until the upstream PR is merged.
@@ -99,7 +100,13 @@ If activation works, your prompt usually shows something like `(.venv)`.
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[notebooks]"
+```
+
+For optional PyTorch ML training adapters, use:
+
+```bash
+python -m pip install -e ".[notebooks,ml]"
 ```
 
 ---
@@ -107,7 +114,7 @@ python -m pip install -r requirements.txt
 ### 5) Verify the install
 
 ```bash
-python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
+python -c "import dluxshera, jax, dLux; print('dluxshera import OK'); print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
 ```
 
 If versions print without errors, your setup is working.
@@ -185,7 +192,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[notebooks]"
 ```
 
 #### 5) Tell VS Code to use your `.venv`
@@ -199,7 +206,7 @@ This step matters: it ensures VS Code, notebooks, and the “Run Python File” 
 #### 6) Quick verification
 
 ```powershell
-python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
+python -c "import dluxshera, jax, dLux; print('dluxshera import OK'); print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
 ```
 
 ---
@@ -218,9 +225,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[notebooks]"
 
-python -c "import jax, dLux; print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
+python -c "import dluxshera, jax, dLux; print('dluxshera import OK'); print('JAX:', jax.__version__); print('dLux:', dLux.__version__)"
 ```
 
 3) In VS Code:
@@ -267,6 +274,13 @@ Notes:
 - To stop Jupyter in the terminal: press `Ctrl+C` and confirm.
 - If tqdm progress bars look weird in notebooks, prefer:
   - `from tqdm.auto import tqdm`
+
+### ML data-access quickstart
+
+For prepared SHERA ML datasets and collaborator notebooks, start with:
+
+- Tutorial: [docs/tutorials/ml_data_access.md](docs/tutorials/ml_data_access.md)
+- Notebook: `examples/notebooks/SHERA_ml_data_access_quickstart.ipynb`
 
 
 
@@ -333,12 +347,7 @@ python examples/recipes/twoplane_astrometry.py
 
 - The new Fresnel propagation utilities for dLux are currently under review. For the time being, dLux installation uses my own local fork. When the PR is fully integrated, these installation instructions will change.
 - Notebooks rely on `notebook_setup.py` located in `examples/notebooks/`.
-- The repo is not yet a Python package; imports follow the current directory structure:
-  ```
-  from Classes.modeling import SheraThreePlane_Model
-  from Classes.optimization import ...
-  ```
-- A `pyproject.toml` will be added later to support `pip install -e .`.
+- The package is installed from `pyproject.toml`; use imports such as `from dluxshera.ml import load_sample_catalog`.
 
 ## Key concepts
 

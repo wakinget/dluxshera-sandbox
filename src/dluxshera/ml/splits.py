@@ -183,7 +183,29 @@ def split_registry_content_identity(split_registry: "SplitRegistry") -> dict[str
 
 @dataclass(frozen=True)
 class SplitRegistry:
-    """Represent reusable science-state and nuisance-state ML splits."""
+    """Represent reusable science-state and nuisance-state ML splits.
+
+    A split registry records group-level train/validation/test assignments for
+    a prepared dataset.  Science groups and nuisance groups are split
+    independently so experiments can control two different leakage modes:
+
+    - science leakage, where the same physical state appears in both training
+      and evaluation through repeated nuisance realizations or pair contexts;
+    - nuisance leakage, where the same nuisance realization appears in both
+      training and evaluation when the goal is to test nuisance generalization.
+
+    Pair construction and custom notebook workflows can combine these axes.  For
+    example, validation with ``science_split="validation"`` and
+    ``nuisance_split="train"`` tests held-out science states under seen nuisance
+    realizations, while ``nuisance_split="validation"`` also holds out nuisance
+    states.
+
+    Notes
+    -----
+    The registry is tied to a prepared dataset identity.  Call
+    :meth:`validate_catalog` or use ``load_split_registry(path, catalog=catalog)``
+    before applying a registry to a catalog loaded from disk.
+    """
 
     artifact_id: str
     schema_version: str
@@ -238,23 +260,81 @@ class SplitRegistry:
         )
 
     def science_split(self, group_id: str) -> str:
-        """Return the split assignment for one science group."""
+        """Return the split assignment for one science group.
+
+        Parameters
+        ----------
+        group_id:
+            Science group id from ``catalog.science_group_ids``.
+
+        Returns
+        -------
+        str
+            Partition label for that science state.
+        """
         return str(self.science_assignments[str(group_id)])
 
     def nuisance_split(self, group_id: str) -> str:
-        """Return the split assignment for one nuisance group."""
+        """Return the split assignment for one nuisance group.
+
+        Parameters
+        ----------
+        group_id:
+            Nuisance group id from ``catalog.nuisance_group_ids``.
+
+        Returns
+        -------
+        str
+            Partition label for that nuisance state.
+        """
         return str(self.nuisance_assignments[str(group_id)])
 
     def science_groups(self, split: str) -> set[str]:
-        """Return science group ids assigned to ``split``."""
+        """Return science group ids assigned to ``split``.
+
+        Parameters
+        ----------
+        split:
+            Partition label, for example ``"train"``, ``"validation"``, or
+            ``"test"``.
+
+        Returns
+        -------
+        set of str
+            Science group ids assigned to that partition.
+        """
         return {group for group, part in self.science_assignments.items() if part == split}
 
     def nuisance_groups(self, split: str) -> set[str]:
-        """Return nuisance group ids assigned to ``split``."""
+        """Return nuisance group ids assigned to ``split``.
+
+        Parameters
+        ----------
+        split:
+            Partition label, for example ``"train"``, ``"validation"``, or
+            ``"test"``.
+
+        Returns
+        -------
+        set of str
+            Nuisance group ids assigned to that partition.
+        """
         return {group for group, part in self.nuisance_assignments.items() if part == split}
 
     def validate_catalog(self, catalog: SampleCatalog) -> None:
-        """Reject use with a different prepared dataset identity."""
+        """Reject use with a different prepared dataset identity.
+
+        Parameters
+        ----------
+        catalog:
+            Catalog that should match this registry's prepared artifact id and
+            prepared dataset hash.
+
+        Raises
+        ------
+        ValueError
+            If the registry was generated for a different prepared dataset.
+        """
         expected_artifact_id = self.prepared_dataset.get("artifact_id")
         if expected_artifact_id != catalog.artifact_id:
             raise ValueError(
@@ -283,9 +363,40 @@ def generate_split_registry(
     """Generate a deterministic reusable ML split registry.
 
     Science states and nuisance realizations are split independently.  The
-    science grouping policy uses the prepared V3 physical-delta hash, keeping
-    the same physical state together even when it appears in several pair-grid
-    contexts.
+    science grouping policy uses the catalog's science-group identity, keeping
+    the same physical state together even when it appears in several nuisance
+    realizations or pair-grid contexts.
+
+    Parameters
+    ----------
+    catalog:
+        Prepared dataset catalog to split.
+    artifact_id:
+        Identifier stored in the split artifact.
+    seed:
+        Integer seed used for deterministic group ordering.  The same catalog,
+        fractions, and seed produce the same assignments.
+    science_fractions:
+        Mapping from science partition name to relative fraction.  Defaults to
+        80/10/10 train/validation/test.
+    nuisance_fractions:
+        Mapping from nuisance partition name to relative fraction.  Defaults to
+        80/10/10 train/validation/test.
+    explicit_nuisance_assignments:
+        Optional complete mapping from nuisance group id to partition.  Use this
+        when nuisance states should follow a designed holdout rather than a
+        random fraction.
+    require_nonempty_science_partitions:
+        If ``True``, every positive-fraction science partition must receive at
+        least one science group.
+    require_nonempty_nuisance_partitions:
+        If ``True``, every positive-fraction nuisance partition must receive at
+        least one nuisance group.
+
+    Returns
+    -------
+    SplitRegistry
+        Reusable split assignment registry tied to ``catalog`` identity.
     """
     science_fractions = dict(
         science_fractions or {"train": 0.8, "validation": 0.1, "test": 0.1}
@@ -396,6 +507,27 @@ def generate_role_preserving_split_registry(
     frozen design choice from the state plan, so the registry records those
     assignments instead of drawing a new random grouped split.  All rendered
     nuisance replicas of a science state must agree on the same role.
+
+    Parameters
+    ----------
+    catalog:
+        Prepared dataset catalog whose ``sample_role`` values already encode
+        science-state split roles.
+    artifact_id:
+        Identifier stored in the split artifact.
+    seed:
+        Recorded for provenance.  It does not reshuffle science roles.
+    explicit_nuisance_assignments:
+        Optional complete mapping from nuisance group id to split label.
+    default_nuisance_split:
+        Nuisance split assigned to every nuisance group when explicit nuisance
+        assignments are not supplied.
+
+    Returns
+    -------
+    SplitRegistry
+        Registry preserving catalog science roles and independently assigning
+        nuisance groups.
     """
     science_assignments: dict[str, str] = {}
     science_family_roles: dict[str, set[str]] = {}
@@ -476,7 +608,20 @@ def generate_role_preserving_split_registry(
 
 
 def load_split_registry(path: Path, *, catalog: SampleCatalog | None = None) -> SplitRegistry:
-    """Load a split registry and optionally validate its prepared dataset."""
+    """Load a split registry and optionally validate its prepared dataset.
+
+    Parameters
+    ----------
+    path:
+        JSON split-registry artifact path.
+    catalog:
+        Optional catalog used to validate prepared dataset identity.
+
+    Returns
+    -------
+    SplitRegistry
+        Loaded split registry.
+    """
     registry = SplitRegistry.from_dict(read_json(Path(path)))
     if catalog is not None:
         registry.validate_catalog(catalog)

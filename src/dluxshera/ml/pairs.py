@@ -159,7 +159,36 @@ def fisher_distance_bin_label(distance: float, edges: Sequence[float]) -> str:
 
 @dataclass(frozen=True)
 class PairPolicy:
-    """Describe an ordered-pair sampling policy without materializing pairs."""
+    """Describe controlled ordered-pair sampling without materializing all pairs.
+
+    Pair policies define which scientific comparison families are eligible when
+    drawing ordered image pairs from a :class:`SampleCatalog`.  They are useful
+    beyond the repository's current CNN experiments: the same records can feed
+    difference-image classifiers, contrastive objectives, regression targets, or
+    custom notebook analyses.
+
+    The primary ``family_weights`` keys are:
+
+    - ``"same_nuisance_different_science"``: compare two science states rendered
+      with the same nuisance group.
+    - ``"different_nuisance_same_science"``: compare two nuisance groups for the
+      same science state.  ``"same_science_different_nuisance"`` is accepted as
+      a compatibility alias and canonicalized to this value.
+    - ``"different_science_different_nuisance"``: compare samples that differ in
+      both science and nuisance group.
+    - ``"identity"``: compare a sample to itself, only when identity pairs are
+      explicitly enabled.
+
+    Legacy aliases ``"A"``, ``"B"``, ``"C"``, and ``"I"`` map to those families.
+    Ordered target semantics are ``target_delta_z = z_B - z_A`` except for
+    same-science nuisance comparisons and identity pairs, where the science
+    target is zero by construction.
+
+    Notes
+    -----
+    The sampler builds small grouped buckets lazily and samples candidates from
+    those buckets.  It does not construct an O(N^2) table of every possible pair.
+    """
 
     policy_id: str = "generic_pair_policy_v1"
     schema_version: str = PAIR_POLICY_SCHEMA_VERSION
@@ -307,7 +336,15 @@ class PairPolicy:
             raise ValueError("max_sampling_attempts must be >= 1.")
 
     def to_dict(self) -> dict[str, Any]:
-        """Return policy metadata suitable for manifests and run configs."""
+        """Return policy metadata suitable for manifests and run configs.
+
+        Returns
+        -------
+        dict
+            JSON-ready policy metadata including pair-family vocabulary,
+            distance constraints, dataset-family constraints, curriculum stages,
+            and ordered-target conventions.
+        """
         return {
             "schema_version": self.schema_version,
             "policy_id": self.policy_id,
@@ -345,7 +382,19 @@ class PairPolicy:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "PairPolicy":
-        """Build a pair policy from serialized metadata."""
+        """Build a pair policy from serialized metadata.
+
+        Parameters
+        ----------
+        payload:
+            Mapping produced by :meth:`to_dict` or a compatible run
+            configuration block.  Missing values use ``PairPolicy`` defaults.
+
+        Returns
+        -------
+        PairPolicy
+            Validated policy with canonicalized aliases.
+        """
         defaults = cls()
         raw_max_fisher_distance = payload.get(
             "max_fisher_distance",
@@ -404,7 +453,19 @@ class PairPolicy:
         )
 
     def resolved_for_epoch(self, epoch: int | None) -> "PairPolicy":
-        """Return a copy with the latest matching curriculum stage applied."""
+        """Return a copy with the latest matching curriculum stage applied.
+
+        Parameters
+        ----------
+        epoch:
+            Epoch number used to resolve staged overrides.  ``None`` returns the
+            policy unchanged.
+
+        Returns
+        -------
+        PairPolicy
+            Effective policy for that epoch.
+        """
         if epoch is None or not self.curriculum_stages:
             return self
         updates: dict[str, Any] = {}
@@ -495,7 +556,22 @@ class PairPolicy:
 
 @dataclass(frozen=True)
 class PairRecord:
-    """Represent one ordered image pair by prepared sample references."""
+    """Represent one ordered image pair by prepared sample references.
+
+    A pair record contains enough information to retrieve two images, understand
+    their science/nuisance relationship, and apply architecture-neutral targets.
+    ``sample_a_index`` and ``sample_b_index`` are global prepared-sample image
+    indices suitable for :class:`dluxshera.datasets.ArrayShardReader`; the
+    stable ``sample_*_id`` fields preserve identity across serialized manifests.
+
+    Notes
+    -----
+    Targets follow the ordered convention ``B_minus_A``.  For pairs that change
+    science state, ``target_delta_z`` and ``target_delta_theta`` describe the
+    science-vector difference from A to B.  For same-science different-nuisance
+    and identity pairs, those science targets are zero while ``nuisance_delta``
+    records the nuisance-vector difference.
+    """
 
     pair_record_id: str
     sample_a_id: str
@@ -596,7 +672,24 @@ def make_reverse_pair_record(
     pair_record_id: str | None = None,
     id_prefix: str = "pair",
 ) -> PairRecord:
-    """Return the ordered reverse of ``record`` with antisymmetric targets."""
+    """Return the ordered reverse of ``record`` with antisymmetric targets.
+
+    Parameters
+    ----------
+    record:
+        Source ordered pair.
+    pair_record_id:
+        Optional explicit id for the reversed record.  If omitted, a stable id is
+        derived from the source record and reversed sample identities.
+    id_prefix:
+        Prefix used when deriving a stable id.
+
+    Returns
+    -------
+    PairRecord
+        Pair with A/B samples, science ids, nuisance ids, dataset-family fields,
+        and pair ids swapped.  Vector targets are multiplied by ``-1``.
+    """
     if pair_record_id is None:
         pair_record_id = _stable_id(
             [record.pair_record_id, "reverse", record.sample_b_id, record.sample_a_id],
@@ -633,14 +726,27 @@ def make_reverse_pair_record(
 
 @dataclass(frozen=True)
 class PairManifest:
-    """Hold frozen validation/test pair records plus provenance metadata."""
+    """Hold frozen ordered-pair records plus provenance metadata.
+
+    Frozen manifests are intended for validation and test comparisons where the
+    exact image pairs should remain stable across runs.  Training can instead
+    use :class:`PairSampler` directly to draw deterministic dynamic pairs from a
+    seed and epoch.
+    """
 
     artifact_id: str
     manifest: Mapping[str, Any]
     records: tuple[PairRecord, ...]
 
     def summary(self) -> dict[str, Any]:
-        """Return compact pair-manifest counts and distance summaries."""
+        """Return compact pair-manifest counts and distance summaries.
+
+        Returns
+        -------
+        dict
+            Artifact id, content hash, pair count, pair-family counts,
+            evaluation-slice counts, and Fisher-distance summary statistics.
+        """
         return {
             "artifact_id": self.artifact_id,
             "content_sha256": self.manifest.get("content_identity", {}).get("sha256"),
@@ -684,7 +790,30 @@ def pair_manifest_content_hash(
 
 
 class PairSampler:
-    """Sample ordered pairs from indexed catalog groups without O(N^2) tables."""
+    """Sample controlled ordered pairs from catalog groups.
+
+    ``PairSampler`` combines a :class:`SampleCatalog`, a :class:`SplitRegistry`,
+    and a :class:`PairPolicy`.  It chooses eligible samples by science split and
+    nuisance split, then lazily groups them into buckets for the requested pair
+    family.  This makes large prepared datasets usable from notebooks and
+    training code without materializing every possible pair.
+
+    Use this class when you need reproducible controlled comparisons, such as
+    same-nuisance different-science pairs for perturbation classification,
+    same-science different-nuisance pairs for nuisance sensitivity studies, or
+    different-science different-nuisance pairs for robustness checks.
+
+    Parameters
+    ----------
+    catalog:
+        Prepared dataset catalog containing sample vectors and group ids.
+    split_registry:
+        Science/nuisance split assignment registry.  It is validated against the
+        catalog identity during construction.
+    policy:
+        Optional pair policy.  If omitted, the default samples
+        ``same_nuisance_different_science`` pairs.
+    """
 
     catalog: SampleCatalog
     split_registry: SplitRegistry
@@ -730,7 +859,26 @@ class PairSampler:
         policy: PairPolicy | None = None,
         dataset_family: str | None = None,
     ) -> np.ndarray:
-        """Return samples whose science and nuisance groups match split choices."""
+        """Return catalog row indices matching split and policy constraints.
+
+        Parameters
+        ----------
+        science_split:
+            Science-state partition name, for example ``"train"``,
+            ``"validation"``, or ``"test"``.
+        nuisance_split:
+            Nuisance-state partition name.  ``"*"``, ``"all"``, and ``"any"``
+            keep all nuisance groups while still applying science splitting.
+        policy:
+            Optional policy override used only for eligibility constraints.
+        dataset_family:
+            Optional dataset-family name to require.
+
+        Returns
+        -------
+        numpy.ndarray
+            One-dimensional ``int64`` array of catalog row indices.
+        """
         policy = self.policy if policy is None else policy
         family_key = "" if dataset_family is None else str(dataset_family)
         key = (
@@ -927,7 +1075,38 @@ class PairSampler:
         eval_slice: str | None = None,
         epoch: int | None = None,
     ) -> PairRecord:
-        """Sample one ordered pair respecting split, family, and distance policy."""
+        """Sample one ordered pair respecting split, family, and distance policy.
+
+        Parameters
+        ----------
+        rng:
+            NumPy random generator.  Supplying a seeded generator makes pair
+            selection reproducible.
+        science_split:
+            Science-state split used to choose eligible science groups.
+        nuisance_split:
+            Nuisance-state split used to choose eligible nuisance groups.  Use
+            ``"all"``, ``"any"``, or ``"*"`` to keep every nuisance group.
+        split:
+            Label written to the returned :class:`PairRecord`.
+        eval_slice:
+            Optional evaluation-slice label written to the record.
+        epoch:
+            Optional epoch used to resolve curriculum stages on the policy.
+
+        Returns
+        -------
+        PairRecord
+            Fully populated ordered-pair record whose sample indices can be read
+            from ``catalog.image_reader()``.
+
+        Raises
+        ------
+        RuntimeError
+            If no valid pair is found within ``policy.max_sampling_attempts``.
+        ValueError
+            If the requested split/family has no valid candidate bucket.
+        """
         policy = self.policy.resolved_for_epoch(epoch)
         self._validate_policy_against_catalog(policy)
         diagnostics: dict[str, Any] = {
@@ -994,7 +1173,30 @@ class PairSampler:
         pair_record_id: str | None = None,
         policy: PairPolicy | None = None,
     ) -> PairRecord:
-        """Build a fully populated ordered-pair record from two catalog indices."""
+        """Build a fully populated ordered-pair record from two catalog indices.
+
+        Parameters
+        ----------
+        sample_a_index, sample_b_index:
+            Catalog row indices for the ordered A and B samples.  The returned
+            record stores their corresponding global image-store indices.
+        family:
+            Pair-family name or accepted alias.  The method trusts the caller to
+            pass indices that satisfy that family.
+        split:
+            Split label to store in the record.
+        eval_slice:
+            Optional evaluation-slice label.
+        pair_record_id:
+            Optional explicit stable record id.
+        policy:
+            Optional policy used for id generation and distance-bin labels.
+
+        Returns
+        -------
+        PairRecord
+            Ordered pair with vector targets and provenance fields populated.
+        """
         policy = self.policy if policy is None else policy
         a = int(sample_a_index)
         b = int(sample_b_index)
@@ -1062,7 +1264,43 @@ def generate_frozen_pair_manifest(
     pairs_per_slice: int = 256,
     eval_slices: Mapping[str, Mapping[str, str]] | None = None,
 ) -> PairManifest:
-    """Generate deterministic frozen validation/test ordered-pair records."""
+    """Generate deterministic frozen validation/test ordered-pair records.
+
+    Frozen manifests are useful when evaluation should replay the exact same
+    controlled comparisons independent of data-loader order, hardware, or model
+    architecture.  The function repeatedly asks :class:`PairSampler` for valid
+    pairs under each evaluation-slice split selection and records enough
+    provenance to validate the result against the prepared catalog and split
+    registry later.
+
+    Parameters
+    ----------
+    catalog:
+        Prepared sample catalog.
+    split_registry:
+        Science/nuisance split registry validated by the sampler.
+    policy:
+        Optional pair policy.  Defaults to ``PairPolicy()``.
+    artifact_id:
+        Identifier stored in the generated manifest.
+    split:
+        Split label written to records, typically ``"validation"`` or
+        ``"test"``.
+    seed:
+        Seed for deterministic pair sampling.
+    pairs_per_slice:
+        Number of unique base pairs requested for each evaluation slice.
+    eval_slices:
+        Optional mapping from evaluation-slice name to ``science_split`` and
+        ``nuisance_split`` selections.  If omitted, validation/test generation
+        includes held-out science under train nuisance and held-out science
+        under matched held-out nuisance.
+
+    Returns
+    -------
+    PairManifest
+        Frozen pair records plus manifest metadata and content identity.
+    """
     if int(pairs_per_slice) < 1:
         raise ValueError("pairs_per_slice must be >= 1.")
     policy = PairPolicy() if policy is None else policy
@@ -1175,7 +1413,23 @@ def generate_frozen_pair_manifest(
 
 
 def write_pair_manifest(path: Path, pair_manifest: PairManifest, *, overwrite: bool = False) -> None:
-    """Write a frozen pair manifest directory with metadata and JSONL rows."""
+    """Write a frozen pair manifest directory with metadata and JSONL rows.
+
+    Parameters
+    ----------
+    path:
+        Output directory.  The function writes ``manifest.json`` and
+        ``pairs.jsonl`` beneath this directory.
+    pair_manifest:
+        Manifest object to serialize.
+    overwrite:
+        If ``False``, refuse an existing non-empty directory.
+
+    Raises
+    ------
+    FileExistsError
+        If ``path`` exists, is non-empty, and ``overwrite`` is ``False``.
+    """
     root = Path(path)
     if root.exists() and any(root.iterdir()) and not overwrite:
         raise FileExistsError(f"{root} exists and is non-empty; pass overwrite=True.")
@@ -1190,7 +1444,29 @@ def load_pair_manifest(
     catalog: SampleCatalog | None = None,
     split_registry: SplitRegistry | None = None,
 ) -> PairManifest:
-    """Load a frozen pair manifest and optionally validate identity links."""
+    """Load a frozen pair manifest and optionally validate identity links.
+
+    Parameters
+    ----------
+    path:
+        Directory containing ``manifest.json`` and ``pairs.jsonl``.
+    catalog:
+        Optional catalog used to verify prepared dataset identity.
+    split_registry:
+        Optional split registry used to verify registry artifact id and stable
+        split content hash.
+
+    Returns
+    -------
+    PairManifest
+        Loaded pair manifest and ordered records.
+
+    Raises
+    ------
+    ValueError
+        If the schema, row count, content hash, catalog identity, or split
+        identity does not match.
+    """
     root = Path(path)
     manifest = read_json(root / "manifest.json")
     if manifest.get("schema_version") != PAIR_MANIFEST_SCHEMA_VERSION:
