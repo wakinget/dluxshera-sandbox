@@ -99,6 +99,10 @@ Use these as your primary working set:
   Practical gotchas (tooling pitfalls, common failure modes).
 - **Runtime plate scale semantics:** `docs/dev/plate_scale_runtime.md`  
   Guidance on plate-scale behavior with runtime bindings and cached optics.
+- **ML inverse-model program:** `docs/dev/shera_ml_inverse_model_design.md`
+  (design + experiment roadmap) and `docs/dev/notes/ml_program_status_20260908.md`
+  (latest status snapshot). Active campaign plans are tracked in
+  `docs/dev/working_plan.md` (ML Campaign Bring-Up sections).
 
 ## Architecture deep dives
 For conceptual and design details, consult:
