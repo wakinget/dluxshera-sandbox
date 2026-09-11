@@ -11,5 +11,6 @@
 set -euo pipefail
 
 export ML_SITE="${ML_SITE:-gattaca2}"
+export ML_CONDA_SH="${ML_CONDA_SH:-/cm/shared/apps/miniforge/etc/profile.d/conda.sh}"
 REPO_ROOT="${ML_REPO_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}"
 exec bash "$REPO_ROOT/work/experiments/ml/hpc/run_study_training.sh"
