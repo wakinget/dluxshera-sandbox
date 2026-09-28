@@ -403,6 +403,44 @@ def test_pair_sampler_other_family_semantics_and_split_boundaries(tmp_path: Path
     assert different_both.nuisance_a_id != different_both.nuisance_b_id
 
 
+def test_all_nuisance_split_keeps_every_nuisance_group_but_still_splits_science(
+    tmp_path: Path,
+) -> None:
+    catalog = load_sample_catalog(_write_prepared_fixture(tmp_path))
+    registry = _split(catalog)
+    sampler = PairSampler(
+        catalog,
+        registry,
+        PairPolicy(
+            family_weights={"different_nuisance_same_science": 1.0},
+            min_fisher_distance=0.0,
+        ),
+    )
+
+    train_rows = sampler.eligible_indices("train", "train")
+    all_rows = sampler.eligible_indices("train", "all")
+    # "any" and "*" are documented equivalents of "all".
+    assert sampler.eligible_indices("train", "any").tolist() == all_rows.tolist()
+    assert sampler.eligible_indices("train", "*").tolist() == all_rows.tolist()
+
+    # Every nuisance group is kept, so the eligible set strictly grows.
+    assert set(train_rows.tolist()) < set(all_rows.tolist())
+    assert {str(catalog.nuisance_group_ids[i]) for i in all_rows} == set(catalog.nuisance_groups)
+
+    # Science splitting still applies, so no held-out science state leaks in.
+    train_science = registry.science_groups("train")
+    assert {str(catalog.science_group_ids[i]) for i in all_rows} == train_science
+
+    # This fixture has a single train nuisance group, so a different-nuisance
+    # family is only samplable once nuisance partitioning is bypassed.
+    with pytest.raises(ValueError, match="No candidate buckets"):
+        sampler.sample_pair(np.random.default_rng(0), nuisance_split="train")
+    record = sampler.sample_pair(np.random.default_rng(0), nuisance_split="all")
+    assert record.science_a_id == record.science_b_id
+    assert record.nuisance_a_id != record.nuisance_b_id
+    assert record.science_a_id in train_science
+
+
 def test_frozen_eval_manifest_is_deterministic_and_validates(tmp_path: Path) -> None:
     catalog = load_sample_catalog(_write_prepared_fixture(tmp_path / "prepared"))
     registry = _split(catalog)

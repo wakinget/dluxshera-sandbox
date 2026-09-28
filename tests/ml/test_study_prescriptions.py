@@ -12,6 +12,7 @@ from dluxshera.ml import (
     IntensityScaler,
     load_study_contract_artifacts,
     load_sample_catalog,
+    load_split_registry,
     resolve_study_experiment_config,
     split_registry_content_sha256,
     validate_evaluation_artifact_against_recipe,

@@ -266,6 +266,28 @@ Pair records use ordered target semantics: ``target_delta_z = z_B - z_A``.  For
 same-science nuisance comparisons, the science target is zero and
 ``nuisance_delta`` records the nuisance-vector difference.
 
+### Use every nuisance realization
+
+Pair sampling normally restricts both axes to a split.  To use the full
+nuisance-state dataset instead of one partition, pass ``"all"`` (``"any"`` and
+``"*"`` are equivalent) as the nuisance split.  Science splitting still applies,
+so this keeps science leakage control while exposing every nuisance realization:
+
+```python
+record = sampler.sample_pair(
+    np.random.default_rng(0),
+    science_split="train",
+    nuisance_split="all",
+)
+
+rows = sampler.eligible_indices("train", "all")
+```
+
+Use this when a model should see the whole nuisance bank; it avoids having to
+place every nuisance group in the ``"train"`` partition.  Keep an explicit
+nuisance split instead whenever you need to measure generalization to unseen
+nuisance realizations.
+
 ## Reproducible splits
 
 ``SplitRegistry`` separates science-state splits from nuisance-state splits.
@@ -293,8 +315,8 @@ stricter held-out-science and held-out-nuisance evaluation, use
 ``science_split="validation"`` and ``nuisance_split="validation"``.
 
 If a prepared dataset contains only one or two nuisance realizations, nonempty
-validation and test nuisance splits are impossible.  Keep nuisance groups in
-``"train"`` for pair sampling, or set
+validation and test nuisance splits are impossible.  Sample with
+``nuisance_split="all"`` so nuisance partitioning is bypassed, or set
 ``require_nonempty_nuisance_partitions=False`` for split inspection until a full
 nuisance bank is available.
 
