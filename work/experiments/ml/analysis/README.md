@@ -1,20 +1,28 @@
 # dLuxShera ML Campaign Analysis
 
-This directory contains the local campaign tracker for ML inverse-model
-training runs. It is experimental analysis infrastructure, not a public library
-API and not a service. The intended workflow is:
+This directory contains reusable analysis code and the lightweight local
+campaign tracker for ML inverse-model training runs. It is experimental
+analysis infrastructure, not a public library API and not a service. The local
+workflow has three layers:
 
 ```text
-LS6 training jobs
-  -> durable compact results under LS6 $WORK
-  -> explicit local rsync
-  -> Results/hpc_imports/ml/<site>/
-  -> reusable loader
-  -> Jupyter campaign tracker
+work/experiments/ml/analysis/
+  reusable committed loaders, tables, plotting helpers, sync helper, and tracker
+
+Results/hpc_imports/ml/<site>/<study>/
+  authoritative local mirror of synchronized compact HPC artifacts
+
+Results/ml_analysis/<study>/
+  local study-specific notebooks, figures, tables, and exploratory outputs
 ```
 
-Imported results are data and remain outside git. The repository top-level
-`.gitignore` ignores `Results/`.
+Imported results and study-specific analysis outputs are local/generated data
+and remain outside git. The repository top-level `.gitignore` ignores
+`Results/`.
+
+Generally useful calculations, table shaping, and plotting should be promoted
+into the committed Python helpers in this directory rather than duplicated
+across notebooks.
 
 ## Compact Result Policy
 
@@ -120,12 +128,31 @@ Launch Jupyter from the repository root and open:
 work/experiments/ml/analysis/ml_campaign_tracker.ipynb
 ```
 
-The notebook does not open SSH connections or run `rsync`. Refreshing the
+This notebook is the high-level cross-study tracker. It is intended to answer:
+what has run, what is complete, what is comparable, and roughly how well is it
+doing? It stays focused on sync/provenance, completion state, evaluation
+contracts, epoch/runtime summaries, global Fisher metrics, and compact
+science-priority physical metrics such as binary-separation RMSE in
+milliarcseconds when available.
+
+The tracker does not open SSH connections or run `rsync`. Refreshing the
 campaign state is intentionally explicit:
 
 1. run `sync_results.py` outside the notebook;
 2. rerun the notebook or use Run All;
 3. newly synchronized runs appear automatically.
+
+Detailed scientific interpretation belongs in local study notebooks under
+`Results/ml_analysis/<study>/`. For example, an S09 capture-range analysis can
+live at:
+
+```text
+Results/ml_analysis/S09/s09_capture_range_analysis.ipynb
+```
+
+That notebook should read directly from
+`Results/hpc_imports/ml/<site>/S09/`; do not copy synchronized artifacts into
+`Results/ml_analysis/`.
 
 ## Tables
 

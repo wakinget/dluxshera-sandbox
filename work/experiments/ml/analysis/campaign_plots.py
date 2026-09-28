@@ -8,10 +8,14 @@ from matplotlib import pyplot as plt
 
 __all__ = [
     "add_common_zero_baseline",
+    "plot_distance_bin_metric_by_experiment",
+    "plot_experiment_metric_summary",
     "plot_best_fisher_rmse_by_run",
     "plot_best_so_far_rmse_vs_epoch",
     "plot_cosine_alignment_by_distance_bin",
     "plot_learning_rate_vs_epoch",
+    "plot_paired_seed_deltas",
+    "plot_parameter_physical_rmse_by_experiment",
     "plot_mse_skill_by_distance_bin",
     "plot_mse_skill_by_run",
     "plot_parameter_skill_by_run",
@@ -183,6 +187,174 @@ def plot_runtime_by_run(
     if "total_training_seconds" in df:
         df["total_training_minutes"] = df["total_training_seconds"] / 60.0
     return _bar_by_run(df, "total_training_minutes", "Training runtime (minutes)", ax=ax)
+
+
+def plot_experiment_metric_summary(
+    runs: pd.DataFrame,
+    metric: str,
+    *,
+    ax: plt.Axes | None = None,
+    group_col: str = "experiment_id",
+    seed_col: str = "seed",
+    ylabel: str | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot experiment means with individual seed points."""
+
+    fig, ax = _figure_ax(ax)
+    df = runs.copy()
+    if df.empty or group_col not in df or metric not in df:
+        _plot_empty_message(ax, pd.DataFrame(), f"No {metric} data.")
+    else:
+        df[metric] = pd.to_numeric(df[metric], errors="coerce")
+        df = df.dropna(subset=[group_col, metric])
+        _plot_empty_message(ax, df, f"No {metric} data.")
+        if not df.empty:
+            order = _ordered_categories(df, group_col)
+            positions = np.arange(len(order))
+            grouped = df.groupby(group_col, sort=False)[metric]
+            means = grouped.mean().reindex(order)
+            stds = grouped.std(ddof=1).reindex(order)
+            ax.bar(positions, means, yerr=stds, alpha=0.35, capsize=4)
+            for xpos, experiment in zip(positions, order):
+                group = df[df[group_col].eq(experiment)].sort_values(seed_col if seed_col in df else metric)
+                jitter = _jitter(len(group), width=0.18)
+                ax.scatter(
+                    np.full(len(group), xpos) + jitter,
+                    group[metric],
+                    s=32,
+                    zorder=3,
+                    label=str(experiment) if len(order) == 1 else None,
+                )
+            ax.set_xticks(positions, labels=[str(value) for value in order], rotation=30, ha="right")
+    ax.set_xlabel(group_col.replace("_", " ").title())
+    ax.set_ylabel(ylabel or metric.replace("_", " "))
+    return fig, ax
+
+
+def plot_paired_seed_deltas(
+    deltas: pd.DataFrame,
+    metric: str,
+    *,
+    ax: plt.Axes | None = None,
+    seed_col: str = "seed",
+    ylabel: str | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot matched-seed metric deltas from ``matched_seed_delta_table``."""
+
+    fig, ax = _figure_ax(ax)
+    column = f"{metric}_delta"
+    df = deltas.copy()
+    if df.empty or column not in df:
+        _plot_empty_message(ax, pd.DataFrame(), f"No paired {metric} delta data.")
+    else:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+        df = df.dropna(subset=[column])
+        _plot_empty_message(ax, df, f"No paired {metric} delta data.")
+        if not df.empty:
+            labels = df[seed_col].astype(str) if seed_col in df else df.index.astype(str)
+            positions = np.arange(len(df))
+            ax.bar(positions, df[column])
+            ax.axhline(0.0, color="black", linewidth=1, alpha=0.6)
+            ax.set_xticks(positions, labels=labels)
+    ax.set_xlabel("Seed")
+    ax.set_ylabel(ylabel or f"{metric.replace('_', ' ')} delta")
+    return fig, ax
+
+
+def plot_distance_bin_metric_by_experiment(
+    distance_bins: pd.DataFrame,
+    *,
+    metric: str = "mse_skill",
+    ax: plt.Axes | None = None,
+    min_sample_count: int | None = None,
+    ylabel: str | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot distance-bin metric means and seed scatter grouped by experiment."""
+
+    fig, ax = _figure_ax(ax)
+    df = distance_bins.copy()
+    required = {"experiment_id", "distance_bin", "distance_bin_lo", metric}
+    if df.empty or not required.issubset(df.columns):
+        _plot_empty_message(ax, pd.DataFrame(), f"No distance-bin {metric} data.")
+    else:
+        df[metric] = pd.to_numeric(df[metric], errors="coerce")
+        if min_sample_count is not None and "sample_count" in df:
+            df.loc[pd.to_numeric(df["sample_count"], errors="coerce") < min_sample_count, metric] = np.nan
+        df = df.dropna(subset=["experiment_id", "distance_bin", "distance_bin_lo", metric])
+        _plot_empty_message(ax, df, f"No distance-bin {metric} data.")
+        if not df.empty:
+            ordered_bins = (
+                df.sort_values("distance_bin_lo")[["distance_bin", "distance_bin_lo"]]
+                .drop_duplicates("distance_bin")["distance_bin"]
+                .tolist()
+            )
+            x = np.arange(len(ordered_bins))
+            for experiment, group in df.groupby("experiment_id", sort=True):
+                summary = group.groupby("distance_bin", sort=False)[metric].agg(["mean", "std"]).reindex(ordered_bins)
+                ax.plot(x, summary["mean"], marker="o", label=str(experiment))
+                lower = (summary["mean"] - summary["std"]).to_numpy(dtype=float)
+                upper = (summary["mean"] + summary["std"]).to_numpy(dtype=float)
+                ax.fill_between(x, lower, upper, alpha=0.12)
+            ax.set_xticks(x, labels=[str(value) for value in ordered_bins], rotation=35, ha="right")
+            ax.legend(fontsize="small")
+    ax.set_xlabel("Fisher-distance bin")
+    ax.set_ylabel(ylabel or metric.replace("_", " "))
+    return fig, ax
+
+
+def plot_validation_metric_by_experiment(
+    history: pd.DataFrame,
+    *,
+    metric: str = "validation_overall_rmse",
+    x: str = "epoch",
+    ax: plt.Axes | None = None,
+    ylabel: str | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot validation history as experiment mean +/- seed scatter."""
+
+    fig, ax = _figure_ax(ax)
+    df = history.copy()
+    required = {"experiment_id", x, metric}
+    if df.empty or not required.issubset(df.columns):
+        _plot_empty_message(ax, pd.DataFrame(), f"No validation {metric} data.")
+    else:
+        df[x] = pd.to_numeric(df[x], errors="coerce")
+        df[metric] = pd.to_numeric(df[metric], errors="coerce")
+        df = df.dropna(subset=["experiment_id", x, metric])
+        _plot_empty_message(ax, df, f"No validation {metric} data.")
+        if not df.empty:
+            for experiment, group in df.groupby("experiment_id", sort=True):
+                summary = group.groupby(x, sort=True)[metric].agg(["mean", "std"]).reset_index()
+                ax.plot(summary[x], summary["mean"], label=str(experiment))
+                lower = (summary["mean"] - summary["std"]).to_numpy(dtype=float)
+                upper = (summary["mean"] + summary["std"]).to_numpy(dtype=float)
+                ax.fill_between(summary[x].to_numpy(dtype=float), lower, upper, alpha=0.12)
+            ax.legend(fontsize="small")
+    ax.set_xlabel(x.replace("_", " ").title())
+    ax.set_ylabel(ylabel or metric.replace("_", " "))
+    return fig, ax
+
+
+def plot_parameter_physical_rmse_by_experiment(
+    parameters: pd.DataFrame,
+    *,
+    parameter: str = "source.separation_as",
+    ax: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot one parameter's physical RMSE by experiment with seed points."""
+
+    df = parameters.copy()
+    if "parameter" in df:
+        df = df[df["parameter"].eq(parameter)].copy()
+    metric = "physical_rmse_display" if "physical_rmse_display" in df else "physical_rmse"
+    unit = None
+    if not df.empty:
+        unit_col = "physical_display_unit" if "physical_display_unit" in df else "physical_unit"
+        if unit_col in df:
+            units = df[unit_col].dropna().astype(str).unique()
+            unit = units[0] if len(units) == 1 else None
+    ylabel = f"{parameter} RMSE" + (f" ({unit})" if unit else "")
+    return plot_experiment_metric_summary(df, metric, ax=ax, ylabel=ylabel)
 
 
 def plot_seen_vs_heldout_nuisance(
@@ -415,3 +587,13 @@ def _sample(df: pd.DataFrame, sample: int | None) -> pd.DataFrame:
     if sample is None or len(df) <= sample:
         return df
     return df.sample(n=sample, random_state=0)
+
+
+def _ordered_categories(df: pd.DataFrame, column: str) -> list[object]:
+    return sorted(df[column].dropna().unique().tolist(), key=lambda value: str(value))
+
+
+def _jitter(size: int, *, width: float) -> np.ndarray:
+    if size <= 1:
+        return np.zeros(size)
+    return np.linspace(-width, width, size)

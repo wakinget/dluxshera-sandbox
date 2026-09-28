@@ -14,11 +14,15 @@ __all__ = [
     "CampaignData",
     "RunRecord",
     "PredictionData",
+    "add_physical_display_columns",
     "compute_initializer_metrics",
     "compute_prediction_geometry",
     "evaluation_contract_summary",
+    "experiment_summary_table",
     "load_campaign",
+    "matched_seed_delta_table",
     "time_to_thresholds",
+    "validation_cutoff_table",
 ]
 
 REQUIRED_COMPLETE_ARTIFACTS = (
@@ -30,6 +34,19 @@ REQUIRED_COMPLETE_ARTIFACTS = (
 )
 
 EPS = 1.0e-12
+SEPARATION_PARAMETER = "source.separation_as"
+
+DEFAULT_EXPERIMENT_SUMMARY_METRICS = (
+    "best_fisher_rmse",
+    "zero_baseline_fisher_rmse",
+    "mse_skill",
+    "rmse_reduction",
+    "separation_rmse_mas",
+    "separation_mae_mas",
+    "separation_fisher_mse_skill",
+    "total_training_seconds",
+    "best_epoch",
+)
 
 
 @dataclass(frozen=True)
@@ -270,6 +287,201 @@ def time_to_thresholds(
     return pd.DataFrame(rows)
 
 
+def validation_cutoff_table(
+    history: pd.DataFrame,
+    cutoffs: Sequence[int | float],
+    *,
+    metric_col: str = "validation_overall_rmse",
+    epoch_col: str = "epoch_number",
+) -> pd.DataFrame:
+    """Return validation metric values at or before useful epoch cutoffs.
+
+    ``epoch_number`` is preferred because it is human-facing and 1-based. If a
+    run has no sampled epoch at or before a cutoff, the earliest sampled epoch is
+    used and marked as not before the cutoff.
+    """
+
+    columns = [
+        "run_id",
+        "study_id",
+        "experiment_id",
+        "seed",
+        "cutoff_epoch",
+        "epoch",
+        "epoch_number",
+        "metric_col",
+        "metric_value",
+        "best_metric_so_far",
+        "cumulative_seconds",
+        "cumulative_minutes",
+        "selected_at_or_before_cutoff",
+    ]
+    if history.empty or metric_col not in history.columns:
+        return pd.DataFrame(columns=columns)
+
+    effective_epoch_col = epoch_col if epoch_col in history.columns else "epoch"
+    if effective_epoch_col not in history.columns:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, Any]] = []
+    sort_cols = ["run_id", effective_epoch_col]
+    for run_id, group in history.sort_values(sort_cols).groupby("run_id"):
+        group = group.copy()
+        group[effective_epoch_col] = pd.to_numeric(group[effective_epoch_col], errors="coerce")
+        group[metric_col] = pd.to_numeric(group[metric_col], errors="coerce")
+        valid = group.dropna(subset=[effective_epoch_col, metric_col])
+        if valid.empty:
+            continue
+        for cutoff in cutoffs:
+            before = valid[valid[effective_epoch_col] <= float(cutoff)]
+            selected_at_or_before = not before.empty
+            selected = before.iloc[-1] if selected_at_or_before else valid.iloc[0]
+            metric_values = pd.to_numeric(
+                valid.loc[valid[effective_epoch_col] <= selected[effective_epoch_col], metric_col],
+                errors="coerce",
+            )
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "study_id": selected.get("study_id"),
+                    "experiment_id": selected.get("experiment_id"),
+                    "seed": selected.get("seed"),
+                    "cutoff_epoch": float(cutoff),
+                    "epoch": selected.get("epoch", np.nan),
+                    "epoch_number": selected.get("epoch_number", np.nan),
+                    "metric_col": metric_col,
+                    "metric_value": float(selected[metric_col]),
+                    "best_metric_so_far": float(metric_values.min()),
+                    "cumulative_seconds": selected.get("cumulative_seconds", np.nan),
+                    "cumulative_minutes": selected.get("cumulative_minutes", np.nan),
+                    "selected_at_or_before_cutoff": selected_at_or_before,
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def add_physical_display_columns(parameters: pd.DataFrame) -> pd.DataFrame:
+    """Add display-unit physical error columns without changing native values.
+
+    Native physical metrics stay in ``physical_rmse`` / ``physical_mae`` and
+    ``physical_unit``. Angular separations in arcseconds are additionally
+    exposed in milliarcseconds for easier scientific reading.
+    """
+
+    df = parameters.copy()
+    if df.empty:
+        for col in (
+            "physical_display_scale",
+            "physical_display_unit",
+            "physical_rmse_display",
+            "physical_mae_display",
+        ):
+            df[col] = pd.Series(dtype=float if col != "physical_display_unit" else object)
+        return df
+
+    if "physical_unit" not in df.columns:
+        df["physical_unit"] = None
+    df["physical_display_scale"] = 1.0
+    df["physical_display_unit"] = df["physical_unit"]
+
+    angular = df["physical_unit"].eq("arcsec")
+    df.loc[angular, "physical_display_scale"] = 1000.0
+    df.loc[angular, "physical_display_unit"] = "mas"
+
+    for source_col, output_col in (
+        ("physical_rmse", "physical_rmse_display"),
+        ("physical_mae", "physical_mae_display"),
+    ):
+        if source_col in df.columns:
+            df[output_col] = pd.to_numeric(df[source_col], errors="coerce") * df["physical_display_scale"]
+        else:
+            df[output_col] = np.nan
+    return df
+
+
+def experiment_summary_table(
+    runs: pd.DataFrame,
+    *,
+    metrics: Sequence[str] | None = None,
+    group_cols: Sequence[str] = ("study_id", "experiment_id"),
+) -> pd.DataFrame:
+    """Aggregate run-level metrics by experiment while preserving seed scatter."""
+
+    if runs.empty:
+        return pd.DataFrame()
+    active_group_cols = [col for col in group_cols if col in runs.columns]
+    if not active_group_cols:
+        raise ValueError("At least one grouping column must be present in runs.")
+
+    selected_metrics = [col for col in (metrics or DEFAULT_EXPERIMENT_SUMMARY_METRICS) if col in runs.columns]
+    rows: list[dict[str, Any]] = []
+    for key, group in runs.groupby(active_group_cols, dropna=False, sort=True):
+        key_values = key if isinstance(key, tuple) else (key,)
+        row: dict[str, Any] = dict(zip(active_group_cols, key_values))
+        row["run_count"] = int(len(group))
+        row["complete_count"] = int(group.get("status", pd.Series(dtype=object)).eq("complete").sum())
+        row["seed_count"] = int(group["seed"].nunique()) if "seed" in group else np.nan
+        for metric in selected_metrics:
+            values = pd.to_numeric(group[metric], errors="coerce").dropna()
+            row[f"{metric}_mean"] = float(values.mean()) if not values.empty else np.nan
+            row[f"{metric}_std"] = float(values.std(ddof=1)) if len(values) > 1 else np.nan
+            row[f"{metric}_min"] = float(values.min()) if not values.empty else np.nan
+            row[f"{metric}_max"] = float(values.max()) if not values.empty else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def matched_seed_delta_table(
+    runs: pd.DataFrame,
+    reference_experiment: str,
+    comparison_experiment: str,
+    *,
+    metrics: Sequence[str] | None = None,
+    seed_col: str = "seed",
+) -> pd.DataFrame:
+    """Compare two experiments on matched seeds.
+
+    Delta columns are ``comparison - reference`` so negative RMSE deltas are
+    improvements while positive skill deltas are improvements.
+    """
+
+    if runs.empty or "experiment_id" not in runs.columns or seed_col not in runs.columns:
+        return pd.DataFrame()
+    selected_metrics = [col for col in (metrics or DEFAULT_EXPERIMENT_SUMMARY_METRICS) if col in runs.columns]
+    reference = (
+        runs[runs["experiment_id"].eq(reference_experiment)]
+        .sort_values(["run_id"])
+        .drop_duplicates(seed_col, keep="first")
+        .set_index(seed_col)
+    )
+    comparison = (
+        runs[runs["experiment_id"].eq(comparison_experiment)]
+        .sort_values(["run_id"])
+        .drop_duplicates(seed_col, keep="first")
+        .set_index(seed_col)
+    )
+    common_seeds = sorted(set(reference.index).intersection(set(comparison.index)))
+    rows: list[dict[str, Any]] = []
+    for seed in common_seeds:
+        ref_row = reference.loc[seed]
+        cmp_row = comparison.loc[seed]
+        row: dict[str, Any] = {
+            seed_col: seed,
+            "reference_experiment_id": reference_experiment,
+            "comparison_experiment_id": comparison_experiment,
+            "reference_run_id": ref_row.get("run_id"),
+            "comparison_run_id": cmp_row.get("run_id"),
+        }
+        for metric in selected_metrics:
+            ref_value = pd.to_numeric(pd.Series([ref_row.get(metric)]), errors="coerce").iloc[0]
+            cmp_value = pd.to_numeric(pd.Series([cmp_row.get(metric)]), errors="coerce").iloc[0]
+            row[f"{metric}_reference"] = ref_value
+            row[f"{metric}_comparison"] = cmp_value
+            row[f"{metric}_delta"] = cmp_value - ref_value
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def evaluation_contract_summary(
     runs: pd.DataFrame,
     *,
@@ -452,7 +664,46 @@ def _run_row(
         "heldout_nuisance_mse_skill": heldout_slice.get("mse_skill"),
         "seen_nuisance_mse_skill": seen_slice.get("mse_skill"),
         "sample_count": None if pred_metrics is None else pred_metrics.get("sample_count"),
+        **_separation_run_metrics(record, arrays),
     }
+
+
+def _separation_run_metrics(
+    record: RunRecord,
+    arrays: Mapping[str, np.ndarray] | None,
+) -> dict[str, Any]:
+    validation = _mapping((record.metrics or {}).get("validation"))
+    row = _separation_physical_metrics(validation)
+    row.update(
+        {
+            "separation_fisher_rmse": np.nan,
+            "separation_fisher_baseline_rmse": np.nan,
+            "separation_fisher_rmse_reduction": np.nan,
+            "separation_fisher_mse_skill": np.nan,
+        }
+    )
+    if arrays is None:
+        return row
+    labels = _parameter_labels(record, arrays["y_true_z"].shape[1])
+    if SEPARATION_PARAMETER not in labels:
+        return row
+    idx = labels.index(SEPARATION_PARAMETER)
+    truth = np.asarray(arrays["y_true_z"], dtype=np.float64)
+    pred = np.asarray(arrays["y_pred_z"], dtype=np.float64)
+    residual = pred - truth
+    baseline_mse = float(np.mean(truth[:, idx] ** 2))
+    model_mse = float(np.mean(residual[:, idx] ** 2))
+    baseline_rmse = math.sqrt(baseline_mse)
+    model_rmse = math.sqrt(model_mse)
+    row.update(
+        {
+            "separation_fisher_rmse": model_rmse,
+            "separation_fisher_baseline_rmse": baseline_rmse,
+            "separation_fisher_rmse_reduction": _safe_skill(baseline_rmse, model_rmse),
+            "separation_fisher_mse_skill": _safe_skill(baseline_mse, model_mse),
+        }
+    )
+    return row
 
 
 def _history_table(record: RunRecord) -> pd.DataFrame:
@@ -548,6 +799,7 @@ def _parameter_table(record: RunRecord, arrays: Mapping[str, np.ndarray]) -> pd.
     config = record.config or {}
     validation = _mapping((record.metrics or {}).get("validation"))
     physical_rmse = _mapping(validation.get("physical_per_parameter_rmse"))
+    physical_mae = _mapping(validation.get("physical_per_parameter_mae"))
 
     rows: list[dict[str, Any]] = []
     for idx, label in enumerate(labels):
@@ -555,6 +807,10 @@ def _parameter_table(record: RunRecord, arrays: Mapping[str, np.ndarray]) -> pd.
         model_mse = float(np.mean(residual[:, idx] ** 2))
         baseline_rmse = math.sqrt(baseline_mse)
         model_rmse = math.sqrt(model_mse)
+        physical_unit = _parameter_unit(label)
+        display_unit, display_scale = _physical_display_unit_and_scale(physical_unit)
+        native_rmse = physical_rmse.get(label)
+        native_mae = physical_mae.get(label)
         rows.append(
             {
                 "site": record.site,
@@ -570,8 +826,13 @@ def _parameter_table(record: RunRecord, arrays: Mapping[str, np.ndarray]) -> pd.
                 "fisher_baseline_rmse": baseline_rmse,
                 "fisher_rmse_reduction": _safe_skill(baseline_rmse, model_rmse),
                 "fisher_mse_skill": _safe_skill(baseline_mse, model_mse),
-                "physical_rmse": physical_rmse.get(label),
-                "physical_unit": _parameter_unit(label),
+                "physical_rmse": native_rmse,
+                "physical_mae": native_mae,
+                "physical_unit": physical_unit,
+                "physical_display_scale": display_scale,
+                "physical_display_unit": display_unit,
+                "physical_rmse_display": _scale_optional(native_rmse, display_scale),
+                "physical_mae_display": _scale_optional(native_mae, display_scale),
             }
         )
     return pd.DataFrame(rows)
@@ -616,6 +877,7 @@ def _distance_bin_table(record: RunRecord, arrays: Mapping[str, np.ndarray]) -> 
         else:
             row["mean_fisher_distance_l2"] = np.nan
             row["median_fisher_distance_l2"] = np.nan
+        row.update(_separation_physical_metrics(_serialized_distance_bin(record, row["distance_bin"])))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -768,6 +1030,18 @@ def _parameter_unit(label: str) -> str | None:
     return None
 
 
+def _physical_display_unit_and_scale(unit: str | None) -> tuple[str | None, float]:
+    if unit == "arcsec":
+        return "mas", 1000.0
+    return unit, 1.0
+
+
+def _scale_optional(value: Any, scale: float) -> float:
+    if value is None:
+        return np.nan
+    return float(value) * scale
+
+
 def _distance_bin_edges(record: RunRecord) -> list[float]:
     config_edges = _nested(record.config or {}, ("evaluation", "fisher_distance_bin_edges"))
     if config_edges is not None:
@@ -788,6 +1062,23 @@ def _distance_bin_label(lo: float, hi: float) -> str:
 def _serialized_slice_value(validation: Mapping[str, Any], slice_name: str, key: str) -> Any:
     by_slice = _mapping(validation.get("by_eval_slice"))
     return _mapping(by_slice.get(slice_name)).get(key)
+
+
+def _serialized_distance_bin(record: RunRecord, distance_bin: str) -> Mapping[str, Any]:
+    validation = _mapping((record.metrics or {}).get("validation"))
+    by_distance = _mapping(validation.get("by_distance_bin"))
+    bins = _mapping(by_distance.get("bins"))
+    return _mapping(bins.get(distance_bin))
+
+
+def _separation_physical_metrics(metrics_group: Mapping[str, Any]) -> dict[str, Any]:
+    rmse_as = _mapping(metrics_group.get("physical_per_parameter_rmse")).get(SEPARATION_PARAMETER)
+    mae_as = _mapping(metrics_group.get("physical_per_parameter_mae")).get(SEPARATION_PARAMETER)
+    return {
+        "separation_rmse_mas": _scale_optional(rmse_as, 1000.0),
+        "separation_mae_mas": _scale_optional(mae_as, 1000.0),
+        "separation_physical_unit": "mas" if rmse_as is not None or mae_as is not None else None,
+    }
 
 
 def _history_total_seconds(record: RunRecord) -> float | None:

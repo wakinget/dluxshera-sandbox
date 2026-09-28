@@ -16,12 +16,17 @@ sys.path.insert(0, str(ANALYSIS_DIR))
 
 from campaign_plots import (  # noqa: E402
     add_common_zero_baseline,
+    plot_distance_bin_metric_by_experiment,
+    plot_experiment_metric_summary,
     plot_best_fisher_rmse_by_run,
     plot_learning_rate_vs_epoch,
     plot_mse_skill_by_distance_bin,
+    plot_paired_seed_deltas,
+    plot_parameter_physical_rmse_by_experiment,
     plot_parameter_skill_heatmap,
     plot_prediction_norms,
     plot_seen_vs_heldout_nuisance,
+    plot_validation_metric_by_experiment,
     plot_validation_rmse_vs_epoch,
 )
 
@@ -30,9 +35,12 @@ def test_plot_helpers_return_figures_and_axes() -> None:
     runs = pd.DataFrame(
         {
             "run_id": ["a", "b"],
+            "experiment_id": ["E01", "E02"],
+            "seed": [1, 1],
             "best_fisher_rmse": [2.0, 1.0],
             "mse_skill": [0.2, 0.3],
             "rmse_reduction": [0.1, 0.2],
+            "separation_rmse_mas": [3.0, 2.5],
             "total_training_seconds": [60.0, 120.0],
         }
     )
@@ -40,7 +48,7 @@ def test_plot_helpers_return_figures_and_axes() -> None:
         {
             "run_id": ["a", "a", "b", "b"],
             "study_id": ["S05"] * 4,
-            "experiment_id": ["E"] * 4,
+            "experiment_id": ["E01", "E01", "E02", "E02"],
             "epoch": [0, 1, 0, 1],
             "validation_overall_rmse": [3.0, 2.0, 4.0, 1.0],
             "best_validation_rmse_so_far": [3.0, 2.0, 4.0, 1.0],
@@ -59,19 +67,24 @@ def test_plot_helpers_return_figures_and_axes() -> None:
     parameters = pd.DataFrame(
         {
             "run_id": ["a", "a", "b", "b"],
+            "experiment_id": ["E01", "E01", "E02", "E02"],
+            "seed": [1, 1, 1, 1],
             "parameter": ["p0", "p1", "p0", "p1"],
             "parameter_display": ["p0", "p1", "p0", "p1"],
             "parameter_index": [0, 1, 0, 1],
             "fisher_mse_skill": [0.1, 0.2, 0.3, 0.4],
+            "physical_rmse_display": [1.0, 2.0, 1.5, 2.5],
+            "physical_display_unit": ["mas", "nm", "mas", "nm"],
         }
     )
     bins = pd.DataFrame(
         {
-            "run_id": ["a", "a"],
-            "distance_bin": ["0-1", "1-2"],
-            "distance_bin_lo": [0.0, 1.0],
-            "mse_skill": [0.1, 0.2],
-            "sample_count": [10, 10],
+            "run_id": ["a", "a", "b", "b"],
+            "experiment_id": ["E01", "E01", "E02", "E02"],
+            "distance_bin": ["0-1", "1-2", "0-1", "1-2"],
+            "distance_bin_lo": [0.0, 1.0, 0.0, 1.0],
+            "mse_skill": [0.1, 0.2, 0.15, 0.25],
+            "sample_count": [10, 10, 10, 10],
         }
     )
     geometry = pd.DataFrame(
@@ -87,14 +100,23 @@ def test_plot_helpers_return_figures_and_axes() -> None:
         (plot_validation_rmse_vs_epoch, history),
         (plot_learning_rate_vs_epoch, history),
         (plot_best_fisher_rmse_by_run, runs),
+        (lambda df: plot_experiment_metric_summary(df, "separation_rmse_mas"), runs),
         (plot_seen_vs_heldout_nuisance, slices),
         (plot_parameter_skill_heatmap, parameters),
+        (lambda df: plot_parameter_physical_rmse_by_experiment(df, parameter="p0"), parameters),
         (plot_mse_skill_by_distance_bin, bins),
+        (plot_distance_bin_metric_by_experiment, bins),
+        (plot_validation_metric_by_experiment, history),
         (plot_prediction_norms, geometry),
     ):
         fig, ax = func(arg)
         assert fig is ax.figure
         plt.close(fig)
+
+    deltas = pd.DataFrame({"seed": [1, 2], "best_fisher_rmse_delta": [-1.0, 0.5]})
+    fig, ax = plot_paired_seed_deltas(deltas, "best_fisher_rmse")
+    assert fig is ax.figure
+    plt.close(fig)
 
 
 def test_plot_helpers_handle_empty_tables() -> None:

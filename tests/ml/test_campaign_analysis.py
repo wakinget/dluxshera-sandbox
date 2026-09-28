@@ -12,10 +12,14 @@ ANALYSIS_DIR = Path(__file__).resolve().parents[2] / "work" / "experiments" / "m
 sys.path.insert(0, str(ANALYSIS_DIR))
 
 from campaign_analysis import (  # noqa: E402
+    add_physical_display_columns,
     compute_initializer_metrics,
     compute_prediction_geometry,
+    experiment_summary_table,
     load_campaign,
+    matched_seed_delta_table,
     time_to_thresholds,
+    validation_cutoff_table,
 )
 
 
@@ -38,6 +42,7 @@ def _write_run(
     scheduler_history: bool = False,
     source_commit: str = "abc123",
     validation_sha: str = "validation-sha",
+    include_physical_metrics: bool = True,
 ) -> Path:
     run_dir = root / "nested" / experiment_id / run_id
     manifest = {
@@ -103,21 +108,33 @@ def _write_run(
     y_true = np.asarray([[1.0, 2.0], [0.0, 2.0], [2.0, 0.0], [0.0, 0.0]])
     y_pred = np.asarray([[0.5, 2.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]])
     residual = y_pred - y_true
+    validation_metrics = {
+        "fisher_overall_rmse": float(np.sqrt(np.mean(residual**2))),
+        "fisher_per_parameter_rmse": {
+            label: float(np.sqrt(np.mean(residual[:, idx] ** 2)))
+            for idx, label in enumerate(PARAMETERS)
+        },
+    }
+    if include_physical_metrics:
+        validation_metrics.update(
+            {
+                "physical_per_parameter_mae": {
+                    "source.contrast": 0.05,
+                    "optics.primary.zernike_coeffs_nm[0]": 0.1,
+                    "source.separation_as": 0.0015,
+                },
+                "physical_per_parameter_rmse": {
+                    "source.contrast": 0.1,
+                    "optics.primary.zernike_coeffs_nm[0]": 0.2,
+                    "source.separation_as": 0.002,
+                },
+            }
+        )
     metrics = {
         "schema_version": "dluxshera_ml_metrics/2",
         "best_epoch": 1,
         "best_validation_loss": float(np.mean(residual**2)),
-        "validation": {
-            "fisher_overall_rmse": float(np.sqrt(np.mean(residual**2))),
-            "fisher_per_parameter_rmse": {
-                label: float(np.sqrt(np.mean(residual[:, idx] ** 2)))
-                for idx, label in enumerate(PARAMETERS)
-            },
-            "physical_per_parameter_rmse": {
-                "source.contrast": 0.1,
-                "optics.primary.zernike_coeffs_nm[0]": 0.2,
-            },
-        },
+        "validation": validation_metrics,
     }
     _write_json(run_dir / "run_manifest.json", manifest)
     if not complete:
@@ -225,8 +242,12 @@ def test_core_metrics_parameter_slices_bins_and_geometry(tmp_path: Path) -> None
 
     parameter = campaign.parameters.set_index("parameter")
     assert parameter.loc["source.contrast", "fisher_mse_skill"] == pytest.approx(0.75)
+    assert parameter.loc["source.contrast", "physical_mae"] == pytest.approx(0.05)
     assert parameter.loc["optics.primary.zernike_coeffs_nm[0]", "parameter_family"] == "M1"
     assert parameter.loc["optics.primary.zernike_coeffs_nm[0]", "physical_unit"] == "nm"
+    assert row["separation_rmse_mas"] == pytest.approx(2.0)
+    assert row["separation_mae_mas"] == pytest.approx(1.5)
+    assert row["separation_physical_unit"] == "mas"
 
     slices = campaign.slices.set_index("eval_slice")
     assert slices.loc["heldout_science_seen_nuisance", "sample_count"] == 2
@@ -244,6 +265,62 @@ def test_core_metrics_parameter_slices_bins_and_geometry(tmp_path: Path) -> None
     assert np.isnan(geom["correction_norm_ratio"][0])
     assert np.isnan(geom["relative_residual_norm"][0])
     assert geom["cosine_alignment"][1] == pytest.approx(1.0)
+
+
+def test_physical_display_columns_convert_arcsec_to_mas() -> None:
+    parameters = pd.DataFrame(
+        {
+            "parameter": ["source.separation_as", "optics.primary.zernike_coeffs_nm[0]"],
+            "physical_rmse": [0.003, 2.0],
+            "physical_mae": [0.002, 1.5],
+            "physical_unit": ["arcsec", "nm"],
+        }
+    )
+
+    converted = add_physical_display_columns(parameters)
+
+    assert converted.loc[0, "physical_rmse_display"] == pytest.approx(3.0)
+    assert converted.loc[0, "physical_mae_display"] == pytest.approx(2.0)
+    assert converted.loc[0, "physical_display_unit"] == "mas"
+    assert converted.loc[1, "physical_rmse_display"] == pytest.approx(2.0)
+    assert converted.loc[1, "physical_display_unit"] == "nm"
+
+
+def test_missing_physical_metrics_degrade_to_nan(tmp_path: Path) -> None:
+    _write_run(tmp_path, include_physical_metrics=False)
+    campaign = load_campaign([tmp_path])
+
+    row = campaign.runs.iloc[0]
+    assert np.isnan(row["separation_rmse_mas"])
+    assert np.isnan(row["separation_mae_mas"])
+    assert campaign.parameters["physical_rmse"].isna().all()
+    assert campaign.parameters["physical_mae"].isna().all()
+
+
+def test_experiment_summary_and_matched_seed_deltas() -> None:
+    runs = pd.DataFrame(
+        {
+            "study_id": ["S", "S", "S", "S"],
+            "experiment_id": ["E01", "E01", "E02", "E02"],
+            "run_id": ["a1", "a2", "b1", "b2"],
+            "seed": [1, 2, 1, 2],
+            "status": ["complete", "complete", "complete", "partial"],
+            "best_fisher_rmse": [10.0, 12.0, 9.0, 15.0],
+            "separation_rmse_mas": [4.0, 6.0, 3.0, 7.0],
+        }
+    )
+
+    summary = experiment_summary_table(runs, metrics=["best_fisher_rmse", "separation_rmse_mas"])
+    indexed = summary.set_index("experiment_id")
+    assert indexed.loc["E01", "run_count"] == 2
+    assert indexed.loc["E02", "complete_count"] == 1
+    assert indexed.loc["E01", "best_fisher_rmse_mean"] == pytest.approx(11.0)
+    assert indexed.loc["E02", "separation_rmse_mas_mean"] == pytest.approx(5.0)
+
+    deltas = matched_seed_delta_table(runs, "E01", "E02", metrics=["best_fisher_rmse", "separation_rmse_mas"])
+    by_seed = deltas.set_index("seed")
+    assert by_seed.loc[1, "best_fisher_rmse_delta"] == pytest.approx(-1.0)
+    assert by_seed.loc[2, "separation_rmse_mas_delta"] == pytest.approx(1.0)
 
 
 def test_duplicate_resolution_and_conflict_detection(tmp_path: Path) -> None:
@@ -271,3 +348,10 @@ def test_time_to_thresholds(tmp_path: Path) -> None:
     assert reached.loc[95.0, "cumulative_seconds"] == pytest.approx(3.0)
     assert np.isnan(reached.loc[75.0, "epoch"])
     assert np.isnan(reached.loc[75.0, "epoch_number"])
+
+    cutoffs = validation_cutoff_table(campaign.history, [2, 4])
+    cutoff_index = cutoffs.set_index("cutoff_epoch")
+    assert cutoff_index.loc[2.0, "epoch_number"] == 2
+    assert cutoff_index.loc[2.0, "metric_value"] == pytest.approx(90.0)
+    assert cutoff_index.loc[4.0, "epoch_number"] == 3
+    assert cutoff_index.loc[4.0, "best_metric_so_far"] == pytest.approx(80.0)
