@@ -15,12 +15,17 @@ __all__ = [
     "RunRecord",
     "PredictionData",
     "add_physical_display_columns",
+    "classify_metric_deltas",
     "compute_initializer_metrics",
     "compute_prediction_geometry",
+    "dataset_family_summary_table",
+    "distance_bin_delta_table",
+    "effect_size_summary_table",
     "evaluation_contract_summary",
     "experiment_summary_table",
     "load_campaign",
     "matched_seed_delta_table",
+    "residual_error_budget_table",
     "time_to_thresholds",
     "validation_cutoff_table",
 ]
@@ -479,6 +484,288 @@ def matched_seed_delta_table(
             row[f"{metric}_comparison"] = cmp_value
             row[f"{metric}_delta"] = cmp_value - ref_value
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def classify_metric_deltas(
+    deltas: Sequence[float],
+    *,
+    higher_is_better: bool,
+    tolerance: float = 1.0e-9,
+) -> str:
+    """Classify paired deltas as improved, worsened, mixed, or tied.
+
+    Deltas are assumed to be ``comparison - reference``. The metric direction is
+    explicit so lower-is-better error metrics and higher-is-better skill metrics
+    cannot be accidentally interpreted the same way.
+    """
+
+    values = pd.to_numeric(pd.Series(deltas), errors="coerce").dropna().to_numpy(dtype=float)
+    if values.size == 0:
+        return "no data"
+    if np.all(np.abs(values) <= tolerance):
+        return "effectively tied"
+    signed = values if higher_is_better else -values
+    improved = signed > tolerance
+    worsened = signed < -tolerance
+    if np.all(improved):
+        return "all improved"
+    if np.all(worsened):
+        return "all worsened"
+    return "mixed"
+
+
+def effect_size_summary_table(
+    runs: pd.DataFrame,
+    comparisons: Sequence[tuple[str, str]],
+    *,
+    metrics: Sequence[str],
+    higher_is_better: Mapping[str, bool],
+    group_col: str = "experiment_id",
+    seed_col: str = "seed",
+    tolerance: float = 1.0e-9,
+) -> pd.DataFrame:
+    """Summarize experiment-mean and matched-seed effect sizes.
+
+    Delta columns are ``comparison - reference``. ``improvement_percent`` is
+    positive when the comparison improves in the declared metric direction.
+    """
+
+    columns = [
+        "reference_experiment_id",
+        "comparison_experiment_id",
+        "metric",
+        "higher_is_better",
+        "reference_mean",
+        "comparison_mean",
+        "absolute_delta",
+        "relative_delta_percent",
+        "improvement_percent",
+        "matched_seed_count",
+        "matched_delta_mean",
+        "matched_delta_std",
+        "matched_delta_min",
+        "matched_delta_max",
+        "matched_delta_classification",
+    ]
+    if runs.empty or group_col not in runs.columns:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, Any]] = []
+    for reference, comparison in comparisons:
+        paired = matched_seed_delta_table(runs, reference, comparison, metrics=metrics, seed_col=seed_col)
+        ref_group = runs[runs[group_col].eq(reference)]
+        cmp_group = runs[runs[group_col].eq(comparison)]
+        for metric in metrics:
+            if metric not in runs.columns:
+                continue
+            direction = bool(higher_is_better[metric])
+            ref_values = pd.to_numeric(ref_group[metric], errors="coerce").dropna()
+            cmp_values = pd.to_numeric(cmp_group[metric], errors="coerce").dropna()
+            ref_mean = float(ref_values.mean()) if not ref_values.empty else np.nan
+            cmp_mean = float(cmp_values.mean()) if not cmp_values.empty else np.nan
+            delta = cmp_mean - ref_mean if np.isfinite(ref_mean) and np.isfinite(cmp_mean) else np.nan
+            rel_delta = _safe_percent_delta(ref_mean, delta)
+            improvement = rel_delta if direction else -rel_delta
+            delta_col = f"{metric}_delta"
+            matched = (
+                pd.to_numeric(paired[delta_col], errors="coerce").dropna()
+                if delta_col in paired
+                else pd.Series(dtype=float)
+            )
+            rows.append(
+                {
+                    "reference_experiment_id": reference,
+                    "comparison_experiment_id": comparison,
+                    "metric": metric,
+                    "higher_is_better": direction,
+                    "reference_mean": ref_mean,
+                    "comparison_mean": cmp_mean,
+                    "absolute_delta": delta,
+                    "relative_delta_percent": rel_delta,
+                    "improvement_percent": improvement,
+                    "matched_seed_count": int(len(matched)),
+                    "matched_delta_mean": float(matched.mean()) if not matched.empty else np.nan,
+                    "matched_delta_std": float(matched.std(ddof=1)) if len(matched) > 1 else np.nan,
+                    "matched_delta_min": float(matched.min()) if not matched.empty else np.nan,
+                    "matched_delta_max": float(matched.max()) if not matched.empty else np.nan,
+                    "matched_delta_classification": classify_metric_deltas(
+                        matched,
+                        higher_is_better=direction,
+                        tolerance=tolerance,
+                    ),
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def distance_bin_delta_table(
+    distance_bins: pd.DataFrame,
+    comparisons: Sequence[tuple[str, str]],
+    *,
+    metrics: Sequence[str],
+    higher_is_better: Mapping[str, bool],
+    group_col: str = "experiment_id",
+) -> pd.DataFrame:
+    """Return experiment-mean pairwise deltas by Fisher-distance bin."""
+
+    columns = [
+        "reference_experiment_id",
+        "comparison_experiment_id",
+        "distance_bin",
+        "distance_bin_lo",
+        "distance_bin_hi",
+        "metric",
+        "higher_is_better",
+        "reference_mean",
+        "comparison_mean",
+        "delta",
+        "improvement_delta",
+        "reference_sample_count_mean",
+        "comparison_sample_count_mean",
+    ]
+    required = {group_col, "distance_bin", "distance_bin_lo"}
+    if distance_bins.empty or not required.issubset(distance_bins.columns):
+        return pd.DataFrame(columns=columns)
+
+    group_keys = ["distance_bin", "distance_bin_lo"]
+    if "distance_bin_hi" in distance_bins.columns:
+        group_keys.append("distance_bin_hi")
+    means = (
+        distance_bins.groupby([group_col, *group_keys], dropna=False)
+        .agg(
+            **{metric: (metric, "mean") for metric in metrics if metric in distance_bins.columns},
+            sample_count=("sample_count", "mean") if "sample_count" in distance_bins.columns else ("distance_bin_lo", "size"),
+        )
+        .reset_index()
+    )
+    rows: list[dict[str, Any]] = []
+    for reference, comparison in comparisons:
+        ref = means[means[group_col].eq(reference)].set_index(group_keys)
+        cmp = means[means[group_col].eq(comparison)].set_index(group_keys)
+        for key in sorted(set(ref.index).intersection(set(cmp.index)), key=lambda value: value if isinstance(value, tuple) else (value,)):
+            key_values = key if isinstance(key, tuple) else (key,)
+            key_row = dict(zip(group_keys, key_values))
+            for metric in metrics:
+                if metric not in means.columns:
+                    continue
+                direction = bool(higher_is_better[metric])
+                ref_value = float(ref.loc[key, metric])
+                cmp_value = float(cmp.loc[key, metric])
+                delta = cmp_value - ref_value
+                rows.append(
+                    {
+                        "reference_experiment_id": reference,
+                        "comparison_experiment_id": comparison,
+                        **key_row,
+                        "metric": metric,
+                        "higher_is_better": direction,
+                        "reference_mean": ref_value,
+                        "comparison_mean": cmp_value,
+                        "delta": delta,
+                        "improvement_delta": delta if direction else -delta,
+                        "reference_sample_count_mean": float(ref.loc[key, "sample_count"]),
+                        "comparison_sample_count_mean": float(cmp.loc[key, "sample_count"]),
+                    }
+                )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def residual_error_budget_table(parameters: pd.DataFrame) -> pd.DataFrame:
+    """Estimate each parameter's share of residual Fisher-space squared error.
+
+    The estimate uses ``fisher_model_rmse ** 2`` and is valid only when rows
+    share the same evaluation population and Fisher-scaled coordinate basis.
+    """
+
+    columns = [
+        "study_id",
+        "experiment_id",
+        "run_id",
+        "seed",
+        "parameter_index",
+        "parameter",
+        "parameter_display",
+        "parameter_family",
+        "residual_mse_proxy",
+        "fraction_of_residual_budget",
+        "cumulative_fraction",
+        "fisher_mse_skill",
+        "physical_rmse",
+        "physical_rmse_display",
+        "physical_unit",
+        "physical_display_unit",
+    ]
+    if parameters.empty or "fisher_model_rmse" not in parameters.columns:
+        return pd.DataFrame(columns=columns)
+
+    df = parameters.copy()
+    df["residual_mse_proxy"] = pd.to_numeric(df["fisher_model_rmse"], errors="coerce") ** 2
+    group_cols = [col for col in ("study_id", "experiment_id", "run_id", "seed") if col in df.columns]
+    if not group_cols:
+        group_cols = ["run_id"] if "run_id" in df.columns else []
+    if not group_cols:
+        total = df["residual_mse_proxy"].sum()
+        df["fraction_of_residual_budget"] = df["residual_mse_proxy"] / total if total > 0 else np.nan
+        df = df.sort_values("fraction_of_residual_budget", ascending=False)
+        df["cumulative_fraction"] = df["fraction_of_residual_budget"].cumsum()
+    else:
+        parts = []
+        for _, group in df.groupby(group_cols, dropna=False, sort=True):
+            total = group["residual_mse_proxy"].sum()
+            group = group.sort_values("residual_mse_proxy", ascending=False).copy()
+            group["fraction_of_residual_budget"] = group["residual_mse_proxy"] / total if total > 0 else np.nan
+            group["cumulative_fraction"] = group["fraction_of_residual_budget"].cumsum()
+            parts.append(group)
+        df = pd.concat(parts, ignore_index=True) if parts else df
+    return df[[col for col in columns if col in df.columns]].copy()
+
+
+def dataset_family_summary_table(records: Mapping[str, RunRecord]) -> pd.DataFrame:
+    """Summarize evaluation metrics grouped by trustworthy dataset-family labels."""
+
+    rows: list[dict[str, Any]] = []
+    for record in records.values():
+        if not record.artifacts.get("evaluation_predictions.npz", False):
+            continue
+        arrays = _load_prediction_arrays(record.result_path / "evaluation_predictions.npz")
+        if "dataset_family" not in arrays:
+            continue
+        labels = np.asarray(arrays["dataset_family"]).astype(str)
+        validation = _mapping((record.metrics or {}).get("validation"))
+        by_family = _mapping(validation.get("by_dataset_family"))
+        capture_by_family = _mapping(validation.get("capture_by_dataset_family"))
+        manifest = record.manifest
+        config = record.config or {}
+        for family in sorted(set(labels)):
+            mask = labels == family
+            computed = compute_initializer_metrics(arrays["y_true_z"][mask], arrays["y_pred_z"][mask])
+            metric_map = _mapping(by_family.get(family))
+            physical_rmse = _mapping(metric_map.get("physical_per_parameter_rmse"))
+            physical_mae = _mapping(metric_map.get("physical_per_parameter_mae"))
+            fisher_rmse = _mapping(metric_map.get("fisher_per_parameter_rmse"))
+            sep_rmse = physical_rmse.get(SEPARATION_PARAMETER)
+            sep_mae = physical_mae.get(SEPARATION_PARAMETER)
+            cap = _mapping(capture_by_family.get(family))
+            rows.append(
+                {
+                    "site": record.site,
+                    "study_id": _first_not_none(config.get("study_id"), manifest.get("study_id")),
+                    "experiment_id": _first_not_none(config.get("experiment_id"), manifest.get("experiment_id")),
+                    "run_id": record.run_id,
+                    "seed": _first_not_none(config.get("seed"), manifest.get("seed")),
+                    "dataset_family": family,
+                    "sample_count": computed["sample_count"],
+                    "fisher_rmse": computed["model_rmse"],
+                    "baseline_fisher_rmse": computed["baseline_rmse"],
+                    "mse_skill": computed["mse_skill"],
+                    "separation_fisher_rmse": fisher_rmse.get(SEPARATION_PARAMETER),
+                    "separation_rmse_mas": _scale_optional(sep_rmse, 1000.0),
+                    "separation_mae_mas": _scale_optional(sep_mae, 1000.0),
+                    "capture_fraction_rho_lt_1": cap.get("fraction_rho_lt_1"),
+                    "capture_rho_median": cap.get("rho_median"),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -1167,6 +1454,12 @@ def _safe_skill(baseline: float, model: float) -> float:
     if not np.isfinite(baseline) or abs(float(baseline)) <= EPS:
         return np.nan
     return float(1.0 - float(model) / float(baseline))
+
+
+def _safe_percent_delta(reference: float, delta: float) -> float:
+    if not np.isfinite(reference) or abs(float(reference)) <= EPS or not np.isfinite(delta):
+        return np.nan
+    return float(100.0 * delta / float(reference))
 
 
 def _as_bool(value: Any) -> bool:

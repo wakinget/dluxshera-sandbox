@@ -13,11 +13,16 @@ sys.path.insert(0, str(ANALYSIS_DIR))
 
 from campaign_analysis import (  # noqa: E402
     add_physical_display_columns,
+    classify_metric_deltas,
     compute_initializer_metrics,
     compute_prediction_geometry,
+    dataset_family_summary_table,
+    distance_bin_delta_table,
+    effect_size_summary_table,
     experiment_summary_table,
     load_campaign,
     matched_seed_delta_table,
+    residual_error_budget_table,
     time_to_thresholds,
     validation_cutoff_table,
 )
@@ -43,6 +48,7 @@ def _write_run(
     source_commit: str = "abc123",
     validation_sha: str = "validation-sha",
     include_physical_metrics: bool = True,
+    include_dataset_family: bool = False,
 ) -> Path:
     run_dir = root / "nested" / experiment_id / run_id
     manifest = {
@@ -140,6 +146,21 @@ def _write_run(
     if not complete:
         return run_dir
     _write_json(run_dir / "run_config_resolved.json", config)
+    if include_dataset_family:
+        validation_metrics["by_dataset_family"] = {
+            "joint": {
+                "sample_count": 2,
+                "physical_per_parameter_rmse": {"source.separation_as": 0.003},
+                "physical_per_parameter_mae": {"source.separation_as": 0.002},
+                "fisher_per_parameter_rmse": {"source.separation_as": 1.0},
+            },
+            "radial": {
+                "sample_count": 2,
+                "physical_per_parameter_rmse": {"source.separation_as": 0.004},
+                "physical_per_parameter_mae": {"source.separation_as": 0.0025},
+                "fisher_per_parameter_rmse": {"source.separation_as": 2.0},
+            },
+        }
     _write_json(run_dir / "metrics.json", metrics)
     if scheduler_history:
         history = pd.DataFrame(
@@ -185,6 +206,24 @@ def _write_run(
         y_true_z=y_true,
         y_pred_z=y_pred,
     )
+    if include_dataset_family:
+        np.savez(
+            run_dir / "evaluation_predictions.npz",
+            pair_record_id=np.asarray(["a", "b", "c", "d"]),
+            eval_slice=np.asarray(
+                [
+                    "heldout_science_seen_nuisance",
+                    "heldout_science_heldout_nuisance",
+                    "heldout_science_seen_nuisance",
+                    "heldout_science_heldout_nuisance",
+                ]
+            ),
+            pair_family=np.asarray(["same"] * 4),
+            dataset_family=np.asarray(["joint", "joint", "radial", "radial"]),
+            fisher_distance_l2=np.asarray([0.0, 0.999, 1.0, 2.0]),
+            y_true_z=y_true,
+            y_pred_z=y_pred,
+        )
     return run_dir
 
 
@@ -355,3 +394,102 @@ def test_time_to_thresholds(tmp_path: Path) -> None:
     assert cutoff_index.loc[2.0, "metric_value"] == pytest.approx(90.0)
     assert cutoff_index.loc[4.0, "epoch_number"] == 3
     assert cutoff_index.loc[4.0, "best_metric_so_far"] == pytest.approx(80.0)
+
+
+def test_classify_metric_deltas_respects_direction_and_tolerance() -> None:
+    assert classify_metric_deltas([-1.0, -0.5], higher_is_better=False) == "all improved"
+    assert classify_metric_deltas([1.0, 0.5], higher_is_better=False) == "all worsened"
+    assert classify_metric_deltas([-1.0, 0.5], higher_is_better=False) == "mixed"
+    assert classify_metric_deltas([1.0e-10, -1.0e-10], higher_is_better=False) == "effectively tied"
+    assert classify_metric_deltas([0.1, 0.2], higher_is_better=True) == "all improved"
+    assert classify_metric_deltas([-0.1, -0.2], higher_is_better=True) == "all worsened"
+
+
+def test_effect_size_summary_uses_metric_directionality() -> None:
+    runs = pd.DataFrame(
+        {
+            "experiment_id": ["E01", "E01", "E02", "E02"],
+            "run_id": ["a1", "a2", "b1", "b2"],
+            "seed": [1, 2, 1, 2],
+            "best_fisher_rmse": [10.0, 12.0, 9.0, 11.0],
+            "mse_skill": [0.5, 0.6, 0.55, 0.65],
+        }
+    )
+
+    summary = effect_size_summary_table(
+        runs,
+        [("E01", "E02")],
+        metrics=["best_fisher_rmse", "mse_skill"],
+        higher_is_better={"best_fisher_rmse": False, "mse_skill": True},
+    ).set_index("metric")
+
+    assert summary.loc["best_fisher_rmse", "absolute_delta"] == pytest.approx(-1.0)
+    assert summary.loc["best_fisher_rmse", "improvement_percent"] == pytest.approx(100.0 / 11.0)
+    assert summary.loc["best_fisher_rmse", "matched_delta_classification"] == "all improved"
+    assert summary.loc["mse_skill", "absolute_delta"] == pytest.approx(0.05)
+    assert summary.loc["mse_skill", "matched_delta_classification"] == "all improved"
+
+
+def test_distance_bin_delta_table() -> None:
+    bins = pd.DataFrame(
+        {
+            "experiment_id": ["E01", "E01", "E02", "E02"],
+            "distance_bin": ["0-1", "1-2", "0-1", "1-2"],
+            "distance_bin_lo": [0.0, 1.0, 0.0, 1.0],
+            "distance_bin_hi": [1.0, 2.0, 1.0, 2.0],
+            "model_fisher_rmse": [10.0, 20.0, 8.0, 25.0],
+            "mse_skill": [0.1, 0.2, 0.3, 0.1],
+            "sample_count": [5, 10, 5, 10],
+        }
+    )
+
+    deltas = distance_bin_delta_table(
+        bins,
+        [("E01", "E02")],
+        metrics=["model_fisher_rmse", "mse_skill"],
+        higher_is_better={"model_fisher_rmse": False, "mse_skill": True},
+    )
+    indexed = deltas.set_index(["distance_bin", "metric"])
+
+    assert indexed.loc[("0-1", "model_fisher_rmse"), "delta"] == pytest.approx(-2.0)
+    assert indexed.loc[("0-1", "model_fisher_rmse"), "improvement_delta"] == pytest.approx(2.0)
+    assert indexed.loc[("1-2", "mse_skill"), "delta"] == pytest.approx(-0.1)
+    assert indexed.loc[("1-2", "mse_skill"), "improvement_delta"] == pytest.approx(-0.1)
+
+
+def test_residual_error_budget_normalizes_within_run() -> None:
+    parameters = pd.DataFrame(
+        {
+            "study_id": ["S", "S"],
+            "experiment_id": ["E", "E"],
+            "run_id": ["r", "r"],
+            "seed": [1, 1],
+            "parameter_index": [0, 1],
+            "parameter": ["p0", "p1"],
+            "parameter_display": ["p0", "p1"],
+            "fisher_model_rmse": [3.0, 4.0],
+            "fisher_mse_skill": [0.1, 0.2],
+        }
+    )
+
+    budget = residual_error_budget_table(parameters).set_index("parameter")
+
+    assert budget.loc["p1", "residual_mse_proxy"] == pytest.approx(16.0)
+    assert budget.loc["p0", "fraction_of_residual_budget"] == pytest.approx(9.0 / 25.0)
+    assert budget["fraction_of_residual_budget"].sum() == pytest.approx(1.0)
+    assert budget.iloc[-1]["cumulative_fraction"] == pytest.approx(1.0)
+
+
+def test_dataset_family_summary_missing_and_present_metadata(tmp_path: Path) -> None:
+    _write_run(tmp_path / "missing")
+    missing = load_campaign([tmp_path / "missing"])
+    assert dataset_family_summary_table(missing.run_records).empty
+
+    _write_run(tmp_path / "present", include_dataset_family=True)
+    present = load_campaign([tmp_path / "present"])
+    summary = dataset_family_summary_table(present.run_records).set_index("dataset_family")
+
+    assert set(summary.index) == {"joint", "radial"}
+    assert summary.loc["joint", "sample_count"] == 2
+    assert np.isfinite(summary.loc["joint", "mse_skill"])
+    assert summary.loc["joint", "separation_rmse_mas"] == pytest.approx(3.0)
