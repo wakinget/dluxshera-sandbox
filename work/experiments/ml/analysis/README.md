@@ -154,6 +154,16 @@ That notebook should read directly from
 `Results/hpc_imports/ml/<site>/S09/`; do not copy synchronized artifacts into
 `Results/ml_analysis/`.
 
+Retrospectives that intentionally span several historical studies can use a
+named local subdirectory such as:
+
+```text
+Results/ml_analysis/early_campaigns/
+```
+
+These notebooks should follow the same rule: read synchronized artifacts from
+`Results/hpc_imports/ml/` and keep campaign-specific interpretation local.
+
 ## Tables
 
 The loader returns a `CampaignData` object with:
