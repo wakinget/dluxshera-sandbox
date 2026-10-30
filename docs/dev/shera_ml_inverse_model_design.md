@@ -1318,5 +1318,20 @@ noise sweep remain future extensions.
 
 The [ML study index](../../work/experiments/ml/analysis/README.md) separates
 local artifact completion from scientific review completion and links the
-[completed S06 bridge review](../../work/experiments/ml/analysis/s06/review.md).
+[completed S06 bridge review](../../work/experiments/ml/analysis/s06/review.md)
+and [completed S07 V4 joint-state review](../../work/experiments/ml/analysis/s07/review.md).
 Campaign prescriptions above remain design history, not current cluster status.
+
+Two S07 findings bear on the research strategy above. First, the larger CNN's
+capacity advantage carries from V3 to the harder V4 joint-state task (8.5% mean
+validation RMSE improvement, all three matched seeds), with no sign of capacity,
+duration or dataset-size saturation — so the large clean objective remains the
+right reference cohort for S10–S12. Second, S07's residual error is ~99.5%
+optical with ~89% of the optical part in equal-weight M1-minus-M2 difference
+coordinates and matched-mirror residual correlations reaching −0.99, independently
+reproducing on V4 the structured mirror-assignment identifiability problem S06
+found on V3. That strengthens the motivation for the S10 eigenmode-weighted loss,
+while the S07 review's caution still applies: the scaled-coordinate
+mirror-difference subspace is not the physical Fisher eigenbasis. S07 evaluated
+only `heldout_science_seen_nuisance` and never touched its locked test set, so it
+says nothing about nuisance generalization — that gap is S08's subject.

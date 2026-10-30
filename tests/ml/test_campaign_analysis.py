@@ -306,6 +306,108 @@ def test_core_metrics_parameter_slices_bins_and_geometry(tmp_path: Path) -> None
     assert geom["cosine_alignment"][1] == pytest.approx(1.0)
 
 
+def test_parameter_labels_follow_array_columns_not_sorted_metrics_keys(tmp_path: Path) -> None:
+    """Production ``metrics.json`` is written with ``sort_keys=True``.
+
+    Its alphabetical ``fisher_per_parameter_rmse`` order is not the column order
+    of the saved arrays, so reusing those keys positionally mislabels every
+    column. Here the true column order is
+    ``[source.separation_as, optics.primary.zernike_coeffs_nm[0]]`` while the
+    sorted key order is the reverse.
+    """
+
+    run_dir = tmp_path / "S05-E01" / "S05-E01-R001"
+    truth = np.asarray([[4.0, 1.0], [4.0, 1.0], [-4.0, -1.0], [-4.0, -1.0]])
+    pred = np.asarray([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+    residual = pred - truth
+    column_rmse = np.sqrt(np.mean(residual**2, axis=0))
+    assert column_rmse[0] != pytest.approx(column_rmse[1])
+
+    array_order = ("source.separation_as", "optics.primary.zernike_coeffs_nm[0]")
+    per_parameter = {
+        label: float(column_rmse[idx]) for idx, label in enumerate(array_order)
+    }
+    assert sorted(per_parameter) != list(array_order)
+
+    _write_json(
+        run_dir / "run_manifest.json",
+        {
+            "schema_version": "dluxshera_ml_run_manifest/1",
+            "study_id": "S05",
+            "experiment_id": "S05-E01",
+            "run_id": "S05-E01-R001",
+            "seed": 11,
+            "test_evaluated": False,
+        },
+    )
+    # Serialized exactly the way production writes it: keys sorted.
+    (run_dir / "metrics.json").write_text(
+        json.dumps(
+            {"validation": {"fisher_per_parameter_rmse": per_parameter}},
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    np.savez(run_dir / "evaluation_predictions.npz", y_true_z=truth, y_pred_z=pred)
+
+    campaign = load_campaign([tmp_path])
+    labels = (
+        campaign.parameters.sort_values("parameter_index")["parameter"].tolist()
+    )
+    assert labels == list(array_order)
+    parameter = campaign.parameters.set_index("parameter")
+    assert parameter.loc["source.separation_as", "fisher_model_rmse"] == pytest.approx(
+        column_rmse[0]
+    )
+    assert parameter.loc["source.separation_as", "parameter_family"] == "source/global"
+    assert parameter.loc[
+        "optics.primary.zernike_coeffs_nm[0]", "fisher_model_rmse"
+    ] == pytest.approx(column_rmse[1])
+    assert parameter.loc["optics.primary.zernike_coeffs_nm[0]", "parameter_family"] == "M1"
+
+
+def test_parameter_labels_fall_back_to_positional_when_rmse_match_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Equal per-parameter RMSE values cannot identify the column order.
+
+    A plausible-looking but unverifiable assignment is worse than an explicit
+    positional label, so the loader falls back rather than guessing.
+    """
+
+    run_dir = tmp_path / "S05-E01" / "S05-E01-R001"
+    truth = np.asarray([[2.0, 2.0], [-2.0, -2.0]])
+    pred = np.zeros_like(truth)
+    _write_json(
+        run_dir / "run_manifest.json",
+        {
+            "schema_version": "dluxshera_ml_run_manifest/1",
+            "study_id": "S05",
+            "experiment_id": "S05-E01",
+            "run_id": "S05-E01-R001",
+            "seed": 11,
+            "test_evaluated": False,
+        },
+    )
+    _write_json(
+        run_dir / "metrics.json",
+        {
+            "validation": {
+                "fisher_per_parameter_rmse": {
+                    "optics.primary.zernike_coeffs_nm[0]": 2.0,
+                    "source.separation_as": 2.0,
+                }
+            }
+        },
+    )
+    np.savez(run_dir / "evaluation_predictions.npz", y_true_z=truth, y_pred_z=pred)
+
+    campaign = load_campaign([tmp_path])
+    labels = campaign.parameters.sort_values("parameter_index")["parameter"].tolist()
+    assert labels == ["z[0]", "z[1]"]
+
+
 def test_physical_display_columns_convert_arcsec_to_mas() -> None:
     parameters = pd.DataFrame(
         {

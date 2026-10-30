@@ -40,6 +40,9 @@ REQUIRED_COMPLETE_ARTIFACTS = (
 
 EPS = 1.0e-12
 SEPARATION_PARAMETER = "source.separation_as"
+# Relative tolerance for matching archived per-parameter RMSE values to
+# column-wise RMSE recomputed from the saved float32 prediction arrays.
+PARAMETER_LABEL_RTOL = 1.0e-4
 
 DEFAULT_EXPERIMENT_SUMMARY_METRICS = (
     "best_fisher_rmse",
@@ -971,7 +974,7 @@ def _separation_run_metrics(
     )
     if arrays is None:
         return row
-    labels = _parameter_labels(record, arrays["y_true_z"].shape[1])
+    labels = _parameter_labels(record, arrays["y_true_z"].shape[1], arrays)
     if SEPARATION_PARAMETER not in labels:
         return row
     idx = labels.index(SEPARATION_PARAMETER)
@@ -1081,7 +1084,7 @@ def _parameter_table(record: RunRecord, arrays: Mapping[str, np.ndarray]) -> pd.
     truth = np.asarray(arrays["y_true_z"], dtype=np.float64)
     pred = np.asarray(arrays["y_pred_z"], dtype=np.float64)
     residual = pred - truth
-    labels = _parameter_labels(record, truth.shape[1])
+    labels = _parameter_labels(record, truth.shape[1], arrays)
     manifest = record.manifest
     config = record.config or {}
     validation = _mapping((record.metrics or {}).get("validation"))
@@ -1274,12 +1277,53 @@ def _identity_tuple(record: RunRecord) -> tuple[Any, ...]:
     )
 
 
-def _parameter_labels(record: RunRecord, dim: int) -> list[str]:
+def _parameter_labels(
+    record: RunRecord,
+    dim: int,
+    arrays: Mapping[str, np.ndarray] | None = None,
+) -> list[str]:
+    """Return per-column parameter labels in saved-array column order.
+
+    ``metrics.json`` is serialized with ``sort_keys=True``, so its
+    ``fisher_per_parameter_rmse`` key order is alphabetical and is *not* the
+    column order of ``y_true_z``/``y_pred_z``. Using the sorted keys positionally
+    mislabels every column. When the prediction arrays are available, the true
+    order is recovered by matching each archived per-parameter RMSE to the
+    column-wise RMSE recomputed from the saved arrays. Without the arrays, or if
+    the match is ambiguous, positional labels are returned rather than a
+    plausible-looking wrong assignment.
+    """
+
     validation = _mapping((record.metrics or {}).get("validation"))
     per_param = _mapping(validation.get("fisher_per_parameter_rmse"))
-    if len(per_param) == dim:
-        return list(per_param.keys())
-    return [f"z[{idx}]" for idx in range(dim)]
+    fallback = [f"z[{idx}]" for idx in range(dim)]
+    if len(per_param) != dim:
+        return fallback
+    if arrays is None or "y_true_z" not in arrays or "y_pred_z" not in arrays:
+        return fallback
+
+    truth = np.asarray(arrays["y_true_z"], dtype=np.float64)
+    pred = np.asarray(arrays["y_pred_z"], dtype=np.float64)
+    if truth.shape[1] != dim:
+        return fallback
+    column_rmse = np.sqrt(np.mean((pred - truth) ** 2, axis=0))
+
+    labels = list(per_param.keys())
+    values = np.asarray([float(per_param[label]) for label in labels], dtype=np.float64)
+    tolerance = PARAMETER_LABEL_RTOL * np.maximum(np.abs(column_rmse), 1.0)
+    resolved: list[str | None] = [None] * dim
+    unused = set(range(dim))
+    for column in range(dim):
+        candidates = [
+            index
+            for index in unused
+            if abs(values[index] - column_rmse[column]) <= tolerance[column]
+        ]
+        if len(candidates) != 1:
+            return fallback
+        resolved[column] = labels[candidates[0]]
+        unused.discard(candidates[0])
+    return [label for label in resolved if label is not None]
 
 
 def _parameter_family(label: str) -> str:

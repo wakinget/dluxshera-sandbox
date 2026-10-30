@@ -36,7 +36,7 @@ No new Slurm scan was performed; last observed submissions are historical only.
 | [S01](../s01/README.md) | 9 result-bearing runs in local retrospective | [Local S01/S05 retrospective](../../../../Results/ml_analysis/early_campaigns/s01_s05_early_ml_campaign_retrospective.ipynb); no tracked standalone review |
 | [S05](../s05/README.md) | 4 result-bearing runs in local retrospective | Same local retrospective |
 | [S06](../s06/README.md) | Verified production archive: 9/9 complete, validation only; [history reconciled](s06/reconciliation.md) | [Completed bridge review](s06/review.md), [support/provenance](s06/support.md) |
-| [S07](../s07/README.md) | Local LS6 artifacts present; live status unverified | No integrated review |
+| [S07](../s07/README.md) | Verified completed export: 10/10 operationally complete (6 at budget, 4 legitimately early-stopped), validation only; [history reconciled](s07/reconciliation.md) | [Completed V4 joint-state review](s07/review.md) |
 | [S08](../s08/README.md) | Local LS6 artifacts present; live status unverified | No integrated review |
 | [S09](../s09/README.md) | 9 complete runs in local summary | [Local capture analysis](../../../../Results/ml_analysis/S09/s09_capture_range_analysis.ipynb); no tracked standalone review |
 | [S10](../s10/README.md) | Partial local gattaca2 cohort; live status unverified | No integrated review |
@@ -48,7 +48,8 @@ No new Slurm scan was performed; last observed submissions are historical only.
 - Maintained reusable loaders, plots, sync code and interactive tracker: this
   tracked directory. `work/` is not blanket-ignored; materializations are ignored.
 - Tracked study-specific scientific reviews: `analysis/<study>/review.md`;
-  S06 is authoritative here. Keep numeric findings there, not in duplicate ledgers.
+  S06 and S07 are authoritative here. Keep numeric findings there, not in
+  duplicate ledgers.
 - Local imported run artifacts: `Results/hpc_imports/ml/<site>/<study>/`.
   Generated notebooks, tables and figures: `Results/ml_analysis/<study>/`.
   These paths are ignored by `.gitignore`; no Results files are currently tracked.
@@ -213,6 +214,25 @@ The loader returns a `CampaignData` object with:
 Raw prediction arrays are loaded lazily with
 `campaign.load_predictions(run_id)`.
 
+### Parameter column order
+
+`metrics.json` is written with `sort_keys=True`, so its
+`fisher_per_parameter_rmse` key order is **alphabetical and is not the column
+order** of `y_true_z`/`y_pred_z`. Using those keys positionally mislabels every
+column and silently corrupts any per-parameter or residual-structure conclusion;
+global RMSE, skill, slice and distance-bin metrics are unaffected. The loader
+recovers the true order by matching each archived per-parameter RMSE to the
+column-wise RMSE recomputed from the saved arrays, and returns positional `z[i]`
+labels rather than guessing when that match is ambiguous. For the V3/V4 science
+vector the recovered order is:
+
+```text
+[separation_as, log_flux_total, contrast, plate_scale, M1 Z4-Z11, M2 Z4-Z11]
+```
+
+Do not reintroduce positional use of the sorted metric keys. See
+[S07 reconciliation](s07/reconciliation.md) for how this was found.
+
 ## Initializer Metrics
 
 The network is evaluated as an initializer/correction for ADORA, not as the
@@ -309,6 +329,10 @@ local tar archive requires checking member paths/types, retaining its SHA256,
 and recording archive provenance; see [S06 reconciliation](s06/reconciliation.md).
 Keep historical generations outside active recursive discovery, for example
 `Results/hpc_imports/ml_history/`. Never merge renamed `S06B-*` into production.
+A stale import is not always a different experiment generation: S07's older copy
+was an in-flight snapshot of the *same* runs at the same revision, superseded
+once they finished ([reconciliation](s07/reconciliation.md)). Distinguish the
+cases from per-run history length and manifest stopping state before deciding.
 
 ### 2. Validate and analyze with existing interfaces
 
