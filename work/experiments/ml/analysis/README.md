@@ -24,6 +24,39 @@ Generally useful calculations, table shaping, and plotting should be promoted
 into the committed Python helpers in this directory rather than duplicated
 across notebooks.
 
+## Studies and review status (local audit: 2026-10-30)
+
+This is the stable ML study landing page. The [campaign notebook](ml_campaign_tracker.ipynb)
+remains the interactive, data-driven tracker. Artifact completeness in that
+notebook does not mean scientific review completion or current cluster status.
+No new Slurm scan was performed; last observed submissions are historical only.
+
+| Study | Local data evidence | Scientific review |
+| --- | --- | --- |
+| [S01](../s01/README.md) | 9 result-bearing runs in local retrospective | [Local S01/S05 retrospective](../../../../Results/ml_analysis/early_campaigns/s01_s05_early_ml_campaign_retrospective.ipynb); no tracked standalone review |
+| [S05](../s05/README.md) | 4 result-bearing runs in local retrospective | Same local retrospective |
+| [S06](../s06/README.md) | Verified production archive: 9/9 complete, validation only; [history reconciled](s06/reconciliation.md) | [Completed bridge review](s06/review.md), [support/provenance](s06/support.md) |
+| [S07](../s07/README.md) | Local LS6 artifacts present; live status unverified | No integrated review |
+| [S08](../s08/README.md) | Local LS6 artifacts present; live status unverified | No integrated review |
+| [S09](../s09/README.md) | 9 complete runs in local summary | [Local capture analysis](../../../../Results/ml_analysis/S09/s09_capture_range_analysis.ipynb); no tracked standalone review |
+| [S10](../s10/README.md) | Partial local gattaca2 cohort; live status unverified | No integrated review |
+| [S11](../s11/README.md) | No local import found; live status unverified | No integrated review |
+| [S12](../s12/README.md) | No local import found; live status unverified | No integrated review |
+
+### Canonical locations
+
+- Maintained reusable loaders, plots, sync code and interactive tracker: this
+  tracked directory. `work/` is not blanket-ignored; materializations are ignored.
+- Tracked study-specific scientific reviews: `analysis/<study>/review.md`;
+  S06 is authoritative here. Keep numeric findings there, not in duplicate ledgers.
+- Local imported run artifacts: `Results/hpc_imports/ml/<site>/<study>/`.
+  Generated notebooks, tables and figures: `Results/ml_analysis/<study>/`.
+  These paths are ignored by `.gitignore`; no Results files are currently tracked.
+- S06 optical source: original `Results/ml_eigenmodes/` sweep remains authoritative;
+  [support](s06/support.md) labels its local analysis copy and records hashes.
+- Existing `early_campaigns/` and S09 results stay in place. Local links require
+  imported artifacts and will not resolve in a clean clone without those imports.
+
 ## Compact Result Policy
 
 By default, `sync_results.py` transfers only compact analysis artifacts when
@@ -142,7 +175,8 @@ campaign state is intentionally explicit:
 2. rerun the notebook or use Run All;
 3. newly synchronized runs appear automatically.
 
-Detailed scientific interpretation belongs in local study notebooks under
+Tracked scientific reviews belong beside this index (for example [S06](s06/review.md)).
+Exploratory scientific interpretation belongs in local study notebooks under
 `Results/ml_analysis/<study>/`. For example, an S09 capture-range analysis can
 live at:
 
@@ -235,3 +269,124 @@ contract is shared, especially the prepared dataset, split registry, and frozen
 validation manifest identity. The notebook displays these identities and flags
 runs where `test_evaluated` is true so tuning/development analyses do not
 accidentally treat test evaluation as ordinary validation evidence.
+
+## Campaign analysis workflow
+
+### 1. Import an identified collection
+
+Run from the repository root in the configured ML Python environment. Always
+choose the actual source root and a generation-specific destination. The default
+work root can contain older generations; it is not automatically the latest
+production source. Preview (prints the rsync command; does not contact the host):
+
+```bash
+python work/experiments/ml/analysis/sync_results.py \
+  --user dmckeith --host ls6.tacc.utexas.edu \
+  --remote-root /scratch/11689/dmckeith/dLuxShera-ML/runs/ \
+  --study S07 --local-root Results/hpc_imports/ml/ls6/production_YYYYMMDD \
+  --dry-run
+```
+
+Remove `--dry-run` to transfer. `--study S07` appends S07 to both roots.
+For another cluster use explicit `--host`, `--remote-root`, and `--local-root`;
+the CLI's only site preset is `tacc_ls6`, so document the actual cluster in the
+review rather than treating the preset as cluster verification.
+
+Imports now stage into an empty temporary tree, check all file collisions, then
+copy. A differing existing file or recorded source identity is rejected before
+copying any run files; select a new snapshot destination. Identical re-imports
+and missing-file additions from the same source are allowed. Imports to one
+destination must be serialized. This is conservative snapshot preservation,
+not an automatic latest-run merge. There is no overwrite switch. A legacy
+collection without a manifest still gets file-collision protection; establish
+its identity separately. Interrupted transfers do not update the sync manifest.
+Dry-run does not validate remote contents or predict content collisions.
+
+The sync manifest records user/host/root, timestamp, artifact policy, and a
+per-file SHA256 inventory. Run manifests retain run IDs, revisions, dataset,
+split and evaluation identities. Preserve these files together. Importing a
+local tar archive requires checking member paths/types, retaining its SHA256,
+and recording archive provenance; see [S06 reconciliation](s06/reconciliation.md).
+Keep historical generations outside active recursive discovery, for example
+`Results/hpc_imports/ml_history/`. Never merge renamed `S06B-*` into production.
+
+### 2. Validate and analyze with existing interfaces
+
+Use a specific collection root, not a directory containing conflicting historical
+generations. `load_campaign` reads saved arrays to build tables; it does not run
+inference or evaluate test data. Loading can use substantial memory for large
+campaigns. `load_predictions` provides detailed arrays on demand.
+
+```python
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path('work/experiments/ml/analysis').resolve()))
+from campaign_analysis import (
+    load_campaign, evaluation_contract_summary, experiment_summary_table,
+    matched_seed_delta_table,
+)
+
+campaign = load_campaign([Path('Results/hpc_imports/ml/ls6/S06')])
+print(campaign.runs[['run_id', 'status', 'best_fisher_rmse']])
+print(campaign.warnings)
+print(evaluation_contract_summary(campaign.runs))
+summary = experiment_summary_table(campaign.runs)
+deltas = matched_seed_delta_table(campaign.runs, 'S06-E01', 'S06-E02')
+out = Path('Results/ml_analysis/S06/reproduced')
+out.mkdir(parents=True, exist_ok=True)
+summary.to_csv(out / 'experiment_summary.csv', index=False)
+deltas.to_csv(out / 'matched_seed_deltas.csv', index=False)
+```
+
+Inspect expected run counts and histories separately from `status`: `complete`
+means compact artifacts present, not budget reached or scientific review done.
+Review source revisions/dirty flags, prepared hash, split and validation identity,
+parameter labels/order, evaluation slices and `test_evaluated`. Confirm matching
+pair IDs/truth and baselines before paired comparisons. Inspect missing files
+and metric warnings; do not bypass duplicate identity failures. A manifest's
+test identity can be recorded without the test being evaluated.
+
+`compute_initializer_metrics` and `compute_prediction_geometry` retain the
+zero-correction baseline and scaled-z definitions above. `parameters`, `slices`,
+and `distance_bins` supply common detailed tables; `residual_error_budget_table`
+and `distance_bin_delta_table` provide existing aggregations. Physical-unit
+metrics remain per-parameter, never a mixed-unit headline RMSE.
+
+### 3. Visualize, review and track
+
+Continue the example using the reusable plotting layer:
+
+```python
+import matplotlib.pyplot as plt
+import campaign_plots as plots
+fig, ax = plots.plot_validation_rmse_vs_epoch(campaign.history)
+fig.savefig(out / 'validation_history.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+fig, ax = plots.plot_experiment_metric_summary(campaign.runs, 'best_fisher_rmse')
+fig.savefig(out / 'experiment_rmse.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+```
+
+Use parameter/slice/distance plots from `campaign_plots.py` where appropriate.
+Keep genuinely study-specific diagnostics next to the study or in its local
+notebook, reading the same imported arrays. The S09 local notebook already
+uses shared loaders, summaries and plots; curriculum exposure schedules and
+policy interpretation appropriately remain study-specific. S06's handoff script
+duplicates run traversal, metrics, binning and plots, so remains noncanonical
+archive input. Its mirror residual covariance/PCA diagnostics are study-specific,
+not a reason to retain its hardcoded duplicate pipeline. No shared numerical
+behavior or metric definitions were changed in this cleanup.
+
+Write `analysis/sXX/review.md` using the [review template](review_template.md),
+link reproducible outputs under `Results/ml_analysis/SXX/`, then update the
+concise studies index here. Rerun the existing tracker only after validating
+imports. Its root search works from the repository or a descendant directory;
+its default root discovers all active imported studies. No heavy notebook cells
+need execution merely to edit a review. Keep durable conclusions in the review,
+with the developer ledger linking here rather than duplicating numeric tables.
+
+Module ownership: `sync_results.py` imports and records source identity;
+`campaign_analysis.py` loads, computes and aggregates; `campaign_plots.py` plots;
+`ml_campaign_tracker.ipynb` explores the shared tables; per-study reviews carry
+scientific interpretation. `work/experiments/ml/sXX/` remains the prescription;
+`Results/ml_eigenmodes/` remains the original optical sensitivity store.

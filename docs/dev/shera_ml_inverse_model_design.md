@@ -1312,3 +1312,11 @@ loaded batch. S12 applies physical photon noise to count-space images before ML
 scaling and uses an authenticated fixed photon-noise validation recipe for
 deterministic model selection. Read noise, dark current, and a full detector
 noise sweep remain future extensions.
+
+
+## ML scientific review index
+
+The [ML study index](../../work/experiments/ml/analysis/README.md) separates
+local artifact completion from scientific review completion and links the
+[completed S06 bridge review](../../work/experiments/ml/analysis/s06/review.md).
+Campaign prescriptions above remain design history, not current cluster status.

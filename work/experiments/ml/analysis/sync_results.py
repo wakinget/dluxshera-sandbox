@@ -4,7 +4,10 @@ import argparse
 import datetime as dt
 import getpass
 import json
+import hashlib
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -43,6 +46,11 @@ class SyncConfig:
     include_logs: bool = False
     study: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.study is not None and (not self.study or self.study in (".", "..")
+                                       or "/" in self.study or "\\" in self.study):
+            raise ValueError("study must be a single directory name")
+
 
 def build_rsync_command(config: SyncConfig, *, dry_run: bool = False) -> list[str]:
     """Build the conservative compact-artifact rsync command."""
@@ -70,12 +78,18 @@ def write_sync_manifest(
         "schema_version": "dluxshera_ml_sync_manifest/1",
         "site": config.site,
         "host": config.host,
+        "user": config.user,
         "remote_root": config.remote_root,
         "local_root": str(effective_local_root(config)),
         "synced_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "artifact_policy": list(artifact_policy or DEFAULT_COMPACT_ARTIFACTS),
         "include_checkpoints": bool(config.include_checkpoints),
         "include_logs": bool(config.include_logs),
+        "files_sha256": {
+            str(p.relative_to(effective_local_root(config))): _sha256(p)
+            for p in sorted(effective_local_root(config).rglob("*"))
+            if p.is_file() and p.name != "sync_manifest.json"
+        },
     }
     if config.study is not None:
         payload["study"] = config.study
@@ -84,6 +98,48 @@ def write_sync_manifest(
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return payload
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def import_staged_results(staged: Path, config: SyncConfig) -> None:
+    """Add a snapshot without replacing any differing local file.
+
+    Check every collision before copying. Changed source or file contents require
+    a new local namespace; identical imports and missing-file additions are safe.
+    Callers must serialize imports to a destination.
+    """
+    destination = effective_local_root(config)
+    manifest = destination / "sync_manifest.json"
+    if manifest.exists():
+        prior = json.loads(manifest.read_text())
+        for key, value in (("host", config.host), ("remote_root", config.remote_root),
+                           ("study", config.study), ("user", config.user)):
+            if prior.get(key) != value:
+                raise ValueError(f"Source identity changed ({key}); use a new --local-root.")
+    files = [p for p in staged.rglob("*") if p.is_file()]
+    for path in files:
+        target = destination / path.relative_to(staged)
+        if target.is_symlink() or any(p.is_symlink() for p in target.parents):
+            raise ValueError(f"Symlink in import destination: {target}")
+        if target.exists() and (not target.is_file() or _sha256(path) != _sha256(target)):
+            raise ValueError(f"Import collision: {target}; use a new --local-root.")
+        for parent in target.parents:
+            if parent == destination.parent:
+                break
+            if parent.exists() and not parent.is_dir():
+                raise ValueError(f"Import path collision: {parent}")
+    for path in files:
+        target = destination / path.relative_to(staged)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.copy2(path, target)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,8 +180,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return 0
     destination = effective_local_root(config)
-    destination.mkdir(parents=True, exist_ok=True)
-    subprocess.run(command, check=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Always transfer to an empty staging tree, then validate all collisions.
+    from dataclasses import replace
+    with tempfile.TemporaryDirectory(prefix=".ml-sync-", dir=destination.parent) as tmp:
+        staged = Path(tmp) / "incoming"
+        staged.mkdir()
+        staging_config = replace(config, local_root=staged, study=None,
+                                 remote_root=config.remote_root.rstrip("/") +
+                                 ("/" + config.study.strip("/") if config.study else ""))
+        subprocess.run(build_rsync_command(staging_config), check=True)
+        import_staged_results(staged, config)
     write_sync_manifest(destination / "sync_manifest.json", config)
     return 0
 

@@ -71,3 +71,62 @@ def test_sync_manifest_serialization_omits_credentials_and_records_policy(tmp_pa
     assert loaded["include_checkpoints"] is True
     assert loaded["include_logs"] is False
     assert "user@" not in json.dumps(loaded)
+
+
+def test_staged_import_is_idempotent_and_refuses_all_changes(tmp_path):
+    import pytest
+    from sync_results import import_staged_results
+    config = _config(tmp_path)
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    (staged / 'metrics.json').write_text('original')
+    import_staged_results(staged, config)
+    write_sync_manifest(config.local_root / 'sync_manifest.json', config)
+    import_staged_results(staged, config)
+    (staged / 'run_manifest.json').write_text('{}')
+    import_staged_results(staged, config)
+    assert (config.local_root / 'run_manifest.json').read_text() == '{}'
+    manifest = json.loads((config.local_root / 'sync_manifest.json').read_text())
+    import hashlib
+    assert manifest['files_sha256']['metrics.json'] == hashlib.sha256(b'original').hexdigest()
+    (staged / 'metrics.json').write_text('changed')
+    (staged / 'history.csv').write_text('new')
+    with pytest.raises(ValueError, match='collision'):
+        import_staged_results(staged, config)
+    assert (config.local_root / 'metrics.json').read_text() == 'original'
+    assert not (config.local_root / 'history.csv').exists()
+
+
+def test_staged_import_rejects_source_changes(tmp_path):
+    import pytest
+    from sync_results import import_staged_results
+    config = _config(tmp_path)
+    write_sync_manifest(config.local_root / 'sync_manifest.json', config)
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    with pytest.raises(ValueError, match='Source identity'):
+        import_staged_results(staged, _config(tmp_path, remote_root='/scratch/new'))
+
+
+def test_study_cannot_escape_namespace(tmp_path):
+    import pytest
+    for study in ['..', '../S06', '/S06', '']:
+        with pytest.raises(ValueError):
+            _config(tmp_path, study=study)
+
+
+def test_cli_stages_remote_study_and_records_inventory(tmp_path, monkeypatch):
+    import sync_results
+    commands = []
+    def transfer(command, check):
+        commands.append(command)
+        (Path(command[-1]) / 'run_manifest.json').write_text('{"run_id":"S06-E01-R001"}')
+    monkeypatch.setattr(sync_results.subprocess, 'run', transfer)
+    local = tmp_path / 'imports'
+    assert sync_results.main(['--user', 'user', '--study', 'S06', '--local-root', str(local)]) == 0
+    assert commands[0][-2].endswith('/ml/S06/')
+    assert (local / 'S06/run_manifest.json').exists()
+    assert 'run_manifest.json' in json.loads((local / 'S06/sync_manifest.json').read_text())['files_sha256']
+    commands.clear()
+    sync_results.main(['--dry-run', '--local-root', str(local)])
+    assert not commands
