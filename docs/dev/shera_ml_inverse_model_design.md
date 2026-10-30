@@ -1318,8 +1318,9 @@ noise sweep remain future extensions.
 
 The [ML study index](../../work/experiments/ml/analysis/README.md) separates
 local artifact completion from scientific review completion and links the
-[completed S06 bridge review](../../work/experiments/ml/analysis/s06/review.md)
-and [completed S07 V4 joint-state review](../../work/experiments/ml/analysis/s07/review.md).
+[completed S06 bridge review](../../work/experiments/ml/analysis/s06/review.md),
+the [completed S07 V4 joint-state review](../../work/experiments/ml/analysis/s07/review.md),
+and the [completed S09 V4 radial-capture review](../../work/experiments/ml/analysis/s09/review.md).
 Campaign prescriptions above remain design history, not current cluster status.
 
 Two S07 findings bear on the research strategy above. First, the larger CNN's
@@ -1335,3 +1336,19 @@ while the S07 review's caution still applies: the scaled-coordinate
 mirror-difference subspace is not the physical Fisher eigenbasis. S07 evaluated
 only `heldout_science_seen_nuisance` and never touched its locked test set, so it
 says nothing about nuisance generalization — that gap is S08's subject.
+
+S09 adds two findings on the capture-range question. First, raising the configured
+`radial_capture_v4` sampling weight from 25% to 50% improves the learned
+initializer — 9.8% mean physical separation RMSE improvement with all three matched
+seeds improving, concentrated in the 2,000-5,000 Fisher-distance bin — and the gain
+transfers to the `joint_full_v4` majority population rather than being confined to
+the radial family. Second, the staged easy-to-hard distance curriculum (S09-E03) was
+worse than uniform distance balancing on all three matched seeds, but that
+comparison is **confounded**: E03 receives only ~58% of E02's expected 2,000-5,000
+exposure over the same 600-epoch budget, so S09 does not isolate ordering from
+cumulative hard-pair exposure. The ~88.7% mirror-difference residual structure is
+unchanged by radial sampling, so that degeneracy is a separate failure mode from
+capture range and remains S10's subject. S09 also exposed and fixed a per-parameter
+label-alignment defect in the shared analysis layer; see the
+[S09 review](../../work/experiments/ml/analysis/s09/review.md) for the corrected
+error budget and the superseded values.

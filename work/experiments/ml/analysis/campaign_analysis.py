@@ -40,9 +40,15 @@ REQUIRED_COMPLETE_ARTIFACTS = (
 
 EPS = 1.0e-12
 SEPARATION_PARAMETER = "source.separation_as"
-# Relative tolerance for matching archived per-parameter RMSE values to
-# column-wise RMSE recomputed from the saved float32 prediction arrays.
-PARAMETER_LABEL_RTOL = 1.0e-4
+# Tolerances for matching archived per-parameter RMSE values to column-wise RMSE
+# recomputed from the saved prediction arrays. Both quantities are reductions of
+# the same stored arrays, so across every locally imported run they agree to the
+# last bit; the tolerance only needs to absorb summation-order differences. It
+# must stay well below the smallest genuine gap between two coordinates' RMSE
+# (2.4e-4 absolute in the local S06/S07/S09 collections), because a tolerance
+# wider than that gap makes distinct coordinates look like an unresolvable tie.
+PARAMETER_LABEL_RTOL = 1.0e-9
+PARAMETER_LABEL_ATOL = 1.0e-12
 
 DEFAULT_EXPERIMENT_SUMMARY_METRICS = (
     "best_fisher_rmse",
@@ -1292,6 +1298,14 @@ def _parameter_labels(
     column-wise RMSE recomputed from the saved arrays. Without the arrays, or if
     the match is ambiguous, positional labels are returned rather than a
     plausible-looking wrong assignment.
+
+    The archived values and the recomputed column RMSEs are the same multiset
+    under the unknown permutation, so the match is resolved by rank: sort both
+    sequences and pair them positionally. That recovers the one consistent
+    assignment even where neighbouring coordinates have nearly equal RMSE, which
+    a per-column candidate search cannot do. The result is accepted only if every
+    paired value agrees within tolerance *and* no two archived values are closer
+    together than that tolerance; a genuine tie is unresolvable and falls back.
     """
 
     validation = _mapping((record.metrics or {}).get("validation"))
@@ -1310,20 +1324,27 @@ def _parameter_labels(
 
     labels = list(per_param.keys())
     values = np.asarray([float(per_param[label]) for label in labels], dtype=np.float64)
-    tolerance = PARAMETER_LABEL_RTOL * np.maximum(np.abs(column_rmse), 1.0)
-    resolved: list[str | None] = [None] * dim
-    unused = set(range(dim))
-    for column in range(dim):
-        candidates = [
-            index
-            for index in unused
-            if abs(values[index] - column_rmse[column]) <= tolerance[column]
-        ]
-        if len(candidates) != 1:
-            return fallback
-        resolved[column] = labels[candidates[0]]
-        unused.discard(candidates[0])
-    return [label for label in resolved if label is not None]
+    if not np.all(np.isfinite(values)) or not np.all(np.isfinite(column_rmse)):
+        return fallback
+
+    column_rank = np.argsort(column_rmse, kind="stable")
+    value_rank = np.argsort(values, kind="stable")
+    resolved = [0] * dim
+    for rank in range(dim):
+        resolved[int(column_rank[rank])] = int(value_rank[rank])
+
+    def _tolerance(scale: np.ndarray) -> np.ndarray:
+        return np.maximum(PARAMETER_LABEL_RTOL * np.abs(scale), PARAMETER_LABEL_ATOL)
+
+    paired = values[resolved]
+    if np.any(np.abs(paired - column_rmse) > _tolerance(column_rmse)):
+        return fallback
+
+    sorted_values = values[value_rank]
+    gaps = np.diff(sorted_values)
+    if gaps.size and np.any(gaps <= _tolerance(sorted_values[:-1])):
+        return fallback
+    return [labels[index] for index in resolved]
 
 
 def _parameter_family(label: str) -> str:

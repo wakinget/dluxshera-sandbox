@@ -38,7 +38,7 @@ No new Slurm scan was performed; last observed submissions are historical only.
 | [S06](../s06/README.md) | Verified production archive: 9/9 complete, validation only; [history reconciled](s06/reconciliation.md) | [Completed bridge review](s06/review.md), [support/provenance](s06/support.md) |
 | [S07](../s07/README.md) | Verified completed export: 10/10 operationally complete (6 at budget, 4 legitimately early-stopped), validation only; [history reconciled](s07/reconciliation.md) | [Completed V4 joint-state review](s07/review.md) |
 | [S08](../s08/README.md) | Local LS6 artifacts present; live status unverified | No integrated review |
-| [S09](../s09/README.md) | 9 complete runs in local summary | [Local capture analysis](../../../../Results/ml_analysis/S09/s09_capture_range_analysis.ipynb); no tracked standalone review |
+| [S09](../s09/README.md) | Verified completed export: 9/9 at the 600-epoch budget, validation only; export byte-identical to the installed import | [Completed V4 radial-capture review](s09/review.md) |
 | [S10](../s10/README.md) | Partial local gattaca2 cohort; live status unverified | No integrated review |
 | [S11](../s11/README.md) | No local import found; live status unverified | No integrated review |
 | [S12](../s12/README.md) | No local import found; live status unverified | No integrated review |
@@ -48,7 +48,7 @@ No new Slurm scan was performed; last observed submissions are historical only.
 - Maintained reusable loaders, plots, sync code and interactive tracker: this
   tracked directory. `work/` is not blanket-ignored; materializations are ignored.
 - Tracked study-specific scientific reviews: `analysis/<study>/review.md`;
-  S06 and S07 are authoritative here. Keep numeric findings there, not in
+  S06, S07 and S09 are authoritative here. Keep numeric findings there, not in
   duplicate ledgers.
 - Local imported run artifacts: `Results/hpc_imports/ml/<site>/<study>/`.
   Generated notebooks, tables and figures: `Results/ml_analysis/<study>/`.
@@ -176,7 +176,8 @@ campaign state is intentionally explicit:
 2. rerun the notebook or use Run All;
 3. newly synchronized runs appear automatically.
 
-Tracked scientific reviews belong beside this index (for example [S06](s06/review.md)).
+Tracked scientific reviews belong beside this index (for example [S06](s06/review.md),
+[S07](s07/review.md), [S09](s09/review.md)).
 Exploratory scientific interpretation belongs in local study notebooks under
 `Results/ml_analysis/<study>/`. For example, an S09 capture-range analysis can
 live at:
@@ -220,18 +221,34 @@ Raw prediction arrays are loaded lazily with
 `fisher_per_parameter_rmse` key order is **alphabetical and is not the column
 order** of `y_true_z`/`y_pred_z`. Using those keys positionally mislabels every
 column and silently corrupts any per-parameter or residual-structure conclusion;
-global RMSE, skill, slice and distance-bin metrics are unaffected. The loader
-recovers the true order by matching each archived per-parameter RMSE to the
-column-wise RMSE recomputed from the saved arrays, and returns positional `z[i]`
-labels rather than guessing when that match is ambiguous. For the V3/V4 science
-vector the recovered order is:
+global RMSE, skill, slice and distance-bin metrics are unaffected. For the V3/V4
+science vector the true order is:
 
 ```text
 [separation_as, log_flux_total, contrast, plate_scale, M1 Z4-Z11, M2 Z4-Z11]
 ```
 
-Do not reintroduce positional use of the sorted metric keys. See
-[S07 reconciliation](s07/reconciliation.md) for how this was found.
+The compact artifacts do not carry `vector_spaces.json`, so an imported run has no
+direct record of its column order. The loader recovers it by **rank-matching**: the
+archived per-parameter RMSE values and the column-wise RMSEs recomputed from the
+saved arrays are the same multiset under the unknown permutation, so both are
+sorted and paired by rank. Every pairing is then checked against
+`PARAMETER_LABEL_RTOL`/`ATOL`, and the result is rejected if two archived values sit
+closer together than that tolerance. A genuine tie, a dimension mismatch or missing
+arrays yields positional `z[i]` labels rather than a plausible-looking wrong
+assignment.
+
+The tolerance is deliberately tight (`1e-9` relative). Both quantities are
+reductions of the same stored arrays and agree to the last bit across every locally
+imported run, while the smallest genuine gap between two coordinates' RMSE is
+2.4e-4 absolute. A tolerance wider than that gap makes distinct coordinates look
+unresolvable and silently drops the whole run from every per-parameter aggregate —
+which is what happened to `S09-E01-R003` under an earlier loose per-column match
+(see the [S09 review](s09/review.md)).
+
+Do not reintroduce positional use of the sorted metric keys, and do not loosen the
+tolerance. See [S07 reconciliation](s07/reconciliation.md) for how this was found.
+Regression coverage is in `tests/ml/test_campaign_analysis.py`.
 
 ## Initializer Metrics
 
@@ -394,8 +411,9 @@ plt.close(fig)
 Use parameter/slice/distance plots from `campaign_plots.py` where appropriate.
 Keep genuinely study-specific diagnostics next to the study or in its local
 notebook, reading the same imported arrays. The S09 local notebook already
-uses shared loaders, summaries and plots; curriculum exposure schedules and
-policy interpretation appropriately remain study-specific. S06's handoff script
+uses shared loaders, summaries and plots; curriculum exposure schedules, the
+mirror-difference subspace, reversal-coupling accounting and accepted-family
+composition appropriately remain study-specific. S06's handoff script
 duplicates run traversal, metrics, binning and plots, so remains noncanonical
 archive input. Its mirror residual covariance/PCA diagnostics are study-specific,
 not a reason to retain its hardcoded duplicate pipeline. No shared numerical

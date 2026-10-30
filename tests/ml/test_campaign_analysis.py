@@ -408,6 +408,154 @@ def test_parameter_labels_fall_back_to_positional_when_rmse_match_is_ambiguous(
     assert labels == ["z[0]", "z[1]"]
 
 
+CANONICAL_V4_SCIENCE_ORDER = (
+    "source.separation_as",
+    "source.log_flux_total",
+    "source.contrast",
+    "optics.plate_scale_as_per_pix",
+    *(f"optics.primary.zernike_coeffs_nm[{idx}]" for idx in range(8)),
+    *(f"optics.secondary.zernike_coeffs_nm[{idx}]" for idx in range(8)),
+)
+
+
+def _write_science_vector_run(
+    run_dir: Path,
+    column_rmse: np.ndarray,
+    *,
+    run_id: str = "S09-E01-R003",
+    experiment_id: str = "S09-E01",
+) -> np.ndarray:
+    """Write one run whose saved arrays realize ``column_rmse`` exactly.
+
+    Two antisymmetric records give ``column_rmse[i]`` as the column RMSE of a
+    zero prediction, so the archived per-parameter values and the recomputed
+    ones are the same numbers and only the key order differs.
+    """
+
+    truth = np.vstack([column_rmse, -column_rmse])
+    pred = np.zeros_like(truth)
+    realized = np.sqrt(np.mean((pred - truth) ** 2, axis=0))
+    _write_json(
+        run_dir / "run_manifest.json",
+        {
+            "schema_version": "dluxshera_ml_run_manifest/1",
+            "study_id": "S09",
+            "experiment_id": experiment_id,
+            "run_id": run_id,
+            "seed": 47,
+            "test_evaluated": False,
+        },
+    )
+    # Serialized the way production writes it: keys sorted alphabetically.
+    (run_dir / "metrics.json").write_text(
+        json.dumps(
+            {
+                "validation": {
+                    "fisher_per_parameter_rmse": {
+                        label: float(realized[idx])
+                        for idx, label in enumerate(CANONICAL_V4_SCIENCE_ORDER)
+                    }
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    np.savez(run_dir / "evaluation_predictions.npz", y_true_z=truth, y_pred_z=pred)
+    return realized
+
+
+def test_parameter_labels_recover_full_canonical_v4_science_order(tmp_path: Path) -> None:
+    """The recovered order must be the saved-array order for all 20 coordinates.
+
+    The sorted ``metrics.json`` keys put the optical block first and the source
+    parameters last, so a positional read of those keys would shift every
+    column. Each recovered value is checked against both the archived metric and
+    the column-wise value recomputed from the arrays.
+    """
+
+    column_rmse = np.asarray(
+        [22.5, 9.75, 9.6, 20.4, 180.5, 116.0, 116.7, 16.6, 24.0, 167.3, 147.6, 59.5,
+         171.7, 115.7, 118.2, 23.0, 25.9, 168.0, 148.6, 196.7]
+    )
+    assert len(np.unique(column_rmse)) == column_rmse.size
+    run_dir = tmp_path / "S09-E01" / "S09-E01-R003"
+    realized = _write_science_vector_run(run_dir, column_rmse)
+    assert sorted(CANONICAL_V4_SCIENCE_ORDER) != list(CANONICAL_V4_SCIENCE_ORDER)
+
+    campaign = load_campaign([tmp_path])
+    ordered = campaign.parameters.sort_values("parameter_index")
+    assert ordered["parameter"].tolist() == list(CANONICAL_V4_SCIENCE_ORDER)
+    assert ordered["fisher_model_rmse"].tolist() == pytest.approx(realized.tolist())
+
+    families = ordered.set_index("parameter")["parameter_family"]
+    assert families["source.separation_as"] == "source/global"
+    assert families["optics.primary.zernike_coeffs_nm[7]"] == "M1"
+    assert families["optics.secondary.zernike_coeffs_nm[7]"] == "M2"
+
+    # The largest RMSE belongs to M2 Z11, not to binary separation.
+    worst = ordered.sort_values("fisher_model_rmse").iloc[-1]
+    assert worst["parameter"] == "optics.secondary.zernike_coeffs_nm[7]"
+    assert worst["parameter_display"] == "M2 Z11"
+
+
+def test_parameter_labels_recover_order_despite_near_equal_rmse(tmp_path: Path) -> None:
+    """Two coordinates may have nearly equal RMSE without being ambiguous.
+
+    S09-E01-R003 has M1 Z6 at 123.16131 and M2 Z6 at 123.14989 — distinct, but
+    close enough that a per-column candidate search with a loose tolerance saw
+    two candidates and silently degraded the whole run to positional labels,
+    dropping it from every per-parameter aggregate.
+    """
+
+    column_rmse = np.asarray(
+        [22.5, 9.75, 9.6, 20.4, 180.5, 116.0, 123.16131231, 16.6, 24.0, 167.3,
+         147.6, 59.5, 171.7, 115.7, 123.14989291, 23.0, 25.9, 168.0, 148.6, 196.7]
+    )
+    gap = abs(column_rmse[6] - column_rmse[14])
+    assert 0.0 < gap < 1.0e-4 * column_rmse[6]
+
+    run_dir = tmp_path / "S09-E01" / "S09-E01-R003"
+    realized = _write_science_vector_run(run_dir, column_rmse)
+
+    campaign = load_campaign([tmp_path])
+    ordered = campaign.parameters.sort_values("parameter_index")
+    assert ordered["parameter"].tolist() == list(CANONICAL_V4_SCIENCE_ORDER)
+    assert ordered["fisher_model_rmse"].tolist() == pytest.approx(realized.tolist())
+    assert set(ordered["parameter_family"]) == {"source/global", "M1", "M2"}
+
+    # The run must contribute a usable separation row rather than being dropped.
+    separation = ordered[ordered["parameter"].eq("source.separation_as")]
+    assert len(separation) == 1
+    assert separation["physical_unit"].iloc[0] == "arcsec"
+
+
+def test_per_parameter_rmse_reproduces_global_fisher_rmse(tmp_path: Path) -> None:
+    """``sqrt(mean(per-coordinate MSE))`` must equal the global Fisher RMSE.
+
+    This identity holds only when the per-parameter rows cover every column of
+    the same evaluation population exactly once, so it also guards against a
+    label recovery that drops or duplicates a coordinate.
+    """
+
+    column_rmse = np.asarray(
+        [22.5, 9.75, 9.6, 20.4, 180.5, 116.0, 116.7, 16.6, 24.0, 167.3, 147.6, 59.5,
+         171.7, 115.7, 118.2, 23.0, 25.9, 168.0, 148.6, 196.7]
+    )
+    run_dir = tmp_path / "S09-E01" / "S09-E01-R003"
+    realized = _write_science_vector_run(run_dir, column_rmse)
+
+    campaign = load_campaign([tmp_path])
+    per_parameter = campaign.parameters["fisher_model_rmse"].to_numpy(dtype=float)
+    assert per_parameter.size == realized.size
+    identity = float(np.sqrt(np.mean(per_parameter**2)))
+
+    arrays = campaign.load_predictions("S09-E01-R003").arrays
+    global_metrics = compute_initializer_metrics(arrays["y_true_z"], arrays["y_pred_z"])
+    assert identity == pytest.approx(global_metrics["model_rmse"], rel=1.0e-12)
+
+
 def test_physical_display_columns_convert_arcsec_to_mas() -> None:
     parameters = pd.DataFrame(
         {

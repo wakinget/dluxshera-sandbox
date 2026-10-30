@@ -7,3 +7,8 @@ thresholds, not as an ADORA capture radius.
 
 The matrix expands to nine runs, including the easy-to-hard S09-E03 distance
 curriculum. All runs keep `evaluate_test: false`.
+
+**Status (2026-10-30):** training-complete — all nine runs reached the 600-epoch
+budget — and scientifically reviewed. See the
+[S09 scientific review](../analysis/s09/review.md) for results, provenance and
+limitations. The frozen test set remains unevaluated.
