@@ -3,8 +3,10 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import json
+import multiprocessing as mp
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -58,25 +60,45 @@ from .pairs import (
 )
 from .scaling import IntensityScaler, fit_intensity_scaler, load_intensity_scaler
 from .splits import SplitRegistry, load_split_registry, split_registry_content_sha256
-from .torch_data import DynamicPairDataset, PairManifestDataset
+from .torch_data import (
+    DynamicPairDataset,
+    PairManifestDataset,
+    UnsafeWorkerStartMethodError,
+    noise_requires_safe_workers,
+    resolve_dataloader_context,
+)
 
 __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
+    "DEFAULT_PER_BATCH_TIMEOUT_SECONDS",
     "DEFAULT_S01_FISHER_DISTANCE_BIN_EDGES",
+    "DataLoaderSmokeTimeout",
     "EarlyStoppingConfig",
     "EarlyStoppingState",
     "LRSchedulerConfig",
+    "MIN_SUSTAINED_SAMPLES",
+    "MIN_SUSTAINED_SECONDS",
+    "build_bounded_dataloader_kwargs",
     "default_s01_e00_config",
     "default_s01_e01_config",
     "load_run_config",
     "prepare_science_loss_helper",
     "resolve_device",
+    "run_supervised",
+    "smoke_test_dataloader",
     "train_pairwise_correction",
     "validate_fisher_distance_bin_edges",
 ]
 
 CHECKPOINT_SCHEMA_VERSION = "dluxshera_ml_checkpoint/1"
 DEFAULT_S01_FISHER_DISTANCE_BIN_EDGES = (0.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0)
+
+#: Default per-batch ``DataLoader`` timeout, in seconds, used when worker
+#: processes are active.  Generous relative to healthy loading (a slow S12 batch
+#: is ~1s) but far below a multi-day wall-clock limit, so a wedged worker raises
+#: within minutes instead of silently consuming the whole allocation.  Override
+#: with ``training.dataloader_timeout_seconds``; set to 0 to disable.
+DEFAULT_PER_BATCH_TIMEOUT_SECONDS = 600.0
 
 
 def _repo_root() -> Path:
@@ -138,6 +160,375 @@ def _runtime_info(device: torch.device) -> dict[str, Any]:
         "slurmd_nodename": env.get("SLURMD_NODENAME"),
         "hostname": socket.gethostname(),
     }
+
+
+def _jax_backend_name() -> str | None:
+    """Return the selected JAX backend, or ``None`` when JAX is unavailable.
+
+    Notes
+    -----
+    S12 jobs ran CUDA-enabled PyTorch while JAX silently selected its CPU
+    backend.  Recording both devices makes that asymmetry visible in run
+    provenance instead of only in stderr.
+    """
+    try:
+        import jax
+    except ModuleNotFoundError:  # pragma: no cover - JAX is a hard dependency
+        return None
+    try:
+        return str(jax.default_backend())
+    except Exception:  # pragma: no cover - defensive provenance only
+        return None
+
+
+class DataLoaderSmokeTimeout(RuntimeError):
+    """Raised when a bounded data-loader smoke test does not produce batches.
+
+    A stalled worker is indistinguishable from very slow loading at a single
+    point in time, so the error message reports how many batches arrived before
+    the budget expired.
+    """
+
+
+#: Minimum sustained-measurement samples and seconds for a throughput number to
+#: be treated as defensible for capacity planning.
+MIN_SUSTAINED_SAMPLES = 10
+MIN_SUSTAINED_SECONDS = 20.0
+
+
+def smoke_test_dataloader(
+    loader: "DataLoader",
+    *,
+    batches: int = 2,
+    timeout_seconds: float = 300.0,
+    label: str = "train",
+    warmup_batches: int | None = None,
+) -> dict[str, Any]:
+    """Pull a bounded number of batches and report loading diagnostics.
+
+    Parameters
+    ----------
+    loader:
+        Configured ``DataLoader`` to exercise.  Its dataset, worker count, and
+        multiprocessing context are used as-is.  The loader should be built with
+        a finite ``timeout`` so a wedged worker raises instead of blocking; see
+        :func:`build_bounded_dataloader_kwargs`.
+    batches:
+        Total number of batches to fetch, including warmup.
+    timeout_seconds:
+        Wall-clock budget for the whole drain.  Exceeding it raises
+        :class:`DataLoaderSmokeTimeout`.
+    label:
+        Short name used in diagnostics, for example ``"train"``.
+    warmup_batches:
+        Batches to discard before measuring sustained throughput.  Defaults to
+        the estimated prefetch depth (``num_workers * prefetch_factor``), which
+        is the queue filled during worker startup.  Timings inside that window
+        measure queue drain, not sustained throughput.
+
+    Returns
+    -------
+    dict
+        JSON-ready diagnostics.  ``sustained_pairs_per_second`` is the number to
+        use for capacity planning, and is only trustworthy when
+        ``sustained_measurement_valid`` is ``True`` -- that requires at least
+        :data:`MIN_SUSTAINED_SAMPLES` post-warmup batches spanning at least
+        :data:`MIN_SUSTAINED_SECONDS`.
+
+    Raises
+    ------
+    DataLoaderSmokeTimeout
+        If fewer than ``batches`` batches arrive within the budget.  This is the
+        fail-fast path that turns a multi-day silent stall into a prompt error.
+
+    Notes
+    -----
+    Two independent bounds apply.  ``DataLoader(timeout=...)`` raises when an
+    individual fetch exceeds its per-batch budget -- this does cover a stalled
+    *first* batch, since the timeout applies to every queue get including the
+    first. This function adds a cooperative budget checked between fetches;
+    zero-worker fetches and teardown remain unbounded without run_supervised.
+    The budget handles the case
+    where many batches are each individually slow but not timing out.
+
+    On timeout the loader's worker processes are shut down explicitly before
+    raising on a best-effort basis. For reproducing a
+    true deadlock, run the diagnostic under process-level supervision
+    (:func:`run_supervised`) rather than relying on in-process
+    teardown, since a deadlocked worker may ignore a clean shutdown.
+    """
+    requested = max(int(batches), 1)
+    budget = float(timeout_seconds)
+    if budget <= 0.0:
+        raise ValueError("timeout_seconds must be > 0.")
+    num_workers = int(getattr(loader, "num_workers", 0))
+    context = getattr(loader, "multiprocessing_context", None)
+    method = None
+    if context is not None:
+        method = str(getattr(context, "_name", context))
+    elif num_workers > 0:
+        method = str(mp.get_start_method(allow_none=True) or "")
+
+    prefetch_factor = getattr(loader, "prefetch_factor", None)
+    default_warmup = num_workers * int(prefetch_factor or 2) if num_workers > 0 else 0
+    warmup = default_warmup if warmup_batches is None else max(int(warmup_batches), 0)
+
+    observed: list[float] = []
+    pair_counts: list[int] = []
+    shape: list[int] | None = None
+    overall_started = time.perf_counter()
+    iterator = iter(loader)
+    try:
+        while len(observed) < requested:
+            started = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
+            observed.append(time.perf_counter() - started)
+            pair_counts.append(int(batch["image_a"].shape[0])
+                               if isinstance(batch, Mapping) and "image_a" in batch
+                               else int(getattr(loader, "batch_size", 0) or 0))
+            if shape is None and isinstance(batch, Mapping) and "image_a" in batch:
+                shape = [int(v) for v in batch["image_a"].shape]
+            del batch
+            if time.perf_counter() - overall_started > budget:
+                break
+        elapsed = time.perf_counter() - overall_started
+        if len(observed) < requested:
+            raise DataLoaderSmokeTimeout(
+                f"{label} data-loader smoke test produced {len(observed)} of "
+                f"{requested} batch(es) in {elapsed:.1f}s "
+                f"(budget {budget:.1f}s, num_workers={num_workers}, "
+                f"multiprocessing_method={method!r}, "
+                f"jax_backend={_jax_backend_name()!r}). "
+                "Workers idling at ~0% CPU indicate a start-method deadlock; "
+                "workers busy with slowly arriving batches indicate throughput "
+                "that is too low for the configured workload."
+            )
+    except DataLoaderSmokeTimeout:
+        _shutdown_dataloader_iterator(iterator)
+        raise
+    except Exception as exc:
+        _shutdown_dataloader_iterator(iterator)
+        raise RuntimeError(
+            f"{label} data-loader smoke test failed after {len(observed)} "
+            f"batch(es) with {type(exc).__name__}: {exc} "
+            f"(num_workers={num_workers}, multiprocessing_method={method!r})."
+        ) from exc
+    else:
+        _shutdown_dataloader_iterator(iterator)
+
+    batch_size = int(getattr(loader, "batch_size", 0) or 0)
+    sustained = [float(v) for v in observed[warmup:]]
+    sustained_seconds = sum(sustained)
+    sustained_mean = sustained_seconds / len(sustained) if sustained else None
+    valid = (
+        len(sustained) >= MIN_SUSTAINED_SAMPLES
+        and sustained_seconds >= MIN_SUSTAINED_SECONDS
+    )
+    note = None
+    if not valid:
+        note = (
+            f"sustained measurement used {len(sustained)} post-warmup batch(es) "
+            f"spanning {sustained_seconds:.1f}s, below the "
+            f"{MIN_SUSTAINED_SAMPLES}-batch / {MIN_SUSTAINED_SECONDS:.0f}s "
+            "threshold for a defensible capacity estimate. Re-run with more "
+            "batches before using this throughput number."
+        )
+    return {
+        "label": str(label),
+        "batches_requested": requested,
+        "batches_observed": len(observed),
+        "warmup_batches_discarded": int(warmup),
+        "first_batch_seconds": float(observed[0]),
+        "sustained_batches": len(sustained),
+        "sustained_pairs": sum(pair_counts[warmup:]),
+        "sustained_seconds": sustained_seconds,
+        "sustained_batch_seconds": sustained_mean,
+        "sustained_batches_per_second": None
+        if not sustained_mean or sustained_mean <= 0.0
+        else 1.0 / sustained_mean,
+        "sustained_pairs_per_second": None
+        if not sustained_mean or sustained_mean <= 0.0 or batch_size <= 0
+        else sum(pair_counts[warmup:]) / sustained_seconds,
+        "sustained_measurement_valid": bool(valid),
+        "sustained_measurement_note": note,
+        "total_seconds": elapsed,
+        "timeout_seconds": budget,
+        "num_workers": num_workers,
+        "multiprocessing_method": method,
+        "per_batch_timeout_seconds": float(getattr(loader, "timeout", 0) or 0.0) or None,
+        "batch_size": batch_size,
+        "image_batch_shape": shape,
+        "jax_backend": _jax_backend_name(),
+    }
+
+
+def _shutdown_dataloader_iterator(iterator: Any) -> None:
+    """Best-effort shutdown of a multiprocess DataLoader iterator's workers.
+
+    Called before raising so a stalled worker pool does not outlive the probe.
+    A genuinely deadlocked worker may not honour this, which is why the
+    diagnostic entry point supervises probes in a separate process it can kill.
+    """
+    shutdown = getattr(iterator, "_shutdown_workers", None)
+    if shutdown is None:
+        return
+    try:
+        shutdown()
+    except Exception:  # pragma: no cover - teardown is best-effort
+        pass
+
+
+def run_supervised(
+    target: Any,
+    *,
+    timeout_seconds: float,
+    label: str = "probe",
+    start_method: str = "spawn",
+) -> dict[str, Any]:
+    """Run ``target`` in a supervised child process and kill it on timeout.
+
+    This is the only reliable way to bound work that may deadlock.  An
+    in-process watchdog thread cannot terminate a wedged worker, and a
+    deadlocked grandchild may ignore a clean shutdown; killing the whole child
+    process tree does work.
+
+    Parameters
+    ----------
+    target:
+        Zero-argument picklable callable returning a JSON-ready mapping.  It
+        runs in a fresh interpreter, so it must be importable at module level.
+    timeout_seconds:
+        Wall-clock budget.  On expiry the child and any of its descendants are
+        killed and a ``status`` of ``"timeout"`` is returned.
+    label:
+        Short name used in the returned diagnostics.
+    start_method:
+        Start method for the supervising child.  ``spawn`` by default so the
+        supervisor itself is never forked from a JAX-initialised parent.
+
+    Returns
+    -------
+    dict
+        ``{"status": "ok", "result": ...}``, ``{"status": "timeout", ...}``, or
+        ``{"status": "failed", "error": ...}``.  Timeout is reported rather than
+        raised so a caller can record it as evidence.
+    """
+    import math
+
+    if not math.isfinite(float(timeout_seconds)) or float(timeout_seconds) <= 0:
+        raise ValueError("timeout_seconds must be finite and > 0")
+    ctx = mp.get_context(start_method)
+    queue: Any = ctx.Queue()
+    process = ctx.Process(
+        target=_supervised_entrypoint,
+        args=(target, queue),
+        name=f"supervised-{label}",
+    )
+    started = time.perf_counter()
+    process.start()
+    process.join(float(timeout_seconds))
+    elapsed = time.perf_counter() - started
+
+    if process.is_alive():
+        _kill_process_tree(process.pid)
+        process.join(10.0)
+        if process.is_alive():  # pragma: no cover - defensive
+            process.kill()
+            process.join(5.0)
+        return {
+            "status": "timeout",
+            "label": str(label),
+            "timeout_seconds": float(timeout_seconds),
+            "elapsed_seconds": elapsed,
+            "detail": (
+                f"{label} did not complete within {timeout_seconds:.1f}s and was "
+                "killed along with its worker processes. A probe that produces no "
+                "batches while its workers idle at ~0% CPU is a start-method "
+                "deadlock."
+            ),
+        }
+    try:
+        payload = queue.get_nowait()
+    except Exception:
+        payload = {
+            "status": "failed",
+            "error": (
+                f"{label} exited with code {process.exitcode} without reporting a "
+                "result. A nonzero or signal exit code usually means the worker "
+                "process was killed, for example by the OOM killer."
+            ),
+            "exitcode": process.exitcode,
+        }
+    payload = dict(payload)
+    payload["elapsed_seconds"] = elapsed
+    payload["label"] = str(label)
+    return payload
+
+
+def _supervised_entrypoint(target: Any, queue: Any) -> None:  # pragma: no cover - child process
+    """Run ``target`` in the child and report its outcome over ``queue``."""
+    try:
+        queue.put({"status": "ok", "result": target()})
+    except BaseException as exc:
+        queue.put(
+            {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "error_type": type(exc).__name__,
+            }
+        )
+
+
+def _kill_process_tree(pid: int | None) -> None:
+    """Kill ``pid`` and its descendants.
+
+    A deadlocked DataLoader worker is a grandchild of this process, so killing
+    only the direct child would leave orphaned workers behind.
+    """
+    if pid is None:  # pragma: no cover - defensive
+        return
+    children: list[int] = []
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-P", str(int(pid))],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        children = [int(line) for line in completed.stdout.split() if line.strip()]
+    except (OSError, ValueError):  # pragma: no cover - platform dependent
+        children = []
+    for child in children:
+        _kill_process_tree(child)
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):  # pragma: no cover - already gone
+        pass
+
+
+def build_bounded_dataloader_kwargs(
+    *,
+    num_workers: int,
+    per_batch_timeout_seconds: float | None,
+) -> dict[str, Any]:
+    """Return ``DataLoader`` kwargs that bound per-batch waiting.
+
+    ``DataLoader(timeout=...)`` applies to every batch fetch, including the
+    first, and raises ``RuntimeError`` rather than blocking forever.  It is only
+    supported with worker processes, so the timeout is dropped when
+    ``num_workers == 0`` (where a stall is in-process and visible to a
+    debugger anyway).
+    """
+    if int(num_workers) <= 0 or not per_batch_timeout_seconds:
+        return {}
+    timeout = float(per_batch_timeout_seconds)
+    if timeout <= 0.0:
+        return {}
+    return {"timeout": timeout}
 
 
 @dataclass(frozen=True)
@@ -1402,6 +1793,45 @@ def train_pairwise_correction(
     batch_size = int(training_cfg.get("batch_size", 32))
     num_workers = int(training_cfg.get("num_workers", 0))
     shard_cache_size = int(training_cfg.get("shard_cache_size", 4))
+    requires_safe_workers = noise_requires_safe_workers(
+        (noise_config, validation_noise_config)
+    )
+    loader_context, loader_context_name, loader_context_reason = resolve_dataloader_context(
+        training_cfg.get("dataloader_multiprocessing_context"),
+        requires_safe_workers=requires_safe_workers,
+        num_workers=num_workers,
+    )
+    per_batch_timeout = training_cfg.get(
+        "dataloader_timeout_seconds", DEFAULT_PER_BATCH_TIMEOUT_SECONDS
+    )
+    # persistent_workers must stay False: DynamicPairDataset.set_epoch() reaches
+    # workers only because the dataset is re-pickled for each epoch.
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": (device.type == "cuda"),
+        "persistent_workers": False,
+        # A finite per-batch timeout turns an indefinitely wedged worker into a
+        # prompt RuntimeError instead of a silent multi-day stall.
+        **build_bounded_dataloader_kwargs(
+            num_workers=num_workers,
+            per_batch_timeout_seconds=per_batch_timeout,
+        ),
+    }
+    if loader_context is not None:
+        loader_kwargs["multiprocessing_context"] = loader_context
+    dataloader_runtime = {
+        "num_workers": num_workers,
+        "multiprocessing_method": loader_context_name,
+        "multiprocessing_method_reason": loader_context_reason,
+        "requires_safe_workers": bool(requires_safe_workers),
+        "persistent_workers": False,
+        "per_batch_timeout_seconds": loader_kwargs.get("timeout"),
+        "jax_backend": _jax_backend_name(),
+        "torch_training_device": str(device),
+    }
+    runtime["dataloader"] = dataloader_runtime
     early_stopping_config = EarlyStoppingConfig.from_dict(training_cfg.get("early_stopping"))
     sampler = PairSampler(catalog, split_registry, pair_policy)
     train_dataset = DynamicPairDataset(
@@ -1423,22 +1853,8 @@ def train_pairwise_correction(
         noise_config=validation_noise_config,
         shard_cache_size=shard_cache_size,
     )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        persistent_workers=False,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        persistent_workers=False,
-    )
+    train_loader = DataLoader(train_dataset, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, **loader_kwargs)
 
     training_pair_stream = {
         "pairs_per_epoch_ordered": len(train_dataset),
@@ -1528,6 +1944,18 @@ def train_pairwise_correction(
     fisher_distance_bin_edges = validate_fisher_distance_bin_edges(
         evaluation_cfg.get("fisher_distance_bin_edges", DEFAULT_S01_FISHER_DISTANCE_BIN_EDGES)
     )
+    print(
+        "training start "
+        f"epochs={start_epoch}..{epochs} "
+        f"device={device} "
+        f"jax_backend={dataloader_runtime['jax_backend']} "
+        f"num_workers={num_workers} "
+        f"mp_method={loader_context_name} "
+        f"batch_timeout={loader_kwargs.get('timeout')} "
+        f"batch_size={batch_size}",
+        flush=True,
+    )
+    first_batch_reported = False
     for epoch in range(start_epoch, epochs):
         epoch_started = time.perf_counter()
         learning_rate = _optimizer_learning_rate(optimizer)
@@ -1542,6 +1970,19 @@ def train_pairwise_correction(
         running_noise_consistency = 0.0
         seen = 0
         for batch in train_loader:
+            if not first_batch_reported:
+                # The six timed-out S12 runs produced no signal between
+                # initialisation and their wall-clock limit.  Report the first
+                # batch so a stalled pipeline is distinguishable from a slow one.
+                first_batch_reported = True
+                print(
+                    "first training batch "
+                    f"epoch={epoch} "
+                    f"seconds={time.perf_counter() - epoch_started:.1f} "
+                    f"num_workers={num_workers} "
+                    f"mp_method={loader_context_name}",
+                    flush=True,
+                )
             image_a, image_b, target = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
             if nuisance_enabled:
@@ -1753,14 +2194,7 @@ def train_pairwise_correction(
             noise_config=NoiseConfig(enabled=False),
             shard_cache_size=shard_cache_size,
         )
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=(device.type == "cuda"),
-            persistent_workers=False,
-        )
+        test_loader = DataLoader(test_dataset, **loader_kwargs)
         checkpoint = _load_training_checkpoint(output_dir / "checkpoint_best.pt", map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         test_kwargs = {"device": device, "catalog": catalog}

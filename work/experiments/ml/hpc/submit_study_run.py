@@ -58,6 +58,25 @@ def _audit_manifest_env(values: list[str]) -> str | None:
     return None if not mapping else json.dumps(mapping, sort_keys=True)
 
 
+def _dataloader_smoke_env(args: argparse.Namespace) -> dict[str, str | None]:
+    """Return bounded data-loader smoke-test variables for the batch job.
+
+    These keys must also appear in ``SUBMITTED_ENV_KEYS``; the submitted
+    environment is built from that allowlist after stripping parent-shell
+    ``ML_*`` values, so an unlisted key would be silently dropped.
+    """
+    smoke = getattr(args, "dataloader_smoke", None)
+    return {
+        "ML_DATALOADER_SMOKE": None if smoke is None else ("1" if smoke else "0"),
+        "ML_DATALOADER_SMOKE_BATCHES": None
+        if args.dataloader_smoke_batches is None
+        else str(int(args.dataloader_smoke_batches)),
+        "ML_DATALOADER_SMOKE_TIMEOUT": None
+        if args.dataloader_smoke_timeout is None
+        else str(float(args.dataloader_smoke_timeout)),
+    }
+
+
 def _repo_sha(repo_root: Path) -> str | None:
     try:
         result = subprocess.run(
@@ -96,6 +115,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact-lock", type=Path, default=None)
     parser.add_argument("--eigenbasis-artifact", type=Path, default=None)
     parser.add_argument("--noisy-eval-artifact", type=Path, default=None)
+    parser.add_argument(
+        "--dataloader-smoke",
+        dest="dataloader_smoke",
+        action="store_true",
+        default=None,
+        help="Force the bounded data-loader smoke test on in preflight. Defaults "
+        "to on when the study enables noise augmentation.",
+    )
+    parser.add_argument(
+        "--no-dataloader-smoke",
+        dest="dataloader_smoke",
+        action="store_false",
+        help="Skip the bounded data-loader smoke test in preflight.",
+    )
+    parser.add_argument("--dataloader-smoke-batches", type=int, default=None)
+    parser.add_argument("--dataloader-smoke-timeout", type=float, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--persist-dir", type=Path, default=None)
     parser.add_argument("--persist-artifact-root", type=Path, default=None)
@@ -168,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
                 "DLUXSHERA_SOURCE_COMMIT": args.source_commit,
                 "ML_SOURCE_ARCHIVE_ID": args.source_archive_id,
                 "DLUXSHERA_SOURCE_ARCHIVE_ID": args.source_archive_id,
+                **_dataloader_smoke_env(args),
             }
             submission = prepare_sbatch_submission(
                 profile,
@@ -303,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         "DLUXSHERA_SOURCE_COMMIT": args.source_commit,
         "ML_SOURCE_ARCHIVE_ID": args.source_archive_id,
         "DLUXSHERA_SOURCE_ARCHIVE_ID": args.source_archive_id,
+        **_dataloader_smoke_env(args),
     }
     submission = prepare_sbatch_submission(
         profile,

@@ -28,6 +28,7 @@ devtools/context_snapshot_*/**
 docs/dev/notes/*
 !docs/dev/notes/
 !docs/dev/notes/ml_program_status_20260908.md
+!docs/dev/notes/s12_batched_noise_proposal.md
 
 # My own example files to ignore
 Examples/*

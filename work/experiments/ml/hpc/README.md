@@ -8,7 +8,11 @@ details.
 ## Structure
 
 - `preflight_ml_gpu.py`: generic CUDA and study-contract preflight for any
-  tracked ML study.
+  tracked ML study.  Also runs a bounded data-loader smoke test when noise
+  augmentation is enabled; see
+  [Data-Loader Safety and Fail-Fast Checks](#data-loader-safety-and-fail-fast-checks).
+- `diagnose_ml_dataloader.py`: standalone data-pipeline diagnostic.  Runs the
+  real dataset and noise path with a finite timeout and no training.
 - `run_study_training.sh`: generic batch-body wrapper that validates the CUDA
   environment, runs preflight, persists compact study artifacts when
   `ML_PERSIST_ARTIFACT_ROOT` is set, trains via `train_from_study.py`, and
@@ -76,6 +80,171 @@ temporary sibling and then publishes atomically, so concurrent same-identity
 jobs can share one persistent artifact root without treating a benign race as a
 failure.  The prepared shard store is intentionally not copied into this
 artifact tree.
+
+## Data-Loader Safety and Fail-Fast Checks
+
+### Why JAX-backed noise and forked workers deadlock
+
+JAX initialises a multithreaded backend and is unsafe to fork from.  Importing
+`dluxshera.ml` is enough to trigger that initialisation: `utils/noise.py` imports
+`components.detectors`, which imports `dLux`, which executes a module-level
+`jnp.zeros(...)`.  So the training process is fork-unsafe from import time, well
+before any noise is applied.
+
+A study whose noise model executes JAX inside `Dataset.__getitem__`
+(`noise_model: shera_observation`) therefore cannot use `fork`-started
+DataLoader workers.  Each worker inherits the parent's initialised backend and
+deadlocks on its first JAX call: no error, no progress, and the job runs to its
+wall-time limit.  This destroyed six 72-hour S12 allocations; see
+`docs/dev/lessons_learned.md`.
+
+### Supported worker configurations
+
+The start method is chosen in code, not in `study.yaml`, so frozen study and
+artifact identities are unaffected.
+
+| Noise model | `num_workers` | Start method | Status |
+|---|---|---|---|
+| disabled or `legacy_numpy` | any | PyTorch default | supported; unchanged from S01-S11 |
+| `shera_observation` | 0 | n/a, in-process | supported fallback; benchmark on target hardware |
+| `shera_observation` | > 0 | `forkserver` (automatic) | **recommended** |
+| `shera_observation` | > 0 | `spawn` | supported; equivalent throughput, slower pool startup |
+| `shera_observation` | > 0 | `fork` | **rejected** during configuration |
+
+The unsafe combination **fails closed**: requesting `fork` with JAX-backed noise
+and `num_workers > 0` raises `UnsafeWorkerStartMethodError` at setup rather than
+warning and then stalling. Reproducing the deadlock deliberately requires the
+diagnostic's explicit
+`--i-understand-this-will-deadlock-reproduce-fork-hang` flag, which is not
+reachable from study configuration.
+
+Override with `training.dataloader_multiprocessing_context` only when
+diagnosing. `persistent_workers` stays `False`: the dynamic pair sampler is
+epoch-dependent, and `set_epoch()` reaches workers only because the dataset is
+re-pickled each epoch.
+
+### Bounded waiting
+
+Two independent bounds apply, and they cover different failures:
+
+- **Per-batch** — `DataLoader(timeout=...)`, defaulting to
+  `DEFAULT_PER_BATCH_TIMEOUT_SECONDS` (600 s) whenever workers are active.
+  Override with `training.dataloader_timeout_seconds`; `0` disables it. This
+  applies to *every* fetch including the first, so it does cover a worker that
+  wedges before producing anything. PyTorch rejects a nonzero timeout with
+  `num_workers=0`, so it is omitted there.
+- **Whole-probe** — preflight and the diagnostic run each probe in a supervised child process
+  and kills that process *and its worker descendants* on timeout. This is
+  necessary because a genuinely deadlocked worker cannot be interrupted from
+  inside the process that owns it; an in-process watchdog thread would leave
+  orphaned workers behind.
+
+Performance note: `forkserver` re-execs a clean interpreter per worker, so the
+first batch costs a few seconds of startup that `fork` does not. That cost is
+paid once per epoch and is negligible against epoch wall time.
+
+### Why CUDA availability does not establish pipeline readiness
+
+The original preflight validated CUDA and every artifact hash and still passed
+six jobs that could never produce a batch.  CUDA checks the training device;
+they say nothing about whether worker processes can hand back data.  Note also
+that PyTorch using CUDA does not imply JAX does — in the S12 runs JAX silently
+selected its CPU backend.  Both devices are now recorded in
+`run_config_resolved.json` under `runtime.dataloader`.
+
+### Required smoke test before long jobs
+
+Preflight runs a bounded data-loader smoke test automatically whenever noise
+augmentation is enabled.  It answers "can this pipeline produce batches at all",
+not "how fast is it".
+
+Control it through the submit helper with `--dataloader-smoke` /
+`--no-dataloader-smoke`, `--dataloader-smoke-batches`, and
+`--dataloader-smoke-timeout`, which export `ML_DATALOADER_SMOKE`,
+`ML_DATALOADER_SMOKE_BATCHES`, and `ML_DATALOADER_SMOKE_TIMEOUT` into the batch
+environment.  Those three keys are allowlisted in `SUBMITTED_ENV_KEYS`; setting
+them only in the parent shell does **not** work, because the submitted
+environment strips parent-shell `ML_*` variables before applying explicit
+values.
+
+For a standalone check on a compute node, with no GPU required:
+
+```bash
+PYTHONPATH=src python3 work/experiments/ml/hpc/diagnose_ml_dataloader.py \
+  --study work/experiments/ml/s12/study.yaml \
+  --experiment-id S12-E01 \
+  --run-id S12-E01-R001 \
+  --prepared-root "$GATTACA_SCRATCH/prepared/PREP-V4-v1" \
+  --split-registry "$GATTACA_SCRATCH/artifacts/v4/SPLIT-V4-ROLE-PRESERVING-v1.json" \
+  --scaler "$GATTACA_SCRATCH/artifacts/v4/SCALER-V4-GLOBAL-MAX-ABS-v1.json" \
+  --validation-manifest "$GATTACA_SCRATCH/artifacts/S12/validation_pairs/S12-VALIDATION-PAIRS-v1" \
+  --noisy-eval-artifact "$GATTACA_SCRATCH/artifacts/S12/S12-PHOTON-NOISE-VALIDATION-v1.json" \
+  --artifact-lock "$GATTACA_SCRATCH/artifacts/S12/S12-ARTIFACT-LOCK-v1.json" \
+  --batches 60 --timeout-seconds 1800
+```
+
+Useful variations: `--num-workers 0` for the in-process fallback,
+`--loader validation` for the frozen noisy manifest, and `--with-training-step`
+to add a bounded GPU forward/backward check that includes the second-view
+noise-consistency term when the experiment defines one.  The diagnostic never
+reads the locked test manifest and never writes to run directories.
+
+To demonstrate the deadlock rather than avoid it, combine
+`--multiprocessing-context fork` with
+`--i-understand-this-will-deadlock-reproduce-fork-hang`.  The probe is expected
+to time out; the supervisor kills it and its workers, so nothing is left
+running.
+
+#### Sustained throughput
+
+`--batches 60` is the right scale for a capacity decision.  Workers prefetch, so
+a short run measures queue drain rather than sustained loading and overstates
+throughput by 30-60%.  The report discards the prefetch window
+(`warmup_batches_discarded`) and then certifies the result only when it has at
+least 10 post-warmup batches spanning at least 20 s:
+
+- `sustained_pairs_per_second` — the number to plan with.
+- `sustained_measurement_valid` — **treat throughput as unusable when `false`**.
+- `sustained_measurement_note` — says what was insufficient.
+- `capacity_projection` — projected epoch minutes and campaign hours from the
+  study's own `pairs_per_epoch` and `epochs`, marked `not_defensible` when the
+  measurement did not qualify.
+
+### Recognising a job stuck before its first epoch
+
+Training prints a `training start ...` line with the resolved device, JAX
+backend, worker count, start method, and per-batch timeout, then a
+`first training batch ...` line.
+
+- `training start` present, no `first training batch`, and no `epoch 001/...`
+  line → stalled before producing any data.  With a nonzero per-batch timeout
+  this now self-terminates with `DataLoader timed out after N seconds` instead
+  of running to the wall-clock limit.
+- Neither line present → the stall is earlier, in artifact loading or scaler
+  fitting.
+
+### Stalled worker vs slow but healthy loading
+
+Both look like "no progress" in the log.  Distinguish by worker CPU:
+
+```bash
+squeue --me
+srun --jobid <job> --pty top -b -n 1 | head -20
+```
+
+- Worker processes present at ~0% CPU, state `S`, and a `first batch` line that
+  never arrives → **deadlock**.  Expect the JAX fork RuntimeWarning in stderr.
+  Fix the start method; do not wait.
+- Workers busy near 100% CPU with batches arriving slowly → **throughput**.
+  Compare `sustained_pairs_per_second` from the diagnostic against
+  `pairs_per_epoch` and the epoch budget, then request more wall time, split the
+  campaign across allocations with `--resume-checkpoint`, or revisit
+  `pairs_per_epoch` (which changes the scientific prescription).  Note that for
+  JAX-backed noise, raising `num_workers` measured as **no** improvement
+  locally — verify on the cluster before relying on it.
+
+The bounded smoke test reports the same distinction in its failure message
+rather than blocking indefinitely.
 
 ## Submit Behavior
 
@@ -608,3 +777,13 @@ manifests and locks. S11 does not need `--eigenbasis-artifact`; S12 must include
 S12 is the SHERA photon-noise observation condition: photon noise is enabled,
 read noise and dark current remain disabled, and noise is applied in count
 space before `IntensityScaler`.
+
+Preflight's whole-probe deadline includes zero-worker loading and teardown.
+The low-level `smoke_test_dataloader` has only a cooperative overall budget:
+a blocked zero-worker fetch cannot observe it. Production zero-worker training
+has no batch timeout; use the supervised diagnostic to qualify that fallback.
+Default S12 uses four safe workers and a 600-second per-batch timeout.
+`sustained_batches` counts post-warmup batches (formerly `sustained_samples`);
+`sustained_pairs` counts actual pairs, including a partial final batch.
+Local E01 measurements were 41.1 pairs/s with zero workers and 49.4 with four;
+worker count alone does not predict cluster speedup.

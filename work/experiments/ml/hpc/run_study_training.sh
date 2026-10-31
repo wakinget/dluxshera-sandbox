@@ -67,6 +67,19 @@ fi
 if [[ -n "${ML_AUDIT_MANIFESTS:-}" ]]; then
   preflight_args+=(--audit-manifest-json "$ML_AUDIT_MANIFESTS")
 fi
+# Bounded data-loader smoke test. Defaults to on in preflight whenever noise
+# augmentation is enabled; set ML_DATALOADER_SMOKE=0 to opt out explicitly.
+if [[ "${ML_DATALOADER_SMOKE:-}" == "0" ]]; then
+  preflight_args+=(--no-dataloader-smoke)
+elif [[ "${ML_DATALOADER_SMOKE:-}" == "1" ]]; then
+  preflight_args+=(--dataloader-smoke)
+fi
+if [[ -n "${ML_DATALOADER_SMOKE_BATCHES:-}" ]]; then
+  preflight_args+=(--dataloader-smoke-batches "$ML_DATALOADER_SMOKE_BATCHES")
+fi
+if [[ -n "${ML_DATALOADER_SMOKE_TIMEOUT:-}" ]]; then
+  preflight_args+=(--dataloader-smoke-timeout "$ML_DATALOADER_SMOKE_TIMEOUT")
+fi
 
 copy_compact_outputs() {
   if [[ -z "${ML_PERSIST_DIR:-}" || ! -d "$ML_RUN_DIR" ]]; then

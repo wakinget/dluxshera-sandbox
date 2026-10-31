@@ -74,7 +74,13 @@ def _write_vector_spaces(root: Path, sigmas: np.ndarray) -> None:
     )
 
 
-def _write_prepared_fixture(root: Path) -> Path:
+def _write_prepared_fixture(root: Path, *, image_size: int = 8) -> Path:
+    """Write a synthetic prepared dataset.
+
+    ``image_size`` defaults to the small 8x8 images used by most unit tests.
+    Pass a larger value when a test needs realistic per-sample work; the JAX
+    fork deadlock, for instance, does not reproduce at 8x8.
+    """
     sigmas = np.asarray([0.5, 2.0], dtype=np.float32)
     z_states = [
         np.asarray([-1.0, 0.0], dtype=np.float32),
@@ -89,7 +95,8 @@ def _write_prepared_fixture(root: Path) -> Path:
         np.asarray([0.1, 0.0], dtype=np.float32),
         np.asarray([0.0, 0.2], dtype=np.float32),
     ]
-    yy, xx = np.mgrid[0:8, 0:8].astype(np.float32)
+    size = int(image_size)
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
     images: list[np.ndarray] = []
     metadata: list[dict[str, object]] = []
     sample_index = 0
@@ -137,7 +144,7 @@ def _write_prepared_fixture(root: Path) -> Path:
                 "prepared_sample_count": len(images),
             },
             "array_storage": {
-                "sample_shape": [8, 8],
+                "sample_shape": [size, size],
                 "sample_count": len(images),
                 "storage_dtype": "float32",
                 "shard_count": shard_manifest["shard_count"],
@@ -148,8 +155,8 @@ def _write_prepared_fixture(root: Path) -> Path:
     return root
 
 
-def _write_v4_like_prepared_fixture(root: Path) -> Path:
-    _write_prepared_fixture(root)
+def _write_v4_like_prepared_fixture(root: Path, *, image_size: int = 8) -> Path:
+    _write_prepared_fixture(root, image_size=image_size)
     manifest = read_json(root / "manifest.json")
     manifest["artifact_id"] = "PREP-V4-v1"
     manifest["source_dataset"] = {"dataset_version": "shera_ml_master_v4"}

@@ -52,6 +52,13 @@ SUBMITTED_ENV_KEYS = (
     "ML_SOURCE_ARCHIVE_ID",
     "DLUXSHERA_SOURCE_COMMIT",
     "DLUXSHERA_SOURCE_ARCHIVE_ID",
+    # Bounded data-loader smoke test controls consumed by
+    # run_study_training.sh.  These must be listed here or the submitted
+    # environment silently drops them, because parent-shell ML_* variables are
+    # stripped before the explicit values are applied.
+    "ML_DATALOADER_SMOKE",
+    "ML_DATALOADER_SMOKE_BATCHES",
+    "ML_DATALOADER_SMOKE_TIMEOUT",
 )
 
 REQUIRED_RUN_ENV_KEYS = (

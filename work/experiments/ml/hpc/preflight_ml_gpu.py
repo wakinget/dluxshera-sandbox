@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import socket
@@ -71,6 +72,134 @@ def _torch_summary(device: str) -> dict:
     return out
 
 
+def _dataloader_smoke_in_process(
+    *,
+    config: dict,
+    catalog,
+    split_registry,
+    pair_policy,
+    scaler_path: Path | None,
+    enabled: bool | None,
+    batches: int,
+    timeout_seconds: float,
+) -> dict:
+    """Prove the configured training data pipeline can actually produce batches.
+
+    CUDA availability and valid artifact hashes do not establish pipeline
+    readiness.  The six timed-out S12 runs passed every artifact check and then
+    stalled before epoch 0 because JAX-backed noise deadlocked in forked
+    DataLoader workers.  This check exercises the real dataset and noise path
+    under the real worker configuration, bounded by a timeout.
+
+    Returns a diagnostics mapping.  Raises on failure so a batch job stops
+    before entering a multi-day training allocation.
+    """
+    from torch.utils.data import DataLoader
+
+    from dluxshera.ml import NoiseConfig
+    from dluxshera.ml.losses import PairConsistencyConfig
+    from dluxshera.ml.scaling import load_intensity_scaler
+    from dluxshera.ml.torch_data import (
+        DynamicPairDataset,
+        noise_requires_safe_workers,
+        resolve_dataloader_context,
+    )
+    from dluxshera.ml.training import (
+        build_bounded_dataloader_kwargs,
+        smoke_test_dataloader,
+    )
+
+    noise_config = NoiseConfig.from_dict(config.get("noise"))
+    validation_noise_config = NoiseConfig.from_dict(config.get("validation_noise"))
+    augmentation_enabled = bool(noise_config.enabled or validation_noise_config.enabled)
+    should_run = augmentation_enabled if enabled is None else bool(enabled)
+    if not should_run:
+        return {
+            "status": "skipped",
+            "reason": "noise augmentation disabled and smoke test not requested"
+            if enabled is None
+            else "explicitly disabled with --no-dataloader-smoke",
+            "noise_enabled": augmentation_enabled,
+        }
+
+    training_cfg = dict(config.get("training", {}))
+    batch_size = int(training_cfg.get("batch_size", 32))
+    num_workers = int(training_cfg.get("num_workers", 0))
+    consistency_config = PairConsistencyConfig.from_dict(config.get("pair_consistency"))
+    requires_safe_workers = noise_requires_safe_workers(
+        (noise_config, validation_noise_config)
+    )
+    context, context_name, context_reason = resolve_dataloader_context(
+        training_cfg.get("dataloader_multiprocessing_context"),
+        requires_safe_workers=requires_safe_workers,
+        num_workers=num_workers,
+    )
+    dataset = DynamicPairDataset(
+        catalog=catalog,
+        sampler=PairSampler(catalog, split_registry, pair_policy),
+        pairs_per_epoch=max(batch_size * max(int(batches), 1), 2),
+        seed=int(config.get("seed", 0)),
+        science_split="train",
+        nuisance_split="train",
+        scaler=None if scaler_path is None else load_intensity_scaler(scaler_path),
+        noise_config=noise_config,
+        second_noise_view=consistency_config.noise_consistency_weight > 0.0,
+        shard_cache_size=int(training_cfg.get("shard_cache_size", 4)),
+    )
+    dataset.set_epoch(0)
+    loader_kwargs: dict = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "pin_memory": False,
+        "persistent_workers": False,
+        # Bound every fetch, including the first, so a wedged worker raises
+        # here instead of stalling the batch job.
+        **build_bounded_dataloader_kwargs(
+            num_workers=num_workers,
+            per_batch_timeout_seconds=float(timeout_seconds),
+        ),
+    }
+    if context is not None:
+        loader_kwargs["multiprocessing_context"] = context
+    result = smoke_test_dataloader(
+        DataLoader(dataset, **loader_kwargs),
+        batches=int(batches),
+        timeout_seconds=float(timeout_seconds),
+        label="preflight_train",
+    )
+    return {
+        "status": "ok",
+        "noise_enabled": augmentation_enabled,
+        "requires_safe_workers": bool(requires_safe_workers),
+        "multiprocessing_method": context_name,
+        "multiprocessing_method_reason": context_reason,
+        "purpose": (
+            "proves the pipeline can produce batches; not a capacity "
+            "measurement. Use diagnose_ml_dataloader.py for sustained throughput."
+        ),
+        **result,
+    }
+
+
+def _dataloader_smoke(**kwargs) -> dict:
+    """Bound the entire loader check, including zero-worker fetches and teardown."""
+    from functools import partial
+    from dluxshera.ml.training import run_supervised
+
+    budget = float(kwargs["timeout_seconds"])
+    if not math.isfinite(budget) or budget <= 0:
+        raise ValueError("timeout_seconds must be finite and > 0")
+    outcome = run_supervised(
+        partial(_dataloader_smoke_in_process, **kwargs),
+        timeout_seconds=budget,
+        label="preflight_train",
+    )
+    if outcome["status"] != "ok":
+        raise RuntimeError(f"Data-loader preflight failed: {outcome}")
+    return {**outcome["result"], "deadline_kind": "process", "deadline_seconds": budget}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Preflight CUDA and frozen ML study artifacts.")
     parser.add_argument("--study", type=Path, required=True)
@@ -88,6 +217,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--noisy-eval-artifact", type=Path, default=None)
     parser.add_argument("--persist-artifact-root", type=Path, default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--dataloader-smoke",
+        dest="dataloader_smoke",
+        action="store_true",
+        default=None,
+        help="Force the bounded data-loader smoke test on. Defaults to on when "
+        "noise augmentation is enabled.",
+    )
+    parser.add_argument(
+        "--no-dataloader-smoke",
+        dest="dataloader_smoke",
+        action="store_false",
+        help="Skip the bounded data-loader smoke test.",
+    )
+    parser.add_argument("--dataloader-smoke-batches", type=int, default=2)
+    parser.add_argument("--dataloader-smoke-timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
 
     study = load_study_prescription(args.study)
@@ -292,6 +437,16 @@ def main(argv: list[str] | None = None) -> int:
             "distance_bin_smoke": distance_smoke,
         },
     }
+    summary["dataloader_smoke"] = _dataloader_smoke(
+        config=config,
+        catalog=catalog,
+        split_registry=split_registry,
+        pair_policy=pair_policy,
+        scaler_path=args.scaler,
+        enabled=args.dataloader_smoke,
+        batches=int(args.dataloader_smoke_batches),
+        timeout_seconds=float(args.dataloader_smoke_timeout),
+    )
     if args.persist_artifact_root is not None:
         summary["persistent_artifacts"] = persist_study_contract_artifacts(
             artifact_root=args.persist_artifact_root,
