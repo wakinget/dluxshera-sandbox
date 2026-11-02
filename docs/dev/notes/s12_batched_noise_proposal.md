@@ -1,6 +1,41 @@
 # Proposal: batched SHERA photon-noise generation for S12 throughput
 
-**Status: proposal only. Not implemented, not enabled.** This exists because
+**Historical proposal and prototype.** An opt-in implementation and new local
+measurements are now described in [the performance review](../s12_pipeline_performance.md).
+It remains disabled by default pending real V4 cluster checks. The original
+proposal and its benchmark context are retained below.
+
+Three later findings qualify the numbers in this note; the performance review
+is authoritative where they conflict:
+
+- The measured batching speedup on resident real V3 images is **5.3×**
+  (0.729 → 0.137 s per 32-image batch), not the 5.4× or 6.76× figures from the
+  early isolated prototypes. Outputs are bitwise identical, as claimed here.
+- Open question 4 ("ragged final batch") is resolved: mixed-brightness groups
+  are padded to the requested batch width so a short trailing batch does not
+  trigger a fresh compilation per bright-image count, and padding results are
+  discarded. Exactness across batch partitions is covered by tests.
+- Open question 5 ("provenance identity") is resolved as this note anticipated:
+  `noise_model` stays `SHERA-PHOTON-NOISE-OBSERVATION-v1` because the output is
+  bitwise identical, and the implementation is recorded in runtime provenance
+  and checkpoints, outside scientific identity.
+
+A separate line of inquiry — replacing the sampler with a precomputed Poisson
+lookup table — was investigated and **rejected**; see the lookup section of the
+performance review. That investigation also found that vectorized NumPy Poisson
+is ~4.5× faster than the batched JAX kernel for the same work, which this note's
+"per-call JAX dispatch is the binding constraint" diagnosis did not anticipate:
+the binding constraint is the JAX Poisson kernel itself, and batching only
+amortizes dispatch around it.
+
+That NumPy lead has since been **followed up and integrated** as a second opt-in
+strategy, `--noise-implementation numpy`, measured at 4.73× over batched JAX
+with the full per-record seed contract in place. It samples the same Poisson
+model from a different RNG stream, so it is validated statistically rather than
+bitwise, and the frozen noisy-validation recipe stays JAX-backed so no artifact
+needed regenerating. See the NumPy investigation in the performance review.
+
+**Original status: proposal only. Not implemented, not enabled.** This exists because
 S12-E02's measured data-loading cost is close to the Gattaca2 wall-clock budget.
 It requires scientific review before any use, because it changes *where* noise is
 applied even though it does not change *what* noise is applied.

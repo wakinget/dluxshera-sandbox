@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import json
+import math
 import multiprocessing as mp
 import os
 import shutil
@@ -48,7 +49,12 @@ from .metrics import (
     metrics_by_group,
 )
 from .models import build_pairwise_correction_model, count_parameters
-from .noise import NoiseConfig, noise_config_identity
+from .noise import (
+    NoiseConfig,
+    effective_noise_implementation,
+    noise_config_identity,
+    numpy_noise_provenance,
+)
 from .noisy_eval import load_noisy_eval_recipe, validate_noisy_eval_recipe
 from .pairs import (
     PairManifest,
@@ -66,6 +72,8 @@ from .torch_data import (
     UnsafeWorkerStartMethodError,
     noise_requires_safe_workers,
     resolve_dataloader_context,
+    resolve_noise_implementation,
+    resolve_validation_noise_implementation,
 )
 
 __all__ = [
@@ -135,6 +143,28 @@ def _git_info() -> dict[str, Any]:
     return info
 
 
+def _validate_resume_noise_implementation(checkpoint, current: str) -> None:
+    """Execution provenance is separate from scientific training identity.
+
+    Historical checkpoints predate batching and are treated as reference only.
+    There is deliberately no implicit implementation migration on resume.
+
+    This matters more for ``numpy`` than for ``batched``: ``batched`` is bitwise
+    identical to ``reference``, so switching between them would change nothing
+    observable, whereas switching to or from ``numpy`` changes the realized
+    training noise stream mid-campaign.  Both are rejected, so a single run
+    never mixes RNG methods and the reviewer sees the switch explicitly.
+    """
+    previous = checkpoint.get("runtime_provenance", {}).get("noise_implementation", "reference")
+    if previous != current:
+        raise ValueError(
+            f"Resume noise implementation mismatch: checkpoint={previous!r}, requested={current!r}. "
+            "Resume with the original implementation; historical checkpoints require reference. "
+            "Switching between the JAX and NumPy samplers would change the realized "
+            "training-noise stream within one campaign."
+        )
+
+
 def _runtime_info(device: torch.device) -> dict[str, Any]:
     """Return optional execution provenance for local and SLURM runs."""
     cuda_device_name = None
@@ -144,7 +174,16 @@ def _runtime_info(device: torch.device) -> dict[str, Any]:
         except Exception:  # pragma: no cover - defensive provenance only
             cuda_device_name = None
     env = os.environ
+    requested_noise_implementation = resolve_noise_implementation()
     return {
+        "jax_backend": _jax_backend_name(),
+        "noise_implementation": requested_noise_implementation,
+        "validation_noise_implementation": resolve_validation_noise_implementation(
+            requested_noise_implementation
+        ),
+        "numpy_version": str(np.__version__),
+        "jax_version": _jax_version(),
+        "numpy_noise_rng": numpy_noise_provenance(),
         "python_version": ".".join(str(v) for v in os.sys.version_info[:3]),
         "torch_version": str(getattr(torch, "__version__", "")),
         "torch_cuda_version": None
@@ -179,6 +218,21 @@ def _jax_backend_name() -> str | None:
         return str(jax.default_backend())
     except Exception:  # pragma: no cover - defensive provenance only
         return None
+
+
+def _jax_version() -> str | None:
+    """Return the installed JAX version, or ``None`` when JAX is unavailable.
+
+    Notes
+    -----
+    Batched/reference bitwise equality was only ever established on a tested
+    JAX build, so the build belongs in run provenance alongside the backend.
+    """
+    try:
+        import jax
+    except ModuleNotFoundError:  # pragma: no cover - JAX is a hard dependency
+        return None
+    return str(getattr(jax, "__version__", "")) or None
 
 
 class DataLoaderSmokeTimeout(RuntimeError):
@@ -328,7 +382,20 @@ def smoke_test_dataloader(
         and sustained_seconds >= MIN_SUSTAINED_SECONDS
     )
     note = None
+    recommended_batches = None
     if not valid:
+        # A fast implementation drains the requested batches before the span
+        # gate is met.  That is a measurement-size problem, not a slow loader,
+        # so report the batch count that would satisfy the gate rather than
+        # leaving the operator to guess.  Scale from the observed rate with a
+        # 25% margin, and always ask for at least the sample-count minimum.
+        if sustained_mean and sustained_mean > 0.0:
+            needed_for_span = int(
+                math.ceil(1.25 * MIN_SUSTAINED_SECONDS / sustained_mean)
+            )
+            recommended_batches = int(warmup) + max(
+                needed_for_span, MIN_SUSTAINED_SAMPLES
+            )
         note = (
             f"sustained measurement used {len(sustained)} post-warmup batch(es) "
             f"spanning {sustained_seconds:.1f}s, below the "
@@ -336,6 +403,13 @@ def smoke_test_dataloader(
             "threshold for a defensible capacity estimate. Re-run with more "
             "batches before using this throughput number."
         )
+        if recommended_batches is not None:
+            note += (
+                f" At the observed {sustained_mean:.4f}s/batch, approximately "
+                f"--batches {recommended_batches} (including {int(warmup)} "
+                "warmup) would satisfy the gate. A short span means the loader "
+                "was fast, not that it is unusable."
+            )
     return {
         "label": str(label),
         "batches_requested": requested,
@@ -354,6 +428,7 @@ def smoke_test_dataloader(
         else sum(pair_counts[warmup:]) / sustained_seconds,
         "sustained_measurement_valid": bool(valid),
         "sustained_measurement_note": note,
+        "recommended_batches_for_valid_measurement": recommended_batches,
         "total_seconds": elapsed,
         "timeout_seconds": budget,
         "num_workers": num_workers,
@@ -1778,6 +1853,7 @@ def train_pairwise_correction(
         current_identity["noisy_validation_recipe"] = noisy_eval_identity
     if resume_checkpoint_path is not None:
         checkpoint = _load_training_checkpoint(resume_checkpoint_path, map_location=device)
+        _validate_resume_noise_implementation(checkpoint, runtime["noise_implementation"])
         _validate_resume_identity(checkpoint=checkpoint, current_identity=current_identity)
         _validate_resume_lr_scheduler(
             checkpoint=checkpoint,
@@ -1830,6 +1906,15 @@ def train_pairwise_correction(
         "per_batch_timeout_seconds": loader_kwargs.get("timeout"),
         "jax_backend": _jax_backend_name(),
         "torch_training_device": str(device),
+        "requested_noise_implementation": runtime["noise_implementation"],
+        # A requested strategy that cannot cover this configuration falls back
+        # to the reference sampler; record what will actually execute.
+        "effective_training_noise_implementation": effective_noise_implementation(
+            noise_config, runtime["noise_implementation"]
+        ),
+        "effective_validation_noise_implementation": effective_noise_implementation(
+            validation_noise_config, runtime["validation_noise_implementation"]
+        ),
     }
     runtime["dataloader"] = dataloader_runtime
     early_stopping_config = EarlyStoppingConfig.from_dict(training_cfg.get("early_stopping"))
@@ -1845,6 +1930,9 @@ def train_pairwise_correction(
         noise_config=noise_config,
         second_noise_view=consistency_config.noise_consistency_weight > 0.0,
         shard_cache_size=shard_cache_size,
+        # Pass the already-resolved value so the datasets cannot disagree with
+        # the implementation recorded in runtime provenance and checkpoints.
+        noise_implementation=runtime["noise_implementation"],
     )
     val_dataset = PairManifestDataset(
         catalog=catalog,
@@ -1852,6 +1940,9 @@ def train_pairwise_correction(
         scaler=scaler,
         noise_config=validation_noise_config,
         shard_cache_size=shard_cache_size,
+        # Frozen validation noise stays JAX-backed even when training uses
+        # NumPy, so the frozen noisy-validation recipe needs no regeneration.
+        noise_implementation=runtime["validation_noise_implementation"],
     )
     train_loader = DataLoader(train_dataset, **loader_kwargs)
     val_loader = DataLoader(val_dataset, **loader_kwargs)

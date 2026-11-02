@@ -1,5 +1,42 @@
 # ML HPC Orchestration
 
+S12 optimization follow-up: [performance review and Gattaca2 CPU qualification](../../../../docs/dev/s12_pipeline_performance.md).
+Two opt-in noise strategies (`batched` JAX and deterministic per-record `numpy`)
+are under local validation; `reference` remains the default. That document holds
+the step-by-step qualification procedure, the experiment-aware validator, the
+complete 1,024-record equivalence check, the NumPy statistical validation, and
+the first-real-run GPU verification. Historical incident and recovery notes
+below are retained.
+
+Diagnostics in this directory:
+
+| Script | Purpose |
+|---|---|
+| `preflight_ml_gpu.py` | CUDA and frozen-artifact preflight plus a bounded data-loader smoke test. Supports `--noise-implementation reference\|batched\|numpy`. |
+| `diagnose_ml_dataloader.py` | Supervised throughput, clean baseline, stage profile for all three strategies, and exact reference/batched equivalence. Does not read the locked test manifest. |
+| `qualify_s12_pipeline.py` | Reduces the qualification JSON reports to one PASS / REMEASURE / FAIL decision. Reruns nothing. Exit 0 / 2 / 1 respectively, so a shell can branch on it. |
+| `analyze_image_statistics.py` | Read-only count statistics and SHERA Poisson/Gaussian branch selection for a prepared dataset. |
+| `benchmark_s12_fixture.py` | Local synthetic-fixture throughput comparison across clean/reference/batched/numpy. Engineering regression only, never capacity certification. |
+| `submit_study_run.py` | Launch preview and submission. Supports `--noise-implementation`. |
+
+Selecting `numpy` affects **training noise only**: the frozen noisy-validation
+recipe stays JAX-backed, so no frozen artifact needs regenerating. `numpy` is a
+different RNG stream, not a bitwise match to the reference, so
+`--verify-equivalence` rejects it; its validation is statistical, in
+`tests/ml/test_numpy_noise.py`. It also does not make a run JAX-free: JAX is
+still imported, frozen validation still samples through it, and the fork-safe
+worker start method is still required.
+
+A successful diagnostic exit does not mean its throughput measurement is usable
+— a run can succeed while reporting `sustained_measurement_valid: false`, which
+NumPy triggers routinely by draining the requested batches faster than the
+20-second validity window. Always finish with `qualify_s12_pipeline.py`, which
+separates that case (`REMEASURE`, exit 2) from a real failure (`FAIL`, exit 1).
+
+The Poisson lookup-table research prototype lives in
+`work/experiments/ml/research/` and is deliberately outside the production
+import graph; it was evaluated and rejected for S12.
+
 This directory contains the shared execution layer for tracked ML studies.  A
 study-specific `study.yaml` remains the scientific source of truth; these
 helpers only bind that prescription to site-specific scheduler and environment

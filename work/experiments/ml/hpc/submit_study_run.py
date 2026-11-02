@@ -67,6 +67,7 @@ def _dataloader_smoke_env(args: argparse.Namespace) -> dict[str, str | None]:
     """
     smoke = getattr(args, "dataloader_smoke", None)
     return {
+        "DLUXSHERA_NOISE_IMPLEMENTATION": getattr(args, "noise_implementation", None),
         "ML_DATALOADER_SMOKE": None if smoke is None else ("1" if smoke else "0"),
         "ML_DATALOADER_SMOKE_BATCHES": None
         if args.dataloader_smoke_batches is None
@@ -150,6 +151,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Additional scheduler option, for example a Gattaca2 GPU partition/GRES flag.",
     )
     parser.add_argument("--dry-run", action="store_true", default=False)
+    parser.add_argument(
+        "--noise-implementation",
+        choices=("reference", "batched", "numpy"),
+        default="reference",
+        help="Training-noise execution strategy. Execution provenance only; "
+        "frozen validation noise stays JAX-backed regardless of this choice.",
+    )
     args = parser.parse_args(argv)
 
     profile = slurm_profile(args.site)
@@ -221,6 +229,35 @@ def main(argv: list[str] | None = None) -> int:
                     "run_id": row.run_id,
                     "command": submission.command,
                     "missing_required_environment": list(submission.missing_required_environment),
+                    # The sbatch command shows only scheduler options, so output
+                    # paths and the noise strategy would otherwise be
+                    # unverifiable from a preview. These are the values that
+                    # decide where a 72-hour run writes and which sampler it
+                    # uses, so a preview that cannot show them cannot be
+                    # reviewed.
+                    "submitted_environment": {
+                        key: submission.environment.get(key)
+                        for key in (
+                            "ML_RUN_DIR",
+                            "ML_PERSIST_DIR",
+                            "ML_PERSIST_ARTIFACT_ROOT",
+                            "ML_SOURCE_COMMIT",
+                            "ML_CONDA_PREFIX",
+                            "ML_PREPARED_ROOT",
+                            "ML_SPLIT_REGISTRY",
+                            "ML_SCALER",
+                            "ML_VALIDATION_MANIFEST",
+                            "ML_NOISY_EVAL_ARTIFACT",
+                            "ML_ARTIFACT_LOCK",
+                            "ML_OVERWRITE",
+                            "DLUXSHERA_NOISE_IMPLEMENTATION",
+                        )
+                        if key in submission.environment
+                    },
+                    "log_paths": {
+                        "output": str(submission.output),
+                        "error": str(submission.error),
+                    },
                     "resolved_artifacts": {
                         "artifact_profile": row.artifact_profile,
                         "split_registry_artifact_id": row.split_registry_artifact_id,

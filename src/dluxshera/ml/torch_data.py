@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import warnings
 from typing import Any, Iterable, Mapping
 
@@ -16,18 +17,28 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in no-torch e
     ) from exc
 
 from .catalog import SampleCatalog
-from .noise import NoiseConfig, apply_pair_noise
+from .noise import (
+    NoiseConfig,
+    apply_pair_noise,
+    apply_pair_noise_batch,
+    apply_pair_noise_numpy,
+)
 from .pairs import PairManifest, PairRecord, PairSampler, make_reverse_pair_record
 from .scaling import IntensityScaler
 
 __all__ = [
     "DynamicPairDataset",
     "JAX_BACKED_NOISE_MODELS",
+    "NOISE_IMPLEMENTATIONS",
+    "NOISE_IMPLEMENTATION_ENV_VAR",
     "PairManifestDataset",
     "SAFE_WORKER_START_METHODS",
     "UnsafeWorkerStartMethodError",
+    "VALIDATION_NOISE_IMPLEMENTATIONS",
     "noise_requires_safe_workers",
     "resolve_dataloader_context",
+    "resolve_noise_implementation",
+    "resolve_validation_noise_implementation",
 ]
 
 #: Noise models whose implementation executes JAX operations inside
@@ -44,6 +55,91 @@ SAFE_WORKER_START_METHODS = ("forkserver", "spawn")
 #: cost once per worker pool rather than once per worker, so it is cheaper than
 #: ``spawn`` while being equally fork-safe.
 DEFAULT_SAFE_WORKER_START_METHOD = "forkserver"
+
+#: Supported noise *execution* strategies.  This is runtime provenance, not a
+#: scientific noise identity: ``reference`` and ``batched`` produce bitwise
+#: identical realizations, and ``numpy`` produces a different realization of
+#: the same prescribed photon-noise probability model.
+NOISE_IMPLEMENTATIONS = ("reference", "batched", "numpy")
+
+#: Strategies permitted for *frozen* validation noise.  The S12 frozen
+#: noisy-validation recipe was constructed around the JAX noise stream, so the
+#: validation realization must stay JAX-backed even when training uses NumPy.
+#: ``numpy`` is deliberately absent; see
+#: :func:`resolve_validation_noise_implementation`.
+VALIDATION_NOISE_IMPLEMENTATIONS = ("reference", "batched")
+
+#: Environment variable supplying the runtime default noise implementation.
+NOISE_IMPLEMENTATION_ENV_VAR = "DLUXSHERA_NOISE_IMPLEMENTATION"
+
+
+def resolve_noise_implementation(noise_implementation: str | None = None) -> str:
+    """Resolve the noise execution strategy without constructing a dataset.
+
+    Parameters
+    ----------
+    noise_implementation:
+        Explicit selection, or ``None`` to read
+        :data:`NOISE_IMPLEMENTATION_ENV_VAR` and fall back to ``"reference"``.
+
+    Returns
+    -------
+    str
+        One of :data:`NOISE_IMPLEMENTATIONS`.
+
+    Raises
+    ------
+    ValueError
+        When the resolved value is not a supported implementation.
+
+    Notes
+    -----
+    Callers that must report the resolved strategy on a path where no dataset
+    exists -- for example a skipped preflight smoke test -- use this instead of
+    reading ``dataset.noise_implementation``.
+    """
+    resolved = str(
+        noise_implementation
+        or os.environ.get(NOISE_IMPLEMENTATION_ENV_VAR)
+        or "reference"
+    )
+    if resolved not in NOISE_IMPLEMENTATIONS:
+        raise ValueError(
+            f"noise_implementation must be one of {NOISE_IMPLEMENTATIONS}, got {resolved!r}."
+        )
+    return resolved
+
+
+def resolve_validation_noise_implementation(training_implementation: str) -> str:
+    """Return the strategy to use for frozen validation noise.
+
+    Parameters
+    ----------
+    training_implementation:
+        The resolved *training* noise strategy.
+
+    Returns
+    -------
+    str
+        One of :data:`VALIDATION_NOISE_IMPLEMENTATIONS`.
+
+    Notes
+    -----
+    Selecting ``numpy`` for training maps validation to ``"reference"``.  The
+    frozen S12 noisy-validation recipe pins a deterministic JAX realization of
+    the validation observation images; reproducing that realization requires
+    the JAX stream, so the validation loader keeps it regardless of the
+    training strategy.  ``reference`` and ``batched`` are bitwise identical, so
+    either preserves the frozen recipe and ``batched`` is passed through.
+
+    This is why the training optimization can be evaluated without
+    regenerating any frozen artifact.
+    """
+    return (
+        str(training_implementation)
+        if training_implementation in VALIDATION_NOISE_IMPLEMENTATIONS
+        else "reference"
+    )
 
 
 def noise_requires_safe_workers(
@@ -200,12 +296,13 @@ def _record_to_tensors(
     noise_config: NoiseConfig,
     dynamic_seed_offset: int,
     second_noise_view: bool = False,
+    prepared_views: list | None = None,
 ) -> dict[str, Any]:
-    clean_a = reader.get(int(record.sample_a_index))
-    clean_b = reader.get(int(record.sample_b_index))
+    clean_a = reader.get(int(record.sample_a_index)) if prepared_views is None else None
+    clean_b = reader.get(int(record.sample_b_index)) if prepared_views is None else None
     # Noise is applied after ordering, so observation-only noise remains tied
     # to the B role even when a reverse PairRecord swaps physical samples.
-    image_a, image_b = apply_pair_noise(
+    image_a, image_b = prepared_views[0] if prepared_views is not None else apply_pair_noise(
         clean_a,
         clean_b,
         noise_config,
@@ -240,7 +337,7 @@ def _record_to_tensors(
         ),
     }
     if second_noise_view:
-        image_a2, image_b2 = apply_pair_noise(
+        image_a2, image_b2 = prepared_views[1] if prepared_views is not None else apply_pair_noise(
             clean_a,
             clean_b,
             noise_config,
@@ -256,7 +353,45 @@ def _record_to_tensors(
     return item
 
 
-class PairManifestDataset(Dataset):
+class _BatchFetch:
+    def _single_item_needs_batch_path(self) -> bool:
+        """Return ``True`` when ``__getitem__`` must delegate to ``__getitems__``.
+
+        ``reference`` and ``batched`` are bitwise identical, so a single-item
+        fetch can use the reference sampler either way.  ``numpy`` is a
+        genuinely different stream, so routing one item through the reference
+        sampler would make the realization depend on whether the loader chose
+        the batch-fetch path.  Delegating keeps both paths identical.
+
+        The ``enabled`` term also breaks the recursion: with noise disabled,
+        ``__getitems__`` falls back to per-item fetches.
+        """
+        return self.noise_implementation == "numpy" and self.noise_config.enabled
+
+    def __getitems__(self, indices: list[int]) -> list[dict[str, Any]]:
+        """Fetch ordered count-space views before scaling, inside one worker."""
+        if self.noise_implementation == "reference" or not self.noise_config.enabled:
+            return [self[index] for index in indices]
+        records_offsets = [self._record_and_offset(int(index)) for index in indices]
+        reader = self._get_reader()
+        # Bound all temporary storage to this batch; preserve requested order.
+        clean = [(reader.get(int(r.sample_a_index)), reader.get(int(r.sample_b_index)))
+                 for r, _ in records_offsets]
+        # NumPy draws per record from its own derived seed, so the realization
+        # is independent of this batch's width and composition.
+        sampler = (apply_pair_noise_numpy if self.noise_implementation == "numpy"
+                   else apply_pair_noise_batch)
+        views = [sampler(clean, self.noise_config,
+                 [(r.pair_record_id, offset + extra) for r, offset in records_offsets])
+                 for extra in ([0, 1_000_000_007] if self.second_noise_view else [0])]
+        return [_record_to_tensors(catalog=self.catalog, reader=reader, record=r,
+                    scaler=self.scaler, noise_config=self.noise_config,
+                    dynamic_seed_offset=offset, second_noise_view=self.second_noise_view,
+                    prepared_views=[view[i] for view in views])
+                for i, (r, offset) in enumerate(records_offsets)]
+
+
+class PairManifestDataset(_BatchFetch, Dataset):
     """Read fixed ordered pairs from a frozen pair manifest.
 
     This is an optional PyTorch adapter around the architecture-neutral catalog,
@@ -278,6 +413,12 @@ class PairManifestDataset(Dataset):
         If ``True``, include ``image_a_noise_view2`` and
         ``image_b_noise_view2`` tensors generated by reapplying
         ``noise_config`` with a separate deterministic seed offset.
+    noise_implementation:
+        Runtime strategy: reference (default), batched, or numpy. When omitted,
+        reads DLUXSHERA_NOISE_IMPLEMENTATION. This is an execution strategy, not
+        a scientific noise identity: batched is bitwise identical to reference,
+        while numpy samples the same photon-noise probability model from a
+        different RNG stream.
     shard_cache_size:
         Number of shard memory maps retained by the underlying image reader.
 
@@ -299,7 +440,9 @@ class PairManifestDataset(Dataset):
         noise_config: NoiseConfig | Mapping[str, Any] | None = None,
         second_noise_view: bool = False,
         shard_cache_size: int = 4,
+        noise_implementation: str | None = None,
     ) -> None:
+        self.noise_implementation = resolve_noise_implementation(noise_implementation)
         self.catalog = catalog
         self.records = tuple(pair_manifest.records)
         self.scaler = IntensityScaler() if scaler is None else scaler
@@ -328,7 +471,12 @@ class PairManifestDataset(Dataset):
             self._reader = self.catalog.image_reader(cache_size=self.shard_cache_size)
         return self._reader
 
+    def _record_and_offset(self, index: int) -> tuple[PairRecord, int]:
+        return self.records[int(index)], int(index)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
+        if self._single_item_needs_batch_path():
+            return self.__getitems__([int(index)])[0]
         return _record_to_tensors(
             catalog=self.catalog,
             reader=self._get_reader(),
@@ -340,7 +488,7 @@ class PairManifestDataset(Dataset):
         )
 
 
-class DynamicPairDataset(Dataset):
+class DynamicPairDataset(_BatchFetch, Dataset):
     """Generate deterministic dynamic training pairs for a seed and epoch.
 
     This optional PyTorch adapter asks :class:`PairSampler` for pairs on demand
@@ -376,6 +524,12 @@ class DynamicPairDataset(Dataset):
         If ``True``, include ``image_a_noise_view2`` and
         ``image_b_noise_view2`` tensors generated by reapplying
         ``noise_config`` with a separate deterministic seed offset.
+    noise_implementation:
+        Runtime strategy: reference (default), batched, or numpy. When omitted,
+        reads DLUXSHERA_NOISE_IMPLEMENTATION. This is an execution strategy, not
+        a scientific noise identity: batched is bitwise identical to reference,
+        while numpy samples the same photon-noise probability model from a
+        different RNG stream.
     shard_cache_size:
         Number of shard memory maps retained by the underlying image reader.
     """
@@ -393,6 +547,7 @@ class DynamicPairDataset(Dataset):
         noise_config: NoiseConfig | Mapping[str, Any] | None = None,
         second_noise_view: bool = False,
         shard_cache_size: int = 4,
+        noise_implementation: str | None = None,
     ) -> None:
         if int(pairs_per_epoch) < 1:
             raise ValueError("pairs_per_epoch must be >= 1.")
@@ -401,6 +556,7 @@ class DynamicPairDataset(Dataset):
                 "include_reverse=True requires pairs_per_epoch to be even because "
                 "pairs_per_epoch counts ordered examples."
             )
+        self.noise_implementation = resolve_noise_implementation(noise_implementation)
         self.catalog = catalog
         self.sampler = sampler
         self.pairs_per_epoch = int(pairs_per_epoch)
@@ -443,7 +599,7 @@ class DynamicPairDataset(Dataset):
             self._reader = self.catalog.image_reader(cache_size=self.shard_cache_size)
         return self._reader
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
+    def _record_and_offset(self, index: int) -> tuple[PairRecord, int]:
         ordered_index = int(index)
         include_reverse = bool(self.sampler.policy.include_reverse)
         base_pair_index = ordered_index // 2 if include_reverse else ordered_index
@@ -459,12 +615,18 @@ class DynamicPairDataset(Dataset):
         )
         if include_reverse and ordered_index % 2 == 1:
             record = make_reverse_pair_record(record)
+        return record, pair_seed if self.noise_config.training_dynamic else 0
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        if self._single_item_needs_batch_path():
+            return self.__getitems__([int(index)])[0]
+        record, offset = self._record_and_offset(index)
         return _record_to_tensors(
             catalog=self.catalog,
             reader=self._get_reader(),
             record=record,
             scaler=self.scaler,
             noise_config=self.noise_config,
-            dynamic_seed_offset=pair_seed if self.noise_config.training_dynamic else 0,
+            dynamic_seed_offset=offset,
             second_noise_view=self.second_noise_view,
         )

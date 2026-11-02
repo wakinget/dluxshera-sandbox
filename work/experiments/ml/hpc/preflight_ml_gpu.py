@@ -82,6 +82,7 @@ def _dataloader_smoke_in_process(
     enabled: bool | None,
     batches: int,
     timeout_seconds: float,
+    noise_implementation_override: str | None = None,
 ) -> dict:
     """Prove the configured training data pipeline can actually produce batches.
 
@@ -99,10 +100,14 @@ def _dataloader_smoke_in_process(
     from dluxshera.ml import NoiseConfig
     from dluxshera.ml.losses import PairConsistencyConfig
     from dluxshera.ml.scaling import load_intensity_scaler
+    from dluxshera.ml.noise import effective_noise_implementation, numpy_noise_provenance
     from dluxshera.ml.torch_data import (
+        NOISE_IMPLEMENTATION_ENV_VAR,
         DynamicPairDataset,
         noise_requires_safe_workers,
         resolve_dataloader_context,
+        resolve_noise_implementation,
+        resolve_validation_noise_implementation,
     )
     from dluxshera.ml.training import (
         build_bounded_dataloader_kwargs,
@@ -113,6 +118,14 @@ def _dataloader_smoke_in_process(
     validation_noise_config = NoiseConfig.from_dict(config.get("validation_noise"))
     augmentation_enabled = bool(noise_config.enabled or validation_noise_config.enabled)
     should_run = augmentation_enabled if enabled is None else bool(enabled)
+    # Resolve the strategy from the environment, not from a dataset: on the
+    # skipped path no dataset is ever constructed, and reading an attribute off
+    # one raised UnboundLocalError for noiseless studies and
+    # --no-dataloader-smoke.  Training uses the same environment variable, so
+    # the reported provenance matches what a real run would select.
+    noise_implementation = resolve_noise_implementation(
+        noise_implementation_override
+    )
     if not should_run:
         return {
             "status": "skipped",
@@ -120,6 +133,10 @@ def _dataloader_smoke_in_process(
             if enabled is None
             else "explicitly disabled with --no-dataloader-smoke",
             "noise_enabled": augmentation_enabled,
+            "noise_implementation": noise_implementation,
+            "validation_noise_implementation": resolve_validation_noise_implementation(
+                noise_implementation
+            ),
         }
 
     training_cfg = dict(config.get("training", {}))
@@ -145,6 +162,7 @@ def _dataloader_smoke_in_process(
         noise_config=noise_config,
         second_noise_view=consistency_config.noise_consistency_weight > 0.0,
         shard_cache_size=int(training_cfg.get("shard_cache_size", 4)),
+        noise_implementation=noise_implementation,
     )
     dataset.set_epoch(0)
     loader_kwargs: dict = {
@@ -171,6 +189,21 @@ def _dataloader_smoke_in_process(
     return {
         "status": "ok",
         "noise_enabled": augmentation_enabled,
+        "noise_implementation": dataset.noise_implementation,
+        # What will actually run: a requested strategy that cannot cover this
+        # configuration degrades to the reference sampler inside the dataset.
+        "effective_noise_implementation": effective_noise_implementation(
+            noise_config, dataset.noise_implementation
+        ),
+        "validation_noise_implementation": resolve_validation_noise_implementation(
+            dataset.noise_implementation
+        ),
+        "noise_implementation_source": (
+            "explicit override"
+            if noise_implementation_override
+            else f"{NOISE_IMPLEMENTATION_ENV_VAR} or default"
+        ),
+        "numpy_noise_rng": numpy_noise_provenance(),
         "requires_safe_workers": bool(requires_safe_workers),
         "multiprocessing_method": context_name,
         "multiprocessing_method_reason": context_reason,
@@ -233,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--dataloader-smoke-batches", type=int, default=2)
     parser.add_argument("--dataloader-smoke-timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--noise-implementation",
+        choices=("reference", "batched", "numpy"),
+        default=None,
+        help="Training-noise execution strategy for the smoke test. Defaults "
+        "to DLUXSHERA_NOISE_IMPLEMENTATION, then 'reference'. Execution "
+        "provenance only: reference and batched are bitwise identical, and "
+        "numpy samples the same photon-noise model from a different RNG.",
+    )
     args = parser.parse_args(argv)
 
     study = load_study_prescription(args.study)
@@ -446,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         enabled=args.dataloader_smoke,
         batches=int(args.dataloader_smoke_batches),
         timeout_seconds=float(args.dataloader_smoke_timeout),
+        noise_implementation_override=args.noise_implementation,
     )
     if args.persist_artifact_root is not None:
         summary["persistent_artifacts"] = persist_study_contract_artifacts(

@@ -25,6 +25,7 @@ __all__ = [
 SBATCH_JOB_ID_PATTERN = re.compile(r"(?P<job_id>\d+)(?:;[A-Za-z0-9_.-]+)?")
 
 SUBMITTED_ENV_KEYS = (
+    "DLUXSHERA_NOISE_IMPLEMENTATION",
     "ML_SITE",
     "ML_REPO_ROOT",
     "ML_CONDA_SH",

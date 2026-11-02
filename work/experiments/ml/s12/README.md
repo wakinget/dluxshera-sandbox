@@ -1,5 +1,27 @@
 # S12 V4 Photon-Noise Observation Robustness
 
+S12 optimization follow-up: [performance review and Gattaca2 CPU qualification](../../../../docs/dev/s12_pipeline_performance.md).
+Two opt-in noise execution strategies are under local validation — `batched`
+(bitwise identical to the reference) and `numpy` (same Poisson model, different
+RNG stream) — with `reference` still the default. Use that procedure for the
+experiment-aware validator and first-real-run GPU verification. This study's
+YAML, prescription, seeds, and frozen artifacts are unchanged; the strategy is
+an execution choice recorded in runtime provenance, absent from
+`training_identity`, and the frozen noisy-validation recipe stays JAX-backed in
+every case. Historical incident and recovery notes below are retained.
+
+Two S12 modeling points recorded there, for reference while reading this study:
+
+- **Unity detector conversion.** Prepared-image values are expected counts with
+  `1 DN = 1 electron`. `detector_model` is `null` and read noise and dark current
+  are disabled, so no detector spec is consulted. This is an accepted assumption
+  for S12, not a calibrated conversion.
+- **Noise branch.** The shared observation-noise utility selects the bright
+  Gaussian approximation only when the **whole-image minimum** exceeds
+  `bright_threshold` (100.0 here). For 50 ms exposures the faint PSF outskirts
+  keep every image on the exact Poisson branch; measured 512/512 on local V3,
+  pending the same measurement on V4.
+
 S12 reuses the S10-E01 clean reference cohort (`S10-E01-R001..R003`) rather
 than retraining a separate baseline. S12-E01 trains with dynamic SHERA photon
 observation noise and evaluates against a fixed-seed noisy validation

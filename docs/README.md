@@ -24,6 +24,7 @@ Working practices, priorities, and lessons learned.
 - [ML program status snapshot (2026-09-08)](dev/notes/ml_program_status_20260908.md)
 - [S06-S09 ML campaign plan](dev/notes/ml_s06_s09_campaign_plan.md)
 - [S10-S12 ML campaign plan](dev/notes/ml_s10_s12_campaign_plan.md)
+- [S12 pipeline performance, noise-regime findings, and Gattaca2 qualification](dev/s12_pipeline_performance.md)
 - [ML model architecture visualization](dev/ml_model_visualization.md)
 - [Observation sub-block simulation contract (Phase 4)](dev/obs_subblock_generator_design.md)
 - [Observation sub-block inference design](dev/obs_subblock_inference_design.md)

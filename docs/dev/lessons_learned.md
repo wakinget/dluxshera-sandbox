@@ -28,3 +28,66 @@
   - **Operational lesson:** CUDA availability and valid artifact hashes do not establish pipeline readiness. The original preflight validated both and still let six jobs stall before epoch 0. Any long HPC job must prove it can produce a batch, under a bounded timeout, before entering a multi-day allocation.
   - **Recovery directories collide with the refusal to reuse non-empty output.** The failed runs left manifests but no checkpoint, so neither `--resume-checkpoint` nor plain reuse works, and `--overwrite` would `rmtree` the only evidence of the incident. Restart into a **separate physical output root** while keeping the canonical logical run IDs; the run path is `<run-dir>/<STUDY>/<EXPERIMENT>/<RUN>`, so changing the root alone suffices. Mirror only the restart root into the analysis tree: `campaign_analysis` groups by `run_id` and treats differing `git.source_commit` as a conflicting identity, which warns in normal mode and raises under `--strict`.
   - **Submitted-environment allowlist:** `prepare_sbatch_submission` strips parent-shell `ML_*` variables and rebuilds the environment from `SUBMITTED_ENV_KEYS`. A new `ML_*` control that is documented but not added to that tuple is silently dropped, and the batch job runs with defaults while the operator believes otherwise.
+
+- 2026-10-31 — S12 batching follow-up: isolated noise speedups do not certify
+  full campaign throughput. Keep mixed-brightness decisions per image and preserve
+  eager Gaussian arithmetic when exact rounding matters. See the
+  [performance review](s12_pipeline_performance.md) for evidence and limitations.
+  - **Report provenance from the source that produced it, not from a downstream
+    object.** The skipped-preflight path reported
+    `dataset.noise_implementation` on a branch where no dataset is ever built,
+    raising `UnboundLocalError` for every noiseless study. A value needed on
+    both the taken and skipped branch must be resolved before the branch.
+  - **`zip()` is the wrong tool for verifying equivalence.** Comparing an
+    optimized result against a reference with `zip` stops at the shorter
+    sequence, so a truncated or dropped record reports as exact. Equivalence
+    checks must assert counts and index coverage *before* comparing values.
+  - **Pick the baseline before claiming a speedup.** The Poisson lookup-table
+    investigation measured 6–10× over batched JAX, but vectorized
+    `numpy.random.Generator.poisson` is itself ~4.5× faster than batched JAX for
+    the same work, so the real lookup advantage was under 2× — not enough to pay
+    for a gigabyte-scale table. An impressive ratio against a slow baseline is
+    not evidence of a fast method.
+  - **Quantizing a discrete distribution's parameter is not an approximation in
+    the low-count regime; it is a different distribution.** Nearest-integer
+    Poisson lookup maps every λ < 0.5 to a deterministic zero, deleting the
+    photon noise from exactly the faint pixels a photon-noise study is about.
+
+- 2026-11-01 — S12 NumPy photon-noise follow-up. See the
+  [performance review](s12_pipeline_performance.md#numpy-photon-noise-investigation).
+  - **Check what the reproducibility contract actually costs before trading it
+    away.** The fast NumPy microbenchmark used one shared RNG over a stacked
+    batch, whose stream depends on batch composition — unusable for a
+    per-record determinism contract. Re-measured with deterministic per-image
+    `PCG64` generators, seed derivation plus RNG construction came to 0.0002 s of
+    a 0.0313 s batch: under 1%, capturing 96% of the shared-RNG ceiling. The
+    contract was nearly free, and assuming otherwise would have cost either the
+    speedup or the reproducibility for no reason.
+  - **An unmatched benchmark ratio is not a speedup.** The 4.5× NumPy-over-JAX
+    figure compared a bare vectorized RNG call against a JAX path that also did
+    per-record key derivation and data assembly. On warm synthetic fixtures the
+    *loader* ratio came out at 14–18× instead, because small warm shards make
+    noise generation the whole cost; on real GPFS reads it will be smaller.
+    State which pathways a ratio compares, and measure isolated stages and
+    end-to-end delivery separately.
+  - **A different RNG stream needs a different kind of test.** Bitwise
+    equivalence is the right check for `batched`, which reproduces the
+    reference exactly, and a meaningless one for `numpy`, where "not exact" is
+    the expected result. The diagnostic now rejects the bitwise check for
+    `numpy` rather than reporting a failure that says nothing; correctness there
+    is established by moments, Fano factor, zero probability, tails, and
+    goodness-of-fit at the λ the study actually occupies.
+  - **Hash the seed before using it.** The noise schedule separates sides by
+    `+17`/`+31`, which a linear seeding would turn into near-identical streams.
+    NumPy routes integers through `SeedSequence`, which hashes them, so the
+    measured side-stream correlation sits at the 1/√N floor. A per-record
+    seeding scheme must be checked for exactly this, not assumed.
+  - **A validity gate should distinguish "too slow to measure" from "too fast
+    to measure".** The 20-second sustained-span gate failed NumPy because 400
+    batches drained in 1.8 s, which reads as a failure and is the opposite. The
+    gate now computes and reports the batch count that would satisfy it.
+  - **Correlation across differing inputs cannot detect a shared random
+    index.** The lookup prototype's `offset_per_level` variant draws one
+    translation per count level and reuses it batch-wide, so identical expected
+    images get identical "independent" draws — invisible to correlation between
+    different images, obvious the moment duplicate inputs are fed in.

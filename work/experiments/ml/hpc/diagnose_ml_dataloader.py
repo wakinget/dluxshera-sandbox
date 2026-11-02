@@ -42,6 +42,141 @@ def _parse_key_path_json(value: str | None, *, option: str) -> dict[str, Path]:
     return {str(key): Path(str(path)) for key, path in payload.items()}
 
 
+class EquivalenceMismatch(AssertionError):
+    """Raised when the batched path does not exactly reproduce the reference."""
+
+
+def compare_noise_implementations(
+    dataset,
+    *,
+    indices: list[int],
+    batch_size: int,
+) -> dict:
+    """Compare the batched path against the reference on exactly ``indices``.
+
+    The comparison is deliberately count-driven rather than ``zip``-driven.  A
+    ``zip`` of a truncated optimized batch against the full reference list
+    silently compares only the overlapping prefix and reports success, which
+    would let a dropped or reordered record pass as "exact".  Here every
+    requested index must be returned exactly once, and the per-index pairing is
+    established by position within the requested batch before any field is
+    compared.
+
+    Parameters
+    ----------
+    dataset:
+        Dataset exposing ``__getitem__`` (reference) and ``__getitems__``
+        (optimized).  Its ``noise_implementation`` is set to ``"batched"`` for
+        the optimized fetch and restored afterwards.
+    indices:
+        Ordered dataset indices to compare.  Must be unique.
+    batch_size:
+        Partition width.  The final batch may be partial; that is the point of
+        varying this value.
+
+    Returns
+    -------
+    dict
+        Report with expected/compared counts, batch partitioning, and explicit
+        missing / duplicated / mismatched record lists.
+
+    Raises
+    ------
+    EquivalenceMismatch
+        On any count, coverage, field-set, or value discrepancy.
+    """
+    import torch
+
+    if int(batch_size) < 1:
+        raise ValueError("batch_size must be >= 1.")
+    requested = [int(index) for index in indices]
+    if len(set(requested)) != len(requested):
+        raise ValueError("indices must be unique; duplicate requests cannot be verified.")
+
+    batches = [
+        requested[start : start + int(batch_size)]
+        for start in range(0, len(requested), int(batch_size))
+    ]
+    compared = 0
+    seen: dict[int, int] = {}
+    mismatched: list[dict] = []
+    original = getattr(dataset, "noise_implementation", "reference")
+    try:
+        for batch_indices in batches:
+            expected = [dataset[index] for index in batch_indices]
+            dataset.noise_implementation = "batched"
+            actual = dataset.__getitems__(list(batch_indices))
+            dataset.noise_implementation = original
+            # Count first: a short or over-long optimized batch is a failure in
+            # its own right, independent of any field value.
+            if not isinstance(actual, list):
+                raise EquivalenceMismatch(
+                    f"__getitems__ returned {type(actual).__name__}, expected list, "
+                    f"for indices {batch_indices[0]}..{batch_indices[-1]}."
+                )
+            if len(actual) != len(batch_indices):
+                raise EquivalenceMismatch(
+                    f"__getitems__ returned {len(actual)} record(s) for "
+                    f"{len(batch_indices)} requested indices "
+                    f"({batch_indices[0]}..{batch_indices[-1]}); a truncated or "
+                    "padded optimized batch is never equivalent."
+                )
+            for index, actual_item, expected_item in zip(batch_indices, actual, expected):
+                seen[index] = seen.get(index, 0) + 1
+                record_id = expected_item.get("pair_record_id")
+                if set(actual_item.keys()) != set(expected_item.keys()):
+                    raise EquivalenceMismatch(
+                        f"record {record_id!r} (index {index}) field sets differ: "
+                        f"optimized-only={sorted(set(actual_item) - set(expected_item))}, "
+                        f"reference-only={sorted(set(expected_item) - set(actual_item))}."
+                    )
+                if actual_item.get("pair_record_id") != record_id:
+                    raise EquivalenceMismatch(
+                        f"index {index} identity differs: optimized returned "
+                        f"{actual_item.get('pair_record_id')!r}, reference {record_id!r}."
+                    )
+                for key in expected_item:
+                    lhs, rhs = actual_item[key], expected_item[key]
+                    if isinstance(rhs, torch.Tensor):
+                        equal = (
+                            isinstance(lhs, torch.Tensor)
+                            and lhs.shape == rhs.shape
+                            and lhs.dtype == rhs.dtype
+                            and torch.equal(lhs, rhs)
+                        )
+                    else:
+                        equal = lhs == rhs
+                    if not equal:
+                        mismatched.append(
+                            {"index": index, "pair_record_id": record_id, "field": key}
+                        )
+                compared += 1
+    finally:
+        dataset.noise_implementation = original
+
+    missing = sorted(set(requested) - set(seen))
+    duplicated = sorted(index for index, count in seen.items() if count > 1)
+    report = {
+        "expected_records": len(requested),
+        "compared_records": compared,
+        "batch_size": int(batch_size),
+        "batches": len(batches),
+        "final_batch_records": len(batches[-1]) if batches else 0,
+        "final_batch_is_partial": bool(batches) and len(batches[-1]) != int(batch_size),
+        "comparison_implementation": "batched vs reference (in-process, single worker)",
+        "missing_indices": missing,
+        "duplicated_indices": duplicated,
+        "mismatched_fields": mismatched[:32],
+        "mismatched_field_count": len(mismatched),
+        "exact": not (missing or duplicated or mismatched) and compared == len(requested),
+    }
+    if not report["exact"]:
+        raise EquivalenceMismatch(
+            f"Batched/reference comparison is not exact: {json.dumps(report)}"
+        )
+    return report
+
+
 @dataclass(frozen=True)
 class ProbeRequest:
     """Picklable description of one supervised probe.
@@ -72,6 +207,25 @@ class ProbeRequest:
     allow_unsafe_fork_deadlock: bool
     with_training_step: bool
     device: str | None
+    noise_implementation: str = "reference"
+    clean_baseline: bool = False
+    profile: bool = False
+    equivalence_full_manifest: bool = False
+    equivalence_batch_sizes: tuple[int, ...] = ()
+    numpy_shared_rng_ceiling: bool = False
+
+    def resolved_noise_implementation(self) -> str:
+        """Return the strategy the selected loader will actually use.
+
+        The validation loader exercises the frozen noisy-validation recipe,
+        which is JAX-backed, so it mirrors ``training.py``'s separation rather
+        than benchmarking a configuration production will never run.
+        """
+        from dluxshera.ml.torch_data import resolve_validation_noise_implementation
+
+        if self.loader == "train":
+            return str(self.noise_implementation)
+        return resolve_validation_noise_implementation(self.noise_implementation)
 
     def _build(self) -> dict:
         """Build the catalog, dataset, and loader inside the child process."""
@@ -165,6 +319,9 @@ class ProbeRequest:
                 shard_cache_size=shard_cache_size,
             )
 
+        dataset.noise_implementation = self.resolved_noise_implementation()
+        if self.clean_baseline:
+            dataset.noise_config = NoiseConfig()
         requires_safe_workers = noise_requires_safe_workers(
             (noise_config, validation_noise_config)
         )
@@ -205,6 +362,8 @@ class ProbeRequest:
 
     def describe(self) -> dict:
         """Return static identity/configuration facts without fetching batches."""
+        from dluxshera.ml.noise import effective_noise_implementation, numpy_noise_provenance
+
         built = self._build()
         catalog = built["catalog"]
         return {
@@ -212,6 +371,13 @@ class ProbeRequest:
             "experiment_id": str(built["config"].get("experiment_id")),
             "run_id": str(built["config"].get("run_id")),
             "loader": str(self.loader),
+            "noise_implementation": built["dataset"].noise_implementation,
+            "requested_noise_implementation": self.noise_implementation,
+            "effective_noise_implementation": effective_noise_implementation(
+                built["active_noise"], built["dataset"].noise_implementation
+            ),
+            "numpy_noise_rng": numpy_noise_provenance(),
+            "clean_baseline": self.clean_baseline,
             "prepared_dataset": {
                 "artifact_id": catalog.artifact_id,
                 "prepared_dataset_hash": catalog.prepared_dataset_hash,
@@ -240,13 +406,145 @@ class ProbeRequest:
         from dluxshera.ml.training import smoke_test_dataloader
 
         built = self._build()
-        return smoke_test_dataloader(
+        result = smoke_test_dataloader(
             built["loader"],
             batches=int(self.batches),
             timeout_seconds=float("inf"),  # the supervisor owns the wall clock
             label=str(self.loader),
             warmup_batches=self.warmup_batches,
         )
+
+        if self.profile:
+            import cProfile
+            import pstats
+            import io
+            import time
+            import resource
+            import jax
+            from torch.utils.data import default_collate
+            dataset = built["dataset"]
+            indices = list(range(min(len(dataset), built["batch_size"])))
+            started = time.perf_counter()
+            default_collate(dataset.__getitems__(indices))
+            result["profile_first_inprocess_batch_seconds"] = time.perf_counter() - started
+            profiler = cProfile.Profile()
+            profiler.enable()
+            for _ in range(4):
+                default_collate(dataset.__getitems__(indices))
+            profiler.disable()
+            stream = io.StringIO()
+            pstats.Stats(profiler, stream=stream).sort_stats("cumtime").print_stats(35)
+            result["profile_warm_four_batches"] = stream.getvalue()
+            result["peak_rss_platform_units_self"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            result["jax_backend"] = jax.default_backend()
+            from dluxshera.ml.noise import (
+                apply_pair_noise,
+                apply_pair_noise_batch,
+                apply_pair_noise_numpy,
+                numpy_noise_provenance,
+            )
+            records = [dataset._record_and_offset(i) for i in indices]
+            reader = dataset._get_reader()
+            pairs = [(reader.get(int(r.sample_a_index)), reader.get(int(r.sample_b_index)))
+                     for r, _ in records]
+            seeds = [(r.pair_record_id, offset) for r, offset in records]
+            draws = {
+                "reference": lambda: [
+                    apply_pair_noise(a, b, dataset.noise_config, pair_record_id=r,
+                                     dynamic_seed_offset=o)
+                    for (a, b), (r, o) in zip(pairs, seeds)
+                ],
+                "batched": lambda: apply_pair_noise_batch(pairs, dataset.noise_config, seeds),
+                "numpy": lambda: apply_pair_noise_numpy(pairs, dataset.noise_config, seeds),
+            }
+            if self.numpy_shared_rng_ceiling:
+                # NON-PRODUCTION reference point: one RNG over the stacked
+                # batch. Realization depends on batch composition and ordering,
+                # so this bounds achievable speed; it is not a candidate.
+                import numpy as np
+                stack = np.stack([np.maximum(np.asarray(b, dtype=np.float32), 0.0)
+                                  for _, b in pairs])
+                draws["numpy_shared_rng_ceiling_NONPRODUCTION"] = lambda: (
+                    np.random.Generator(np.random.PCG64(0)).poisson(stack).astype(np.float32)
+                )
+            resident = {}
+            for strategy, draw in draws.items():
+                started = time.perf_counter()
+                draw()
+                first = time.perf_counter() - started
+                started = time.perf_counter()
+                for _ in range(8):
+                    draw()
+                warm = (time.perf_counter() - started) / 8
+                resident[strategy] = {
+                    "first_call_seconds": first,
+                    "warm_batch_seconds": warm,
+                    "images_per_second": (len(indices) / warm) if warm > 0 else None,
+                    "production_candidate": not strategy.endswith("NONPRODUCTION"),
+                }
+            result["resident_noise_one_view"] = resident
+            result["numpy_noise_rng"] = numpy_noise_provenance()
+        return result
+
+    def verify_equivalence(self):
+        """Compare every output field; never regenerate a manifest or recipe.
+
+        This is an **in-process** equivalence check: the reference and batched
+        paths run in the same process on identical records.  It deliberately
+        says nothing about multiprocessing behaviour; forkserver/spawn
+        equivalence is covered by ``tests/ml/test_batched_noise.py``.
+
+        ``--equivalence-full-manifest`` compares every record in the dataset
+        rather than ``--batches`` worth, which is what certifies the complete
+        frozen 1,024-record S12 validation manifest.  Each configured batch size
+        is compared independently so a partition-dependent result cannot hide.
+
+        This is a *bitwise* comparison, and only ``batched`` is bitwise
+        identical to the reference.  ``--noise-implementation numpy`` is
+        rejected here rather than reported as a mismatch: NumPy is a different
+        RNG stream by design, so "not exact" would be the expected result and
+        would say nothing about correctness.  Use the statistical tests in
+        ``tests/ml/test_numpy_noise.py`` for the NumPy pathway instead.
+        """
+        if self.noise_implementation == "numpy":
+            raise ValueError(
+                "--verify-equivalence certifies bitwise equality against the "
+                "reference JAX sampler, which only 'batched' provides. The "
+                "NumPy strategy samples the same photon-noise model from a "
+                "different RNG stream and is validated statistically, not "
+                "bitwise. Re-run with --noise-implementation batched."
+            )
+        built = self._build()
+        dataset = built["dataset"]
+        available = len(dataset)
+        requested_span = (
+            available
+            if self.equivalence_full_manifest
+            else min(available, int(self.batches) * built["batch_size"])
+        )
+        indices = list(range(requested_span))
+        sizes = [built["batch_size"]]
+        for extra in self.equivalence_batch_sizes:
+            if int(extra) not in sizes:
+                sizes.append(int(extra))
+        partitions = [
+            compare_noise_implementations(dataset, indices=indices, batch_size=size)
+            for size in sizes
+        ]
+        return {
+            "exact": all(part["exact"] for part in partitions),
+            "records": requested_span,
+            "dataset_records_available": available,
+            "coverage": (
+                "complete manifest"
+                if requested_span == available
+                else f"partial sample of {available} available records"
+            ),
+            "complete_manifest_compared": requested_span == available,
+            "loader": self.loader,
+            "scope": "in-process; not a multiprocessing equivalence test",
+            "partitions": partitions,
+        }
 
     def run_training_step_probe(self) -> dict:
         """Run bounded train steps on real noisy batches. Runs in the child.
@@ -446,6 +744,39 @@ def main(argv: list[str] | None = None) -> int:
         "demonstrate the failure. The probe is expected to time out and be "
         "killed. Never use this for a real run.",
     )
+    parser.add_argument(
+        "--noise-implementation",
+        choices=("reference", "batched", "numpy"),
+        default="reference",
+        help="Noise execution strategy to exercise. reference and batched are "
+        "bitwise identical; numpy samples the same photon-noise model from "
+        "deterministic per-record PCG64 generators.",
+    )
+    parser.add_argument(
+        "--numpy-shared-rng-ceiling",
+        action="store_true",
+        help="Additionally microbenchmark one shared NumPy RNG over the whole "
+        "image stack. NON-PRODUCTION: its realization depends on batch "
+        "composition and ordering, so it is a performance ceiling only.",
+    )
+    parser.add_argument("--clean-baseline", action="store_true")
+    parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--verify-equivalence", action="store_true")
+    parser.add_argument(
+        "--equivalence-full-manifest",
+        action="store_true",
+        help="Compare every record in the dataset instead of --batches worth. "
+        "Use this to certify the complete frozen validation manifest.",
+    )
+    parser.add_argument(
+        "--equivalence-batch-size",
+        type=int,
+        action="append",
+        default=[],
+        dest="equivalence_batch_sizes",
+        help="Additional partition width to repeat the exact comparison with, "
+        "for example 17 to exercise a partial final batch. Repeatable.",
+    )
     args = parser.parse_args(argv)
 
     if args.allow_unsafe_fork_deadlock and args.multiprocessing_context != "fork":
@@ -457,6 +788,12 @@ def main(argv: list[str] | None = None) -> int:
     from dluxshera.ml.training import run_supervised
 
     request = ProbeRequest(
+        noise_implementation=args.noise_implementation,
+        clean_baseline=args.clean_baseline,
+        profile=args.profile,
+        numpy_shared_rng_ceiling=args.numpy_shared_rng_ceiling,
+        equivalence_full_manifest=args.equivalence_full_manifest,
+        equivalence_batch_sizes=tuple(int(size) for size in args.equivalence_batch_sizes),
         study=args.study,
         experiment_id=args.experiment_id,
         run_id=args.run_id,
@@ -486,6 +823,12 @@ def main(argv: list[str] | None = None) -> int:
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
             "slurmd_nodename": os.environ.get("SLURMD_NODENAME"),
             "cpu_count": os.cpu_count(),
+            # Recorded so a qualification gate can reject a stale report left
+            # in a reused directory by an earlier source revision. Taken from
+            # the environment the operator exports, not from `git rev-parse`,
+            # because the runbook deploys a detached worktree.
+            "source_commit": os.environ.get("DLUXSHERA_SOURCE_COMMIT")
+            or os.environ.get("ML_SOURCE_COMMIT"),
         },
         "supervision": {
             "timeout_seconds": float(args.timeout_seconds),
@@ -505,7 +848,11 @@ def main(argv: list[str] | None = None) -> int:
         summary["identity"] = describe
         print(json.dumps(json_ready(summary), indent=2, sort_keys=True))
         return 1
-    summary["identity"] = describe["result"]
+    # Carry the supervised status into the identity block. The failure branch
+    # above reports a "status", so omitting it on success would make
+    # `identity.status` present only on failure -- and any gate checking
+    # `identity.status == "ok"` would reject every healthy report.
+    summary["identity"] = {"status": "ok", **describe["result"]}
 
     loader_probe = run_supervised(
         request.run_loader_probe,
@@ -537,6 +884,18 @@ def main(argv: list[str] | None = None) -> int:
             pairs_per_epoch=int(config_training.get("pairs_per_epoch", 16384)),
             epochs=int(config_training.get("epochs", 600)),
         )
+
+    if args.verify_equivalence:
+        equivalence = run_supervised(
+            request.verify_equivalence,
+            timeout_seconds=float(args.timeout_seconds),
+            label="equivalence",
+        )
+        summary["equivalence"] = equivalence
+        # A supervised child that reported "ok" without an exact result is
+        # still a failure; never let a non-exact comparison exit zero.
+        if equivalence.get("status") != "ok" or not equivalence.get("result", {}).get("exact"):
+            exit_code = 1
 
     if args.with_training_step:
         step_probe = run_supervised(
