@@ -24,7 +24,7 @@ Generally useful calculations, table shaping, and plotting should be promoted
 into the committed Python helpers in this directory rather than duplicated
 across notebooks.
 
-## Studies and review status (local audit: 2026-10-30)
+## Studies and review status (local audit: 2026-11-02)
 
 This is the stable ML study landing page. The [campaign notebook](ml_campaign_tracker.ipynb)
 remains the interactive, data-driven tracker. Artifact completeness in that
@@ -39,8 +39,8 @@ No new Slurm scan was performed; last observed submissions are historical only.
 | [S07](../s07/README.md) | Verified completed export: 10/10 operationally complete (6 at budget, 4 legitimately early-stopped), validation only; [history reconciled](s07/reconciliation.md) | [Completed V4 joint-state review](s07/review.md) |
 | [S08](../s08/README.md) | Local LS6 artifacts present; live status unverified | No integrated review |
 | [S09](../s09/README.md) | Verified completed export: 9/9 at the 600-epoch budget, validation only; export byte-identical to the installed import | [Completed V4 radial-capture review](s09/review.md) |
-| [S10](../s10/README.md) | Partial local gattaca2 cohort; live status unverified | No integrated review |
-| [S11](../s11/README.md) | No local import found; live status unverified | No integrated review |
+| [S10](../s10/README.md) | 9/9 complete local runs; archive and inventory verified | [Preliminary review](s10/review.md); remaining checks listed there |
+| [S11](../s11/README.md) | 6/6 complete local runs; archive and inventory verified | [Preliminary review](s11/review.md); remaining checks listed there |
 | [S12](../s12/README.md) | No local import found; live status unverified | No integrated review |
 
 ### Canonical locations

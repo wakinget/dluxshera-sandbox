@@ -986,3 +986,7 @@ Status: planned and repository-prepared, not cluster-executed.
   partition/GRES arguments remain launch-time scheduler options.
 
 Detailed plan and command surface: `docs/dev/notes/ml_s10_s12_campaign_plan.md`.
+
+Current ML evidence and outstanding closeout work are summarized in the
+[2026-11-02 program snapshot](notes/ml_program_status_20261102.md).
+The bring-up sections above retain their historical preparation context.

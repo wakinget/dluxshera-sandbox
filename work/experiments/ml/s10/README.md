@@ -11,3 +11,8 @@ All runs keep `evaluate_test: false`. See
 `docs/dev/notes/ml_s10_s12_campaign_plan.md` for the full launch prescription;
 as of that note this is repository preparation, not evidence that jobs have
 been submitted or completed.
+
+November 2, 2026: all nine runs are locally complete and archive-verified,
+validation only. See the [scientific review](../analysis/s10/review.md) and
+[import reconciliation](../analysis/s10/reconciliation.md). Scientific closeout
+checks remain pending as identified in the review.
