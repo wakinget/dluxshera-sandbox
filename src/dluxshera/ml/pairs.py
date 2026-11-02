@@ -831,20 +831,38 @@ class PairSampler:
         self.policy = PairPolicy() if policy is None else policy
         self._eligible_cache: dict[tuple[str, str, str, str], np.ndarray] = {}
         self._bucket_cache: dict[tuple[str, str, str, str], list[np.ndarray]] = {}
+        # Catalog-derived validation inputs, computed once.  `SampleCatalog` is a
+        # frozen dataclass and the sampler never mutates it, so these cannot go
+        # stale for the lifetime of this sampler.  Scanning them per call cost
+        # ~323us on the 22,990-row V3 catalog -- about 5.3s per 16,384-pair
+        # epoch, since `sample_pair` revalidates for every training example.
+        self._catalog_families: frozenset[str] = frozenset(
+            str(v) for v in self.catalog.dataset_families
+        )
+        self._catalog_families_sorted: tuple[str, ...] = tuple(
+            sorted(self._catalog_families)
+        )
+        self._catalog_has_pair_ids: bool = any(str(v) for v in self.catalog.pair_ids)
         self._validate_policy_against_catalog(self.policy)
 
     def _validate_policy_against_catalog(self, policy: PairPolicy) -> None:
-        catalog_families = {str(v) for v in self.catalog.dataset_families}
+        """Validate ``policy`` against cached catalog facts.
+
+        The *policy* is still validated on every call, so epoch-resolved and
+        dataset-family-resolved policies are checked exactly as before.  Only
+        the catalog-derived inputs are cached, because they are immutable for
+        this sampler.
+        """
         requested = set(str(v) for v in policy.dataset_families)
         weighted = set(str(v) for v in policy.dataset_family_weights)
         sampled = set(str(v) for v in policy.dataset_family_sampling)
-        unknown = sorted((requested | weighted | sampled) - catalog_families)
+        unknown = sorted((requested | weighted | sampled) - self._catalog_families)
         if unknown:
             raise ValueError(
                 f"Pair policy {policy.policy_id!r} references unknown dataset family "
-                f"name(s) {unknown}; available={sorted(catalog_families)}."
+                f"name(s) {unknown}; available={list(self._catalog_families_sorted)}."
             )
-        if policy.same_pair_id and not any(str(v) for v in self.catalog.pair_ids):
+        if policy.same_pair_id and not self._catalog_has_pair_ids:
             raise ValueError(
                 f"Pair policy {policy.policy_id!r} sets same_pair_id=True, but the "
                 "catalog has no non-empty pair_id values. V4 policies should normally "

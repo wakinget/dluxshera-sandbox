@@ -17,6 +17,7 @@ Diagnostics in this directory:
 | `qualify_s12_pipeline.py` | Reduces the qualification JSON reports to one PASS / REMEASURE / FAIL decision. Reruns nothing. Exit 0 / 2 / 1 respectively, so a shell can branch on it. |
 | `analyze_image_statistics.py` | Read-only count statistics and SHERA Poisson/Gaussian branch selection for a prepared dataset. |
 | `benchmark_s12_fixture.py` | Local synthetic-fixture throughput comparison across clean/reference/batched/numpy. Engineering regression only, never capacity certification. |
+| `benchmark_pair_sampling.py` | Isolates pair-policy validation and `sample_pair` cost at configurable catalog sizes, reporting before/after the catalog-validation cache. Read-only. |
 | `submit_study_run.py` | Launch preview and submission. Supports `--noise-implementation`. |
 
 Selecting `numpy` affects **training noise only**: the frozen noisy-validation
